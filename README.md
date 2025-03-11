@@ -6,10 +6,10 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 
 ### Core concepts:
 
-1. [**Agents**](docs/agents.md): LLMs configured with instructions, tools, guardrails, and handoffs
-2. [**Handoffs**](docs/handoffs.md): Allow agents to transfer control to other agents for specific tasks
-3. [**Guardrails**](docs/guardrails.md): Configurable safety checks for input and output validation
-4. [**Tracing**](docs/tracing.md): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
+1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
+2. [**Handoffs**](https://openai.github.io/openai-agents-python/handoffs/): Allow agents to transfer control to other agents for specific tasks
+3. [**Guardrails**](https://openai.github.io/openai-agents-python/guardrails/): Configurable safety checks for input and output validation
+4. [**Tracing**](https://openai.github.io/openai-agents-python/tracing/): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
 
 Explore the [examples](examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
@@ -138,7 +138,7 @@ The Agents SDK is designed to be highly flexible, allowing you to model a wide r
 
 ## Tracing
 
-The Agents SDK includes built-in tracing, making it easy to track and debug the behavior of your agents. Tracing is extensible by design, supporting custom spans and a wide variety of external destinations, including [Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents), [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk), and [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk). See [Tracing](http://openai.github.io/openai-agents-python/tracing.md) for more details.
+The Agents SDK automatically traces your agent runs, making it easy to track and debug the behavior of your agents. Tracing is extensible by design, supporting custom spans and a wide variety of external destinations, including [Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents), [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk), and [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk). For more details about how to customize or disable tracing, see [Tracing](http://openai.github.io/openai-agents-python/tracing).
 
 ## Development (only needed if you need to edit the SDK/examples)
 
