@@ -13,7 +13,7 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 
 Explore the [examples](examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
-Notably, our SDK [is compatible](((https://openai.github.io/openai-agents-python/models/))) with any model providers that support the OpenAI API format.
+Notably, our SDK [is compatible](https://openai.github.io/openai-agents-python/models/) with any model providers that support the OpenAI Chat Completions API format.
 
 ## Get started
 
