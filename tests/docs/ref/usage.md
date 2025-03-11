@@ -1,3 +1,0 @@
-# `Usage`
-
-::: agents.usage
