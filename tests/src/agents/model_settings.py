@@ -11,6 +11,7 @@ class ModelSettings:
     This class holds optional model configuration parameters (e.g. temperature,
     top_p, penalties, truncation, etc.).
     """
+
     temperature: float | None = None
     top_p: float | None = None
     frequency_penalty: float | None = None
