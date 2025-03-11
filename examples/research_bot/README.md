@@ -21,5 +21,5 @@ If you're building your own research bot, some ideas to add to this are:
 
 1. Retrieval: Add support for fetching relevant information from a vector store. You could use the File Search tool for this.
 2. Image and file upload: Allow users to attach PDFs or other files, as baseline context for the research.
-3. More planning and thinking: Models often produce better results given more time to think. Improve the planning process to come up with a better plan, and add an evaluation step so that the model can choose to improve it's results, search for more stuff, etc.
+3. More planning and thinking: Models often produce better results given more time to think. Improve the planning process to come up with a better plan, and add an evaluation step so that the model can choose to improve its results, search for more stuff, etc.
 4. Code execution: Allow running code, which is useful for data analysis.
