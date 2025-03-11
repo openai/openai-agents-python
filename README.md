@@ -114,7 +114,7 @@ When you call `Runner.run()`, we run a loop until we get a final output.
 
 1. We call the LLM, using the model and settings on the agent, and the message history.
 2. The LLM returns a response, which may include tool calls.
-3. If the response has a final output (see below for the more on this), we return it and end the loop.
+3. If the response has a final output (see below for more on this), we return it and end the loop.
 4. If the response has a handoff, we set the agent to the new agent and go back to step 1.
 5. We process the tool calls (if any) and append the tool responses messages. Then we go to step 1.
 
