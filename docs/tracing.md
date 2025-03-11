@@ -16,7 +16,7 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
     -   `trace_id`: A unique ID for the trace. Automatically generated if you don't pass one. Must have the format `trace_<32_alphanumeric>`.
     -   `group_id`: Optional group ID, to link multiple traces from the same conversation. For example, you might use a chat thread ID.
     -   `disabled`: If True, the trace will not be recorded.
-    -   `metadata`: Optiona metadata for the trace.
+    -   `metadata`: Optional metadata for the trace.
 -   **Spans** represent operations that have a start and end time. Spans have:
     -   `started_at` and `ended_at` timestamps.
     -   `trace_id`, to represent the trace they belong to
