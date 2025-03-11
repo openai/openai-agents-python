@@ -1,0 +1,5 @@
+# Python cache files
+__pycache__/
+
+# Egg metadata directories
+*.egg-info/
