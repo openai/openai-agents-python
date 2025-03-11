@@ -28,7 +28,7 @@ async def main():
                 instructions="You are a helpful agent.",
                 tools=[ComputerTool(computer)],
                 # Use the computer using model, and set truncation to auto because its required
-                model="computer-use-preview-2025-02-04",
+                model="computer-use-preview",
                 model_settings=ModelSettings(truncation="auto"),
             )
             result = await Runner.run(agent, "Search for SF sports news and summarize.")
