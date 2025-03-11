@@ -19,7 +19,7 @@ from openai.types.responses import (
     ResponseStreamEvent,
 )
 from openai.types.responses.response_input_item_param import ComputerCallOutput, FunctionCallOutput
-from openai.types.responses.response_output_item import Reasoning
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import BaseModel
 from typing_extensions import TypeAlias
 
@@ -136,10 +136,10 @@ class ToolCallOutputItem(RunItemBase[Union[FunctionCallOutput, ComputerCallOutpu
 
 
 @dataclass
-class ReasoningItem(RunItemBase[Reasoning]):
+class ReasoningItem(RunItemBase[ResponseReasoningItem]):
     """Represents a reasoning item."""
 
-    raw_item: Reasoning
+    raw_item: ResponseReasoningItem
     """The raw reasoning item."""
 
     type: Literal["reasoning_item"] = "reasoning_item"

@@ -284,3 +284,5 @@ def function_tool(
         return _create_function_tool(real_func)
 
     return decorator
+    return decorator
+    return decorator
