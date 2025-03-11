@@ -2,7 +2,7 @@
 
 The OpenAI Agents SDK is a lightweight yet powerful framework for building multi-agent workflows.
 
-<img src="docs/assets/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
+<img src="https://cdn.openai.com/API/docs/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
 
 ### Core concepts:
 
