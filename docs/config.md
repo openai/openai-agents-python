@@ -10,7 +10,7 @@ from agents import set_default_openai_key
 set_default_openai_key("sk-...")
 ```
 
-Alternatively, you can also configure an OpenAI client to be used. By default, the SDK creates an `AsyncOpenAI` instance, using the API key from the environment variable or the default key set above. You can chnage this by using the [set_default_openai_client()][agents.set_default_openai_client] function.
+Alternatively, you can also configure an OpenAI client to be used. By default, the SDK creates an `AsyncOpenAI` instance, using the API key from the environment variable or the default key set above. You can change this by using the [set_default_openai_client()][agents.set_default_openai_client] function.
 
 ```python
 from openai import AsyncOpenAI

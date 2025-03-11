@@ -21,7 +21,7 @@ Input guardrails run in 3 steps:
 
 ## Output guardrails
 
-Output guardrailas run in 3 steps:
+Output guardrails run in 3 steps:
 
 1. First, the guardrail receives the same input passed to the agent.
 2. Next, the guardrail function runs to produce a [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput], which is then wrapped in an [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]
@@ -33,7 +33,7 @@ Output guardrailas run in 3 steps:
 
 ## Tripwires
 
-If the input or output fails the guardrail, the Guardrail can signal this with a tripwire. As soon as we see a guardail that has triggered the tripwires, we immediately raise a `{Input,Output}GuardrailTripwireTriggered` exception and halt the Agent execution.
+If the input or output fails the guardrail, the Guardrail can signal this with a tripwire. As soon as we see a guardrail that has triggered the tripwires, we immediately raise a `{Input,Output}GuardrailTripwireTriggered` exception and halt the Agent execution.
 
 ## Implementing a guardrail
 
