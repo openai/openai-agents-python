@@ -138,7 +138,7 @@ def _type_to_str(t: type[Any]) -> str:
         # It's a simple type like `str`, `int`, etc.
         return t.__name__
     elif args:
-        args_str = ', '.join(_type_to_str(arg) for arg in args)
+        args_str = ", ".join(_type_to_str(arg) for arg in args)
         return f"{origin.__name__}[{args_str}]"
     else:
         return str(t)
