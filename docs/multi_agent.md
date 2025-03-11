@@ -34,4 +34,4 @@ While orchestrating via LLM is powerful, orchestrating via LLM makes tasks more 
 -   Running the agent that performs the task in a `while` loop with an agent that evaluates and provides feedback, until the evaluator says the output passes certain criteria.
 -   Running multiple agents in parallel, e.g. via Python primitives like `asyncio.gather`. This is useful for speed when you have multiple tasks that don't depend on each other.
 
-We have a number of examples in [`examples/agent_patterns`](https://github.com/openai/openai-agents-python/examples/agent_patterns).
+We have a number of examples in [`examples/agent_patterns`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns).
