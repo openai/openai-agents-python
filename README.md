@@ -11,7 +11,7 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 3. [**Guardrails**](docs/guardrails.md): Configurable safety checks for input and output validation
 4. [**Tracing**](docs/tracing.md): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
 
-Explore the [examples](examples) directory to see the SDK in action.
+Explore the [examples](examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
 ## Get started
 
