@@ -86,7 +86,7 @@ class InputGuardrail(Generic[TContext]):
         [RunContextWrapper[TContext], Agent[Any], str | list[TResponseInputItem]],
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
-    """A function that receives the the agent input and the context, and returns a
+    """A function that receives the agent input and the context, and returns a
      `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
      include information about the guardrail's output.
     """
