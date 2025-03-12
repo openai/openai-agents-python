@@ -19,4 +19,5 @@ jobs:
           close-issue-message: "This issue was closed because it has been inactive for 3 days since being marked as stale."
           days-before-pr-stale: -1
           days-before-pr-close: -1
+          any-of-labels: 'question,needs-more-info'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
