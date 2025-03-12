@@ -166,6 +166,9 @@ triage_agent = Agent(
 )
 
 async def main():
+    result = await Runner.run(triage_agent, "who was the first president of the united states?")
+    print(result.final_output)
+
     result = await Runner.run(triage_agent, "what is life")
     print(result.final_output)
 

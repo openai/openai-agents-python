@@ -7,7 +7,7 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_computer_tool_call import ActionClick
-from openai.types.responses.response_output_item import Reasoning, ReasoningContent
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from pydantic import BaseModel
 
 from agents import (
@@ -287,8 +287,8 @@ def test_function_web_search_tool_call_parsed_correctly():
 def test_reasoning_item_parsed_correctly():
     # Verify that a Reasoning output item is converted into a ReasoningItem.
 
-    reasoning = Reasoning(
-        id="r1", type="reasoning", content=[ReasoningContent(text="why", type="reasoning_summary")]
+    reasoning = ResponseReasoningItem(
+        id="r1", type="reasoning", summary=[Summary(text="why", type="summary_text")]
     )
     response = ModelResponse(
         output=[reasoning],

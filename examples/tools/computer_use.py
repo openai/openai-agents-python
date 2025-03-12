@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import logging
 from typing import Literal, Union
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
@@ -16,8 +15,10 @@ from agents import (
     trace,
 )
 
-logging.getLogger("openai.agents").setLevel(logging.DEBUG)
-logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
+# Uncomment to see very verbose logs
+# import logging
+# logging.getLogger("openai.agents").setLevel(logging.DEBUG)
+# logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
 
 
 async def main():
