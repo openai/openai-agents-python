@@ -808,6 +808,13 @@ class _Converter:
                         "content": cls.extract_text_content(content),
                     }
                     result.append(msg_developer)
+                elif role == "assistant":
+                    flush_assistant_message()
+                    msg_assistant: ChatCompletionAssistantMessageParam = {
+                        "role": "assistant",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_assistant)
                 else:
                     raise UserError(f"Unexpected role in easy_input_message: {role}")
 
