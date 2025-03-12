@@ -157,3 +157,18 @@ class Agent(Generic[TContext]):
             logger.error(f"Instructions must be a string or a function, got {self.instructions}")
 
         return None
+
+    def _add_item(
+        self, item: Any, attr_name: str, expected_type: type | tuple[type, ...]
+    ) -> None:
+        """Generic method to add an item to a specified list attribute with type checking and duplicate prevention."""
+        if not isinstance(item, expected_type):
+            raise TypeError(f"Expected {expected_type}, got {type(item)}")
+        attr_list = getattr(self, attr_name)
+        if item.name not in [existing.name for existing in attr_list]:
+            attr_list.append(item)
+        else:
+            logger.warning(
+                f"Item {item.name} already exists in {attr_name}. "
+                "Skipping addition to avoid duplicates."
+            )
