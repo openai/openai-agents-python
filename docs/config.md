@@ -17,7 +17,7 @@ from openai import AsyncOpenAI
 from agents import set_default_openai_client
 
 custom_client = AsyncOpenAI(base_url="...", api_key="...")
-set_default_openai_client(client)
+set_default_openai_client(custom_client)
 ```
 
 Finally, you can also customize the OpenAI API that is used. By default, we use the OpenAI Responses API. You can override this to use the Chat Completions API by using the [set_default_openai_api()][agents.set_default_openai_api] function.
