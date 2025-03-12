@@ -208,3 +208,11 @@ class Agent(Generic[TContext]):
         """Add one or multiple input guardrails to the agent's input guardrail list."""
         for g in self._ensure_iterable(guardrail):
             self._add_item(g, "input_guardrails", InputGuardrail)
+
+    def add_output_guardrails(
+        self,
+        guardrail: OutputGuardrail[TContext] | Iterable[OutputGuardrail[TContext]],
+    ) -> None:
+        """Add one or multiple output guardrails to the agent's output guardrail list."""
+        for g in self._ensure_iterable(guardrail):
+            self._add_item(g, "output_guardrails", OutputGuardrail)
