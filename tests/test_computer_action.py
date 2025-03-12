@@ -54,6 +54,10 @@ class LoggingComputer(Computer):
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
 
+    def screenshot_hash(self) -> str:
+        self.calls.append(("screenshot_hash", ()))
+        return f"hash_{self._screenshot_return}"
+
     def click(self, x: int, y: int, button: str) -> None:
         self.calls.append(("click", (x, y, button)))
 
@@ -97,6 +101,10 @@ class LoggingAsyncComputer(AsyncComputer):
     async def screenshot(self) -> str:
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
+
+    async def screenshot_hash(self) -> str:
+        self.calls.append(("screenshot_hash", ()))
+        return f"hash_{self._screenshot_return}"
 
     async def click(self, x: int, y: int, button: str) -> None:
         self.calls.append(("click", (x, y, button)))
@@ -158,7 +166,7 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
         pending_safety_checks=[],
         status="completed",
     )
-    screenshot_output = await ComputerAction._get_screenshot_sync(computer, tool_call)
+    screenshot_output = ComputerAction._get_screenshot_sync(computer, tool_call)
     # The last call is always to screenshot()
     if isinstance(action, ActionScreenshot):
         # Screenshot is taken twice: initial explicit call plus final capture.

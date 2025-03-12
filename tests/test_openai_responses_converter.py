@@ -123,6 +123,9 @@ def test_convert_tools_basic_types_and_includes():
         def screenshot(self) -> str:
             raise NotImplementedError
 
+        def screenshot_hash(self) -> str:
+            return "hash_screenshot"
+
         def click(self, x: int, y: int, button: str) -> None:
             raise NotImplementedError
 

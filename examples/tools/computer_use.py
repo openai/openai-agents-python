@@ -122,6 +122,12 @@ class LocalPlaywrightComputer(AsyncComputer):
         png_bytes = await self.page.screenshot(full_page=False)
         return base64.b64encode(png_bytes).decode("utf-8")
 
+    async def screenshot_hash(self) -> str:
+        """Returns a hash of the current screenshot."""
+        import hashlib
+        png_bytes = await self.page.screenshot(full_page=False)
+        return hashlib.md5(png_bytes).hexdigest()
+
     async def click(self, x: int, y: int, button: Button = "left") -> None:
         playwright_button: Literal["left", "middle", "right"] = "left"
 

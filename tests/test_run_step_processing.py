@@ -341,6 +341,9 @@ class DummyComputer(Computer):
     def drag(self, path: list[tuple[int, int]]) -> None:
         return None  # pragma: no cover
 
+    def screenshot_hash(self) -> str:
+        return "hash_screenshot"  # pragma: no cover
+
 
 def test_computer_tool_call_without_computer_tool_raises_error():
     # If the agent has no ComputerTool in its tools, process_model_response should raise a
