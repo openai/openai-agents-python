@@ -141,3 +141,5 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+mcp_agent.secrets.yaml
