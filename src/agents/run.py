@@ -651,8 +651,8 @@ class Runner:
                 usage = (
                     Usage(
                         requests=1,
-                        input_tokens=event.response.usage.input_tokens,
-                        output_tokens=event.response.usage.output_tokens,
+                        input_tokens=event.response.usage.prompt_tokens,
+                        output_tokens=event.response.usage.completion_tokens,
                         total_tokens=event.response.usage.total_tokens,
                     )
                     if event.response.usage
