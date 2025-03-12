@@ -200,3 +200,11 @@ class Agent(Generic[TContext]):
         """Add one or multiple handoffs to the agent's handoff list."""
         for h in self._ensure_iterable(handoff):
             self._add_item(h, "handoffs", (Agent, Handoff))
+
+    def add_input_guardrails(
+        self,
+        guardrail: InputGuardrail[TContext] | Iterable[InputGuardrail[TContext]],
+    ) -> None:
+        """Add one or multiple input guardrails to the agent's input guardrail list."""
+        for g in self._ensure_iterable(guardrail):
+            self._add_item(g, "input_guardrails", InputGuardrail)
