@@ -50,7 +50,7 @@ async def main():
 
     with trace("Joke workflow"): # (1)!
         first_result = await Runner.run(agent, "Tell me a joke")
-        second_result = await Runner.run(agent, f"Rate this joke: {first_output.final_output}")
+        second_result = await Runner.run(agent, f"Rate this joke: {first_result.final_output}")
         print(f"Joke: {first_result.final_output}")
         print(f"Rating: {second_result.final_output}")
 ```
