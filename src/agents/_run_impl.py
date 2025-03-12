@@ -23,7 +23,7 @@ from openai.types.responses.response_computer_tool_call import (
     ActionWait,
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
-from openai.types.responses.response_output_item import Reasoning
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from . import _utils
 from .agent import Agent
@@ -288,7 +288,7 @@ class RunImpl:
                 items.append(ToolCallItem(raw_item=output, agent=agent))
             elif isinstance(output, ResponseFunctionWebSearch):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
-            elif isinstance(output, Reasoning):
+            elif isinstance(output, ResponseReasoningItem):
                 items.append(ReasoningItem(raw_item=output, agent=agent))
             elif isinstance(output, ResponseComputerToolCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))

@@ -13,12 +13,12 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
 from openai.types.responses.response_function_web_search import ResponseFunctionWebSearch
 from openai.types.responses.response_function_web_search_param import ResponseFunctionWebSearchParam
-from openai.types.responses.response_input_item_param import Reasoning as ReasoningInputParam
-from openai.types.responses.response_output_item import Reasoning, ReasoningContent
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
 from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from openai.types.responses.response_output_text import ResponseOutputText
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
+from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
 
 from agents import (
     Agent,
@@ -129,7 +129,7 @@ def test_text_message_outputs_across_list_of_runitems() -> None:
     item1: RunItem = MessageOutputItem(agent=Agent(name="test"), raw_item=message1)
     item2: RunItem = MessageOutputItem(agent=Agent(name="test"), raw_item=message2)
     # Create a non-message run item of a different type, e.g., a reasoning trace.
-    reasoning = Reasoning(id="rid", content=[], type="reasoning")
+    reasoning = ResponseReasoningItem(id="rid", summary=[], type="reasoning")
     non_message_item: RunItem = ReasoningItem(agent=Agent(name="test"), raw_item=reasoning)
     # Confirm only the message outputs are concatenated.
     assert ItemHelpers.text_message_outputs([item1, non_message_item, item2]) == "foobar"
@@ -266,16 +266,18 @@ def test_to_input_items_for_computer_call_click() -> None:
 
 def test_to_input_items_for_reasoning() -> None:
     """A reasoning output should produce the same dict as a reasoning input item."""
-    rc = ReasoningContent(text="why", type="reasoning_summary")
-    reasoning = Reasoning(id="rid1", content=[rc], type="reasoning")
+    rc = Summary(text="why", type="summary_text")
+    reasoning = ResponseReasoningItem(id="rid1", summary=[rc], type="reasoning")
     resp = ModelResponse(output=[reasoning], usage=Usage(), referenceable_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     converted_dict = input_items[0]
 
-    expected: ReasoningInputParam = {
+    expected: ResponseReasoningItemParam = {
         "id": "rid1",
-        "content": [{"text": "why", "type": "reasoning_summary"}],
+        "summary": [{"text": "why", "type": "summary_text"}],
         "type": "reasoning",
     }
+    print(converted_dict)
+    print(expected)
     assert converted_dict == expected

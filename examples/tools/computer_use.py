@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import logging
 from typing import Literal, Union
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
@@ -16,8 +15,10 @@ from agents import (
     trace,
 )
 
-logging.getLogger("openai.agents").setLevel(logging.DEBUG)
-logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
+# Uncomment to see very verbose logs
+# import logging
+# logging.getLogger("openai.agents").setLevel(logging.DEBUG)
+# logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
 
 
 async def main():
@@ -28,7 +29,7 @@ async def main():
                 instructions="You are a helpful agent.",
                 tools=[ComputerTool(computer)],
                 # Use the computer using model, and set truncation to auto because its required
-                model="computer-use-preview-2025-02-04",
+                model="computer-use-preview",
                 model_settings=ModelSettings(truncation="auto"),
             )
             result = await Runner.run(agent, "Search for SF sports news and summarize.")
