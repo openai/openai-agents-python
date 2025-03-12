@@ -503,6 +503,7 @@ class OpenAIChatCompletionsModel(Model):
             top_p=self._non_null_or_not_given(model_settings.top_p),
             frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
             presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
+            max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
             tool_choice=tool_choice,
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,

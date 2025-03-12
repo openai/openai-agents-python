@@ -235,6 +235,7 @@ class OpenAIResponsesModel(Model):
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
             truncation=self._non_null_or_not_given(model_settings.truncation),
+            max_output_tokens=self._non_null_or_not_given(model_settings.max_tokens),
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
