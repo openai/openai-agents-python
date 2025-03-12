@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -57,6 +57,25 @@ def get_function_tool_call(name: str, arguments: str | None = None) -> ResponseO
         name=name,
         arguments=arguments or "",
     )
+
+
+def get_malformed_function_tool_call(name: str, arguments: str) -> Dict[str, Any]:
+    """Creates a malformed function tool call that will cause an exception when processed."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    }
+
+
+def get_unknown_response_type() -> Dict[str, Any]:
+    """Creates an unknown response type that will cause an exception when processed."""
+    return {
+        "type": "unknown_type",
+        "content": "This is not a valid response type"
+    }
 
 
 def get_handoff_tool_call(
