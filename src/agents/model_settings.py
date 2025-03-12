@@ -19,6 +19,7 @@ class ModelSettings:
     tool_choice: Literal["auto", "required", "none"] | str | None = None
     parallel_tool_calls: bool | None = False
     truncation: Literal["auto", "disabled"] | None = None
+    max_tokens: int | None = None
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
@@ -33,4 +34,5 @@ class ModelSettings:
             tool_choice=override.tool_choice or self.tool_choice,
             parallel_tool_calls=override.parallel_tool_calls or self.parallel_tool_calls,
             truncation=override.truncation or self.truncation,
+            max_tokens=override.max_tokens or self.max_tokens,
         )
