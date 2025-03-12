@@ -81,7 +81,17 @@ class BackendSpanExporter(TracingExporter):
         traces: list[dict[str, Any]] = []
         spans: list[dict[str, Any]] = []
 
-        data = [item.export() for item in items if item.export()]
+        # Categorize items into traces and spans
+        for item in items:
+            if hasattr(item, 'export') and callable(item.export):
+                export_data = item.export()
+                if export_data:
+                    if isinstance(item, Trace):
+                        traces.append(export_data)
+                    else:
+                        spans.append(export_data)
+
+        data = traces + spans
         payload = {"data": data}
 
         headers = {
