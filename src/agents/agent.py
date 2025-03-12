@@ -161,7 +161,10 @@ class Agent(Generic[TContext]):
     def _add_item(
         self, item: Any, attr_name: str, expected_type: type | tuple[type, ...]
     ) -> None:
-        """Generic method to add an item to a specified list attribute with type checking and duplicate prevention."""
+        """
+        Generic method to add an item to a specified list attribute.
+        Checks if the item is of the expected type and prevents duplicates.
+        """
         if not isinstance(item, expected_type):
             raise TypeError(f"Expected {expected_type}, got {type(item)}")
         attr_list = getattr(self, attr_name)
