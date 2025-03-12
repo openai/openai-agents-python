@@ -400,24 +400,27 @@ def test_assistant_messages_in_history():
     Test that assistant messages are added to the history.
     """
     messages = _Converter.items_to_messages(
-            [
-                {
-                    "role": "user",
-                    "content": "Hello",
-                },
-                {
-                    "role": "assistant",
-                    "content": "Hello?",
-                },
-                {
-                    "role": "user",
-                    "content": "What was my Name?",
-                },
-            ]
-        )
-    
-    # OUTPUT is [{'role': 'user', 'content': 'Hello'}, {'role': 'assistant', 'content': 'Hello?'}, {'role': 'user', 'content': 'What was my Name?'}]
-    assert messages == [{'role': 'user', 'content': 'Hello'}, {'role': 'assistant', 'content': 'Hello?'}, {'role': 'user', 'content': 'What was my Name?'}]
+        [
+            {
+                "role": "user",
+                "content": "Hello",
+            },
+            {
+                "role": "assistant",
+                "content": "Hello?",
+            },
+            {
+                "role": "user",
+                "content": "What was my Name?",
+            },
+        ]
+    )
+
+    assert messages == [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello?"},
+        {"role": "user", "content": "What was my Name?"},
+    ]
     assert len(messages) == 3
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == "Hello"
