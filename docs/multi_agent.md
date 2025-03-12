@@ -27,11 +27,11 @@ This pattern is great when the task is open-ended and you want to rely on the in
 
 ## Orchestrating via code
 
-While orchestrating via LLM is powerful, orchestrating via LLM makes tasks more deterministic and predictable, in terms of speed, cost and performance. Common patterns here are:
+While orchestrating via LLM is powerful, orchestrating via code makes tasks more deterministic and predictable, in terms of speed, cost and performance. Common patterns here are:
 
 -   Using [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) to generate well formed data that you can inspect with your code. For example, you might ask an agent to classify the task into a few categories, and then pick the next agent based on the category.
 -   Chaining multiple agents by transforming the output of one into the input of the next. You can decompose a task like writing a blog post into a series of steps - do research, write an outline, write the blog post, critique it, and then improve it.
 -   Running the agent that performs the task in a `while` loop with an agent that evaluates and provides feedback, until the evaluator says the output passes certain criteria.
 -   Running multiple agents in parallel, e.g. via Python primitives like `asyncio.gather`. This is useful for speed when you have multiple tasks that don't depend on each other.
 
-We have a number of examples in [`examples/agent_patterns`](https://github.com/openai/openai-agents-python/examples/agent_patterns).
+We have a number of examples in [`examples/agent_patterns`](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns).

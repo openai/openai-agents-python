@@ -1,3 +1,0 @@
-# `Scope`
-
-::: agents.tracing.scope

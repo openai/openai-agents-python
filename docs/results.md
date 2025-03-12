@@ -32,7 +32,7 @@ The [`new_items`][agents.result.RunResultBase.new_items] property contains the n
 
 -   [`MessageOutputItem`][agents.items.MessageOutputItem] indicates a message from the LLM. The raw item is the message generated.
 -   [`HandoffCallItem`][agents.items.HandoffCallItem] indicates that the LLM called the handoff tool. The raw item is the tool call item from the LLM.
--   [`HandoffOutputItem`][agents.items.HandoffOutputItem] indicates that a handoff occured. The raw item is the tool response to the handoff tool call. You can also access the source/target agents from the item.
+-   [`HandoffOutputItem`][agents.items.HandoffOutputItem] indicates that a handoff occurred. The raw item is the tool response to the handoff tool call. You can also access the source/target agents from the item.
 -   [`ToolCallItem`][agents.items.ToolCallItem] indicates that the LLM invoked a tool.
 -   [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] indicates that a tool was called. The raw item is the tool response. You can also access the tool output from the item.
 -   [`ReasoningItem`][agents.items.ReasoningItem] indicates a reasoning item from the LLM. The raw item is the reasoning generated.

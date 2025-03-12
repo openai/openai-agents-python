@@ -49,13 +49,16 @@ def test_resp_set_default_openai_client():
 
 
 def test_set_default_openai_api():
-    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIResponsesModel), \
+    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIResponsesModel), (
         "Default should be responses"
+    )
 
     set_default_openai_api("chat_completions")
-    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIChatCompletionsModel), \
+    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIChatCompletionsModel), (
         "Should be chat completions model"
+    )
 
     set_default_openai_api("responses")
-    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIResponsesModel), \
+    assert isinstance(OpenAIProvider().get_model("gpt-4"), OpenAIResponsesModel), (
         "Should be responses model"
+    )

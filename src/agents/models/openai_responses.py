@@ -361,7 +361,7 @@ class Converter:
             includes = "file_search_call.results" if tool.include_search_results else None
         elif isinstance(tool, ComputerTool):
             converted_tool = {
-                "type": "computer-preview",
+                "type": "computer_use_preview",
                 "environment": tool.computer.environment,
                 "display_width": tool.computer.dimensions[0],
                 "display_height": tool.computer.dimensions[1],
