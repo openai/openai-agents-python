@@ -192,3 +192,11 @@ class Agent(Generic[TContext]):
         expected_types = get_args(Tool)
         for t in self._ensure_iterable(tool):
             self._add_item(t, "tools", expected_types)
+
+    def add_handoffs(
+        self,
+        handoff: Agent[Any] | Handoff[TContext] | Iterable[Agent[Any] | Handoff[TContext]],
+    ) -> None:
+        """Add one or multiple handoffs to the agent's handoff list."""
+        for h in self._ensure_iterable(handoff):
+            self._add_item(h, "handoffs", (Agent, Handoff))
