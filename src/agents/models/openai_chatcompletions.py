@@ -405,20 +405,30 @@ class OpenAIChatCompletionsModel(Model):
             for function_call in state.function_calls.values():
                 outputs.append(function_call)
 
-            final_response = response.model_copy(update={"output": outputs, "usage": usage})
+            final_usage = (
+                Usage(
+                    requests=1,
+                    input_tokens=usage.prompt_tokens,
+                    output_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                )
+                if usage
+                else Usage()
+            )
+            final_response = response.model_copy(update={"output": outputs, "usage": final_usage})
 
             yield ResponseCompletedEvent(
                 response=final_response,
                 type="response.completed",
             )
-            if tracing.include_data():
-                span_generation.span_data.output = [final_response.model_dump()]
 
-            if usage:
-                span_generation.span_data.usage = {
-                    "input_tokens": usage.prompt_tokens,
-                    "output_tokens": usage.completion_tokens,
-                }
+            if tracing.include_data():
+                span_generation.span_data.output = [output.model_dump() for output in outputs]
+
+            span_generation.span_data.usage = {
+                "input_tokens": final_usage.input_tokens,
+                "output_tokens": final_usage.output_tokens,
+            }
 
     @overload
     async def _fetch_response(
