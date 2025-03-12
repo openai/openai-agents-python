@@ -55,13 +55,6 @@ class Computer(abc.ABC):
     def drag(self, path: list[tuple[int, int]]) -> None:
         pass
 
-    @abc.abstractmethod
-    def screenshot_hash(self) -> str:
-        """Returns a hash of the current screenshot. This is used to avoid sending the same
-        screenshot multiple times. The default implementation uses the screenshot itself as
-        the hash.
-        """
-        pass
 
 
 class AsyncComputer(abc.ABC):
@@ -112,12 +105,4 @@ class AsyncComputer(abc.ABC):
 
     @abc.abstractmethod
     async def drag(self, path: list[tuple[int, int]]) -> None:
-        pass
-
-    @abc.abstractmethod
-    async def screenshot_hash(self) -> str:
-        """Returns a hash of the current screenshot. This is used to avoid sending the same
-        screenshot multiple times. The default implementation uses the screenshot itself as
-        the hash.
-        """
         pass

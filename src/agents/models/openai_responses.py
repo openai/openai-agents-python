@@ -366,7 +366,7 @@ class Converter:
                 "display_width": tool.computer.dimensions[0],
                 "display_height": tool.computer.dimensions[1],
             }
-            includes = None
+            includes = "computer_call_output.output.image_url"
 
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")

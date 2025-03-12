@@ -123,8 +123,6 @@ def test_convert_tools_basic_types_and_includes():
         def screenshot(self) -> str:
             raise NotImplementedError
 
-        def screenshot_hash(self) -> str:
-            return "hash_screenshot"
 
         def click(self, x: int, y: int, button: str) -> None:
             raise NotImplementedError
@@ -156,9 +154,11 @@ def test_convert_tools_basic_types_and_includes():
     converted = Converter.convert_tools(tools, handoffs=[])
     assert isinstance(converted.tools, list)
     assert isinstance(converted.includes, list)
-    # The includes list should have exactly the include for file search when include_search_results
-    # is True.
-    assert converted.includes == ["file_search_call.results"]
+    # The includes list should have includes for file search and computer tool
+    assert set(converted.includes) == {
+        "file_search_call.results",
+        "computer_call_output.output.image_url"
+    }
     # There should be exactly four converted tool dicts.
     assert len(converted.tools) == 4
     # Extract types and verify.

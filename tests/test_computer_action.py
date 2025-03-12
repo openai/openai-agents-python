@@ -54,9 +54,6 @@ class LoggingComputer(Computer):
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
 
-    def screenshot_hash(self) -> str:
-        self.calls.append(("screenshot_hash", ()))
-        return f"hash_{self._screenshot_return}"
 
     def click(self, x: int, y: int, button: str) -> None:
         self.calls.append(("click", (x, y, button)))
@@ -102,9 +99,6 @@ class LoggingAsyncComputer(AsyncComputer):
         self.calls.append(("screenshot", ()))
         return self._screenshot_return
 
-    async def screenshot_hash(self) -> str:
-        self.calls.append(("screenshot_hash", ()))
-        return f"hash_{self._screenshot_return}"
 
     async def click(self, x: int, y: int, button: str) -> None:
         self.calls.append(("click", (x, y, button)))
