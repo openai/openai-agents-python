@@ -4,7 +4,7 @@ import dataclasses
 import inspect
 from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, cast, get_args
 
 from . import _utils
 from ._utils import MaybeAwaitable
@@ -186,3 +186,9 @@ class Agent(Generic[TContext]):
             return item
         except TypeError:
             return [item]
+
+    def add_tools(self, tool: Tool | Iterable[Tool]) -> None:
+        """Add one or multiple tools to the agent's tool list."""
+        expected_types = get_args(Tool)
+        for t in self._ensure_iterable(tool):
+            self._add_item(t, "tools", expected_types)
