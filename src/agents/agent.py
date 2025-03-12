@@ -186,7 +186,7 @@ class Agent(Generic[TContext]):
             return [item]
         try:
             iter(item)
-            return item
+            return cast(Iterable[Any], item)
         except TypeError:
             return [item]
 
