@@ -1166,7 +1166,7 @@ wheels = [
 ]
 
 [[package]]
-name = "openai-agents"
+name = "openai-agents-mcp"
 version = "0.0.3"
 source = { editable = "." }
 dependencies = [

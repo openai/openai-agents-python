@@ -1,12 +1,12 @@
 [project]
-name = "openai-agents"
+name = "openai-agents-mcp"
 version = "0.0.3"
-description = "OpenAI Agents SDK"
+description = "MCP-compatible fork of OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "OpenAI", email = "support@openai.com" },
+    { name = "Sarmad Qadri", email = "sarmad@lastmileai.dev" },
 ]
 dependencies = [
     "openai>=1.66.2",
@@ -32,8 +32,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/openai/openai-agents-python"
-Repository = "https://github.com/openai/openai-agents-python"
+Homepage = "https://github.com/saqadri/openai-agents-mcp"
+Repository = "https://github.com/saqadri/openai-agents-mcp"
 
 [dependency-groups]
 dev = [
