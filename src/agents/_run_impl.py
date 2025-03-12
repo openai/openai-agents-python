@@ -358,10 +358,11 @@ class RunImpl:
     ) -> list[RunItem]:
         async def run_single_tool(
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
-        ) -> str:
+        ) -> tuple[str, bool]:
             with function_span(func_tool.name) as span_fn:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
+                is_error: bool = False
                 try:
                     _, _, result = await asyncio.gather(
                         hooks.on_tool_start(context_wrapper, agent, func_tool),
@@ -372,30 +373,32 @@ class RunImpl:
                         ),
                         func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
                     )
-
-                    await asyncio.gather(
-                        hooks.on_tool_end(context_wrapper, agent, func_tool, result),
-                        (
-                            agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
-                            if agent.hooks
-                            else _utils.noop_coroutine()
-                        ),
-                    )
+ 
                 except Exception as e:
+                    is_error = True
+                    result = f"Error running tool {func_tool.name}: {e}"
                     _utils.attach_error_to_current_span(
                         SpanError(
                             message="Error running tool",
                             data={"tool_name": func_tool.name, "error": str(e)},
                         )
                     )
-                    if isinstance(e, AgentsException):
-                        raise e
-                    raise UserError(f"Error running tool {func_tool.name}: {e}") from e
+                    logger.warning(result)
 
+                await asyncio.gather(
+                        hooks.on_tool_end(
+                            context_wrapper, agent, func_tool, result),
+                        (
+                            agent.hooks.on_tool_end(
+                                context_wrapper, agent, func_tool, result)
+                            if agent.hooks
+                            else _utils.noop_coroutine()
+                        ),
+                    )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.output = result
-            return result
-
+            return result, is_error
+                    
         tasks = []
         for tool_run in tool_runs:
             function_tool = tool_run.function_tool
@@ -405,9 +408,14 @@ class RunImpl:
 
         return [
             ToolCallOutputItem(
-                output=str(result),
-                raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, str(result)),
+                output=result[0],
+                raw_item=ItemHelpers.tool_call_output_item(
+                    tool_run.tool_call, 
+                    result[0], 
+                    is_error=result[1]
+                ),
                 agent=agent,
+                is_error=result[1]
             )
             for tool_run, result in zip(tool_runs, results)
         ]

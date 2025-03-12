@@ -131,6 +131,9 @@ class ToolCallOutputItem(RunItemBase[Union[FunctionCallOutput, ComputerCallOutpu
 
     output: str
     """The output of the tool call."""
+    
+    is_error: bool = False
+    """Indicates whether this output represents an error during tool execution."""
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
 
@@ -236,11 +239,12 @@ class ItemHelpers:
 
     @classmethod
     def tool_call_output_item(
-        cls, tool_call: ResponseFunctionToolCall, output: str
+        cls, tool_call: ResponseFunctionToolCall, output: str, is_error: bool = False
     ) -> FunctionCallOutput:
         """Creates a tool call output item from a tool call and its output."""
         return {
             "call_id": tool_call.call_id,
             "output": output,
             "type": "function_call_output",
+            "is_error": is_error,
         }
