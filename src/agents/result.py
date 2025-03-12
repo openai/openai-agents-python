@@ -216,5 +216,3 @@ class RunResultStreaming(RunResultBase):
 
         if self._output_guardrails_task and not self._output_guardrails_task.done():
             self._output_guardrails_task.cancel()
-            self._output_guardrails_task.cancel()
-            self._output_guardrails_task.cancel()
