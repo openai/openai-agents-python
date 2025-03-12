@@ -18,6 +18,9 @@ from .run_context import RunContextWrapper, TContext
 from .tool import Tool, function_tool
 
 if TYPE_CHECKING:
+    from mcp_agent.mcp.mcp_aggregator import MCPAggregator
+    from mcp_agent.mcp_server_registry import ServerRegistry
+
     from .lifecycle import AgentHooks
     from .result import RunResult
 
@@ -95,6 +98,25 @@ class Agent(Generic[TContext]):
     """A class that receives callbacks on various lifecycle events for this agent.
     """
 
+    mcp_servers: list[str] = field(default_factory=list)
+    """A list of MCP server names to use with this agent.
+
+    The agent will automatically discover and include tools from these MCP servers.
+    Each server name must be registered in the server registry,
+    which is initialized from mcp_agent.config.yaml.
+    """
+
+    mcp_server_registry: ServerRegistry | None = None
+    """The server registry to use with this agent. 
+    If not provided, it will be loaded from the run context, which initializes it from mcp_agent.config.yaml.
+    """
+
+    _mcp_aggregator: MCPAggregator | None = None
+    """The MCP aggregator used by this agent. Will be created lazily when needed."""
+
+    _mcp_initialized: bool = False
+    """Whether MCP tools have been loaded for this agent."""
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:
         ```
@@ -157,3 +179,41 @@ class Agent(Generic[TContext]):
             logger.error(f"Instructions must be a string or a function, got {self.instructions}")
 
         return None
+
+    async def load_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> None:
+        """Load tools from MCP servers and add them to this agent's tools."""
+
+        logger.debug(f"MCP servers: {self.mcp_servers}")
+
+        if not self.mcp_servers or self._mcp_initialized:
+            return
+
+        from .mcp import initialize_mcp_aggregator, mcp_list_tools
+
+        if self._mcp_aggregator is None:
+            self._mcp_aggregator = await initialize_mcp_aggregator(
+                run_context,
+                name=self.name,
+                servers=self.mcp_servers,
+                server_registry=self.mcp_server_registry,
+                connection_persistence=True
+            )
+
+        # Get all tools from the MCP servers
+        mcp_tools = await mcp_list_tools(self._mcp_aggregator)
+
+        # Add the MCP tools to the agent's tools
+        logger.info(f"Adding {len(mcp_tools)} MCP tools to agent {self.name}")
+        self.tools.extend(mcp_tools)
+        self._mcp_initialized = True
+
+    async def cleanup_resources(self) -> None:
+        """Clean up resources when the agent is done."""
+        if self._mcp_aggregator:
+            logger.info(f"Cleaning up MCP resources for agent {self.name}")
+            try:
+                await self._mcp_aggregator.__aexit__(None, None, None)
+                self._mcp_aggregator = None
+                self._mcp_initialized = False
+            except Exception as e:
+                logger.error(f"Error cleaning up MCP resources for agent {self.name}: {e}")

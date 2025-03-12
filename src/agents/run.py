@@ -172,6 +172,14 @@ class Runner:
             should_run_agent_start_hooks = True
 
             try:
+                # If the agent uses MCP servers, ensure we have a server registry
+                if starting_agent.mcp_servers:
+                    from .mcp import ensure_mcp_server_registry_in_context
+                    ensure_mcp_server_registry_in_context(context_wrapper)
+
+                    # Load MCP tools
+                    await starting_agent.load_mcp_tools(context_wrapper)
+
                 while True:
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
@@ -248,6 +256,7 @@ class Runner:
                             turn_result.next_step.output,
                             context_wrapper,
                         )
+                        # TODO: saqadri - should we clean up agent resources here?
                         return RunResult(
                             input=original_input,
                             new_items=generated_items,
@@ -271,6 +280,10 @@ class Runner:
             finally:
                 if current_span:
                     current_span.finish(reset_current=True)
+
+                # Clean up agent resources
+                # TODO: saqadri - verify if we need this here
+                await starting_agent.cleanup_resources()
 
     @classmethod
     def run_sync(
@@ -485,6 +498,14 @@ class Runner:
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
+            # If the agent uses MCP servers, ensure we have a server registry
+            if current_agent.mcp_servers:
+                from .mcp import ensure_mcp_server_registry_in_context
+                ensure_mcp_server_registry_in_context(context_wrapper)
+
+                # Load MCP tools for the starting agent
+                await current_agent.load_mcp_tools(context_wrapper)
+
             while True:
                 if streamed_result.is_complete:
                     break
@@ -598,6 +619,10 @@ class Runner:
         finally:
             if current_span:
                 current_span.finish(reset_current=True)
+
+            # Clean up agent resources
+            # TODO: saqadri - verify if we need this here
+            await starting_agent.cleanup_resources()
 
     @classmethod
     async def _run_single_turn_streamed(

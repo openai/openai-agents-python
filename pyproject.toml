@@ -3,7 +3,7 @@ name = "openai-agents"
 version = "0.0.2"
 description = "OpenAI Agents SDK"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "OpenAI", email = "support@openai.com" },
@@ -15,6 +15,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "mcp-agent>=0.0.8",
 ]
 classifiers = [
     "Typing :: Typed",

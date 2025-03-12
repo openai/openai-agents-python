@@ -162,6 +162,58 @@ make mypy   # run typechecker
 make lint   # run linter
 ```
 
+## Using with MCP (Model Context Protocol)
+
+The OpenAI Agents SDK can be integrated with the Model Context Protocol ([MCP](https://modelcontextprotocol.github.io/)) to seamlessly use tools from MCP servers. This integration allows you to:
+
+1. Use tools from MCP servers directly in your agents
+2. Configure MCP servers using standard configuration files
+3. Combine local tools with tools from MCP servers
+
+### Setting up MCP Integration
+
+1. Create an `mcp_agent.config.yaml` file in your project directory that defines your MCP servers:
+
+```yaml
+mcp:
+  servers:
+    fetch:
+      command: "uvx"
+      args: ["mcp-server-fetch"]
+    filesystem:
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+```
+
+2. Create a context object and specify which MCP servers to use with your agent:
+
+```python
+from agents import Agent, Run, function_tool
+
+# Create a simple context class that will hold the MCP server registry
+class AgentContext:
+    def __init__(self, mcp_config_path=None, mcp_config=None):
+        self.mcp_config_path = mcp_config_path  # Optional specific path to config file
+        self.mcp_config = mcp_config # Optional programmatic setting of MCP server settings
+
+# Create an agent that specifies which MCP servers to use
+agent = Agent(
+    name="MCP Assistant",
+    instructions="You are a helpful assistant.",
+    tools=[your_local_tool],  # Local tools you define
+    mcp_servers=["fetch", "filesystem"],  # MCP servers to use (must be in config)
+)
+
+# Run the agent - tools from specified MCP servers will be automatically loaded
+result = await Run.run(
+    starting_agent=agent,
+    input="Print the first paragraph of https://openai.github.io/openai-agents-python/", # uses MCP fetch server
+    context=AgentContext(),  # Server registry loads automatically
+)
+```
+
+For more details, read the [MCP examples README](examples/mcp/README.md) and try out the [examples/mcp/basic/hello_world.py](examples/mcp/basic/hello_world.py) for a complete working example.
+
 ## Acknowledgements
 
 We'd like to acknowledge the excellent work of the open-source community, especially:
@@ -170,5 +222,7 @@ We'd like to acknowledge the excellent work of the open-source community, especi
 -   [MkDocs](https://github.com/squidfunk/mkdocs-material)
 -   [Griffe](https://github.com/mkdocstrings/griffe)
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
+-   [MCP](https://modelcontextprotocol.io/introduction) (Model Context Protocol)
+-   [mcp-agent](https://github.com/lastmile-ai/mcp-agent)
 
 We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
