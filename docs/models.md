@@ -1,6 +1,6 @@
 # Models
 
-The Agents SDK comes with out of the box support for OpenAI models in two flavors:
+The Agents SDK comes with out-of-the-box support for OpenAI models in two flavors:
 
 -   **Recommended**: the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel], which calls OpenAI APIs using the new [Responses API](https://platform.openai.com/docs/api-reference/responses).
 -   The [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel], which calls OpenAI APIs using the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
