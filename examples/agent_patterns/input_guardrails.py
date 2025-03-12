@@ -53,7 +53,7 @@ async def math_guardrail(
 
     return GuardrailFunctionOutput(
         output_info=final_output,
-        tripwire_triggered=not final_output.is_math_homework,
+        tripwire_triggered=final_output.is_math_homework,
     )
 
 
