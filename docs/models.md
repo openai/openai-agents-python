@@ -48,7 +48,7 @@ async def main():
     print(result.final_output)
 ```
 
-1.  Sets the the name of an OpenAI model directly.
+1.  Sets the name of an OpenAI model directly.
 2.  Provides a [`Model`][agents.models.interface.Model] implementation.
 
 ## Using other LLM providers
