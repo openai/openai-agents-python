@@ -36,6 +36,7 @@ class UserInfo:  # (1)!
     name: str
     uid: int
 
+@function_tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
     return f"User {wrapper.context.name} is 47 years old"
 
@@ -44,7 +45,7 @@ async def main():
 
     agent = Agent[UserInfo](  # (4)!
         name="Assistant",
-        tools=[function_tool(fetch_user_age)],
+        tools=[fetch_user_age],
     )
 
     result = await Runner.run(
