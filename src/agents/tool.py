@@ -189,7 +189,8 @@ def function_tool(
         failure_error_function: If provided, use this function to generate an error message when
             the tool call fails. The error message is sent to the LLM. If you pass None, then no
             error message will be sent and instead an Exception will be raised.
-        strict_mode: If False, parameters with default values become optional in the function schema.
+        strict_mode: If False, parameters with default values become optional in the
+            function schema.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:

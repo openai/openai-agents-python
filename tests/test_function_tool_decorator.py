@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -145,7 +145,7 @@ async def test_no_error_on_invalid_json_async():
 
 
 @function_tool(strict_mode=False)
-def optional_param_function(a: int, b: int | None = None) -> str:
+def optional_param_function(a: int, b: Optional[int] = None) -> str:
     if b is None:
         return f"{a}_no_b"
     return f"{a}_{b}"
@@ -165,17 +165,22 @@ async def test_optional_param_function():
 
 
 @function_tool(strict_mode=False)
-def multiple_optional_params_function(x: int = 42, y: str = "hello", z: int | None = None) -> str:
+def multiple_optional_params_function(
+    x: int = 42,
+    y: str = "hello",
+    z: Optional[int] = None,
+) -> str:
     if z is None:
         return f"{x}_{y}_no_z"
     return f"{x}_{y}_{z}"
+
 
 
 @pytest.mark.asyncio
 async def test_multiple_optional_params_function():
     tool = multiple_optional_params_function
 
-    input_data = {}
+    input_data: dict[str,Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "42_hello_no_z"
 
