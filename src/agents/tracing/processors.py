@@ -78,9 +78,6 @@ class BackendSpanExporter(TracingExporter):
             logger.warning("OPENAI_API_KEY is not set, skipping trace export")
             return
 
-        traces: list[dict[str, Any]] = []
-        spans: list[dict[str, Any]] = []
-
         data = [item.export() for item in items if item.export()]
         payload = {"data": data}
 
@@ -100,7 +97,7 @@ class BackendSpanExporter(TracingExporter):
 
                 # If the response is successful, break out of the loop
                 if response.status_code < 300:
-                    logger.debug(f"Exported {len(traces)} traces, {len(spans)} spans")
+                    logger.debug(f"Exported {len(items)} items")
                     return
 
                 # If the response is a client error (4xx), we wont retry
