@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast
 
@@ -172,3 +172,17 @@ class Agent(Generic[TContext]):
                 f"Item {item.name} already exists in {attr_name}. "
                 "Skipping addition to avoid duplicates."
             )
+
+    @staticmethod
+    def _ensure_iterable(item: Any) -> Iterable[Any]:
+        """
+        Ensures the provided item is iterable.
+        Strings and bytes are treated as non-iterable for our purposes.
+        """
+        if isinstance(item, (str, bytes)):
+            return [item]
+        try:
+            iter(item)
+            return item
+        except TypeError:
+            return [item]
