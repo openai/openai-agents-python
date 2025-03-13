@@ -70,6 +70,21 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
     ) -> ModelResponse:
+        """
+        Get a response from the model.
+
+        Args:
+            system_instructions: The system instructions to use.
+            input: The input items to the model, in OpenAI Responses format.
+            model_settings: The model settings to use.
+            tools: The tools available to the model.
+            output_schema: The output schema to use.
+            handoffs: The handoffs available to the model.
+            tracing: Tracing configuration.
+
+        Returns:
+            The full model response.
+        """
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
                 response = await self._fetch_response(
@@ -205,6 +220,21 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         stream: Literal[True] | Literal[False] = False,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
+        """
+        Fetch a response from the model.
+
+        Args:
+            system_instructions: The system instructions to use.
+            input: The input items to the model, in OpenAI Responses format.
+            model_settings: The model settings to use.
+            tools: The tools available to the model.
+            output_schema: The output schema to use.
+            handoffs: The handoffs available to the model.
+            stream: Whether to stream the response.
+
+        Returns:
+            The model response or an async stream of response events.
+        """
         list_input = ItemHelpers.input_to_new_input_list(input)
 
         parallel_tool_calls = (
@@ -227,24 +257,34 @@ class OpenAIResponsesModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        return await self._client.responses.create(
-            instructions=self._non_null_or_not_given(system_instructions),
-            model=self.model,
-            input=list_input,
-            include=converted_tools.includes,
-            tools=converted_tools.tools,
-            temperature=self._non_null_or_not_given(model_settings.temperature),
-            top_p=self._non_null_or_not_given(model_settings.top_p),
-            truncation=self._non_null_or_not_given(model_settings.truncation),
-            max_output_tokens=self._non_null_or_not_given(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=stream,
-            extra_headers=_HEADERS,
-            text=response_format,
-        )
+        try:
+            return await self._client.responses.create(
+                instructions=self._non_null_or_not_given(system_instructions),
+                model=self.model,
+                input=list_input,
+                include=converted_tools.includes,
+                tools=converted_tools.tools,
+                temperature=self._non_null_or_not_given(model_settings.temperature),
+                top_p=self._non_null_or_not_given(model_settings.top_p),
+                truncation=self._non_null_or_not_given(model_settings.truncation),
+                max_output_tokens=self._non_null_or_not_given(model_settings.max_tokens),
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                stream=stream,
+                extra_headers=_HEADERS,
+                text=response_format,
+            )
+        except Exception as e:
+            logger.error(f"Error fetching response: {e}")
+            raise
 
     def _get_client(self) -> AsyncOpenAI:
+        """
+        Get the OpenAI client.
+
+        Returns:
+            The OpenAI client.
+        """
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
@@ -261,6 +301,15 @@ class Converter:
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | None
     ) -> response_create_params.ToolChoice | NotGiven:
+        """
+        Convert the tool choice to the appropriate format.
+
+        Args:
+            tool_choice: The tool choice.
+
+        Returns:
+            The converted tool choice.
+        """
         if tool_choice is None:
             return NOT_GIVEN
         elif tool_choice == "required":
@@ -291,6 +340,15 @@ class Converter:
     def get_response_format(
         cls, output_schema: AgentOutputSchema | None
     ) -> ResponseTextConfigParam | NotGiven:
+        """
+        Get the response format based on the output schema.
+
+        Args:
+            output_schema: The output schema.
+
+        Returns:
+            The response format.
+        """
         if output_schema is None or output_schema.is_plain_text():
             return NOT_GIVEN
         else:
@@ -309,6 +367,16 @@ class Converter:
         tools: list[Tool],
         handoffs: list[Handoff[Any]],
     ) -> ConvertedTools:
+        """
+        Convert the tools and handoffs to the appropriate format.
+
+        Args:
+            tools: The tools.
+            handoffs: The handoffs.
+
+        Returns:
+            The converted tools and includes.
+        """
         converted_tools: list[ToolParam] = []
         includes: list[IncludeLiteral] = []
 
@@ -329,8 +397,15 @@ class Converter:
 
     @classmethod
     def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, IncludeLiteral | None]:
-        """Returns converted tool and includes"""
+        """
+        Convert a tool to the appropriate format.
 
+        Args:
+            tool: The tool.
+
+        Returns:
+            The converted tool and includes.
+        """
         if isinstance(tool, FunctionTool):
             converted_tool: ToolParam = {
                 "name": tool.name,
@@ -377,6 +452,15 @@ class Converter:
 
     @classmethod
     def _convert_handoff_tool(cls, handoff: Handoff) -> ToolParam:
+        """
+        Convert a handoff to the appropriate format.
+
+        Args:
+            handoff: The handoff.
+
+        Returns:
+            The converted handoff tool.
+        """
         return {
             "name": handoff.tool_name,
             "parameters": handoff.input_json_schema,

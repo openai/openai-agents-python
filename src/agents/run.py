@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, cast, List, Dict, Union
 
 from openai.types.responses import ResponseCompletedEvent
 

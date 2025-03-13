@@ -81,7 +81,8 @@ class FileSearchTool:
     """A filter to apply based on file attributes."""
 
     @property
-    def name(self):
+    def name(self) -> str:
+        """The name of the tool."""
         return "file_search"
 
 
@@ -98,7 +99,8 @@ class WebSearchTool:
     """The amount of context to use for the search."""
 
     @property
-    def name(self):
+    def name(self) -> str:
+        """The name of the tool."""
         return "web_search_preview"
 
 
@@ -112,7 +114,8 @@ class ComputerTool:
     """
 
     @property
-    def name(self):
+    def name(self) -> str:
+        """The name of the tool."""
         return "computer_use_preview"
 
 
