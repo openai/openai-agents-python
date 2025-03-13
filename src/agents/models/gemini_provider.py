@@ -32,6 +32,7 @@ class GeminiProvider(ModelProvider):
         api_key: str | None = None,
         base_url: str | None = "https://generativelanguage.googleapis.com/v1beta/openai/",
         openai_client: AsyncOpenAI | None = None,
+        default_model: str = DEFAULT_MODEL,
     ) -> None:
         if openai_client is not None:
             assert api_key is None and base_url is None, (
@@ -42,6 +43,8 @@ class GeminiProvider(ModelProvider):
             self._client = None
             self._stored_api_key = api_key
             self._stored_base_url = base_url
+        
+        self._default_model = default_model
 
     # We lazy load the client in case you never actually use GeminiProvider()
     def _get_client(self) -> AsyncOpenAI:
@@ -56,7 +59,7 @@ class GeminiProvider(ModelProvider):
 
     def get_model(self, model_name: str | None) -> Model:
         if model_name is None:
-            model_name = DEFAULT_MODEL
+            model_name = self._default_model
 
         client = self._get_client()
 
