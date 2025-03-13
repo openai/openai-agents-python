@@ -106,15 +106,12 @@ def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
             If False, you'll either need to set the OPENAI_API_KEY environment variable or call
             set_tracing_export_api_key() with the API key you want to use for tracing.
     """
-<<<<<<< HEAD
     _config.set_default_openai_key(key, use_for_tracing)
-=======
     try:
         _config.set_default_openai_key(key)
     except Exception as e:
         logging.error(f"Error setting default OpenAI key: {e}")
         raise
->>>>>>> d44243306c5fc32c8185df5597d8a5fc420ee7d8
 
 
 def set_default_openai_client(client: AsyncOpenAI, use_for_tracing: bool = True) -> None:
@@ -147,11 +144,9 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
 
 def enable_verbose_stdout_logging() -> None:
     """Enables verbose logging to stdout. This is useful for debugging."""
-<<<<<<< HEAD
     logger = logging.getLogger("openai.agents")
     logger.setLevel(logging.DEBUG)
     logger.addHandler(logging.StreamHandler(sys.stdout))
-=======
     try:
         for name in ["openai.agents", "openai.agents.tracing"]:
             logger = logging.getLogger(name)
@@ -160,7 +155,6 @@ def enable_verbose_stdout_logging() -> None:
     except Exception as e:
         logging.error(f"Error enabling verbose stdout logging: {e}")
         raise
->>>>>>> d44243306c5fc32c8185df5597d8a5fc420ee7d8
 
 
 __all__ = [
