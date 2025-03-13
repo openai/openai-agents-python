@@ -40,7 +40,7 @@ class BackendSpanExporter(TracingExporter):
         """
         Args:
             api_key: The API key for the "Authorization" header. Defaults to
-                `os.environ["OPENAI_TRACE_API_KEY"]` if not provided.
+                `os.environ["OPENAI_API_KEY"]` if not provided.
             organization: The OpenAI organization to use. Defaults to
                 `os.environ["OPENAI_ORG_ID"]` if not provided.
             project: The OpenAI project to use. Defaults to
