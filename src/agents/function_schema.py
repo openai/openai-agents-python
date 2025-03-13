@@ -228,30 +228,36 @@ def function_schema(
     takes_context = False
     filtered_params = []
 
-    if params:
-        first_name, first_param = params[0]
-        # Prefer the evaluated type hint if available
-        ann = type_hints.get(first_name, first_param.annotation)
-        if ann != inspect._empty:
-            origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
-                takes_context = True  # Mark that the function takes context
-            else:
-                filtered_params.append((first_name, first_param))
-        else:
-            filtered_params.append((first_name, first_param))
+    # Helper function to check if a parameter is a special method parameter
+    def is_special_param(name: str) -> bool:
+        return name in ("self", "cls")
 
-    # For parameters other than the first, raise error if any use RunContextWrapper.
-    for name, param in params[1:]:
+    # Helper function to check if a parameter is a context parameter
+    def is_context_param(name: str, param: inspect.Parameter) -> bool:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
-                raise UserError(
-                    f"RunContextWrapper param found at non-first position in function"
-                    f" {func.__name__}"
-                )
-        filtered_params.append((name, param))
+            return origin is RunContextWrapper
+        return False
+
+    if params:
+        first_name, first_param = params[0]
+
+        # Handle special first parameter cases
+        if is_context_param(first_name, first_param):
+            takes_context = True
+        elif not is_special_param(first_name):
+            filtered_params.append((first_name, first_param))
+
+    # For parameters other than the first, handle special cases and context
+    for name, param in params[1:]:
+        if is_context_param(name, param):
+            raise UserError(
+                f"RunContextWrapper param found at non-first position in function"
+                f" {func.__name__}"
+            )
+        if not is_special_param(name):
+            filtered_params.append((name, param))
 
     # We will collect field definitions for create_model as a dict:
     #   field_name -> (type_annotation, default_value_or_Field(...))
