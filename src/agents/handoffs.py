@@ -28,6 +28,10 @@ OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
 
 @dataclass(frozen=True)
 class HandoffInputData:
+    """
+    The input data passed to the next agent during a handoff.
+    """
+
     input_history: str | tuple[TResponseInputItem, ...]
     """
     The input history before `Runner.run()` was called.
@@ -51,7 +55,8 @@ HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], HandoffInputData]
 
 @dataclass
 class Handoff(Generic[TContext]):
-    """A handoff is when an agent delegates a task to another agent.
+    """
+    A handoff is when an agent delegates a task to another agent.
     For example, in a customer support scenario you might have a "triage agent" that determines
     which agent should handle the user's request, and sub-agents that specialize in different
     areas like billing, account management, etc.
@@ -99,15 +104,42 @@ class Handoff(Generic[TContext]):
     """
 
     def get_transfer_message(self, agent: Agent[Any]) -> str:
+        """
+        Get the transfer message for the handoff.
+
+        Args:
+            agent: The agent that is being handed off to.
+
+        Returns:
+            The transfer message.
+        """
         base = f"{{'assistant': '{agent.name}'}}"
         return base
 
     @classmethod
     def default_tool_name(cls, agent: Agent[Any]) -> str:
+        """
+        Get the default tool name for the handoff.
+
+        Args:
+            agent: The agent that is being handed off to.
+
+        Returns:
+            The default tool name.
+        """
         return _utils.transform_string_function_style(f"transfer_to_{agent.name}")
 
     @classmethod
     def default_tool_description(cls, agent: Agent[Any]) -> str:
+        """
+        Get the default tool description for the handoff.
+
+        Args:
+            agent: The agent that is being handed off to.
+
+        Returns:
+            The default tool description.
+        """
         return (
             f"Handoff to the {agent.name} agent to handle the request. "
             f"{agent.handoff_description or ''}"
@@ -190,34 +222,43 @@ def handoff(
     async def _invoke_handoff(
         ctx: RunContextWrapper[Any], input_json: str | None = None
     ) -> Agent[Any]:
-        if input_type is not None and type_adapter is not None:
-            if input_json is None:
-                _utils.attach_error_to_current_span(
-                    SpanError(
-                        message="Handoff function expected non-null input, but got None",
-                        data={"details": "input_json is None"},
+        try:
+            if input_type is not None and type_adapter is not None:
+                if input_json is None:
+                    _utils.attach_error_to_current_span(
+                        SpanError(
+                            message="Handoff function expected non-null input, but got None",
+                            data={"details": "input_json is None"},
+                        )
                     )
+                    raise ModelBehaviorError("Handoff function expected non-null input, but got None")
+
+                validated_input = _utils.validate_json(
+                    json_str=input_json,
+                    type_adapter=type_adapter,
+                    partial=False,
                 )
-                raise ModelBehaviorError("Handoff function expected non-null input, but got None")
+                input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
+                if inspect.iscoroutinefunction(input_func):
+                    await input_func(ctx, validated_input)
+                else:
+                    input_func(ctx, validated_input)
+            elif on_handoff is not None:
+                no_input_func = cast(OnHandoffWithoutInput, on_handoff)
+                if inspect.iscoroutinefunction(no_input_func):
+                    await no_input_func(ctx)
+                else:
+                    no_input_func(ctx)
 
-            validated_input = _utils.validate_json(
-                json_str=input_json,
-                type_adapter=type_adapter,
-                partial=False,
+            return agent
+        except Exception as e:
+            _utils.attach_error_to_current_span(
+                SpanError(
+                    message="Error invoking handoff",
+                    data={"error": str(e)},
+                )
             )
-            input_func = cast(OnHandoffWithInput[THandoffInput], on_handoff)
-            if inspect.iscoroutinefunction(input_func):
-                await input_func(ctx, validated_input)
-            else:
-                input_func(ctx, validated_input)
-        elif on_handoff is not None:
-            no_input_func = cast(OnHandoffWithoutInput, on_handoff)
-            if inspect.iscoroutinefunction(no_input_func):
-                await no_input_func(ctx)
-            else:
-                no_input_func(ctx)
-
-        return agent
+            raise
 
     tool_name = tool_name_override or Handoff.default_tool_name(agent)
     tool_description = tool_description_override or Handoff.default_tool_description(agent)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union, List
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
 
 class QueueCompleteSentinel:
+    """A sentinel value to indicate that the queue is complete."""
     pass
 
 
@@ -97,8 +98,7 @@ class ProcessedResponse:
     computer_actions: list[ToolRunComputerAction]
 
     def has_tools_to_run(self) -> bool:
-        # Handoffs, functions and computer actions need local processing
-        # Hosted tools have already run, so there's nothing to do.
+        """Check if there are any tools to run."""
         return any(
             [
                 self.handoffs,
@@ -151,6 +151,7 @@ class SingleStepResult:
 def get_model_tracing_impl(
     tracing_disabled: bool, trace_include_sensitive_data: bool
 ) -> ModelTracing:
+    """Get the model tracing implementation based on the tracing configuration."""
     if tracing_disabled:
         return ModelTracing.DISABLED
     elif trace_include_sensitive_data:
@@ -176,6 +177,7 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
     ) -> SingleStepResult:
+        """Execute tools and side effects for the current step."""
         # Make a copy of the generated items
         pre_step_items = list(pre_step_items)
 
@@ -271,6 +273,7 @@ class RunImpl:
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
     ) -> ProcessedResponse:
+        """Process the model response and extract relevant information."""
         items: list[RunItem] = []
 
         run_handoffs = []
@@ -356,6 +359,7 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> list[RunItem]:
+        """Execute function tool calls."""
         async def run_single_tool(
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> str:
@@ -422,6 +426,7 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> list[RunItem]:
+        """Execute computer actions."""
         results: list[RunItem] = []
         # Need to run these serially, because each action can affect the computer state
         for action in actions:
@@ -451,6 +456,7 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
     ) -> SingleStepResult:
+        """Execute handoffs."""
         # If there is more than one handoff, add tool responses that reject those handoffs
         if len(run_handoffs) > 1:
             output_message = "Multiple handoffs detected, ignoring this one."
@@ -470,9 +476,20 @@ class RunImpl:
         actual_handoff = run_handoffs[0]
         with handoff_span(from_agent=agent.name) as span_handoff:
             handoff = actual_handoff.handoff
-            new_agent: Agent[Any] = await handoff.on_invoke_handoff(
-                context_wrapper, actual_handoff.tool_call.arguments
-            )
+            try:
+                new_agent: Agent[Any] = await handoff.on_invoke_handoff(
+                    context_wrapper, actual_handoff.tool_call.arguments
+                )
+            except Exception as e:
+                _utils.attach_error_to_span(
+                    span_handoff,
+                    SpanError(
+                        message="Error invoking handoff",
+                        data={"error": str(e)},
+                    )
+                )
+                raise
+
             span_handoff.span_data.to_agent = new_agent.name
 
             # Append a tool output item for the handoff
@@ -568,6 +585,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
     ) -> SingleStepResult:
+        """Execute final output."""
         # Run the on_end hooks
         await cls.run_final_output_hooks(agent, hooks, context_wrapper, final_output)
 
@@ -587,6 +605,7 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         final_output: Any,
     ):
+        """Run the final output hooks."""
         await asyncio.gather(
             hooks.on_agent_end(context_wrapper, agent, final_output),
             agent.hooks.on_end(context_wrapper, agent, final_output)
@@ -602,8 +621,19 @@ class RunImpl:
         input: str | list[TResponseInputItem],
         context: RunContextWrapper[TContext],
     ) -> InputGuardrailResult:
+        """Run a single input guardrail."""
         with guardrail_span(guardrail.get_name()) as span_guardrail:
-            result = await guardrail.run(agent, input, context)
+            try:
+                result = await guardrail.run(agent, input, context)
+            except Exception as e:
+                _utils.attach_error_to_span(
+                    span_guardrail,
+                    SpanError(
+                        message="Error running input guardrail",
+                        data={"error": str(e)},
+                    )
+                )
+                raise
             span_guardrail.span_data.triggered = result.output.tripwire_triggered
             return result
 
@@ -615,8 +645,19 @@ class RunImpl:
         agent_output: Any,
         context: RunContextWrapper[TContext],
     ) -> OutputGuardrailResult:
+        """Run a single output guardrail."""
         with guardrail_span(guardrail.get_name()) as span_guardrail:
-            result = await guardrail.run(agent=agent, agent_output=agent_output, context=context)
+            try:
+                result = await guardrail.run(agent=agent, agent_output=agent_output, context=context)
+            except Exception as e:
+                _utils.attach_error_to_span(
+                    span_guardrail,
+                    SpanError(
+                        message="Error running output guardrail",
+                        data={"error": str(e)},
+                    )
+                )
+                raise
             span_guardrail.span_data.triggered = result.output.tripwire_triggered
             return result
 
@@ -626,6 +667,7 @@ class RunImpl:
         step_result: SingleStepResult,
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
+        """Stream the step result to the queue."""
         for item in step_result.new_step_items:
             if isinstance(item, MessageOutputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
@@ -695,6 +737,7 @@ class ComputerAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
+        """Execute a computer action."""
         output_func = (
             cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
             if isinstance(action.computer_tool.computer, AsyncComputer)
@@ -741,25 +784,29 @@ class ComputerAction:
         computer: Computer,
         tool_call: ResponseComputerToolCall,
     ) -> str:
+        """Get a screenshot synchronously."""
         action = tool_call.action
-        if isinstance(action, ActionClick):
-            computer.click(action.x, action.y, action.button)
-        elif isinstance(action, ActionDoubleClick):
-            computer.double_click(action.x, action.y)
-        elif isinstance(action, ActionDrag):
-            computer.drag([(p.x, p.y) for p in action.path])
-        elif isinstance(action, ActionKeypress):
-            computer.keypress(action.keys)
-        elif isinstance(action, ActionMove):
-            computer.move(action.x, action.y)
-        elif isinstance(action, ActionScreenshot):
-            computer.screenshot()
-        elif isinstance(action, ActionScroll):
-            computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
-        elif isinstance(action, ActionType):
-            computer.type(action.text)
-        elif isinstance(action, ActionWait):
-            computer.wait()
+        try:
+            if isinstance(action, ActionClick):
+                computer.click(action.x, action.y, action.button)
+            elif isinstance(action, ActionDoubleClick):
+                computer.double_click(action.x, action.y)
+            elif isinstance(action, ActionDrag):
+                computer.drag([(p.x, p.y) for p in action.path])
+            elif isinstance(action, ActionKeypress):
+                computer.keypress(action.keys)
+            elif isinstance(action, ActionMove):
+                computer.move(action.x, action.y)
+            elif isinstance(action, ActionScreenshot):
+                computer.screenshot()
+            elif isinstance(action, ActionScroll):
+                computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
+            elif isinstance(action, ActionType):
+                computer.type(action.text)
+            elif isinstance(action, ActionWait):
+                computer.wait()
+        except Exception as e:
+            raise ModelBehaviorError(f"Error executing computer action: {e}")
 
         return computer.screenshot()
 
@@ -769,24 +816,28 @@ class ComputerAction:
         computer: AsyncComputer,
         tool_call: ResponseComputerToolCall,
     ) -> str:
+        """Get a screenshot asynchronously."""
         action = tool_call.action
-        if isinstance(action, ActionClick):
-            await computer.click(action.x, action.y, action.button)
-        elif isinstance(action, ActionDoubleClick):
-            await computer.double_click(action.x, action.y)
-        elif isinstance(action, ActionDrag):
-            await computer.drag([(p.x, p.y) for p in action.path])
-        elif isinstance(action, ActionKeypress):
-            await computer.keypress(action.keys)
-        elif isinstance(action, ActionMove):
-            await computer.move(action.x, action.y)
-        elif isinstance(action, ActionScreenshot):
-            await computer.screenshot()
-        elif isinstance(action, ActionScroll):
-            await computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
-        elif isinstance(action, ActionType):
-            await computer.type(action.text)
-        elif isinstance(action, ActionWait):
-            await computer.wait()
+        try:
+            if isinstance(action, ActionClick):
+                await computer.click(action.x, action.y, action.button)
+            elif isinstance(action, ActionDoubleClick):
+                await computer.double_click(action.x, action.y)
+            elif isinstance(action, ActionDrag):
+                await computer.drag([(p.x, p.y) for p in action.path])
+            elif isinstance(action, ActionKeypress):
+                await computer.keypress(action.keys)
+            elif isinstance(action, ActionMove):
+                await computer.move(action.x, action.y)
+            elif isinstance(action, ActionScreenshot):
+                await computer.screenshot()
+            elif isinstance(action, ActionScroll):
+                await computer.scroll(action.x, action.y, action.scroll_x, action.scroll_y)
+            elif isinstance(action, ActionType):
+                await computer.type(action.text)
+            elif isinstance(action, ActionWait):
+                await computer.wait()
+        except Exception as e:
+            raise ModelBehaviorError(f"Error executing computer action: {e}")
 
         return await computer.screenshot()
