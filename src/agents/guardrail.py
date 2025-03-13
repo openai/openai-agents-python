@@ -97,6 +97,7 @@ class InputGuardrail(Generic[TContext]):
     """
 
     def get_name(self) -> str:
+        """Get the name of the guardrail."""
         if self.name:
             return self.name
 
@@ -108,20 +109,24 @@ class InputGuardrail(Generic[TContext]):
         input: str | list[TResponseInputItem],
         context: RunContextWrapper[TContext],
     ) -> InputGuardrailResult:
+        """Run the input guardrail."""
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
 
-        output = self.guardrail_function(context, agent, input)
-        if inspect.isawaitable(output):
+        try:
+            output = self.guardrail_function(context, agent, input)
+            if inspect.isawaitable(output):
+                return InputGuardrailResult(
+                    guardrail=self,
+                    output=await output,
+                )
+
             return InputGuardrailResult(
                 guardrail=self,
-                output=await output,
+                output=output,
             )
-
-        return InputGuardrailResult(
-            guardrail=self,
-            output=output,
-        )
+        except Exception as e:
+            raise UserError(f"Error running input guardrail: {e}") from e
 
 
 @dataclass
@@ -151,6 +156,7 @@ class OutputGuardrail(Generic[TContext]):
     """
 
     def get_name(self) -> str:
+        """Get the name of the guardrail."""
         if self.name:
             return self.name
 
@@ -159,24 +165,28 @@ class OutputGuardrail(Generic[TContext]):
     async def run(
         self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any
     ) -> OutputGuardrailResult:
+        """Run the output guardrail."""
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
 
-        output = self.guardrail_function(context, agent, agent_output)
-        if inspect.isawaitable(output):
+        try:
+            output = self.guardrail_function(context, agent, agent_output)
+            if inspect.isawaitable(output):
+                return OutputGuardrailResult(
+                    guardrail=self,
+                    agent=agent,
+                    agent_output=agent_output,
+                    output=await output,
+                )
+
             return OutputGuardrailResult(
                 guardrail=self,
                 agent=agent,
                 agent_output=agent_output,
-                output=await output,
+                output=output,
             )
-
-        return OutputGuardrailResult(
-            guardrail=self,
-            agent=agent,
-            agent_output=agent_output,
-            output=output,
-        )
+        except Exception as e:
+            raise UserError(f"Error running output guardrail: {e}") from e
 
 
 TContext_co = TypeVar("TContext_co", bound=Any, covariant=True)

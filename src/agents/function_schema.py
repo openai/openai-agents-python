@@ -87,6 +87,15 @@ DocstringStyle = Literal["google", "numpy", "sphinx"]
 # As of Feb 2025, the automatic style detection in griffe is an Insiders feature. This
 # code approximates it.
 def _detect_docstring_style(doc: str) -> DocstringStyle:
+    """
+    Detects the style of a docstring.
+
+    Args:
+        doc: The docstring to detect the style of.
+
+    Returns:
+        The detected docstring style.
+    """
     scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
 
     # Sphinx style detection: look for :param, :type, :return:, and :rtype:
@@ -128,6 +137,9 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
+    """
+    Context manager to suppress griffe logging.
+    """
     # Supresses warnings about missing annotations for params
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
@@ -210,131 +222,133 @@ def function_schema(
         A `FuncSchema` object containing the function's name, description, parameter descriptions,
         and other metadata.
     """
+    try:
+        # 1. Grab docstring info
+        if use_docstring_info:
+            doc_info = generate_func_documentation(func, docstring_style)
+            param_descs = doc_info.param_descriptions or {}
+        else:
+            doc_info = None
+            param_descs = {}
 
-    # 1. Grab docstring info
-    if use_docstring_info:
-        doc_info = generate_func_documentation(func, docstring_style)
-        param_descs = doc_info.param_descriptions or {}
-    else:
-        doc_info = None
-        param_descs = {}
+        func_name = name_override or doc_info.name if doc_info else func.__name__
 
-    func_name = name_override or doc_info.name if doc_info else func.__name__
+        # 2. Inspect function signature and get type hints
+        sig = inspect.signature(func)
+        type_hints = get_type_hints(func)
+        params = list(sig.parameters.items())
+        takes_context = False
+        filtered_params = []
 
-    # 2. Inspect function signature and get type hints
-    sig = inspect.signature(func)
-    type_hints = get_type_hints(func)
-    params = list(sig.parameters.items())
-    takes_context = False
-    filtered_params = []
-
-    if params:
-        first_name, first_param = params[0]
-        # Prefer the evaluated type hint if available
-        ann = type_hints.get(first_name, first_param.annotation)
-        if ann != inspect._empty:
-            origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
-                takes_context = True  # Mark that the function takes context
+        if params:
+            first_name, first_param = params[0]
+            # Prefer the evaluated type hint if available
+            ann = type_hints.get(first_name, first_param.annotation)
+            if ann != inspect._empty:
+                origin = get_origin(ann) or ann
+                if origin is RunContextWrapper:
+                    takes_context = True  # Mark that the function takes context
+                else:
+                    filtered_params.append((first_name, first_param))
             else:
                 filtered_params.append((first_name, first_param))
-        else:
-            filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper.
-    for name, param in params[1:]:
-        ann = type_hints.get(name, param.annotation)
-        if ann != inspect._empty:
-            origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
-                raise UserError(
-                    f"RunContextWrapper param found at non-first position in function"
-                    f" {func.__name__}"
-                )
-        filtered_params.append((name, param))
+        # For parameters other than the first, raise error if any use RunContextWrapper.
+        for name, param in params[1:]:
+            ann = type_hints.get(name, param.annotation)
+            if ann != inspect._empty:
+                origin = get_origin(ann) or ann
+                if origin is RunContextWrapper:
+                    raise UserError(
+                        f"RunContextWrapper param found at non-first position in function"
+                        f" {func.__name__}"
+                    )
+            filtered_params.append((name, param))
 
-    # We will collect field definitions for create_model as a dict:
-    #   field_name -> (type_annotation, default_value_or_Field(...))
-    fields: dict[str, Any] = {}
+        # We will collect field definitions for create_model as a dict:
+        #   field_name -> (type_annotation, default_value_or_Field(...))
+        fields: dict[str, Any] = {}
 
-    for name, param in filtered_params:
-        ann = type_hints.get(name, param.annotation)
-        default = param.default
+        for name, param in filtered_params:
+            ann = type_hints.get(name, param.annotation)
+            default = param.default
 
-        # If there's no type hint, assume `Any`
-        if ann == inspect._empty:
-            ann = Any
+            # If there's no type hint, assume `Any`
+            if ann == inspect._empty:
+                ann = Any
 
-        # If a docstring param description exists, use it
-        field_description = param_descs.get(name, None)
+            # If a docstring param description exists, use it
+            field_description = param_descs.get(name, None)
 
-        # Handle different parameter kinds
-        if param.kind == param.VAR_POSITIONAL:
-            # e.g. *args: extend positional args
-            if get_origin(ann) is tuple:
-                # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
-                args_of_tuple = get_args(ann)
-                if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[args_of_tuple[0]]  # type: ignore
+            # Handle different parameter kinds
+            if param.kind == param.VAR_POSITIONAL:
+                # e.g. *args: extend positional args
+                if get_origin(ann) is tuple:
+                    # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
+                    args_of_tuple = get_args(ann)
+                    if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
+                        ann = list[args_of_tuple[0]]  # type: ignore
+                    else:
+                        ann = list[Any]
                 else:
-                    ann = list[Any]
-            else:
-                # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                    # If user wrote *args: int, treat as List[int]
+                    ann = list[ann]  # type: ignore
 
-            # Default factory to empty list
-            fields[name] = (
-                ann,
-                Field(default_factory=list, description=field_description),  # type: ignore
-            )
-
-        elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling
-            if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
-                dict_args = get_args(ann)
-                if len(dict_args) == 2:
-                    ann = dict[dict_args[0], dict_args[1]]  # type: ignore
-                else:
-                    ann = dict[str, Any]
-            else:
-                # e.g. def foo(**kwargs: int) -> Dict[str, int]
-                ann = dict[str, ann]  # type: ignore
-
-            fields[name] = (
-                ann,
-                Field(default_factory=dict, description=field_description),  # type: ignore
-            )
-
-        else:
-            # Normal parameter
-            if default == inspect._empty:
-                # Required field
+                # Default factory to empty list
                 fields[name] = (
                     ann,
-                    Field(..., description=field_description),
+                    Field(default_factory=list, description=field_description),  # type: ignore
                 )
-            else:
-                # Parameter with a default value
+
+            elif param.kind == param.VAR_KEYWORD:
+                # **kwargs handling
+                if get_origin(ann) is dict:
+                    # e.g. def foo(**kwargs: dict[str, int])
+                    dict_args = get_args(ann)
+                    if len(dict_args) == 2:
+                        ann = dict[dict_args[0], dict_args[1]]  # type: ignore
+                    else:
+                        ann = dict[str, Any]
+                else:
+                    # e.g. def foo(**kwargs: int) -> Dict[str, int]
+                    ann = dict[str, ann]  # type: ignore
+
                 fields[name] = (
                     ann,
-                    Field(default=default, description=field_description),
+                    Field(default_factory=dict, description=field_description),  # type: ignore
                 )
 
-    # 3. Dynamically build a Pydantic model
-    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+            else:
+                # Normal parameter
+                if default == inspect._empty:
+                    # Required field
+                    fields[name] = (
+                        ann,
+                        Field(..., description=field_description),
+                    )
+                else:
+                    # Parameter with a default value
+                    fields[name] = (
+                        ann,
+                        Field(default=default, description=field_description),
+                    )
 
-    # 4. Build JSON schema from that model
-    json_schema = dynamic_model.model_json_schema()
-    if strict_json_schema:
-        json_schema = ensure_strict_json_schema(json_schema)
+        # 3. Dynamically build a Pydantic model
+        dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
 
-    # 5. Return as a FuncSchema dataclass
-    return FuncSchema(
-        name=func_name,
-        description=description_override or doc_info.description if doc_info else None,
-        params_pydantic_model=dynamic_model,
-        params_json_schema=json_schema,
-        signature=sig,
-        takes_context=takes_context,
-    )
+        # 4. Build JSON schema from that model
+        json_schema = dynamic_model.model_json_schema()
+        if strict_json_schema:
+            json_schema = ensure_strict_json_schema(json_schema)
+
+        # 5. Return as a FuncSchema dataclass
+        return FuncSchema(
+            name=func_name,
+            description=description_override or doc_info.description if doc_info else None,
+            params_pydantic_model=dynamic_model,
+            params_json_schema=json_schema,
+            signature=sig,
+            takes_context=takes_context,
+        )
+    except Exception as e:
+        raise UserError(f"Error generating function schema: {e}") from e
