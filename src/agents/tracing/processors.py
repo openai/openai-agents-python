@@ -224,23 +224,22 @@ class BatchTraceProcessor(TracingProcessor):
         """
         while True:
             items_to_export: list[Span[Any] | Trace] = []
-
-            # Gather a batch of spans up to max_batch_size
-            while not self._queue.empty() and (
-                force or len(items_to_export) < self._max_batch_size
-            ):
+            max_items = self._max_batch_size if not force else float('inf')
+            # Try to get up to max_items from the queue without checking empty() repeatedly
+            for _ in range(int(max_items)):
                 try:
                     items_to_export.append(self._queue.get_nowait())
                 except queue.Empty:
-                    # Another thread might have emptied the queue between checks
+                    # Queue is empty, no need to continue the loop
                     break
-
             # If we collected nothing, we're done
             if not items_to_export:
                 break
-
             # Export the batch
             self._exporter.export(items_to_export)
+            # If not forcing and queue is likely empty, we can stop
+            if not force and len(items_to_export) < max_items:
+                break
 
 
 # Create a shared global instance:
