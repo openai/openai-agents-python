@@ -161,4 +161,60 @@ async def test_provider_cleanup():
     async with provider:
         pass
     
-    assert close_called, "Provider should call close on exit" 
+    assert close_called, "Provider should call close on exit"
+
+
+@pytest.mark.asyncio
+async def test_litellm_provider_with_run_config():
+    """Test that LiteLLMProvider works correctly with RunConfig."""
+    from agents import Agent, RunConfig, Runner
+    from .fake_model import FakeModel
+    from .test_responses import get_text_message
+    
+    # Create a mock LiteLLMProvider that returns a FakeModel
+    class MockLiteLLMProvider(LiteLLMProvider):
+        def __init__(self):
+            # Skip the actual initialization to avoid API calls
+            self.model_requested = None
+            self.fake_model = FakeModel(initial_output=[get_text_message("Hello from LiteLLM via RunConfig!")])
+        
+        def get_model(self, model_name: str | None) -> FakeModel:
+            self.model_requested = model_name
+            return self.fake_model
+    
+    # Create the mock provider
+    provider = MockLiteLLMProvider()
+    
+    # Create an agent with a model name
+    agent = Agent(
+        name="Test Agent",
+        instructions="You are a test agent.",
+        model="claude-3"  # This should be passed to the provider
+    )
+    
+    # Create a run configuration with the provider
+    run_config = RunConfig(model_provider=provider)
+    
+    # Run the agent
+    result = await Runner.run(agent, input="Test input", run_config=run_config)
+    
+    # Verify that the provider was used correctly
+    assert provider.model_requested == "claude-3"
+    assert result.final_output == "Hello from LiteLLM via RunConfig!"
+    
+    # Test with model override in RunConfig
+    run_config_with_override = RunConfig(
+        model="gpt-4",  # This should override the agent's model
+        model_provider=provider
+    )
+    
+    # Reset the provider's state
+    provider.model_requested = None
+    provider.fake_model = FakeModel(initial_output=[get_text_message("Hello from LiteLLM via RunConfig!")])
+    
+    # Run the agent with the override
+    result = await Runner.run(agent, input="Test input", run_config=run_config_with_override)
+    
+    # Verify that the override was used
+    assert provider.model_requested == "gpt-4"
+    assert result.final_output == "Hello from LiteLLM via RunConfig!" 

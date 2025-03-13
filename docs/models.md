@@ -71,3 +71,175 @@ spanish_agent = Agent(
     model_settings=ModelSettings(temperature=0.5),
 )
 ```
+
+## Using LiteLLM Provider
+
+The SDK includes built-in support for [LiteLLM](https://docs.litellm.ai/), a unified interface for multiple LLM providers. LiteLLM provides a proxy server that exposes an OpenAI-compatible API for various LLM providers including OpenAI, Anthropic, Azure, AWS Bedrock, Google, and more.
+
+### Basic Usage
+
+```python
+from agents import Agent, Runner, LiteLLMProvider, RunConfig
+import asyncio
+
+# Create a LiteLLM provider
+provider = LiteLLMProvider(
+    api_key="your-litellm-api-key",  # or set LITELLM_API_KEY env var
+    base_url="http://localhost:8000", # or set LITELLM_API_BASE env var
+)
+
+# Create an agent using a specific model
+agent = Agent(
+    name="Assistant",
+    instructions="You are a helpful assistant.",
+    model="claude-3",  # Will be routed to Anthropic by the provider
+)
+
+# Create a run configuration with the provider
+run_config = RunConfig(model_provider=provider)
+
+async def main():
+    result = await Runner.run(
+        agent, 
+        input="Hello!",
+        run_config=run_config  # Pass the provider through run_config
+    )
+    print(result.final_output)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Environment Variables
+
+The LiteLLM provider supports configuration through environment variables:
+
+```bash
+# LiteLLM configuration
+export LITELLM_API_KEY="your-litellm-api-key"
+export LITELLM_API_BASE="http://localhost:8000"
+export LITELLM_MODEL="gpt-4"  # Default model (optional)
+
+# Provider-specific keys (examples)
+export OPENAI_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="sk-ant-..."
+export AZURE_API_KEY="..."
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+```
+
+### Model Routing
+
+The provider automatically routes model names to their appropriate providers:
+
+```python
+# Create the LiteLLM provider
+provider = LiteLLMProvider(
+    api_key="your-litellm-api-key",
+    base_url="http://localhost:8000"
+)
+
+# Create a run configuration with the provider
+run_config = RunConfig(model_provider=provider)
+
+# Models are automatically routed based on their names
+openai_agent = Agent(
+    name="OpenAI Agent",
+    instructions="Using GPT-4",
+    model="gpt-4",  # Will be routed to OpenAI
+)
+
+anthropic_agent = Agent(
+    name="Anthropic Agent",
+    instructions="Using Claude",
+    model="claude-3",  # Will be routed to Anthropic
+)
+
+azure_agent = Agent(
+    name="Azure Agent",
+    instructions="Using Azure OpenAI",
+    model="azure/gpt-4",  # Explicitly using Azure
+)
+
+# Run any of the agents with the provider
+result = await Runner.run(openai_agent, input="Hello!", run_config=run_config)
+```
+
+You can also explicitly specify providers using prefixes:
+
+- `openai/` - OpenAI models
+- `anthropic/` - Anthropic models
+- `azure/` - Azure OpenAI models
+- `aws/` - AWS Bedrock models
+- `cohere/` - Cohere models
+- `replicate/` - Replicate models
+- `huggingface/` - Hugging Face models
+- `mistral/` - Mistral AI models
+- `gemini/` - Google Gemini models
+- `groq/` - Groq models
+
+### Advanced Configuration
+
+The provider supports additional configuration options:
+
+```python
+provider = LiteLLMProvider(
+    api_key="your-litellm-api-key",
+    base_url="http://localhost:8000",
+    model_name="gpt-4",  # Default model
+    use_responses=True,  # Use OpenAI Responses API format
+    extra_headers={      # Additional headers
+        "x-custom-header": "value"
+    },
+    drop_params=True,    # Drop unsupported params for specific models
+)
+```
+
+### Using Multiple Providers
+
+You can use different providers for different agents in your workflow:
+
+```python
+from agents import Agent, Runner, OpenAIProvider, LiteLLMProvider, RunConfig
+import asyncio
+
+# OpenAI provider for direct OpenAI API access
+openai_provider = OpenAIProvider()
+
+# LiteLLM provider for other models
+litellm_provider = LiteLLMProvider(
+    api_key="your-litellm-api-key",
+    base_url="http://localhost:8000"
+)
+
+# Create agents with different model names
+triage_agent = Agent(
+    name="Triage",
+    instructions="Route requests to appropriate agents",
+    model="gpt-3.5-turbo",  # Will be routed by the provider
+)
+
+analysis_agent = Agent(
+    name="Analysis",
+    instructions="Perform detailed analysis",
+    model="claude-3",  # Will be routed by the provider
+)
+
+# Run with OpenAI provider
+openai_config = RunConfig(model_provider=openai_provider)
+result_triage = await Runner.run(
+    triage_agent, 
+    input="Analyze this data",
+    run_config=openai_config
+)
+
+# Run with LiteLLM provider
+litellm_config = RunConfig(model_provider=litellm_provider)
+result_analysis = await Runner.run(
+    analysis_agent,
+    input="Perform detailed analysis of this data",
+    run_config=litellm_config
+)
+```
+
+The LiteLLM provider makes it easy to use multiple LLM providers while maintaining a consistent interface and the full feature set of the Agents SDK including handoffs, tools, and tracing.
