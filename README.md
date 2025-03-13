@@ -47,9 +47,11 @@ print(result.final_output)
 
 (_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)
 
+(_For Jupyter notebook users, see [hello_world_jupyter.py](examples/basic/hello_world_jupyter.py)_)
+
 ## Handoffs example
 
-```py
+```python
 from agents import Agent, Runner
 import asyncio
 
