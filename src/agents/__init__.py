@@ -92,13 +92,19 @@ from .tracing import (
 from .usage import Usage
 
 
-def set_default_openai_key(key: str) -> None:
-    """Set the default OpenAI API key to use for LLM requests and tracing. This is only necessary if
-    the OPENAI_API_KEY environment variable is not already set.
+def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
+    """Set the default OpenAI API key to use for LLM requests (and optionally tracing(). This is
+    only necessary if the OPENAI_API_KEY environment variable is not already set.
 
     If provided, this key will be used instead of the OPENAI_API_KEY environment variable.
+
+    Args:
+        key: The OpenAI key to use.
+        use_for_tracing: Whether to also use this key to send traces to OpenAI. Defaults to True
+            If False, you'll either need to set the OPENAI_API_KEY environment variable or call
+            set_tracing_export_api_key() with the API key you want to use for tracing.
     """
-    _config.set_default_openai_key(key)
+    _config.set_default_openai_key(key, use_for_tracing)
 
 
 def set_default_openai_client(client: AsyncOpenAI, use_for_tracing: bool = True) -> None:
