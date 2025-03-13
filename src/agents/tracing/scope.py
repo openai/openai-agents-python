@@ -2,7 +2,7 @@
 import contextvars
 from typing import TYPE_CHECKING, Any
 
-from .logger import logger
+from ..logger import logger
 
 if TYPE_CHECKING:
     from .spans import Span
