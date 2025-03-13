@@ -30,6 +30,87 @@ source env/bin/activate
 pip install openai-agents
 ```
 
+Here's how you can set up your OpenAI API key through the terminal on Windows, Mac, and Linux:
+
+
+## Step-by-Step Guide:
+
+### Step 1: Obtain your OpenAI API Key
+
+Log in to your [OpenAI account](https://platform.openai.com/api-keys) and copy your API key.
+
+## Windows (Command Prompt)
+
+Set the environment variable temporarily (session only):
+
+```batch
+set OPENAI_API_KEY="your-api-key"
+```
+
+To set it permanently:
+
+```batch
+setx OPENAI_API_KEY "your-api-key"
+```
+
+After using `setx`, restart the Command Prompt to take effect.
+
+## Windows (PowerShell)
+
+Temporarily (current session):
+
+```powershell
+$env:OPENAI_API_KEY="your-api-key"
+```
+
+To set permanently:
+
+```batch
+setx OPENAI_API_KEY "your-api-key"
+```
+
+Then restart PowerShell or Command Prompt.
+
+
+## macOS and Linux (Terminal)
+
+Set temporarily for the current session:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+```
+
+Set permanently (add it to your shell configuration):
+
+### For `bash` users:
+
+```bash
+echo 'export OPENAI_API_KEY="your-api-key"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### For `zsh` users (default for macOS):
+
+```bash
+echo 'export OPENAI_API_KEY="your-api-key"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+---
+
+## Verify Your Setup (All Platforms)
+
+To check if your API key is correctly set up, run:
+
+```bash
+echo $OPENAI_API_KEY  # macOS/Linux
+echo %OPENAI_API_KEY%  # Windows
+```
+
+Replace `"your-api-key"` with the key copied from OpenAI.
+
+Your API key is now set up and ready to use.
+
 ## Hello world example
 
 ```python
