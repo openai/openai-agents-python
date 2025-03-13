@@ -51,8 +51,10 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseRefusalDeltaEvent,
     ResponseTextDeltaEvent,
+    ResponseUsage,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from .. import _debug
 from ..agent_output import AgentOutputSchema
@@ -405,7 +407,23 @@ class OpenAIChatCompletionsModel(Model):
             for function_call in state.function_calls.values():
                 outputs.append(function_call)
 
-            final_response = response.model_copy(update={"output": outputs, "usage": usage})
+            final_response = response.model_copy()
+            final_response.output = outputs
+            final_response.usage = (
+                ResponseUsage(
+                    input_tokens=usage.prompt_tokens,
+                    output_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                    output_tokens_details=OutputTokensDetails(
+                        reasoning_tokens=usage.completion_tokens_details.reasoning_tokens
+                        if usage.completion_tokens_details
+                        and usage.completion_tokens_details.reasoning_tokens
+                        else 0
+                    ),
+                )
+                if usage
+                else None
+            )
 
             yield ResponseCompletedEvent(
                 response=final_response,
