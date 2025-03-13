@@ -51,8 +51,10 @@ from openai.types.responses import (
     ResponseOutputText,
     ResponseRefusalDeltaEvent,
     ResponseTextDeltaEvent,
+    ResponseUsage,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_usage import OutputTokensDetails
 
 from .. import _debug
 from ..agent_output import AgentOutputSchema
@@ -405,7 +407,23 @@ class OpenAIChatCompletionsModel(Model):
             for function_call in state.function_calls.values():
                 outputs.append(function_call)
 
-            final_response = response.model_copy(update={"output": outputs, "usage": usage})
+            final_response = response.model_copy()
+            final_response.output = outputs
+            final_response.usage = (
+                ResponseUsage(
+                    input_tokens=usage.prompt_tokens,
+                    output_tokens=usage.completion_tokens,
+                    total_tokens=usage.total_tokens,
+                    output_tokens_details=OutputTokensDetails(
+                        reasoning_tokens=usage.completion_tokens_details.reasoning_tokens
+                        if usage.completion_tokens_details
+                        and usage.completion_tokens_details.reasoning_tokens
+                        else 0
+                    ),
+                )
+                if usage
+                else None
+            )
 
             yield ResponseCompletedEvent(
                 response=final_response,
@@ -503,6 +521,7 @@ class OpenAIChatCompletionsModel(Model):
             top_p=self._non_null_or_not_given(model_settings.top_p),
             frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
             presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
+            max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
             tool_choice=tool_choice,
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,
@@ -808,6 +827,13 @@ class _Converter:
                         "content": cls.extract_text_content(content),
                     }
                     result.append(msg_developer)
+                elif role == "assistant":
+                    flush_assistant_message()
+                    msg_assistant: ChatCompletionAssistantMessageParam = {
+                        "role": "assistant",
+                        "content": cls.extract_text_content(content),
+                    }
+                    result.append(msg_assistant)
                 else:
                     raise UserError(f"Unexpected role in easy_input_message: {role}")
 
