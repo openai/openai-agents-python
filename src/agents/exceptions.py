@@ -6,6 +6,7 @@ if TYPE_CHECKING:
 
 class AgentsException(Exception):
     """Base class for all exceptions in the Agents SDK."""
+    pass
 
 
 class MaxTurnsExceeded(AgentsException):
@@ -13,7 +14,7 @@ class MaxTurnsExceeded(AgentsException):
 
     message: str
 
-    def __init__(self, message: str):
+    def __init__(self, message: str) -> None:
         self.message = message
 
 
@@ -24,7 +25,7 @@ class ModelBehaviorError(AgentsException):
 
     message: str
 
-    def __init__(self, message: str):
+    def __init__(self, message: str) -> None:
         self.message = message
 
 
@@ -33,7 +34,7 @@ class UserError(AgentsException):
 
     message: str
 
-    def __init__(self, message: str):
+    def __init__(self, message: str) -> None:
         self.message = message
 
 
@@ -43,7 +44,7 @@ class InputGuardrailTripwireTriggered(AgentsException):
     guardrail_result: "InputGuardrailResult"
     """The result data of the guardrail that was triggered."""
 
-    def __init__(self, guardrail_result: "InputGuardrailResult"):
+    def __init__(self, guardrail_result: "InputGuardrailResult") -> None:
         self.guardrail_result = guardrail_result
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
@@ -56,7 +57,7 @@ class OutputGuardrailTripwireTriggered(AgentsException):
     guardrail_result: "OutputGuardrailResult"
     """The result data of the guardrail that was triggered."""
 
-    def __init__(self, guardrail_result: "OutputGuardrailResult"):
+    def __init__(self, guardrail_result: "OutputGuardrailResult") -> None:
         self.guardrail_result = guardrail_result
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
