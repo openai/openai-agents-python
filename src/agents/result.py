@@ -181,7 +181,8 @@ class RunResultStreaming(RunResultBase):
         if self._stored_exception:
             raise self._stored_exception
 
-    def _check_errors(self):
+    def _check_errors(self) -> None:
+        """Check for errors in the agent run."""
         if self.current_turn > self.max_turns:
             self._stored_exception = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
 
@@ -207,7 +208,8 @@ class RunResultStreaming(RunResultBase):
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-    def _cleanup_tasks(self):
+    def _cleanup_tasks(self) -> None:
+        """Clean up the asyncio tasks."""
         if self._run_impl_task and not self._run_impl_task.done():
             self._run_impl_task.cancel()
 

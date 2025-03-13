@@ -132,28 +132,36 @@ class Agent(Generic[TContext]):
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
 
-            output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
-            )
-            if custom_output_extractor:
-                return await custom_output_extractor(output)
+            try:
+                output = await Runner.run(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                )
+                if custom_output_extractor:
+                    return await custom_output_extractor(output)
 
-            return ItemHelpers.text_message_outputs(output.new_items)
+                return ItemHelpers.text_message_outputs(output.new_items)
+            except Exception as e:
+                logger.error(f"Error running agent as tool: {e}")
+                raise
 
         return run_agent
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
         """Get the system prompt for the agent."""
-        if isinstance(self.instructions, str):
-            return self.instructions
-        elif callable(self.instructions):
-            if inspect.iscoroutinefunction(self.instructions):
-                return await cast(Awaitable[str], self.instructions(run_context, self))
-            else:
-                return cast(str, self.instructions(run_context, self))
-        elif self.instructions is not None:
-            logger.error(f"Instructions must be a string or a function, got {self.instructions}")
+        try:
+            if isinstance(self.instructions, str):
+                return self.instructions
+            elif callable(self.instructions):
+                if inspect.iscoroutinefunction(self.instructions):
+                    return await cast(Awaitable[str], self.instructions(run_context, self))
+                else:
+                    return cast(str, self.instructions(run_context, self))
+            elif self.instructions is not None:
+                logger.error(f"Instructions must be a string or a function, got {self.instructions}")
 
-        return None
+            return None
+        except Exception as e:
+            logger.error(f"Error getting system prompt: {e}")
+            raise

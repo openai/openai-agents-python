@@ -115,17 +115,21 @@ class OpenAIChatCompletionsModel(Model):
             | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
         ) as span_generation:
-            response = await self._fetch_response(
-                system_instructions,
-                input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                span_generation,
-                tracing,
-                stream=False,
-            )
+            try:
+                response = await self._fetch_response(
+                    system_instructions,
+                    input,
+                    model_settings,
+                    tools,
+                    output_schema,
+                    handoffs,
+                    span_generation,
+                    tracing,
+                    stream=False,
+                )
+            except Exception as e:
+                logger.error(f"Error fetching response: {e}")
+                raise
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
@@ -178,17 +182,21 @@ class OpenAIChatCompletionsModel(Model):
             | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
         ) as span_generation:
-            response, stream = await self._fetch_response(
-                system_instructions,
-                input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                span_generation,
-                tracing,
-                stream=True,
-            )
+            try:
+                response, stream = await self._fetch_response(
+                    system_instructions,
+                    input,
+                    model_settings,
+                    tools,
+                    output_schema,
+                    handoffs,
+                    span_generation,
+                    tracing,
+                    stream=True,
+                )
+            except Exception as e:
+                logger.error(f"Error fetching response: {e}")
+                raise
 
             usage: CompletionUsage | None = None
             state = _StreamingState()
@@ -513,22 +521,26 @@ class OpenAIChatCompletionsModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        ret = await self._get_client().chat.completions.create(
-            model=self.model,
-            messages=converted_messages,
-            tools=converted_tools or NOT_GIVEN,
-            temperature=self._non_null_or_not_given(model_settings.temperature),
-            top_p=self._non_null_or_not_given(model_settings.top_p),
-            frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=stream,
-            stream_options={"include_usage": True} if stream else NOT_GIVEN,
-            extra_headers=_HEADERS,
-        )
+        try:
+            ret = await self._get_client().chat.completions.create(
+                model=self.model,
+                messages=converted_messages,
+                tools=converted_tools or NOT_GIVEN,
+                temperature=self._non_null_or_not_given(model_settings.temperature),
+                top_p=self._non_null_or_not_given(model_settings.top_p),
+                frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
+                presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
+                max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
+                tool_choice=tool_choice,
+                response_format=response_format,
+                parallel_tool_calls=parallel_tool_calls,
+                stream=stream,
+                stream_options={"include_usage": True} if stream else NOT_GIVEN,
+                extra_headers=_HEADERS,
+            )
+        except Exception as e:
+            logger.error(f"Error creating chat completion: {e}")
+            raise
 
         if isinstance(ret, ChatCompletion):
             return ret

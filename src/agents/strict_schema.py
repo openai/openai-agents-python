@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List, Union
 
 from openai import NOT_GIVEN
 from typing_extensions import TypeGuard
 
 from .exceptions import UserError
 
-_EMPTY_SCHEMA = {
+_EMPTY_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
     "type": "object",
     "properties": {},
@@ -16,8 +16,8 @@ _EMPTY_SCHEMA = {
 
 
 def ensure_strict_json_schema(
-    schema: dict[str, Any],
-) -> dict[str, Any]:
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
     """Mutates the given JSON schema to ensure it conforms to the `strict` standard
     that the OpenAI API expects.
     """
@@ -26,13 +26,26 @@ def ensure_strict_json_schema(
     return _ensure_strict_json_schema(schema, path=(), root=schema)
 
 
-# Adapted from https://github.com/openai/openai-python/blob/main/src/openai/lib/_pydantic.py
 def _ensure_strict_json_schema(
-    json_schema: object,
+    json_schema: Dict[str, Any],
     *,
     path: tuple[str, ...],
-    root: dict[str, object],
-) -> dict[str, Any]:
+    root: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Ensures that the given JSON schema conforms to the `strict` standard.
+
+    Args:
+        json_schema: The JSON schema to ensure.
+        path: The path to the current schema.
+        root: The root schema.
+
+    Returns:
+        The ensured JSON schema.
+
+    Raises:
+        TypeError: If the given JSON schema is not a dictionary.
+        UserError: If additionalProperties is set to True for object types.
+    """
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
 
@@ -63,8 +76,6 @@ def _ensure_strict_json_schema(
             "to not use a strict schema."
         )
 
-    # object types
-    # { 'type': 'object', 'properties': { 'a':  {...} } }
     properties = json_schema.get("properties")
     if is_dict(properties):
         json_schema["required"] = list(properties.keys())
@@ -73,13 +84,10 @@ def _ensure_strict_json_schema(
             for key, prop_schema in properties.items()
         }
 
-    # arrays
-    # { 'type': 'array', 'items': {...} }
     items = json_schema.get("items")
     if is_dict(items):
         json_schema["items"] = _ensure_strict_json_schema(items, path=(*path, "items"), root=root)
 
-    # unions
     any_of = json_schema.get("anyOf")
     if is_list(any_of):
         json_schema["anyOf"] = [
@@ -87,7 +95,6 @@ def _ensure_strict_json_schema(
             for i, variant in enumerate(any_of)
         ]
 
-    # intersections
     all_of = json_schema.get("allOf")
     if is_list(all_of):
         if len(all_of) == 1:
@@ -101,17 +108,9 @@ def _ensure_strict_json_schema(
                 for i, entry in enumerate(all_of)
             ]
 
-    # strip `None` defaults as there's no meaningful distinction here
-    # the schema will still be `nullable` and the model will default
-    # to using `None` anyway
     if json_schema.get("default", NOT_GIVEN) is None:
         json_schema.pop("default")
 
-    # we can't use `$ref`s if there are also other properties defined, e.g.
-    # `{"$ref": "...", "description": "my description"}`
-    #
-    # so we unravel the ref
-    # `{"type": "string", "description": "my description"}`
     ref = json_schema.get("$ref")
     if ref and has_more_than_n_keys(json_schema, 1):
         assert isinstance(ref, str), f"Received non-string $ref - {ref}"
@@ -122,17 +121,26 @@ def _ensure_strict_json_schema(
                 f"Expected `$ref: {ref}` to resolved to a dictionary but got {resolved}"
             )
 
-        # properties from the json schema take priority over the ones on the `$ref`
         json_schema.update({**resolved, **json_schema})
         json_schema.pop("$ref")
-        # Since the schema expanded from `$ref` might not have `additionalProperties: false` applied
-        # we call `_ensure_strict_json_schema` again to fix the inlined schema and ensure it's valid
         return _ensure_strict_json_schema(json_schema, path=path, root=root)
 
     return json_schema
 
 
-def resolve_ref(*, root: dict[str, object], ref: str) -> object:
+def resolve_ref(*, root: Dict[str, Any], ref: str) -> Any:
+    """Resolves a JSON schema reference.
+
+    Args:
+        root: The root schema.
+        ref: The reference to resolve.
+
+    Returns:
+        The resolved reference.
+
+    Raises:
+        ValueError: If the reference format is unexpected.
+    """
     if not ref.startswith("#/"):
         raise ValueError(f"Unexpected $ref format {ref!r}; Does not start with #/")
 
@@ -148,17 +156,40 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     return resolved
 
 
-def is_dict(obj: object) -> TypeGuard[dict[str, object]]:
-    # just pretend that we know there are only `str` keys
-    # as that check is not worth the performance cost
+def is_dict(obj: Any) -> TypeGuard[Dict[str, Any]]:
+    """Checks if the given object is a dictionary.
+
+    Args:
+        obj: The object to check.
+
+    Returns:
+        True if the object is a dictionary, False otherwise.
+    """
     return isinstance(obj, dict)
 
 
-def is_list(obj: object) -> TypeGuard[list[object]]:
+def is_list(obj: Any) -> TypeGuard[List[Any]]:
+    """Checks if the given object is a list.
+
+    Args:
+        obj: The object to check.
+
+    Returns:
+        True if the object is a list, False otherwise.
+    """
     return isinstance(obj, list)
 
 
-def has_more_than_n_keys(obj: dict[str, object], n: int) -> bool:
+def has_more_than_n_keys(obj: Dict[str, Any], n: int) -> bool:
+    """Checks if the given dictionary has more than n keys.
+
+    Args:
+        obj: The dictionary to check.
+        n: The number of keys to compare against.
+
+    Returns:
+        True if the dictionary has more than n keys, False otherwise.
+    """
     i = 0
     for _ in obj.keys():
         i += 1

@@ -87,31 +87,40 @@ class AgentOutputSchema:
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
-        validated = _utils.validate_json(json_str, self._type_adapter, partial)
-        if self._is_wrapped:
-            if not isinstance(validated, dict):
-                _utils.attach_error_to_current_span(
-                    SpanError(
-                        message="Invalid JSON",
-                        data={"details": f"Expected a dict, got {type(validated)}"},
+        try:
+            validated = _utils.validate_json(json_str, self._type_adapter, partial)
+            if self._is_wrapped:
+                if not isinstance(validated, dict):
+                    _utils.attach_error_to_current_span(
+                        SpanError(
+                            message="Invalid JSON",
+                            data={"details": f"Expected a dict, got {type(validated)}"},
+                        )
                     )
-                )
-                raise ModelBehaviorError(
-                    f"Expected a dict, got {type(validated)} for JSON: {json_str}"
-                )
+                    raise ModelBehaviorError(
+                        f"Expected a dict, got {type(validated)} for JSON: {json_str}"
+                    )
 
-            if _WRAPPER_DICT_KEY not in validated:
-                _utils.attach_error_to_current_span(
-                    SpanError(
-                        message="Invalid JSON",
-                        data={"details": f"Could not find key {_WRAPPER_DICT_KEY} in JSON"},
+                if _WRAPPER_DICT_KEY not in validated:
+                    _utils.attach_error_to_current_span(
+                        SpanError(
+                            message="Invalid JSON",
+                            data={"details": f"Could not find key {_WRAPPER_DICT_KEY} in JSON"},
+                        )
                     )
+                    raise ModelBehaviorError(
+                        f"Could not find key {_WRAPPER_DICT_KEY} in JSON: {json_str}"
+                    )
+                return validated[_WRAPPER_DICT_KEY]
+            return validated
+        except Exception as e:
+            _utils.attach_error_to_current_span(
+                SpanError(
+                    message="Error validating JSON",
+                    data={"error": str(e)},
                 )
-                raise ModelBehaviorError(
-                    f"Could not find key {_WRAPPER_DICT_KEY} in JSON: {json_str}"
-                )
-            return validated[_WRAPPER_DICT_KEY]
-        return validated
+            )
+            raise
 
     def output_type_name(self) -> str:
         """The name of the output type."""
@@ -119,6 +128,7 @@ class AgentOutputSchema:
 
 
 def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
+    """Check if a type is a subclass of BaseModel or dict."""
     if not isinstance(t, type):
         return False
 
@@ -131,6 +141,7 @@ def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
 
 
 def _type_to_str(t: type[Any]) -> str:
+    """Convert a type to its string representation."""
     origin = get_origin(t)
     args = get_args(t)
 
