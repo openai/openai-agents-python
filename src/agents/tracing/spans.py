@@ -6,8 +6,8 @@ from typing import Any, Generic, TypeVar
 
 from typing_extensions import TypedDict
 
+from ..logger import logger
 from . import util
-from .logger import logger
 from .processor_interface import TracingProcessor
 from .scope import Scope
 from .span_data import SpanData

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from .logger import logger
+from ..logger import logger
 from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace

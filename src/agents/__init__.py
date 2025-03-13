@@ -129,10 +129,9 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
 
 def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
-    for name in ["openai.agents", "openai.agents.tracing"]:
-        logger = logging.getLogger(name)
-        logger.setLevel(logging.DEBUG)
-        logger.addHandler(logging.StreamHandler(sys.stdout))
+    logger = logging.getLogger("openai.agents")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
 __all__ = [
