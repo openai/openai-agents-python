@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, overload
 
-from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream, NotGiven
+from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
 from openai.types import ChatModel
 from openai.types.responses import (
     Response,
@@ -113,7 +113,8 @@ class OpenAIResponsesModel(Model):
                         },
                     )
                 )
-                logger.error(f"Error getting response: {e}")
+                request_id = e.request_id if isinstance(e, APIStatusError) else None
+                logger.error(f"Error getting response: {e}. (request_id: {request_id})")
                 raise
 
         return ModelResponse(
