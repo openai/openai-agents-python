@@ -153,7 +153,7 @@ async def homework_guardrail(ctx, agent, input_data):
     final_output = result.final_output_as(HomeworkOutput)
     return GuardrailFunctionOutput(
         output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
+        tripwire_triggered=final_output.is_homework,
     )
 
 triage_agent = Agent(
