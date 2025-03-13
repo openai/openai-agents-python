@@ -137,6 +137,7 @@ def function_tool(
     docstring_style: DocstringStyle | None = None,
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -150,6 +151,7 @@ def function_tool(
     docstring_style: DocstringStyle | None = None,
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
+    strict_mode: bool = True,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -163,6 +165,7 @@ def function_tool(
     docstring_style: DocstringStyle | None = None,
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+    strict_mode: bool = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -186,6 +189,8 @@ def function_tool(
         failure_error_function: If provided, use this function to generate an error message when
             the tool call fails. The error message is sent to the LLM. If you pass None, then no
             error message will be sent and instead an Exception will be raised.
+        strict_mode: If False, parameters with default values become optional in the
+            function schema.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -195,6 +200,7 @@ def function_tool(
             description_override=description_override,
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
+            strict_json_schema=strict_mode,
         )
 
         async def _on_invoke_tool_impl(ctx: RunContextWrapper[Any], input: str) -> str:
@@ -273,6 +279,7 @@ def function_tool(
             description=schema.description or "",
             params_json_schema=schema.params_json_schema,
             on_invoke_tool=_on_invoke_tool,
+            strict_json_schema=strict_mode,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses

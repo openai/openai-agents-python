@@ -33,6 +33,9 @@ class FuncSchema:
     """The signature of the function."""
     takes_context: bool = False
     """Whether the function takes a RunContextWrapper argument (must be the first argument)."""
+    strict_json_schema: bool = True
+    """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
+    as it increases the likelihood of correct JSON input."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -337,4 +340,5 @@ def function_schema(
         params_json_schema=json_schema,
         signature=sig,
         takes_context=takes_context,
+        strict_json_schema=strict_json_schema,
     )
