@@ -15,6 +15,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "graphviz>=0.17",
 ]
 classifiers = [
     "Typing :: Typed",
