@@ -1,5 +1,4 @@
 version = 1
-revision = 1
 requires-python = ">=3.9"
 
 [[package]]
@@ -783,7 +782,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.0.3"
+version = "0.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },

@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 from agents import (
     Agent,
     Runner,
+    function_tool,
     set_default_openai_api,
     set_default_openai_client,
     set_tracing_disabled,
@@ -40,14 +41,21 @@ set_default_openai_api("chat_completions")
 set_tracing_disabled(disabled=True)
 
 
+@function_tool
+def get_weather(city: str):
+    print(f"[debug] getting weather for {city}")
+    return f"The weather in {city} is sunny."
+
+
 async def main():
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
         model=MODEL_NAME,
+        tools=[get_weather],
     )
 
-    result = await Runner.run(agent, "Tell me about recursion in programming.")
+    result = await Runner.run(agent, "What's the weather in Tokyo?")
     print(result.final_output)
 
 
