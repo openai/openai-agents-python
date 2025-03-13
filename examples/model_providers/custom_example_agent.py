@@ -3,7 +3,7 @@ import os
 
 from openai import AsyncOpenAI
 
-from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
+from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool, set_tracing_disabled
 
 BASE_URL = os.getenv("EXAMPLE_BASE_URL") or ""
 API_KEY = os.getenv("EXAMPLE_API_KEY") or ""
@@ -32,18 +32,22 @@ set_tracing_disabled(disabled=True)
 # Runner.run(agent, ..., run_config=RunConfig(model_provider=PROVIDER))
 
 
+@function_tool
+def get_weather(city: str):
+    print(f"[debug] getting weather for {city}")
+    return f"The weather in {city} is sunny."
+
+
 async def main():
     # This agent will use the custom LLM provider
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
         model=OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=client),
+        tools=[get_weather],
     )
 
-    result = await Runner.run(
-        agent,
-        "Tell me about recursion in programming.",
-    )
+    result = await Runner.run(agent, "What's the weather in Tokyo?")
     print(result.final_output)
 
 
