@@ -60,9 +60,9 @@ async def main():
 
         print("Step 1 done")
 
-        # 2. Ask it to square a number
+        # 2. Ask it to generate a number
         result = await Runner.run(
-            second_agent,
+            first_agent,
             input=result.to_input_list()
             + [{"content": "Can you generate a random number between 0 and 100?", "role": "user"}],
         )
