@@ -78,7 +78,7 @@ async def main():
         # San Francisco
 
         # Second turn
-        new_input = output.to_input_list() + [{"role": "user", "content": "What state is it in?"}]
+        new_input = result.to_input_list() + [{"role": "user", "content": "What state is it in?"}]
         result = await Runner.run(agent, new_input)
         print(result.final_output)
         # California

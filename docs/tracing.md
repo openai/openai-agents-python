@@ -50,7 +50,7 @@ async def main():
 
     with trace("Joke workflow"): # (1)!
         first_result = await Runner.run(agent, "Tell me a joke")
-        second_result = await Runner.run(agent, f"Rate this joke: {first_output.final_output}")
+        second_result = await Runner.run(agent, f"Rate this joke: {first_result.final_output}")
         print(f"Joke: {first_result.final_output}")
         print(f"Rating: {second_result.final_output}")
 ```
@@ -93,3 +93,5 @@ External trace processors include:
 -   [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk)
 -   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
 -   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
+-   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration))
+-   [Keywords AI](https://docs.keywordsai.co/integration/development-frameworks/openai-agent)

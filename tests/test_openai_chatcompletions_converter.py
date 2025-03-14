@@ -393,3 +393,38 @@ def test_unknown_object_errors():
     with pytest.raises(UserError, match="Unhandled item type or structure"):
         # Purposely ignore the type error
         _Converter.items_to_messages([TestObject()])  # type: ignore
+
+
+def test_assistant_messages_in_history():
+    """
+    Test that assistant messages are added to the history.
+    """
+    messages = _Converter.items_to_messages(
+        [
+            {
+                "role": "user",
+                "content": "Hello",
+            },
+            {
+                "role": "assistant",
+                "content": "Hello?",
+            },
+            {
+                "role": "user",
+                "content": "What was my Name?",
+            },
+        ]
+    )
+
+    assert messages == [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello?"},
+        {"role": "user", "content": "What was my Name?"},
+    ]
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "Hello"
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["content"] == "Hello?"
+    assert messages[2]["role"] == "user"
+    assert messages[2]["content"] == "What was my Name?"
