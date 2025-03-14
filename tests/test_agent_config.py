@@ -1,7 +1,7 @@
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, Handoff, RunContextWrapper, Runner, handoff
+from agents import Agent, Handoff, RunContextWrapper, Runner, handoff, FunctionTool
 
 
 @pytest.mark.asyncio
@@ -26,6 +26,29 @@ async def test_system_instructions():
     agent = agent.clone(instructions=async_instructions)
     assert await agent.get_system_prompt(context) == "async_123"
 
+def test_list_tools():
+    # Create some mock tools using FunctionTool
+    tool1 = FunctionTool(
+        name="Tool1",
+        description="A mock tool for testing",
+        params_json_schema={},
+        on_invoke_tool=lambda ctx, input: "output"
+    )
+    tool2 = FunctionTool(
+        name="Tool2",
+        description="Another mock tool for testing",
+        params_json_schema={},
+        on_invoke_tool=lambda ctx, input: "output"
+    )
+    
+    # Initialize the agent with these tools
+    agent = Agent(name="TestAgent", tools=[tool1, tool2])
+    
+    # Get the list of tool names
+    tool_names = agent.list_tools()
+    
+    # Assert that the tool names are as expected
+    assert tool_names == ["Tool1", "Tool2"]
 
 @pytest.mark.asyncio
 async def test_handoff_with_agents():
