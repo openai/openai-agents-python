@@ -157,3 +157,15 @@ class Agent(Generic[TContext]):
             logger.error(f"Instructions must be a string or a function, got {self.instructions}")
 
         return None
+
+    def list_tools(self) -> list[str]:
+        """Get a list of all tools the agent has access to.
+
+        Returns:
+            A list of tool names. Logs a warning if no tools are available.
+        """
+        if not self.tools:
+            logger.warning(f"Agent '{self.name}' has no tools available.")
+            return []
+
+        return [tool.name for tool in self.tools]

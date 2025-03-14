@@ -130,3 +130,29 @@ robot_agent = pirate_agent.clone(
     instructions="Write like a robot",
 )
 ```
+
+## Additional Methods
+
+### `get_system_prompt`
+
+The `get_system_prompt` method retrieves the system prompt for the agent. This can be a static string or dynamically generated instructions.
+
+```python
+system_prompt = await agent.get_system_prompt(context)
+print("System Prompt:", system_prompt)
+```
+
+- **Parameters**: 
+  - `run_context`: The context in which the agent is running.
+- **Returns**: A string representing the system prompt.
+
+### `list_tools`
+
+The `list_tools` method provides a list of all tools the agent has access to. This is useful for debugging and monitoring the agent's capabilities.
+
+```python
+tool_names = agent.list_tools()
+print("Tools:", tool_names)
+```
+
+- **Returns**: A list of tool names or descriptions. Logs a warning if no tools are available.
