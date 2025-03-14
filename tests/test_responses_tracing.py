@@ -1,4 +1,5 @@
 import pytest
+from inline_snapshot import snapshot
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseCompletedEvent
 
@@ -6,7 +7,7 @@ from agents import ModelSettings, ModelTracing, OpenAIResponsesModel, trace
 from agents.tracing.span_data import ResponseSpanData
 from tests import fake_model
 
-from .testing_processor import fetch_ordered_spans
+from .testing_processor import fetch_normalized_spans, fetch_ordered_spans
 
 
 class DummyTracing:
@@ -54,6 +55,15 @@ async def test_get_response_creates_trace(monkeypatch):
             "instr", "input", ModelSettings(), [], None, [], ModelTracing.ENABLED
         )
 
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "children": [{"type": "response", "data": {"response_id": "dummy-id"}}],
+            }
+        ]
+    )
+
     spans = fetch_ordered_spans()
     assert len(spans) == 1
 
@@ -82,6 +92,10 @@ async def test_non_data_tracing_doesnt_set_response_id(monkeypatch):
             "instr", "input", ModelSettings(), [], None, [], ModelTracing.ENABLED_WITHOUT_DATA
         )
 
+    assert fetch_normalized_spans() == snapshot(
+        [{"workflow_name": "test", "children": [{"type": "response"}]}]
+    )
+
     spans = fetch_ordered_spans()
     assert len(spans) == 1
     assert spans[0].span_data.response is None
@@ -106,6 +120,8 @@ async def test_disable_tracing_does_not_create_span(monkeypatch):
         await model.get_response(
             "instr", "input", ModelSettings(), [], None, [], ModelTracing.DISABLED
         )
+
+    assert fetch_normalized_spans() == snapshot([{"workflow_name": "test"}])
 
     spans = fetch_ordered_spans()
     assert len(spans) == 0
@@ -138,6 +154,15 @@ async def test_stream_response_creates_trace(monkeypatch):
             "instr", "input", ModelSettings(), [], None, [], ModelTracing.ENABLED
         ):
             pass
+
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "children": [{"type": "response", "data": {"response_id": "dummy-id-123"}}],
+            }
+        ]
+    )
 
     spans = fetch_ordered_spans()
     assert len(spans) == 1
@@ -174,6 +199,10 @@ async def test_stream_non_data_tracing_doesnt_set_response_id(monkeypatch):
         ):
             pass
 
+    assert fetch_normalized_spans() == snapshot(
+        [{"workflow_name": "test", "children": [{"type": "response"}]}]
+    )
+
     spans = fetch_ordered_spans()
     assert len(spans) == 1
     assert isinstance(spans[0].span_data, ResponseSpanData)
@@ -207,6 +236,8 @@ async def test_stream_disabled_tracing_doesnt_create_span(monkeypatch):
             "instr", "input", ModelSettings(), [], None, [], ModelTracing.DISABLED
         ):
             pass
+
+    assert fetch_normalized_spans() == snapshot([{"workflow_name": "test"}])
 
     spans = fetch_ordered_spans()
     assert len(spans) == 0
