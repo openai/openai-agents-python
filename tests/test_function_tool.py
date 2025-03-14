@@ -255,3 +255,23 @@ async def test_async_custom_error_function_works():
 
     result = await tool.on_invoke_tool(ctx, '{"a": 1, "b": 2}')
     assert result == "error_ValueError"
+
+
+@pytest.mark.asyncio
+async def test_tool_error_handling_in_run_impl():
+    """Test error handling when a tool fails."""
+    import unittest.mock as mock
+    from agents.items import ItemHelpers
+    
+    @function_tool
+    def failing_tool(input_text: str) -> int:
+        """This tool always fails"""
+        raise ValueError(f"Tool execution failed: {input_text}")
+    
+    ctx = RunContextWrapper({})
+    result = await failing_tool.on_invoke_tool(ctx, '{"input_text": "test"}')
+    assert "Tool execution failed" in result, "Result should contain error message"
+    
+    mock_call = mock.Mock(call_id="test_id")
+    assert not ItemHelpers.tool_call_output_item(mock_call, "success").get("is_error")
+    assert ItemHelpers.tool_call_output_item(mock_call, "error", is_error=True).get("is_error")
