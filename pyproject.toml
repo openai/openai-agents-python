@@ -15,6 +15,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "fastapi (>=0.115.11,<0.116.0)",
 ]
 classifiers = [
     "Typing :: Typed",
