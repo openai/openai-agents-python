@@ -81,7 +81,7 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
-
+(_For Jupyter notebook users, see [handoff_jupyter.py](examples/basic/handoff_jupyter.py)_)
 ## Functions example
 
 ```python
