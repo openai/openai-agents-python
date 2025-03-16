@@ -175,12 +175,11 @@ def multiple_optional_params_function(
     return f"{x}_{y}_{z}"
 
 
-
 @pytest.mark.asyncio
 async def test_multiple_optional_params_function():
     tool = multiple_optional_params_function
 
-    input_data: dict[str,Any] = {}
+    input_data: dict[str, Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "42_hello_no_z"
 

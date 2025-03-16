@@ -25,7 +25,6 @@ from openai.types.responses.response_computer_tool_call import (
 from openai.types.responses.response_input_param import ComputerCallOutput
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from . import _utils
 from .agent import Agent
 from .agent_output import AgentOutputSchema
 from .computer import AsyncComputer, Computer
@@ -59,6 +58,7 @@ from .tracing import (
     handoff_span,
     trace,
 )
+from .util import _coro, _error_tracing
 
 if TYPE_CHECKING:
     from .run import RunConfig
@@ -293,7 +293,7 @@ class RunImpl:
             elif isinstance(output, ResponseComputerToolCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 if not computer_tool:
-                    _utils.attach_error_to_current_span(
+                    _error_tracing.attach_error_to_current_span(
                         SpanError(
                             message="Computer tool not found",
                             data={},
@@ -324,7 +324,7 @@ class RunImpl:
             # Regular function tool call
             else:
                 if output.name not in function_map:
-                    _utils.attach_error_to_current_span(
+                    _error_tracing.attach_error_to_current_span(
                         SpanError(
                             message="Tool not found",
                             data={"tool_name": output.name},
@@ -368,7 +368,7 @@ class RunImpl:
                         (
                             agent.hooks.on_tool_start(context_wrapper, agent, func_tool)
                             if agent.hooks
-                            else _utils.noop_coroutine()
+                            else _coro.noop_coroutine()
                         ),
                         func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
                     )
@@ -378,11 +378,11 @@ class RunImpl:
                         (
                             agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
                             if agent.hooks
-                            else _utils.noop_coroutine()
+                            else _coro.noop_coroutine()
                         ),
                     )
                 except Exception as e:
-                    _utils.attach_error_to_current_span(
+                    _error_tracing.attach_error_to_current_span(
                         SpanError(
                             message="Error running tool",
                             data={"tool_name": func_tool.name, "error": str(e)},
@@ -502,7 +502,7 @@ class RunImpl:
                         source=agent,
                     )
                     if agent.hooks
-                    else _utils.noop_coroutine()
+                    else _coro.noop_coroutine()
                 ),
             )
 
@@ -520,7 +520,7 @@ class RunImpl:
                     new_items=tuple(new_step_items),
                 )
                 if not callable(input_filter):
-                    _utils.attach_error_to_span(
+                    _error_tracing.attach_error_to_span(
                         span_handoff,
                         SpanError(
                             message="Invalid input filter",
@@ -530,7 +530,7 @@ class RunImpl:
                     raise UserError(f"Invalid input filter: {input_filter}")
                 filtered = input_filter(handoff_input_data)
                 if not isinstance(filtered, HandoffInputData):
-                    _utils.attach_error_to_span(
+                    _error_tracing.attach_error_to_span(
                         span_handoff,
                         SpanError(
                             message="Invalid input filter result",
@@ -591,7 +591,7 @@ class RunImpl:
             hooks.on_agent_end(context_wrapper, agent, final_output),
             agent.hooks.on_end(context_wrapper, agent, final_output)
             if agent.hooks
-            else _utils.noop_coroutine(),
+            else _coro.noop_coroutine(),
         )
 
     @classmethod
@@ -706,7 +706,7 @@ class ComputerAction:
             (
                 agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
                 if agent.hooks
-                else _utils.noop_coroutine()
+                else _coro.noop_coroutine()
             ),
             output_func,
         )
@@ -716,7 +716,7 @@ class ComputerAction:
             (
                 agent.hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
                 if agent.hooks
-                else _utils.noop_coroutine()
+                else _coro.noop_coroutine()
             ),
         )
 

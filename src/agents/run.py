@@ -7,7 +7,6 @@ from typing import Any, cast
 
 from openai.types.responses import ResponseCompletedEvent
 
-from . import Model, _utils
 from ._run_impl import (
     NextStepFinalOutput,
     NextStepHandoff,
@@ -33,7 +32,7 @@ from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
 from .model_settings import ModelSettings
-from .models.interface import ModelProvider
+from .models.interface import Model, ModelProvider
 from .models.openai_provider import OpenAIProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
@@ -41,6 +40,7 @@ from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
+from .util import _coro, _error_tracing
 
 DEFAULT_MAX_TURNS = 10
 
@@ -193,7 +193,7 @@ class Runner:
 
                     current_turn += 1
                     if current_turn > max_turns:
-                        _utils.attach_error_to_span(
+                        _error_tracing.attach_error_to_span(
                             current_span,
                             SpanError(
                                 message="Max turns exceeded",
@@ -447,7 +447,7 @@ class Runner:
             for done in asyncio.as_completed(guardrail_tasks):
                 result = await done
                 if result.output.tripwire_triggered:
-                    _utils.attach_error_to_span(
+                    _error_tracing.attach_error_to_span(
                         parent_span,
                         SpanError(
                             message="Guardrail tripwire triggered",
@@ -511,7 +511,7 @@ class Runner:
                 streamed_result.current_turn = current_turn
 
                 if current_turn > max_turns:
-                    _utils.attach_error_to_span(
+                    _error_tracing.attach_error_to_span(
                         current_span,
                         SpanError(
                             message="Max turns exceeded",
@@ -583,7 +583,7 @@ class Runner:
                         pass
                 except Exception as e:
                     if current_span:
-                        _utils.attach_error_to_span(
+                        _error_tracing.attach_error_to_span(
                             current_span,
                             SpanError(
                                 message="Error in agent run",
@@ -615,7 +615,7 @@ class Runner:
                 (
                     agent.hooks.on_start(context_wrapper, agent)
                     if agent.hooks
-                    else _utils.noop_coroutine()
+                    else _coro.noop_coroutine()
                 ),
             )
 
@@ -705,7 +705,7 @@ class Runner:
                 (
                     agent.hooks.on_start(context_wrapper, agent)
                     if agent.hooks
-                    else _utils.noop_coroutine()
+                    else _coro.noop_coroutine()
                 ),
             )
 
@@ -796,7 +796,7 @@ class Runner:
                 # Cancel all guardrail tasks if a tripwire is triggered.
                 for t in guardrail_tasks:
                     t.cancel()
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Guardrail tripwire triggered",
                         data={"guardrail": result.guardrail.get_name()},
@@ -834,7 +834,7 @@ class Runner:
                 # Cancel all guardrail tasks if a tripwire is triggered.
                 for t in guardrail_tasks:
                     t.cancel()
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Guardrail tripwire triggered",
                         data={"guardrail": result.guardrail.get_name()},
