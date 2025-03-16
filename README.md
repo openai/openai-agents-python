@@ -15,6 +15,9 @@ Explore the [examples](examples) directory to see the SDK in action, and read ou
 
 Notably, our SDK [is compatible](https://openai.github.io/openai-agents-python/models/) with any model providers that support the OpenAI Chat Completions API format.
 
+## Requirements
+- Python **3.9** or higher
+
 ## Get started
 
 1. Set up your Python environment
