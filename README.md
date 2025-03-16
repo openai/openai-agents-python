@@ -176,3 +176,92 @@ We'd like to acknowledge the excellent work of the open-source community, especi
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
 
 We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
+
+# Firecrawl Integration for OpenAI
+
+This integration combines the power of Firecrawl for web scraping with OpenAI for information extraction.
+
+## Features
+
+-   Extract any type of information from any website
+-   Simple, easy-to-use interface
+-   Handles natural language prompts
+
+## Installation
+
+1. Install the required packages:
+
+```bash
+pip install openai firecrawl-py
+```
+
+2. Set your API keys as environment variables:
+
+```bash
+export OPENAI_API_KEY=your_openai_api_key
+export FIRECRAWL_API_KEY=your_firecrawl_api_key
+```
+
+## Usage
+
+Run the script:
+
+```bash
+python firecrawl_agent.py
+```
+
+Enter any prompt like:
+
+-   "Extract pricing information from mendable.ai"
+-   "Find the features of Anthropic's Claude model from anthropic.com"
+-   "Get the latest news from techcrunch.com"
+
+The script will:
+
+1. Extract the website URL from your prompt
+2. Use Firecrawl to scrape the website
+3. Use OpenAI to analyze the content based on your specific request
+4. Display the results
+
+## Example
+
+```
+Enter your prompt (e.g., 'Extract pricing information from mendable.ai'): Extract pricing information from mendable.ai
+
+Scraping https://mendable.ai...
+Extracting information...
+
+--- Result ---
+
+Mendable.ai offers the following pricing plans:
+
+1. Free Plan
+   - $0/month
+   - 100 queries/month
+   - 1 project
+   - Basic features
+
+2. Pro Plan
+   - $49/month
+   - 1,000 queries/month
+   - 3 projects
+   - All features including API access
+
+3. Team Plan
+   - $199/month
+   - 5,000 queries/month
+   - 10 projects
+   - All Pro features plus team collaboration
+
+4. Enterprise Plan
+   - Custom pricing
+   - Unlimited queries
+   - Unlimited projects
+   - Custom features and dedicated support
+```
+
+## Requirements
+
+-   Python 3.7+
+-   OpenAI API key
+-   Firecrawl API key
