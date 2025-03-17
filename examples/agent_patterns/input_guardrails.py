@@ -30,8 +30,8 @@ If the guardrail trips, we'll respond with a refusal message.
 
 ### 1. An agent-based guardrail that is triggered if the user is asking to do math homework
 class MathHomeworkOutput(BaseModel):
-    is_math_homework: bool
     reasoning: str
+    is_math_homework: bool
 
 
 guardrail_agent = Agent(
