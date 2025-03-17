@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from inline_snapshot import snapshot
 
 from agents import Agent, RunConfig, Runner, trace
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
-from .testing_processor import fetch_ordered_spans, fetch_traces
+from .testing_processor import fetch_normalized_spans, fetch_ordered_spans, fetch_traces
 
 
 @pytest.mark.asyncio
@@ -24,6 +25,25 @@ async def test_single_run_is_single_trace():
 
     traces = fetch_traces()
     assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
+
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
 
     spans = fetch_ordered_spans()
     assert len(spans) == 1, (
@@ -52,6 +72,39 @@ async def test_multiple_runs_are_multiple_traces():
     traces = fetch_traces()
     assert len(traces) == 2, f"Expected 2 traces, got {len(traces)}"
 
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent_1",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    }
+                ],
+            },
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent_1",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
     spans = fetch_ordered_spans()
     assert len(spans) == 2, f"Got {len(spans)}, but expected 2: agent span per run"
 
@@ -79,6 +132,43 @@ async def test_wrapped_trace_is_single_trace():
     traces = fetch_traces()
     assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
 
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test_workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent_1",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent_1",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    },
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent_1",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    },
+                ],
+            }
+        ]
+    )
+
     spans = fetch_ordered_spans()
     assert len(spans) == 3, f"Got {len(spans)}, but expected 3: the agent span per run"
 
@@ -97,6 +187,8 @@ async def test_parent_disabled_trace_disabled_agent_trace():
 
     traces = fetch_traces()
     assert len(traces) == 0, f"Expected 0 traces, got {len(traces)}"
+    assert fetch_normalized_spans() == snapshot([])
+
     spans = fetch_ordered_spans()
     assert len(spans) == 0, (
         f"Expected no spans, got {len(spans)}, with {[x.span_data for x in spans]}"
@@ -116,6 +208,8 @@ async def test_manual_disabling_works():
 
     traces = fetch_traces()
     assert len(traces) == 0, f"Expected 0 traces, got {len(traces)}"
+    assert fetch_normalized_spans() == snapshot([])
+
     spans = fetch_ordered_spans()
     assert len(spans) == 0, f"Got {len(spans)}, but expected no spans"
 
@@ -163,6 +257,25 @@ async def test_not_starting_streaming_creates_trace():
 
     traces = fetch_traces()
     assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
+
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "Agent workflow",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {
+                            "name": "test_agent",
+                            "handoffs": [],
+                            "tools": [],
+                            "output_type": "str",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
 
     spans = fetch_ordered_spans()
     assert len(spans) == 1, f"Got {len(spans)}, but expected 1: the agent span"
