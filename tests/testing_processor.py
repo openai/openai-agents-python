@@ -85,6 +85,7 @@ def fetch_normalized_spans():
     traces = []
     for trace_obj in fetch_traces():
         trace = trace_obj.export()
+        assert trace
         assert trace.pop("object") == "trace"
         assert trace.pop("id").startswith("trace_")
         trace = {k: v for k, v in trace.items() if v is not None}
@@ -96,6 +97,7 @@ def fetch_normalized_spans():
 
     for span_obj in fetch_ordered_spans():
         span = span_obj.export()
+        assert span
         assert span.pop("object") == "trace.span"
         assert span.pop("id").startswith("span_")
         assert datetime.fromisoformat(span.pop("started_at"))
