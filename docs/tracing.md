@@ -9,6 +9,8 @@ The Agents SDK includes built-in tracing, collecting a comprehensive record of e
     1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`
     2. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
 
+***For organizations operating under a Zero Data Retention (ZDR) policy using OpenAI's APIs, tracing is unavailable.***
+
 ## Traces and spans
 
 -   **Traces** represent a single end-to-end operation of a "workflow". They're composed of Spans. Traces have the following properties:
