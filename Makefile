@@ -18,6 +18,14 @@ mypy:
 tests: 
 	uv run pytest 
 
+.PHONY: snapshots-fix
+snapshots-fix: 
+	uv run pytest --inline-snapshot=fix 
+
+.PHONY: snapshots-create 
+snapshots-create: 
+	uv run pytest --inline-snapshot=create 
+
 .PHONY: old_version_tests
 old_version_tests: 
 	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest

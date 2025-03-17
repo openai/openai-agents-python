@@ -17,6 +17,7 @@ from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .logger import logger
 from .stream_events import StreamEvent
 from .tracing import Trace
+from .util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
 
 if TYPE_CHECKING:
     from ._run_impl import QueueCompleteSentinel
@@ -88,6 +89,9 @@ class RunResult(RunResultBase):
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
         return self._last_agent
+
+    def __str__(self) -> str:
+        return pretty_print_result(self)
 
 
 @dataclass
@@ -216,3 +220,6 @@ class RunResultStreaming(RunResultBase):
 
         if self._output_guardrails_task and not self._output_guardrails_task.done():
             self._output_guardrails_task.cancel()
+
+    def __str__(self) -> str:
+        return pretty_print_run_result_streaming(self)
