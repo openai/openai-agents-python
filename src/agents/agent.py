@@ -6,8 +6,6 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast
 
-from . import _utils
-from ._utils import MaybeAwaitable
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
@@ -16,6 +14,8 @@ from .model_settings import ModelSettings
 from .models.interface import Model
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool, function_tool
+from .util import _transforms
+from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
@@ -126,7 +126,7 @@ class Agent(Generic[TContext]):
         """
 
         @function_tool(
-            name_override=tool_name or _utils.transform_string_function_style(self.name),
+            name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:

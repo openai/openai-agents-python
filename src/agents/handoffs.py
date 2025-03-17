@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
 from pydantic import TypeAdapter
 from typing_extensions import TypeAlias, TypeVar
 
-from . import _utils
 from .exceptions import ModelBehaviorError, UserError
 from .items import RunItem, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .strict_schema import ensure_strict_json_schema
 from .tracing.spans import SpanError
+from .util import _error_tracing, _json, _transforms
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -104,7 +104,7 @@ class Handoff(Generic[TContext]):
 
     @classmethod
     def default_tool_name(cls, agent: Agent[Any]) -> str:
-        return _utils.transform_string_function_style(f"transfer_to_{agent.name}")
+        return _transforms.transform_string_function_style(f"transfer_to_{agent.name}")
 
     @classmethod
     def default_tool_description(cls, agent: Agent[Any]) -> str:
@@ -192,7 +192,7 @@ def handoff(
     ) -> Agent[Any]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Handoff function expected non-null input, but got None",
                         data={"details": "input_json is None"},
@@ -200,7 +200,7 @@ def handoff(
                 )
                 raise ModelBehaviorError("Handoff function expected non-null input, but got None")
 
-            validated_input = _utils.validate_json(
+            validated_input = _json.validate_json(
                 json_str=input_json,
                 type_adapter=type_adapter,
                 partial=False,

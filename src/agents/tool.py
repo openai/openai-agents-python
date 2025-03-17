@@ -11,14 +11,15 @@ from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import ValidationError
 from typing_extensions import Concatenate, ParamSpec
 
-from . import _debug, _utils
-from ._utils import MaybeAwaitable
+from . import _debug
 from .computer import AsyncComputer, Computer
 from .exceptions import ModelBehaviorError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
 from .run_context import RunContextWrapper
 from .tracing import SpanError
+from .util import _error_tracing
+from .util._types import MaybeAwaitable
 
 ToolParams = ParamSpec("ToolParams")
 
@@ -263,7 +264,7 @@ def function_tool(
                 if inspect.isawaitable(result):
                     return await result
 
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Error running tool (non-fatal)",
                         data={
