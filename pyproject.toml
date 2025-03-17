@@ -47,7 +47,7 @@ dev = [
     "mkdocstrings[python]>=0.28.0",
     "coverage>=7.6.12",
     "playwright==1.50.0",
-    "inline-snapshot>=0.20.5",
+    "inline-snapshot>=0.20.7",
 ]
 [tool.uv.workspace]
 members = ["agents"]
@@ -118,3 +118,6 @@ filterwarnings = [
 markers = [
     "allow_call_model_methods: mark test as allowing calls to real model implementations",
 ]
+
+[tool.inline-snapshot]
+format-command="ruff format --stdin-filename {filename}"

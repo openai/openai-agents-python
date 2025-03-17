@@ -4,10 +4,10 @@ from typing import Any
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict, get_args, get_origin
 
-from . import _utils
 from .exceptions import ModelBehaviorError, UserError
 from .strict_schema import ensure_strict_json_schema
 from .tracing import SpanError
+from .util import _error_tracing, _json
 
 _WRAPPER_DICT_KEY = "response"
 
@@ -87,10 +87,10 @@ class AgentOutputSchema:
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
-        validated = _utils.validate_json(json_str, self._type_adapter, partial)
+        validated = _json.validate_json(json_str, self._type_adapter, partial)
         if self._is_wrapped:
             if not isinstance(validated, dict):
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Invalid JSON",
                         data={"details": f"Expected a dict, got {type(validated)}"},
@@ -101,7 +101,7 @@ class AgentOutputSchema:
                 )
 
             if _WRAPPER_DICT_KEY not in validated:
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Invalid JSON",
                         data={"details": f"Could not find key {_WRAPPER_DICT_KEY} in JSON"},

@@ -23,8 +23,8 @@ story_outline_generator = Agent(
 
 @dataclass
 class EvaluationFeedback:
-    score: Literal["pass", "needs_improvement", "fail"]
     feedback: str
+    score: Literal["pass", "needs_improvement", "fail"]
 
 
 evaluator = Agent[None](

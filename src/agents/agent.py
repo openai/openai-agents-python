@@ -6,8 +6,6 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast
 
-from . import _utils
-from ._utils import MaybeAwaitable
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
@@ -16,6 +14,8 @@ from .model_settings import ModelSettings
 from .models.interface import Model
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool, function_tool
+from .util import _transforms
+from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
@@ -27,8 +27,8 @@ class Agent(Generic[TContext]):
     """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
 
     We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
-    addition, you can pass `description`, which is a human-readable description of the agent, used
-    when the agent is used inside tools/handoffs.
+    addition, you can pass `handoff_description`, which is a human-readable description of the
+    agent, used when the agent is used inside tools/handoffs.
 
     Agents are generic on the context type. The context is a (mutable) object you create. It is
     passed to tool functions, handoffs, guardrails, etc.
@@ -126,7 +126,7 @@ class Agent(Generic[TContext]):
         """
 
         @function_tool(
-            name_override=tool_name or _utils.transform_string_function_style(self.name),
+            name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:

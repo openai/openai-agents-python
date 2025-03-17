@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -142,3 +142,51 @@ async def test_no_error_on_invalid_json_async():
     tool = will_not_fail_on_bad_json_async
     result = await tool.on_invoke_tool(ctx_wrapper(), "{not valid json}")
     assert result == "error_ModelBehaviorError"
+
+
+@function_tool(strict_mode=False)
+def optional_param_function(a: int, b: Optional[int] = None) -> str:
+    if b is None:
+        return f"{a}_no_b"
+    return f"{a}_{b}"
+
+
+@pytest.mark.asyncio
+async def test_optional_param_function():
+    tool = optional_param_function
+
+    input_data = {"a": 5}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "5_no_b"
+
+    input_data = {"a": 5, "b": 10}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "5_10"
+
+
+@function_tool(strict_mode=False)
+def multiple_optional_params_function(
+    x: int = 42,
+    y: str = "hello",
+    z: Optional[int] = None,
+) -> str:
+    if z is None:
+        return f"{x}_{y}_no_z"
+    return f"{x}_{y}_{z}"
+
+
+@pytest.mark.asyncio
+async def test_multiple_optional_params_function():
+    tool = multiple_optional_params_function
+
+    input_data: dict[str, Any] = {}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "42_hello_no_z"
+
+    input_data = {"x": 10, "y": "world"}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "10_world_no_z"
+
+    input_data = {"x": 10, "y": "world", "z": 99}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "10_world_99"
