@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git
+.gitignore
+
+# Misc
+.DS_Store
+*.log
+*.sqlite
+chat_history.db
+
+# Chainlit
+.chainlit/ 
