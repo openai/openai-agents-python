@@ -34,9 +34,7 @@ The runner then runs a loop:
     3. If the LLM produces tool calls, we run those tool calls, append the results, and re-run the loop.
 3. If we exceed the `max_turns` passed, we raise a [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] exception.
 
-!!! note
-
-    The rule for whether the LLM output is considered as a "final output" is that it produces text output with the desired type, and there are no tool calls.
+> **Note:** The rule for whether the LLM output is considered as a "final output" is that it produces text output with the desired type, and there are no tool calls.
 
 ## Streaming
 
