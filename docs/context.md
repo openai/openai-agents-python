@@ -21,9 +21,7 @@ You can use the context for things like:
 -   Dependencies (e.g. logger objects, data fetchers, etc)
 -   Helper functions
 
-!!! danger "Note"
-
-    The context object is **not** sent to the LLM. It is purely a local object that you can read from, write to and call methods on it.
+> **!!! Danger Note:** The context object is **not** sent to the LLM. It is purely a local object that you can read from, write to and call methods on it.
 
 ```python
 import asyncio
