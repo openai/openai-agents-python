@@ -1,0 +1,21 @@
+[project]
+name = "context"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ajmal Khan", email = "128520849+Ajmalniz@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "chainlit>=2.4.1",
+    "openai-agents>=0.0.4",
+    "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+context = "context:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
