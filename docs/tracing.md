@@ -2,12 +2,9 @@
 
 The Agents SDK includes built-in tracing, collecting a comprehensive record of events during an agent run: LLM generations, tool calls, handoffs, guardrails, and even custom events that occur. Using the [Traces dashboard](https://platform.openai.com/traces), you can debug, visualize, and monitor your workflows during development and in production.
 
-!!!note
-
-    Tracing is enabled by default. There are two ways to disable tracing:
-
-    1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`
-    2. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
+> **Note**Tracing is enabled by default. There are two ways to disable tracing:
+> 1. You can globally disable tracing by setting the env var `OPENAI_AGENTS_DISABLE_TRACING=1`
+> 2. You can disable tracing for a single run by setting [`agents.run.RunConfig.tracing_disabled`][] to `True`
 
 ***For organizations operating under a Zero Data Retention (ZDR) policy using OpenAI's APIs, tracing is unavailable.***
 
