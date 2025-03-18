@@ -14,9 +14,7 @@ The [`final_output`][agents.result.RunResultBase.final_output] property contains
 -   a `str`, if the last agent didn't have an `output_type` defined
 -   an object of type `last_agent.output_type`, if the agent had an output type defined.
 
-!!! note
-
-    `final_output` is of type `Any`. We can't statically type this, because of handoffs. If handoffs occur, that means any Agent might be the last agent, so we don't statically know the set of possible output types.
+> **Note:**  `final_output` is of type `Any`. We can't statically type this, because of handoffs. If handoffs occur, that means any Agent might be the last agent, so we don't statically know the set of possible output types.
 
 ## Inputs for the next turn
 
