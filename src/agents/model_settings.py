@@ -39,6 +39,9 @@ class ModelSettings:
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
 
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    """The level of reasoning effort to use when calling the model."""
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""
@@ -53,4 +56,5 @@ class ModelSettings:
             parallel_tool_calls=override.parallel_tool_calls or self.parallel_tool_calls,
             truncation=override.truncation or self.truncation,
             max_tokens=override.max_tokens or self.max_tokens,
+            reasoning_effort=override.reasoning_effort or self.reasoning_effort,
         )
