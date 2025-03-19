@@ -152,8 +152,12 @@ def optional_param_function(a: int, b: Optional[int] = None) -> str:
 
 
 @pytest.mark.asyncio
-async def test_optional_param_function():
+async def test_non_strict_mode_function():
     tool = optional_param_function
+
+    assert tool.strict_json_schema is False, "strict_json_schema should be False"
+
+    assert tool.params_json_schema.get("required") == ["a"], "required should only be a"
 
     input_data = {"a": 5}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
@@ -165,7 +169,7 @@ async def test_optional_param_function():
 
 
 @function_tool(strict_mode=False)
-def multiple_optional_params_function(
+def all_optional_params_function(
     x: int = 42,
     y: str = "hello",
     z: Optional[int] = None,
@@ -176,8 +180,12 @@ def multiple_optional_params_function(
 
 
 @pytest.mark.asyncio
-async def test_multiple_optional_params_function():
-    tool = multiple_optional_params_function
+async def test_all_optional_params_function():
+    tool = all_optional_params_function
+
+    assert tool.strict_json_schema is False, "strict_json_schema should be False"
+
+    assert tool.params_json_schema.get("required") is None, "required should be empty"
 
     input_data: dict[str, Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))

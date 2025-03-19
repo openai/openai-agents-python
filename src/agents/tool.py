@@ -190,8 +190,11 @@ def function_tool(
         failure_error_function: If provided, use this function to generate an error message when
             the tool call fails. The error message is sent to the LLM. If you pass None, then no
             error message will be sent and instead an Exception will be raised.
-        strict_mode: If False, parameters with default values become optional in the
-            function schema.
+        strict_mode: Whether to enable strict mode for the tool's JSON schema. We *strongly*
+            recommend setting this to True, as it increases the likelihood of correct JSON input.
+            If False, it allows non-strict JSON schemas. For example, if a parameter has a default
+            value, it will be optional, additional properties are allowed, etc. See here for more:
+            https://platform.openai.com/docs/guides/structured-outputs?api-mode=responses#supported-schemas
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:

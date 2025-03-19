@@ -111,8 +111,8 @@ class MessageOutput(BaseModel): # (1)!
     response: str
 
 class MathOutput(BaseModel): # (2)!
-    is_math: bool
     reasoning: str
+    is_math: bool
 
 guardrail_agent = Agent(
     name="Guardrail check",
