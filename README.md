@@ -29,6 +29,18 @@ source env/bin/activate
 ```
 pip install openai-agents
 ```
+### Option 2: Install with UV  
+[`uv`](https://github.com/astral-sh/uv) is a modern package manager for Python that provides fast dependency resolution.  
+
+1. Initialize the directory with `uv`:  
+   ```
+   uv init --package sample_project
+   ```
+2. Install Agents SDK
+   ```
+   uv add openai-agents
+   ```
+
 
 ## Hello world example
 
