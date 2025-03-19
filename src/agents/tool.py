@@ -59,9 +59,9 @@ class FunctionTool:
 
     on_invoke_tool: Callable[[RunContextWrapper[Any], str], Awaitable[Any]]
     """A function that invokes the tool with the given context and parameters. The params passed
-    are:
-    1. The tool run context.
-    2. The arguments from the LLM, as a JSON string.
+    are:\n
+    1. The tool run context.\n
+    2. The arguments from the LLM, as a JSON string.\n
 
     You must return a string representation of the tool output, or something we can call `str()` on.
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
@@ -182,10 +182,11 @@ def function_tool(
     strict_mode: bool = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
-    Decorator to create a FunctionTool from a function. By default, we will:
-    1. Parse the function signature to create a JSON schema for the tool's parameters.
-    2. Use the function's docstring to populate the tool's description.
-    3. Use the function's docstring to populate argument descriptions.
+    Decorator to create a FunctionTool from a function. By default, we will:\n
+    1. Parse the function signature to create a JSON schema for the tool's parameters.\n
+    2. Use the function's docstring to populate the tool's description.\n
+    3. Use the function's docstring to populate argument descriptions.\n
+    
     The docstring style is detected automatically, but you can override it.
 
     If the function takes a `RunContextWrapper` as the first argument, it *must* match the
