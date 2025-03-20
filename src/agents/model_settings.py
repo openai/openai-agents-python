@@ -40,7 +40,7 @@ class ModelSettings:
     """The maximum number of output tokens to generate."""
 
     reasoning_effort: Literal["low", "medium", "high"] | None = None
-    """The level of reasoning effort to use when calling the model. Only applies to OpenAI models."""
+    """The level of reasoning effort to use when calling the OpenAI models."""
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
