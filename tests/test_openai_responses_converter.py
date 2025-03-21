@@ -155,7 +155,9 @@ def test_convert_tools_basic_types_and_includes():
     assert isinstance(converted.includes, list)
     # The includes list should have exactly the include for file search when include_search_results
     # is True.
-    assert converted.includes == ["file_search_call.results"]
+    assert "file_search_call.results" in converted.includes
+    # The includes list should also have the include for computer tool screenshots
+    assert "computer_call_output.output.image_url" in converted.includes
     # There should be exactly four converted tool dicts.
     assert len(converted.tools) == 4
     # Extract types and verify.
