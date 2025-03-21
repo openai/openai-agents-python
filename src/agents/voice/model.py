@@ -19,7 +19,7 @@ class TTSModelSettings:
     """Settings for a TTS model."""
 
     voice: (
-        Literal["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] | None
+        Literal["alloy", "ash", "ballad", "verse", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] | None
     ) = None
     """
     The voice to use for the TTS model. If not provided, the default voice for the respective model
