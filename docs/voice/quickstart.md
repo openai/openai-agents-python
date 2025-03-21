@@ -19,26 +19,22 @@ The main concept to know about is a [`VoicePipeline`][agents.voice.pipeline.Voic
 ```mermaid
 graph LR
     %% Input
-    A["🎤 Audio Input"]
+    A["🎤 Audio Input"] --> |"Captured Speech"| B["📝 Transcribe (Speech-to-Text)"]
 
     %% Voice Pipeline
-    subgraph Voice_Pipeline [Voice Pipeline]
+    subgraph Voice_Pipeline ["🔁 AI Processing Pipeline"]
         direction TB
-        B["Transcribe (speech-to-text)"]
-        C["Your Code"]:::highlight
-        D["Text-to-speech"]
-        B --> C --> D
+        B --> |"Converted Text"| C["🤖 AI Agent "]:::highlight
+        C --> |"Processed Response"| D["🔊 Text-to-Speech 🎙️"]
     end
 
     %% Output
-    E["🎧 Audio Output"]
-
-    %% Flow
-    A --> Voice_Pipeline
-    Voice_Pipeline --> E
+    D --> |"Generated Speech"| E["🎧 Audio Output"]
 
     %% Custom styling
     classDef highlight fill:#ffcc66,stroke:#333,stroke-width:1px,font-weight:700;
+
+
 
 ```
 
