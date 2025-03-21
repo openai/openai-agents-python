@@ -1,3 +1,4 @@
+from examples import config
 import asyncio
 import uuid
 

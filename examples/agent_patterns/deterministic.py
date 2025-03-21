@@ -1,3 +1,4 @@
+from examples import config
 import asyncio
 
 from pydantic import BaseModel

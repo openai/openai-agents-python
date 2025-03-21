@@ -1,3 +1,4 @@
+from examples import config
 import asyncio
 
 from agents import Agent, ItemHelpers, MessageOutputItem, Runner, trace
