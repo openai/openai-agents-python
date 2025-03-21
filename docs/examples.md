@@ -1,6 +1,6 @@
 # Examples
 
-Explore a variety of sample implementations of the SDK in the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) section of the repository. These examples are organized into several categories, each demonstrating different patterns and capabilities.
+Explore various sample implementations of the SDK in the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) section of the repository. These examples are organized into several categories, each demonstrating different patterns and capabilities.
 
 ## Table of Contents
 - [Agent Patterns](#agent-patterns)
