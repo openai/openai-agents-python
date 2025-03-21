@@ -14,13 +14,12 @@ DEFAULT_TTS_INSTRUCTIONS = (
 )
 DEFAULT_TTS_BUFFER_SIZE = 120
 
-
 @dataclass
 class TTSModelSettings:
     """Settings for a TTS model."""
 
     voice: (
-        Literal["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] | None
+        Literal["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"] | None
     ) = None
     """
     The voice to use for the TTS model. If not provided, the default voice for the respective model
