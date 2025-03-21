@@ -1,0 +1,8 @@
+openai-agents
+streamlit
+google-search-results
+PyPDF2
+SpeechRecognition
+pyautogui
+python-dotenv
+
