@@ -218,6 +218,10 @@ As mentioned before, we automatically parse the function signature to extract th
 
 The code for the schema extraction lives in [`agents.function_schema`][].
 
+## Model Context Protocol servers as tools
+
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) servers are not currently supported natively in the Agents SDK. However, you can use third-party extensions, such as [openai-agents-mcp](https://pypi.org/project/openai-agents-mcp/), to enable Agents to access tools exposed by MCP servers.
+
 ## Agents as tools
 
 In some workflows, you may want a central agent to orchestrate a network of specialized agents, instead of handing off control. You can do this by modeling agents as tools.
