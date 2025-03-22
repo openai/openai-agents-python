@@ -530,6 +530,7 @@ class OpenAIChatCompletionsModel(Model):
             tool_choice=tool_choice,
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,
+            reasoning_effort=self._non_null_or_not_given(model_settings.reasoning_effort),
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
             extra_headers=_HEADERS,
@@ -549,6 +550,7 @@ class OpenAIChatCompletionsModel(Model):
             else "auto",
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
+            reasoning_effort=model_settings.reasoning_effort,
             tools=[],
             parallel_tool_calls=parallel_tool_calls or False,
         )
