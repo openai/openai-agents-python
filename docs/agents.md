@@ -142,4 +142,11 @@ Supplying a list of tools doesn't always mean the LLM will use a tool. You can f
 
 !!! note
 
-    If requiring tool use, you should consider setting [`Agent.tool_use_behavior`] to stop the Agent from running when a tool output is produced. Otherwise, the Agent might run in an infinite loop, where the LLM produces a tool call , and the tool result is sent to the LLM, and this infinite loops because the LLM is always forced to use a tool.
+    To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call in the following scenarios:
+    
+    1. When `tool_choice` is set to a specific function name (any string that's not "auto", "required", or "none")
+    2. When `tool_choice` is set to "required" AND there is only one tool available
+    
+    This targeted reset mechanism allows the model to decide whether to make additional tool calls in subsequent turns while avoiding infinite loops in these specific cases.
+    
+    If you want the Agent to completely stop after a tool call (rather than continuing with auto mode), you can set [`Agent.tool_use_behavior="stop_on_first_tool"`] which will directly use the tool output as the final response without further LLM processing.
