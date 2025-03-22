@@ -428,3 +428,87 @@ def test_var_keyword_dict_annotation():
     assert properties.get("kwargs").get("type") == "object"
     # The values in the dict are integers.
     assert properties.get("kwargs").get("additionalProperties").get("type") == "integer"
+
+
+def test_context_with_special_params():
+    """Test that context parameter works correctly with special parameters (self/cls)."""
+    class TestClass:
+        def instance_method_with_context(self, ctx: RunContextWrapper[str], a: int) -> str:
+            return f"instance {a}"
+
+        @classmethod
+        def class_method_with_context(cls, ctx: RunContextWrapper[str], a: int) -> str:
+            return f"class {a}"
+
+    # Test instance method
+    instance = TestClass()
+    func_schema = function_schema(instance.instance_method_with_context)
+    assert func_schema.takes_context
+    assert func_schema.params_json_schema.get("title") == "instance_method_with_context_args"
+
+    # Verify only 'a' is in the schema, not 'self' or 'ctx'
+    properties = func_schema.params_json_schema.get("properties", {})
+    assert "a" in properties
+    assert "self" not in properties
+    assert "ctx" not in properties
+
+    # Test class method
+    func_schema = function_schema(TestClass.class_method_with_context)
+    assert func_schema.takes_context
+    assert func_schema.params_json_schema.get("title") == "class_method_with_context_args"
+
+    # Verify only 'a' is in the schema, not 'cls' or 'ctx'
+    properties = func_schema.params_json_schema.get("properties", {})
+    assert "a" in properties
+    assert "cls" not in properties
+    assert "ctx" not in properties
+
+    # Test actual function calls
+    context = RunContextWrapper(context="test")
+
+    # Test instance method call
+    parsed = func_schema.params_pydantic_model(**{"a": 42})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = instance.instance_method_with_context(context, *args, **kwargs_dict)
+    assert result == "instance 42"
+
+    # Test class method call
+    parsed = func_schema.params_pydantic_model(**{"a": 42})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = TestClass.class_method_with_context(context, *args, **kwargs_dict)
+    assert result == "class 42"
+
+
+def test_context_with_other_params():
+    """Test that context parameter works correctly with other parameters."""
+    def func_with_context_and_params(
+        ctx: RunContextWrapper[str],
+        a: int,
+        b: str = "default",
+    ) -> str:
+        return f"{a} {b}"
+
+    func_schema = function_schema(func_with_context_and_params)
+    assert func_schema.takes_context
+    assert func_schema.params_json_schema.get("title") == "func_with_context_and_params_args"
+
+    # Verify schema only contains 'a' and 'b', not 'ctx'
+    properties = func_schema.params_json_schema.get("properties", {})
+    assert "a" in properties
+    assert "b" in properties
+    assert "ctx" not in properties
+
+    # Test function call
+    context = RunContextWrapper(context="test")
+
+    # Test with default value
+    parsed = func_schema.params_pydantic_model(**{"a": 42})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = func_with_context_and_params(context, *args, **kwargs_dict)
+    assert result == "42 default"
+
+    # Test with explicit value
+    parsed = func_schema.params_pydantic_model(**{"a": 42, "b": "explicit"})
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = func_with_context_and_params(context, *args, **kwargs_dict)
+    assert result == "42 explicit"
