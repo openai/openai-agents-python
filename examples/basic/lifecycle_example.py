@@ -26,7 +26,7 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
-    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool, args: str) -> None:
         self.event_counter += 1
         print(
             f"### {self.event_counter}: Tool {tool.name} started. Usage: {self._usage_to_str(context.usage)}"

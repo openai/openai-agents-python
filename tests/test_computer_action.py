@@ -127,10 +127,18 @@ class LoggingAsyncComputer(AsyncComputer):
 @pytest.mark.parametrize(
     "action,expected_call",
     [
-        (ActionClick(type="click", x=10, y=21, button="left"), ("click", (10, 21, "left"))),
-        (ActionDoubleClick(type="double_click", x=42, y=47), ("double_click", (42, 47))),
         (
-            ActionDrag(type="drag", path=[ActionDragPath(x=1, y=2), ActionDragPath(x=3, y=4)]),
+            ActionClick(type="click", x=10, y=21, button="left"),
+            ("click", (10, 21, "left")),
+        ),
+        (
+            ActionDoubleClick(type="double_click", x=42, y=47),
+            ("double_click", (42, 47)),
+        ),
+        (
+            ActionDrag(
+                type="drag", path=[ActionDragPath(x=1, y=2), ActionDragPath(x=3, y=4)]
+            ),
             ("drag", (((1, 2), (3, 4)),)),
         ),
         (ActionKeypress(type="keypress", keys=["a", "b"]), ("keypress", (["a", "b"],))),
@@ -172,13 +180,24 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
 @pytest.mark.parametrize(
     "action,expected_call",
     [
-        (ActionClick(type="click", x=2, y=3, button="right"), ("click", (2, 3, "right"))),
-        (ActionDoubleClick(type="double_click", x=12, y=13), ("double_click", (12, 13))),
         (
-            ActionDrag(type="drag", path=[ActionDragPath(x=5, y=6), ActionDragPath(x=6, y=7)]),
+            ActionClick(type="click", x=2, y=3, button="right"),
+            ("click", (2, 3, "right")),
+        ),
+        (
+            ActionDoubleClick(type="double_click", x=12, y=13),
+            ("double_click", (12, 13)),
+        ),
+        (
+            ActionDrag(
+                type="drag", path=[ActionDragPath(x=5, y=6), ActionDragPath(x=6, y=7)]
+            ),
             ("drag", (((5, 6), (6, 7)),)),
         ),
-        (ActionKeypress(type="keypress", keys=["ctrl", "c"]), ("keypress", (["ctrl", "c"],))),
+        (
+            ActionKeypress(type="keypress", keys=["ctrl", "c"]),
+            ("keypress", (["ctrl", "c"],)),
+        ),
         (ActionMove(type="move", x=8, y=9), ("move", (8, 9))),
         (ActionScreenshot(type="screenshot"), ("screenshot", ())),
         (
@@ -241,7 +260,7 @@ class LoggingAgentHooks(AgentHooks[Any]):
         self.ended: list[tuple[Agent[Any], Any, str]] = []
 
     async def on_tool_start(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, args: str,
     ) -> None:
         self.started.append((agent, tool))
 

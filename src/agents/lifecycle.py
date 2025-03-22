@@ -39,6 +39,7 @@ class RunHooks(Generic[TContext]):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
+        args: str,
     ) -> None:
         """Called before a tool is invoked."""
         pass
@@ -61,7 +62,9 @@ class AgentHooks(Generic[TContext]):
     Subclass and override the methods you need.
     """
 
-    async def on_start(self, context: RunContextWrapper[TContext], agent: Agent[TContext]) -> None:
+    async def on_start(
+        self, context: RunContextWrapper[TContext], agent: Agent[TContext]
+    ) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
         agent."""
         pass
@@ -90,6 +93,7 @@ class AgentHooks(Generic[TContext]):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
+        args: str,
     ) -> None:
         """Called before a tool is invoked."""
         pass

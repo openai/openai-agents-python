@@ -54,6 +54,7 @@ class AgentHooksForTests(AgentHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
+        args: str,
     ) -> None:
         self.events["on_tool_start"] += 1
 
