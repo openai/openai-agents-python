@@ -757,7 +757,7 @@ class _Converter:
             elif isinstance(c, dict) and c.get("type") == "input_file":
                 raise UserError(f"File uploads are not supported for chat completions {c}")
             else:
-                raise UserError(f"Unknonw content: {c}")
+                raise UserError(f"Unknown content: {c}")
         return out
 
     @classmethod

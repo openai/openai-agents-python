@@ -83,7 +83,7 @@ class OpenAIResponsesModel(Model):
                 )
 
                 if _debug.DONT_LOG_MODEL_DATA:
-                    logger.debug("LLM responsed")
+                    logger.debug("LLM responded")
                 else:
                     logger.debug(
                         "LLM resp:\n"
