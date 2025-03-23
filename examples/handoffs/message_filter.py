@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 
+from examples import config
 from agents import Agent, HandoffInputData, Runner, function_tool, handoff, trace
 from agents.extensions import handoff_filters
 

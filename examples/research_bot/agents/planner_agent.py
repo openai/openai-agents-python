@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+from examples import config
 from agents import Agent
 
 PROMPT = (

@@ -1,4 +1,6 @@
 # Agent used to synthesize a final report from the individual summaries.
+from examples import config
+
 from pydantic import BaseModel
 
 from agents import Agent

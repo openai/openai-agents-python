@@ -1,5 +1,6 @@
 import asyncio
 
+from examples import config
 from openai.types.responses import ResponseTextDeltaEvent
 
 from agents import Agent, Runner

@@ -1,6 +1,7 @@
 from examples import config
 import asyncio
 
+from examples import config
 from agents import Agent, ItemHelpers, Runner, trace
 
 """

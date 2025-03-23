@@ -1,6 +1,6 @@
 import asyncio
 import random
-
+from examples import config
 from agents import Agent, ItemHelpers, Runner, function_tool
 
 

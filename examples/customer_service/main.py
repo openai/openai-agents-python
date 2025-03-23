@@ -4,6 +4,7 @@ import asyncio
 import random
 import uuid
 
+from examples import config
 from pydantic import BaseModel
 
 from agents import (

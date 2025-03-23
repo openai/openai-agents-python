@@ -1,5 +1,7 @@
 import asyncio
 
+from examples import config
+
 from pydantic import BaseModel
 
 from agents import Agent, Runner, function_tool
