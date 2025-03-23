@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-
+from examples import config
 from pydantic import BaseModel, Field
 
 from agents import (
