@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from examples import config
 from dataclasses import dataclass
 from typing import Literal
 
