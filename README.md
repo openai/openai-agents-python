@@ -1,4 +1,4 @@
-# OpenAI Agents SDK
+# OpenAI Agents SDK 
 
 The OpenAI Agents SDK is a lightweight yet powerful framework for building multi-agent workflows.
 
@@ -178,3 +178,61 @@ We'd like to acknowledge the excellent work of the open-source community, especi
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
 
 We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
+make tests  # run tests
+make mypy   # run typechecker
+make lint   # run linterfrom agents import Agent, Runner
+import asyncio
+
+spanish_agent = Agent(
+    name="Spanish agent",
+    instructions="You only speak Spanish.",
+)
+
+english_agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+)
+
+triage_agent = Agent(
+    name="Triage agent",
+    instructions="Handoff to the appropriate agent based on the language of the request.",
+    handoffs=[spanish_agent, english_agent],
+)
+
+
+async def main():
+    result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
+    print(result.final_output)
+    # ¡Hola! Estoy bien, gracias por preguntar. ¿Y tú, cómo estás?
+
+
+if __name__ == "__main__":
+    asyncio.run(main())import asyncio
+
+from agents import Agent, Runner, function_tool
+
+
+@function_tool
+def get_weather(city: str) -> str:
+    return f"The weather in {city} is sunny."
+
+
+agent = Agent(
+    name="Hello world",
+    instructions="You are a helpful agent.",
+    tools=[get_weather],
+)
+
+
+async def main():
+    result = await Runner.run(agent, input="What's the weather in Tokyo?")
+    print(result.final_output)
+    # The weather in Tokyo is sunny.
+
+
+if __name__ == "__main__":
+    asyncio.run(main())Runner.runmake tests  # run tests
+make mypy   # run typechecker
+make lint   # run lintermake syncmake tests  # run tests
+make mypy   # run typechecker
+make lint   # run linter
