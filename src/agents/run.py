@@ -628,7 +628,7 @@ class Runner:
 
         handoffs = cls._get_handoffs(agent)
 
-        model = cls._get_model(agent, run_config)
+        model = await cls._get_model(agent, run_config, context_wrapper)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         final_response: ModelResponse | None = None
 
@@ -857,7 +857,7 @@ class Runner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
     ) -> ModelResponse:
-        model = cls._get_model(agent, run_config)
+        model = await cls._get_model(agent, run_config, context_wrapper)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         new_response = await model.get_response(
             system_instructions=system_prompt,
@@ -893,12 +893,22 @@ class Runner:
         return handoffs
 
     @classmethod
-    def _get_model(cls, agent: Agent[Any], run_config: RunConfig) -> Model:
+    async def _get_model(
+        cls,
+        agent: Agent[Any],
+        run_config: RunConfig,
+        context_wrapper: RunContextWrapper[TContext],
+    ) -> Model:
         if isinstance(run_config.model, Model):
             return run_config.model
         elif isinstance(run_config.model, str):
             return run_config.model_provider.get_model(run_config.model)
         elif isinstance(agent.model, Model):
             return agent.model
+        elif callable(agent.model):
+            model = await agent.get_model(context_wrapper)
+            if isinstance(model, Model):
+                return model
+            return run_config.model_provider.get_model(model)
 
         return run_config.model_provider.get_model(agent.model)

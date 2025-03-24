@@ -93,7 +93,15 @@ class Agent(Generic[TContext]):
     modularity.
     """
 
-    model: str | Model | None = None
+    model: (
+        str
+        | Model
+        | Callable[
+            [RunContextWrapper[TContext], Agent[TContext]],
+            MaybeAwaitable[str | Model],
+        ]
+        | None
+    ) = None
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
@@ -203,5 +211,19 @@ class Agent(Generic[TContext]):
                 return cast(str, self.instructions(run_context, self))
         elif self.instructions is not None:
             logger.error(f"Instructions must be a string or a function, got {self.instructions}")
+
+        return None
+
+    async def get_model(self, run_context: RunContextWrapper[TContext]) -> str | Model | None:
+        """Get the model for the agent."""
+        if isinstance(self.model, (str, Model)):
+            return self.model
+        elif callable(self.model):
+            if inspect.iscoroutinefunction(self.model):
+                return await cast(Awaitable[str | Model], self.model(run_context, self))
+            else:
+                return cast(str | Model, self.model(run_context, self))
+        elif self.model is not None:
+            logger.error(f"Model must be a string, Model object, or a function, got {self.model}")
 
         return None

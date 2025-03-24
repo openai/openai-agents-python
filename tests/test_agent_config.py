@@ -28,6 +28,29 @@ async def test_system_instructions():
 
 
 @pytest.mark.asyncio
+async def test_model():
+    agent = Agent[None](
+        name="test",
+        model="gpt-4",
+    )
+    context = RunContextWrapper(None)
+
+    assert await agent.get_model(context) == "gpt-4"
+
+    def sync_model(context: RunContextWrapper[None], agent: Agent[None]):
+        return "sync-model"
+
+    agent = agent.clone(model=sync_model)
+    assert await agent.get_model(context) == "sync-model"
+
+    async def async_model(context: RunContextWrapper[None], agent: Agent[None]):
+        return "async-model"
+
+    agent = agent.clone(model=async_model)
+    assert await agent.get_model(context) == "async-model"
+
+
+@pytest.mark.asyncio
 async def test_handoff_with_agents():
     agent_1 = Agent(
         name="agent_1",
