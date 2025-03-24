@@ -15,6 +15,15 @@ class ModelSettings:
     for the specific model and provider you are using.
     """
 
+    provider: Literal["openai", "ollama"] = "openai"
+    """The provider to use for the model."""
+
+    ollama_base_url: str = "http://localhost:11434"
+    """The base URL for the Ollama API."""
+
+    ollama_default_model: str = "phi4:latest"
+    """The default model to use for Ollama."""
+
     temperature: float | None = None
     """The temperature to use when calling the model."""
 
@@ -45,6 +54,9 @@ class ModelSettings:
         if override is None:
             return self
         return ModelSettings(
+            provider=override.provider or self.provider,
+            ollama_base_url=override.ollama_base_url or self.ollama_base_url,
+            ollama_default_model=override.ollama_default_model or self.ollama_default_model,
             temperature=override.temperature or self.temperature,
             top_p=override.top_p or self.top_p,
             frequency_penalty=override.frequency_penalty or self.frequency_penalty,
