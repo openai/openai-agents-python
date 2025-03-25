@@ -15,6 +15,7 @@ from .exceptions import (
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     UserError,
+    FactCheckingGuardrailTripwireTriggered,
 )
 from .guardrail import (
     GuardrailFunctionOutput,
@@ -22,8 +23,11 @@ from .guardrail import (
     InputGuardrailResult,
     OutputGuardrail,
     OutputGuardrailResult,
+    FactCheckingGuardrail,
+    FactCheckingGuardrailResult,
     input_guardrail,
     output_guardrail,
+    fact_checking_guardrail,
 )
 from .handoffs import Handoff, HandoffInputData, HandoffInputFilter, handoff
 from .items import (
@@ -162,6 +166,7 @@ __all__ = [
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
+    "FactCheckingGuardrailTripwireTriggered",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
     "UserError",
@@ -169,9 +174,12 @@ __all__ = [
     "InputGuardrailResult",
     "OutputGuardrail",
     "OutputGuardrailResult",
+    "FactCheckingGuardrail",
+    "FactCheckingGuardrailResult",
     "GuardrailFunctionOutput",
     "input_guardrail",
     "output_guardrail",
+    "fact_checking_guardrail",
     "handoff",
     "Handoff",
     "HandoffInputData",
