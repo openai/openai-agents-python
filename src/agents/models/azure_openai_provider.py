@@ -9,13 +9,13 @@ from .interface import Model, ModelProvider
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel
 
-DEFAULT_API_VERSION = "2025-01-01-preview"  # 更改为Azure OpenAI更广泛支持的API版本
-DEFAULT_DEPLOYMENT = "gpt-4o"  # 默认部署名称
+DEFAULT_API_VERSION = "2025-01-01-preview"  # Changed to a more widely supported Azure OpenAI API version
+DEFAULT_DEPLOYMENT = "gpt-4o"  # Default deployment name
 
 _http_client: httpx.AsyncClient | None = None
 
 
-# 与 OpenAI Provider 类似，共享 HTTP 客户端以提高性能
+# Similar to OpenAI Provider, share the HTTP client to improve performance
 def shared_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
@@ -35,44 +35,44 @@ class AzureOpenAIProvider(ModelProvider):
         openai_client: AsyncAzureOpenAI | None = None,
         use_responses: bool | None = None,
     ) -> None:
-        """创建新的 Azure OpenAI 提供程序。
+        """Create a new Azure OpenAI provider.
 
         Args:
-            api_key: 用于 Azure OpenAI 客户端的 API 密钥。如果未提供，将从环境变量获取。
-            azure_endpoint: Azure OpenAI 端点，例如 "https://{resource-name}.openai.azure.com"。如果未提供，将从环境变量获取。
-            api_version: Azure OpenAI API 版本。默认为 "2025-01-01-preview"。
-            base_url: 可选的完整基础 URL。如果提供，将覆盖 azure_endpoint。如果未提供，将从环境变量获取。
-            deployment: Azure 部署名称。默认为 "gpt-4o"。
-            openai_client: 可选的 Azure OpenAI 客户端实例。如提供，将忽略其他客户端参数。
-            use_responses: 是否使用 OpenAI Responses API。注意：Azure OpenAI可能不支持标准的Responses API路径。
+            api_key: API key for the Azure OpenAI client. If not provided, it will be retrieved from environment variables.
+            azure_endpoint: Azure OpenAI endpoint, e.g., "https://{resource-name}.openai.azure.com". If not provided, it will be retrieved from environment variables.
+            api_version: Azure OpenAI API version. Default is "2025-01-01-preview".
+            base_url: Optional complete base URL. If provided, it will override azure_endpoint. If not provided, it will be retrieved from environment variables.
+            deployment: Azure deployment name. Default is "gpt-4o".
+            openai_client: Optional Azure OpenAI client instance. If provided, other client parameters will be ignored.
+            use_responses: Whether to use OpenAI Responses API. Note: Azure OpenAI may not support the standard Responses API paths.
         """
         if openai_client is not None:
             assert api_key is None and azure_endpoint is None and base_url is None, (
-                "提供 openai_client 时不要再提供 api_key、azure_endpoint 或 base_url"
+                "Do not provide api_key, azure_endpoint, or base_url when providing openai_client"
             )
             self._client: AsyncAzureOpenAI | None = openai_client
         else:
             self._client = None
-            # 自动从环境变量获取参数，如果参数未提供
+            # Automatically retrieve parameters from environment variables if not provided
             self._stored_api_key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
             self._stored_azure_endpoint = azure_endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
             self._stored_base_url = base_url or os.getenv("AZURE_OPENAI_BASE_URL")
             self._stored_api_version = api_version or os.getenv("AZURE_OPENAI_API_VERSION") or DEFAULT_API_VERSION
             self._stored_deployment = deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT") or DEFAULT_DEPLOYMENT
 
-        # 默认不使用Responses API，因为Azure OpenAI的API路径与标准OpenAI不同
+        # Default to not using Responses API, as Azure OpenAI API paths differ from standard OpenAI
         self._use_responses = False if use_responses is None else use_responses
 
-    # 延迟加载客户端，确保只有在实际使用时才创建客户端实例
+    # Lazy load the client, ensuring that the client instance is only created when actually used
     def _get_client(self) -> AsyncAzureOpenAI:
         if self._client is None:
             if not self._stored_api_key:
-                raise ValueError("Azure OpenAI API 密钥未提供，请设置 AZURE_OPENAI_API_KEY 环境变量或在构造函数中提供")
+                raise ValueError("Azure OpenAI API key not provided, please set the AZURE_OPENAI_API_KEY environment variable or provide it in the constructor")
             
-            # 确定基础 URL
+            # Determine base URL
             base_url = self._stored_base_url or self._stored_azure_endpoint
             if not base_url:
-                raise ValueError("Azure OpenAI 端点未提供，请设置 AZURE_OPENAI_ENDPOINT 或 AZURE_OPENAI_BASE_URL 环境变量，或在构造函数中提供")
+                raise ValueError("Azure OpenAI endpoint not provided, please set the AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_BASE_URL environment variable, or provide it in the constructor")
 
             self._client = AsyncAzureOpenAI(
                 api_key=self._stored_api_key,
@@ -84,20 +84,20 @@ class AzureOpenAIProvider(ModelProvider):
         return self._client
 
     def get_model(self, model_name: str | None) -> Model:
-        """获取指定名称的模型实例
+        """Get a model instance with the specified name
         
         Args:
-            model_name: 模型名称，在 Azure OpenAI 中通常是部署名称
+            model_name: Model name, which is typically the deployment name in Azure OpenAI
             
         Returns:
-            Model: 模型实例
+            Model: Model instance
         """
-        # 在 Azure OpenAI 中，model_name 实际上是部署名称
+        # In Azure OpenAI, model_name is actually the deployment name
         deployment_name = model_name if model_name else self._stored_deployment
         
         client = self._get_client()
 
-        # 由于Azure OpenAI的URL格式要求，除非明确指定，否则使用ChatCompletions API
+        # Due to Azure OpenAI URL format requirements, use ChatCompletions API unless explicitly specified
         return (
             OpenAIResponsesModel(model=deployment_name, openai_client=client)
             if self._use_responses
@@ -106,17 +106,17 @@ class AzureOpenAIProvider(ModelProvider):
     
     @staticmethod
     def from_env() -> AzureOpenAIProvider:
-        """从环境变量创建 AzureOpenAIProvider 实例
+        """Create AzureOpenAIProvider instance from environment variables
         
-        环境变量:
-            AZURE_OPENAI_API_KEY: Azure OpenAI API 密钥
-            AZURE_OPENAI_ENDPOINT: Azure OpenAI 端点
-            AZURE_OPENAI_BASE_URL: (可选) 替代完整基础URL (覆盖 AZURE_OPENAI_ENDPOINT)
-            AZURE_OPENAI_API_VERSION: (可选) API 版本
-            AZURE_OPENAI_DEPLOYMENT: (可选) 部署名称
+        Environment variables:
+            AZURE_OPENAI_API_KEY: Azure OpenAI API key
+            AZURE_OPENAI_ENDPOINT: Azure OpenAI endpoint
+            AZURE_OPENAI_BASE_URL: (Optional) Alternative complete base URL (overrides AZURE_OPENAI_ENDPOINT)
+            AZURE_OPENAI_API_VERSION: (Optional) API version
+            AZURE_OPENAI_DEPLOYMENT: (Optional) Deployment name
         
         Returns:
-            AzureOpenAIProvider: 配置好的实例
+            AzureOpenAIProvider: Configured instance
         """
         return AzureOpenAIProvider(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),

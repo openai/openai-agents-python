@@ -2,7 +2,7 @@ import asyncio
 import sys
 import os
 
-# 添加项目根路径到Python路径
+# Add project root path to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')))
 
 from pydantic import BaseModel
@@ -21,19 +21,19 @@ from src.agents.run import RunConfig
 from src.agents.models.provider_factory import ModelProviderFactory
 
 """
-这个示例展示了如何使用输入保障。
+This example demonstrates how to use input guardrails.
 
-保障是与代理执行并行运行的检查。可用于：
-- 检查输入消息是否偏离主题
-- 检查输出消息是否违反任何政策
-- 如果检测到意外输入，接管代理执行的控制权
+Guardrails are checks that run in parallel with agent execution. They can be used to:
+- Check if input messages are off-topic
+- Check if output messages violate any policies
+- Take over control of agent execution if unexpected input is detected
 
-在此示例中，我们设置一个输入保障，当用户要求帮助解决数学作业时触发。
-如果保障触发，我们将用拒绝消息作为响应。
+In this example, we set up an input guardrail that triggers when the user asks for help 
+with math homework. If the guardrail is triggered, we respond with a rejection message.
 """
 
 def create_ollama_settings(model="phi3:latest"):
-    """创建Ollama模型设置"""
+    """Create Ollama model settings"""
     return ModelSettings(
         provider="ollama",
         ollama_base_url="http://localhost:11434",
@@ -41,12 +41,12 @@ def create_ollama_settings(model="phi3:latest"):
         temperature=0.7
     )
 
-# 创建运行配置
+# Create run configuration
 run_config = RunConfig(tracing_disabled=True)
-# 设置模型提供商
+# Set model provider
 run_config.model_provider = ModelProviderFactory.create_provider(create_ollama_settings())
 
-### 1. 基于代理的保障，当用户要求解数学作业时触发
+### 1. Agent-based guardrail that triggers when user asks for math homework help
 class MathHomeworkOutput(BaseModel):
     reasoning: str
     is_math_homework: bool
@@ -54,7 +54,7 @@ class MathHomeworkOutput(BaseModel):
 
 guardrail_agent = Agent(
     name="Guardrail check",
-    instructions="检查用户是否要求您做他们的数学作业。",
+    instructions="Check if the user is asking you to do their math homework.",
     output_type=MathHomeworkOutput,
     model_settings=create_ollama_settings()
 )
@@ -64,7 +64,7 @@ guardrail_agent = Agent(
 async def math_guardrail(
     context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
-    """这是一个输入保障函数，它调用一个代理来检查输入是否是数学作业问题。"""
+    """This is an input guardrail function that calls an agent to check if the input is a math homework question."""
     result = await Runner.run(guardrail_agent, input, context=context.context, run_config=run_config)
     final_output = result.final_output_as(MathHomeworkOutput)
 
@@ -74,25 +74,25 @@ async def math_guardrail(
     )
 
 
-### 2. 运行循环
+### 2. The run loop
 
 
 async def main():
     agent = Agent(
-        name="客户支持代理",
-        instructions="您是一个客户支持代理。您帮助客户解答他们的问题。",
+        name="Customer Support Agent",
+        instructions="You are a customer support agent. You help customers answer their questions.",
         input_guardrails=[math_guardrail],
         model_settings=create_ollama_settings()
     )
 
     input_data: list[TResponseInputItem] = []
 
-    print("使用Ollama运行输入保障示例")
-    print("尝试提问普通问题，然后尝试提出数学作业问题（如'帮我解方程：2x + 5 = 11'）")
-    print("输入'exit'退出")
+    print("Running Input Guardrails Example with Ollama")
+    print("Try asking normal questions, then try asking math homework questions (like 'help me solve the equation: 2x + 5 = 11')")
+    print("Enter 'exit' to quit")
     
     while True:
-        user_input = input("\n请输入消息: ")
+        user_input = input("\nEnter a message: ")
         if user_input.lower() == 'exit':
             break
             
@@ -103,15 +103,15 @@ async def main():
             }
         )
 
-        print("处理中...")
+        print("Processing...")
         try:
             result = await Runner.run(agent, input_data, run_config=run_config)
             print(result.final_output)
-            # 如果保障未触发，使用结果作为下一次运行的输入
+            # If guardrail wasn't triggered, use the result for the next run
             input_data = result.to_input_list()
         except InputGuardrailTripwireTriggered:
-            # 如果保障触发，添加拒绝消息到输入
-            message = "抱歉，我不能帮您解决数学作业。"
+            # If guardrail triggers, add a rejection message to the input
+            message = "Sorry, I cannot help with math homework."
             print(message)
             input_data.append(
                 {
@@ -122,17 +122,17 @@ async def main():
 
 
 if __name__ == "__main__":
-    # 检查Ollama服务是否运行
+    # Check if Ollama service is running
     import httpx
     try:
         response = httpx.get("http://localhost:11434/api/tags")
         if response.status_code != 200:
-            print("错误: Ollama服务返回非200状态码。请确保Ollama服务正在运行。")
+            print("Error: Ollama service returned a non-200 status code. Make sure Ollama service is running.")
             sys.exit(1)
     except Exception as e:
-        print(f"错误: 无法连接到Ollama服务。请确保Ollama服务正在运行。\n{str(e)}")
-        print("\n如果您尚未安装Ollama，请从https://ollama.ai下载并安装，然后运行'ollama serve'启动服务")
+        print(f"Error: Could not connect to Ollama service. Make sure Ollama service is running.\n{str(e)}")
+        print("\nIf you haven't installed Ollama yet, download and install it from https://ollama.ai and start the service with 'ollama serve'")
         sys.exit(1)
         
-    # 运行主函数
+    # Run the main function
     asyncio.run(main())

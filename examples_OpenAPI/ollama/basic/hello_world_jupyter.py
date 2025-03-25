@@ -2,7 +2,7 @@ import sys
 import os
 import asyncio
 
-# 添加项目根路径到Python路径
+# Add project root to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from src.agents import Agent, Runner
@@ -10,16 +10,16 @@ from src.agents.model_settings import ModelSettings
 from src.agents.run import RunConfig
 from src.agents.models.provider_factory import ModelProviderFactory
 
-# 创建Ollama模型设置
+# Create Ollama model settings
 ollama_settings = ModelSettings(
     provider="ollama",
     ollama_base_url="http://localhost:11434",
     ollama_default_model="llama3.2",
     temperature=0.7,
 )
-# 创建运行配置
+# Create runtime configuration
 run_config = RunConfig(tracing_disabled=True)
-# 设置模型提供商
+# Set model provider
 run_config.model_provider = ModelProviderFactory.create_provider(ollama_settings)
 
 agent = Agent(

@@ -28,17 +28,17 @@ from .openai_chatcompletions import OpenAIChatCompletionsModel
 DEFAULT_MODEL = "llama3"
 
 class OllamaAdapterException(AgentsException):
-    """Ollama适配器异常"""
+    """Ollama Adapter Exception"""
 
     def __init__(self, message: str):
         super().__init__(message)
     
     def __str__(self) -> str:
-        return str(self.args[0])  # 使用args[0]而非message
+        return str(self.args[0])  # Use args[0] instead of message
     
 
 class OllamaAsyncClient:
-    """适配Ollama API，使其行为类似OpenAI的AsyncOpenAI客户端"""
+    """Adapts Ollama API to behave like OpenAI's AsyncOpenAI client"""
     
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url
@@ -46,20 +46,20 @@ class OllamaAsyncClient:
         self.chat = self.Chat(http_client=self.http_client, base_url=base_url)
     
     class Chat:
-        """模拟OpenAI客户端的chat层级"""
+        """Simulates the chat level of OpenAI client"""
         def __init__(self, http_client: httpx.AsyncClient, base_url: str):
             self.http_client = http_client
             self.base_url = base_url
             self.completions = self.Completions(http_client=self.http_client, base_url=base_url)
         
         class Completions:
-            """模拟OpenAI客户端的chat.completions层级"""
+            """Simulates the chat.completions level of OpenAI client"""
             def __init__(self, http_client: httpx.AsyncClient, base_url: str):
                 self.http_client = http_client
                 self.base_url = base_url
                 
             def _clean_not_given(self, obj: Any) -> Any:
-                """递归清理NotGiven值"""
+                """Recursively clean NotGiven values"""
                 if obj is NOT_GIVEN or isinstance(obj, NotGiven):
                     return None
                 elif isinstance(obj, dict):
@@ -69,7 +69,7 @@ class OllamaAsyncClient:
                 return obj
 
             def _extract_json_from_text(self, text: str, schema: dict = None) -> str:
-                """从文本中提取JSON内容"""
+                """Extract JSON content from text"""
                 json_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
                 if json_block_match:
                     json_str = json_block_match.group(1).strip()
@@ -77,7 +77,7 @@ class OllamaAsyncClient:
                         json.loads(json_str)
                         return json_str
                     except json.JSONDecodeError:
-                        logger.debug(f"JSON块解析失败: {json_str[:100]}...")
+                        logger.debug(f"JSON block parsing failed: {json_str[:100]}...")
                 
                 json_match = re.search(r'(\{[\s\S]*?\})', text)
                 if json_match:
@@ -86,7 +86,7 @@ class OllamaAsyncClient:
                         json.loads(json_str)
                         return json_str
                     except json.JSONDecodeError:
-                        logger.debug(f"JSON对象解析失败: {json_str[:100]}...")
+                        logger.debug(f"JSON object parsing failed: {json_str[:100]}...")
                 
                 if schema and "properties" in schema:
                     properties = schema["properties"]
@@ -99,11 +99,11 @@ class OllamaAsyncClient:
                                 try:
                                     json_obj[prop_name] = int(match.group(1)) if prop_type == "integer" else float(match.group(1))
                                 except ValueError:
-                                    logger.debug(f"数值转换失败: {match.group(1)}")
+                                    logger.debug(f"Number conversion failed: {match.group(1)}")
                         elif prop_type == "boolean":
-                            if re.search(fr'(?:{prop_name}|{prop_name.title()}).*?(?:true|True|是的|yes)', text):
+                            if re.search(fr'(?:{prop_name}|{prop_name.title()}).*?(?:true|True|yes|Yes)', text):
                                 json_obj[prop_name] = True
-                            elif re.search(fr'(?:{prop_name}|{prop_name.title()}).*?(?:false|False|不是|no)', text):
+                            elif re.search(fr'(?:{prop_name}|{prop_name.title()}).*?(?:false|False|no|No)', text):
                                 json_obj[prop_name] = False
                         elif prop_type == "string":
                             match = re.search(fr'(?:{prop_name}|{prop_name.title()})[^\"\']*([\"\'])(.*?)\1', text)
@@ -112,16 +112,16 @@ class OllamaAsyncClient:
                     if json_obj:
                         return json.dumps(json_obj)
                 
-                logger.debug(f"无法提取JSON，使用原始文本: {text[:100]}...")
+                logger.debug(f"Unable to extract JSON, using original text: {text[:100]}...")
                 return text
 
                 
             async def create(self, **kwargs) -> Union[ChatCompletion, AsyncIterator[ChatCompletionChunk]]:
-                """模拟OpenAI的chat.completions.create方法，支持工具调用"""
+                """Simulates OpenAI's chat.completions.create method, supporting tool calls"""
                 cleaned_kwargs = self._clean_not_given(kwargs)
                 model = cleaned_kwargs.get("model", DEFAULT_MODEL)
                 messages = cleaned_kwargs.get("messages", [])
-                tools = cleaned_kwargs.get("tools", [])  # 获取工具参数
+                tools = cleaned_kwargs.get("tools", [])  # Get tools parameter
                 stream = cleaned_kwargs.get("stream", False)
                 temperature = cleaned_kwargs.get("temperature", 0.7)
                 max_tokens = cleaned_kwargs.get("max_tokens", 2048)
@@ -147,7 +147,7 @@ class OllamaAsyncClient:
                     else:
                         messages.insert(0, {"role": "system", "content": f"Please process the user request. {handoff_instruction}"})
 
-                # 构造 payload，包含 tools
+                # Construct payload, including tools
                 payload = {
                     "model": model,
                     "messages": messages,
@@ -166,7 +166,7 @@ class OllamaAsyncClient:
                     response.raise_for_status()
                     data = response.json()
 
-                    # 处理 JSON 格式
+                    # Handle JSON format
                     if needs_json and "choices" in data and data["choices"]:
                         content = data["choices"][0]["message"]["content"]
                         json_content = self._extract_json_from_text(content, json_schema)
@@ -174,7 +174,7 @@ class OllamaAsyncClient:
                             parsed_json = json.loads(json_content)
                             data["choices"][0]["message"]["content"] = json.dumps(parsed_json)
                         except json.JSONDecodeError:
-                            logger.debug(f"非流式响应JSON解析失败: {content[:100]}...")
+                            logger.debug(f"Non-streaming response JSON parsing failed: {content[:100]}...")
                     return ChatCompletion.model_validate(data)
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 404:
@@ -192,18 +192,18 @@ class OllamaAsyncClient:
                                     buffer += data["message"]["content"]
                                     last_message = data
                             except json.JSONDecodeError:
-                                logger.warning(f"非流式响应行解析失败: {line[:100]}...")
+                                logger.warning(f"Non-streaming response line parsing failed: {line[:100]}...")
                         if not last_message:
-                            raise OllamaAdapterException("未找到有效消息")
+                            raise OllamaAdapterException("No valid message found")
                         final_data = last_message.copy()
                         final_data["message"]["content"] = self._extract_json_from_text(buffer, json_schema) if needs_json else buffer
                         return self._convert_to_chat_completion(final_data)
                     else:
-                        raise OllamaAdapterException(f"API错误: {str(e)}") from e
+                        raise OllamaAdapterException(f"API error: {str(e)}") from e
 
 
             def _convert_to_chat_completion(self, ollama_response: Dict[str, Any]) -> ChatCompletion:
-                """将Ollama响应转换为ChatCompletion格式"""
+                """Convert Ollama response to ChatCompletion format"""
                 message = ollama_response.get("message", {"content": ollama_response.get("response", "")})
                 response_text = message.get("content", "")
                 prompt_text = str(ollama_response.get("prompt", ""))
@@ -226,7 +226,7 @@ class OllamaAsyncClient:
                 )
             
             async def _create_stream(self, payload: dict, needs_json: bool = False, json_schema: dict = None) -> AsyncIterator[ChatCompletionChunk]:
-                """创建流式响应，支持工具调用"""
+                """Create a streaming response, supporting tool calls"""
                 url = f"{self.base_url}/v1/chat/completions"
                 stream_payload = payload.copy()
                 stream_payload["stream"] = True
@@ -236,7 +236,7 @@ class OllamaAsyncClient:
                         url = f"{self.base_url}/api/chat"
                     else:
                         response.raise_for_status()
-                        function_calls = {}  # 存储流式工具调用
+                        function_calls = {}  # Store streaming tool calls
                         async for line in response.aiter_lines():
                             if not line.strip() or line.strip() == "data: [DONE]":
                                 continue
@@ -245,7 +245,7 @@ class OllamaAsyncClient:
                                 chunk = ChatCompletionChunk.model_validate(json.loads(data))
                                 yield chunk
 
-                                # 处理工具调用增量
+                                # Handle tool call increments
                                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.tool_calls:
                                     for tc_delta in chunk.choices[0].delta.tool_calls:
                                         index = tc_delta.index
@@ -259,10 +259,10 @@ class OllamaAsyncClient:
                                             function_calls[index]["function"]["name"] += tc_delta.function.name or ""
                                             function_calls[index]["function"]["arguments"] += tc_delta.function.arguments or ""
                             except json.JSONDecodeError:
-                                logger.warning(f"流式响应块解析失败: {data[:100]}...")
+                                logger.warning(f"Streaming response chunk parsing failed: {data[:100]}...")
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code != 404:
-                        raise OllamaAdapterException(f"流式API错误: {str(e)}") from e
+                        raise OllamaAdapterException(f"Streaming API error: {str(e)}") from e
 
                 async with self.http_client.stream("POST", url, json=payload, timeout=60.0) as http_response:
                     http_response.raise_for_status()
@@ -319,7 +319,7 @@ class OllamaAsyncClient:
                                         )
                                     )
                             except json.JSONDecodeError:
-                                logger.warning(f"流式响应块解析失败: {line[:100]}...")
+                                logger.warning(f"Streaming response chunk parsing failed: {line[:100]}...")
 
 class OllamaProvider(ModelProvider):
     def __init__(self, *, base_url: str = "http://localhost:11434", default_model: str = DEFAULT_MODEL):

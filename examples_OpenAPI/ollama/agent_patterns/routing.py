@@ -3,7 +3,7 @@ import sys
 import os
 import uuid
 
-# 添加项目根路径到Python路径
+# Add project root path to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..')))
 
 from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
@@ -14,12 +14,13 @@ from src.agents.run import RunConfig
 from src.agents.models.provider_factory import ModelProviderFactory
 
 """
-这个示例展示了分流/路由模式。分流代理收到第一条消息，然后根据请求的语言移交给适当的代理。
-响应以流式方式传送给用户。
+This example demonstrates the triage/routing pattern. A triage agent receives the first message,
+and then hands off to the appropriate agent based on the language of the request.
+Responses are streamed to the user.
 """
 
 def create_ollama_settings(model="phi3:latest"):
-    """创建Ollama模型设置"""
+    """Create Ollama model settings"""
     return ModelSettings(
         provider="ollama",
         ollama_base_url="http://localhost:11434",
@@ -27,9 +28,9 @@ def create_ollama_settings(model="phi3:latest"):
         temperature=0.7
     )
 
-# 创建运行配置
+# Create run configuration
 run_config = RunConfig(tracing_disabled=True)
-# 设置模型提供商
+# Set model provider
 run_config.model_provider = ModelProviderFactory.create_provider(create_ollama_settings())
 
 french_agent = Agent(
@@ -59,11 +60,11 @@ triage_agent = Agent(
 
 
 async def main():
-    # 我们为这个对话创建一个ID，以便链接每个跟踪
+    # We create an ID for this conversation to link each trace
     conversation_id = str(uuid.uuid4().hex[:16])
 
-    print("欢迎使用多语言助手！我们提供法语、西班牙语和英语服务。")
-    print("请输入您的问题 (输入'exit'退出):")
+    print("Welcome to the multilingual assistant! We offer French, Spanish, and English services.")
+    print("Enter your question (type 'exit' to quit):")
     msg = input("> ")
     
     if msg.lower() == 'exit':
@@ -73,15 +74,15 @@ async def main():
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
     while True:
-        # 每个对话回合是单个跟踪。通常，来自用户的每个输入都是对您的应用程序的API请求，
-        # 您可以在trace()中包装该请求
+        # Each turn in the conversation is a single trace. Typically, each input from a user
+        # is an API request to your application, which you would wrap in trace()
         with trace("Routing example", group_id=conversation_id):
             result = Runner.run_streamed(
                 agent,
                 input=inputs,
                 run_config=run_config
             )
-            print("\n回复: ", end="", flush=True)
+            print("\nResponse: ", end="", flush=True)
             async for event in result.stream_events():
                 if not isinstance(event, RawResponsesStreamEvent):
                     continue
@@ -103,17 +104,17 @@ async def main():
 
 
 if __name__ == "__main__":
-    # 检查Ollama服务是否运行
+    # Check if Ollama service is running
     import httpx
     try:
         response = httpx.get("http://localhost:11434/api/tags")
         if response.status_code != 200:
-            print("错误: Ollama服务返回非200状态码。请确保Ollama服务正在运行。")
+            print("Error: Ollama service returned a non-200 status code. Make sure Ollama service is running.")
             sys.exit(1)
     except Exception as e:
-        print(f"错误: 无法连接到Ollama服务。请确保Ollama服务正在运行。\n{str(e)}")
-        print("\n如果您尚未安装Ollama，请从https://ollama.ai下载并安装，然后运行'ollama serve'启动服务")
+        print(f"Error: Could not connect to Ollama service. Make sure Ollama service is running.\n{str(e)}")
+        print("\nIf you haven't installed Ollama yet, download and install it from https://ollama.ai and start the service with 'ollama serve'")
         sys.exit(1)
         
-    # 运行主函数
+    # Run the main function
     asyncio.run(main())

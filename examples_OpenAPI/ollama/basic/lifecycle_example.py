@@ -4,7 +4,7 @@ import os
 import random
 from typing import Any
 
-# 添加项目根路径到Python路径
+# Add project root to Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 from pydantic import BaseModel
@@ -77,16 +77,16 @@ class FinalResult(BaseModel):
 
 
 async def main() -> None:
-    # 创建Ollama模型设置
+    # Create Ollama model settings
     ollama_settings = ModelSettings(
         provider="ollama",
         ollama_base_url="http://localhost:11434",
         ollama_default_model="llama3.2",
         temperature=0.7
     )
-    # 创建运行配置
+    # Create runtime configuration
     run_config = RunConfig(tracing_disabled=True)
-    # 设置模型提供商
+    # Set model provider
     run_config.model_provider = ModelProviderFactory.create_provider(ollama_settings)
 
     multiply_agent = Agent(
@@ -119,7 +119,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # 检查Ollama服务是否运行
+    # Check if Ollama service is running
     import httpx
     try:
         response = httpx.get("http://localhost:11434/api/tags")
@@ -131,5 +131,5 @@ if __name__ == "__main__":
         print("\nIf you haven't installed Ollama, please download and install it from https://ollama.ai, then run 'ollama serve' to start the service")
         sys.exit(1)
         
-    # 运行主函数
+    # Run the main function
     asyncio.run(main())
