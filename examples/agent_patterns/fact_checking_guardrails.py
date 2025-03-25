@@ -5,7 +5,7 @@ import json
 
 from pydantic import BaseModel, Field
 
-from src.agents import (
+from agents import (
     Agent,
     GuardrailFunctionOutput,
     FactCheckingGuardrailTripwireTriggered,
@@ -37,7 +37,7 @@ class MessageOutput(BaseModel):
 
 class FactCheckingOutput(BaseModel):
     reasoning: str
-    is_fact_wrong: bool
+    is_age_correct: bool
 
 
 guardrail_agent = Agent(
@@ -69,7 +69,7 @@ async def self_check_facts(context: RunContextWrapper, agent: Agent, output: Mes
 
     return GuardrailFunctionOutput(
         output_info=final_output,
-        tripwire_triggered=final_output.is_fact_wrong,
+        tripwire_triggered=not final_output.is_age_correct,
     )
 
 
