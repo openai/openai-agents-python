@@ -5,7 +5,7 @@ import json
 
 from pydantic import BaseModel, Field
 
-from src.agents import (
+from agents import (
     Agent,
     GuardrailFunctionOutput,
     FactCheckingGuardrailTripwireTriggered,
@@ -35,9 +35,9 @@ class MessageOutput(BaseModel):
     age: int | None = Field(description="Age of the person")
 
 
-class ProductFactCheckingOutput(BaseModel):
+class FactCheckingOutput(BaseModel):
     reasoning: str
-    is_fact_correct: bool
+    is_fact_wrong: bool
 
 
 guardrail_agent = Agent(
@@ -46,7 +46,7 @@ guardrail_agent = Agent(
         "You are given a task to determine if the hypothesis is grounded in the provided evidence. "
         "Rely solely on the contents of the evidence without using external knowledge."
     ),
-    output_type=ProductFactCheckingOutput,
+    output_type=FactCheckingOutput,
 )
 
 
@@ -57,19 +57,19 @@ async def self_check_facts(context: RunContextWrapper, agent: Agent, output: Mes
         is coherent with the input.
         """
     message = (
-        f"Evidence: {evidence}\n"
-        f"Hypothesis: {output.age}"
+        f"Input: {evidence}\n"
+        f"Age: {output.age}"
     )
 
     print(f"message: {message}")
 
     # Run the fact-checking agent using the constructed message.
     result = await Runner.run(guardrail_agent, message, context=context.context)
-    final_output = result.final_output_as(ProductFactCheckingOutput)
+    final_output = result.final_output_as(FactCheckingOutput)
 
     return GuardrailFunctionOutput(
         output_info=final_output,
-        tripwire_triggered=final_output.is_fact_correct,
+        tripwire_triggered=final_output.is_fact_wrong,
     )
 
 
