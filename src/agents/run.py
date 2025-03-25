@@ -259,6 +259,13 @@ class Runner:
                             turn_result.next_step.output,
                             context_wrapper,
                         )
+                        fact_checking_guardrail_results = await cls._run_fact_checking_guardrails(
+                            current_agent.fact_checking_guardrails + (run_config.fact_checking_guardrails or []),
+                            current_agent,
+                            turn_result.next_step.output,
+                            context_wrapper,
+                            original_input
+                        )
                         return RunResult(
                             input=original_input,
                             new_items=generated_items,
@@ -267,6 +274,7 @@ class Runner:
                             _last_agent=current_agent,
                             input_guardrail_results=input_guardrail_results,
                             output_guardrail_results=output_guardrail_results,
+                            fact_checking_guardrail_results=fact_checking_guardrail_results,
                         )
                     elif isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -863,8 +871,8 @@ class Runner:
             guardrails: list[FactCheckingGuardrail[TContext]],
             agent: Agent[TContext],
             agent_output: Any,
-            agent_input: Any,
             context: RunContextWrapper[TContext],
+            agent_input: Any,
     ) -> list[FactCheckingGuardrailResult]:
         if not guardrails:
             return []
