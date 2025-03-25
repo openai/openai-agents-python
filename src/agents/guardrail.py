@@ -189,6 +189,7 @@ class OutputGuardrail(Generic[TContext]):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
 
         output = self.guardrail_function(context, agent, agent_output)
+
         if inspect.isawaitable(output):
             return OutputGuardrailResult(
                 guardrail=self,
