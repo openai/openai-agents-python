@@ -589,13 +589,31 @@ class Runner:
                             )
                         )
 
+                        streamed_result._fact_checking_guardrails_task = asyncio.create_task(
+                            cls._run_fact_checking_guardrails(
+                                current_agent.fact_checking_guardrails
+                                + (run_config.fact_checking_guardrails or []),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
+                                copy.deepcopy(ItemHelpers.input_to_new_input_list(starting_input)),
+                            )
+                        )
+
                         try:
                             output_guardrail_results = await streamed_result._output_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             output_guardrail_results = []
 
+                        try:
+                            fact_checking_guardrails_results = await streamed_result._fact_checking_guardrails_task
+                        except Exception:
+                            # Exceptions will be checked in the stream_events loop
+                            fact_checking_guardrails_results = []
+
                         streamed_result.output_guardrail_results = output_guardrail_results
+                        streamed_result.fact_checking_guardrails = fact_checking_guardrails_results
                         streamed_result.final_output = turn_result.next_step.output
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
