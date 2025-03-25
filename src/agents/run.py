@@ -424,6 +424,7 @@ class Runner:
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
+            fact_checking_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             _trace=new_trace,
         )
