@@ -442,27 +442,27 @@ def fact_checking_guardrail(
     *,
     name: str | None = None,
 ) -> (
-    OutputGuardrail[TContext_co]
+    FactCheckingGuardrail[TContext_co]
     | Callable[
         [_FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co]],
-        OutputGuardrail[TContext_co],
+        FactCheckingGuardrail[TContext_co],
     ]
 ):
     """
     Decorator that transforms a sync or async function into an `OutputGuardrail`.
     It can be used directly (no parentheses) or with keyword args, e.g.:
 
-        @output_guardrail
+        @fact_checking_guardrail
         def my_sync_guardrail(...): ...
 
-        @output_guardrail(name="guardrail_name")
+        @fact_checking_guardrail(name="guardrail_name")
         async def my_async_guardrail(...): ...
     """
 
     def decorator(
         f: _FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co],
-    ) -> OutputGuardrail[TContext_co]:
-        return OutputGuardrail(guardrail_function=f, name=name)
+    ) -> FactCheckingGuardrail[TContext_co]:
+        return FactCheckingGuardrail(guardrail_function=f, name=name)
 
     if func is not None:
         # Decorator was used without parentheses
