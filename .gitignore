@@ -135,7 +135,7 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#.idea/
+.idea/
 
 # Ruff stuff:
 .ruff_cache/

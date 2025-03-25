@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+env:
+  UV_FROZEN: "1"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
