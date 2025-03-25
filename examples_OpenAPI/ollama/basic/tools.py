@@ -2,53 +2,60 @@ import asyncio
 import sys
 import os
 
-# Add project root to Python path to ensure src package can be imported
+# 添加项目根路径到Python路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
-# Import required modules
-from src.agents import Agent, Runner
+from pydantic import BaseModel
+
+from src.agents import Agent, Runner, function_tool
 from src.agents.model_settings import ModelSettings
 from src.agents.run import RunConfig
 from src.agents.models.provider_factory import ModelProviderFactory
 
-async def main():
-    # Create Ollama model settings
-    ollama_settings = ModelSettings(
-        provider="ollama",  # Specify Ollama as the provider
-        ollama_base_url="http://localhost:11434",  # Ollama service address
-        ollama_default_model="phi4:latest",  # Use phi4 model
-        temperature=0.7  # Optional: control creativity
-    )
-    # Create run configuration
-    run_config = RunConfig()
-    # Set model provider
-    run_config.model_provider = ModelProviderFactory.create_provider(ollama_settings)
+class Weather(BaseModel):
+    city: str
+    temperature_range: str
+    conditions: str
 
-    # Create Agent instance
-    agent = Agent(
-        name="Assistant",
-        instructions="You only respond in haikus.",
-        model_settings=ollama_settings  # Use Ollama settings
+
+@function_tool
+def get_weather(city: str) -> Weather:
+    print("[debug] get_weather called")
+    return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
+
+
+async def main():
+    # 创建Ollama模型设置
+    ollama_settings = ModelSettings(
+        provider="ollama",
+        ollama_base_url="http://localhost:11434",
+        ollama_default_model="llama3.2",
+        temperature=0.7
     )
+    # 创建运行配置
+    run_config = RunConfig(tracing_disabled=True)
+    # 设置模型提供商
+    run_config.model_provider = ModelProviderFactory.create_provider(ollama_settings)
     
-    # Run Agent
-    print("Running Agent, please wait...")
+    agent = Agent(
+        name="Hello world",
+        instructions="You are a helpful agent.",
+        tools=[get_weather],
+        model_settings=ollama_settings
+    )
+
+    print("Running Agent with Ollama, please wait...")
     result = await Runner.run(
         agent, 
-        "Tell me about recursion in programming.", 
+        input="What's the weather in Tokyo?",
         run_config=run_config
     )
-    
-    # Print results
     print("\nResult:")
     print(result.final_output)
-    # Expected output similar to:
-    # Function calls itself,
-    # Looping in smaller pieces,
-    # Endless by design.
+
 
 if __name__ == "__main__":
-    # Check if Ollama service is running
+    # 检查Ollama服务是否运行
     import httpx
     try:
         response = httpx.get("http://localhost:11434/api/tags")
@@ -60,5 +67,5 @@ if __name__ == "__main__":
         print("\nIf you haven't installed Ollama, please download and install it from https://ollama.ai, then run 'ollama serve' to start the service")
         sys.exit(1)
         
-    # Run main function
+    # 运行主函数
     asyncio.run(main())

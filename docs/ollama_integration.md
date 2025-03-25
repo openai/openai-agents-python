@@ -29,7 +29,7 @@ from src.agents.model_settings import ModelSettings
 ollama_settings = ModelSettings(
     provider="ollama",  # Specify Ollama as the provider
     ollama_base_url="http://localhost:11434",  # Ollama service address
-    ollama_default_model="phi4:latest",  # Model to use
+    ollama_default_model="llama3.2",  # Model to use
     temperature=0.7  # Optional: control creativity
 )
 ```
@@ -46,7 +46,7 @@ from src.agents.model_settings import ModelSettings
 ollama_settings = ModelSettings(
     provider="ollama",
     ollama_base_url="http://localhost:11434",  
-    ollama_default_model="phi4:latest"
+    ollama_default_model="llama3.2"
 )
 
 # Create an agent with Ollama
@@ -96,7 +96,7 @@ async def main():
     ollama_settings = ModelSettings(
         provider="ollama", 
         ollama_base_url="http://localhost:11434", 
-        ollama_default_model="phi4:latest", 
+        ollama_default_model="llama3.2", 
         temperature=0.7
     )
     

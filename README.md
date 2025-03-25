@@ -2,6 +2,37 @@
 
 > This project builds upon and extends the [original OpenAI Agents SDK](https://github.com/openai/openai-agents-python/blob/main/README.md).
 
+A example of using the OpenAPI Agents SDK to interact with the Ollama API:
+```bash
+(env) ➜  openAPI-agents-python git:(main) ✗ python examples_OpenAPI/ollama/basic/hello_world.py 
+Running Agent, please wait...
+Sending request to: http://localhost:11434/v1/chat/completions
+Request payload: {"model": "llama3.2", "temperature": 0.7, "max_tokens": 1000, "messages": [{"role": "system", "content": "You only respond in haikus."}, {"content": "Tell me about recursion in programming.", "role": "user"}]}
+
+Result:
+A function calls self,  
+Solving problems piece by piece,  
+Ends when base is met.  
+
+Stack grows with each call,  
+Memory used till solution,  
+Careful with limits.  
+
+Tail recursion saves,  
+Optimizing stack usage well,  
+In some languages clear.  
+
+Simple tasks repeated,  
+Towers of Hanoi's magic dance,  
+Math problems delight.  
+
+Endless loops beware!  
+Missing base case is your foe,  
+Watch for infinite calls.  
+
+---
+```
+
 ## Project Vision
 
 The OpenAPI Agents SDK is a powerful framework designed to achieve an ambitious goal: **enabling any API that conforms to the OpenAPI specification to be utilized by intelligent agents**. Through this framework, we can:
@@ -23,6 +54,17 @@ We have implemented integration with **Ollama**, which is an important milestone
 - Communicate via Ollama's OpenAI-compatible API endpoints
 - Experience the power of the Agent framework without requiring OpenAI API keys
 - Ensure data privacy with all processing happening locally
+
+### Examples passed with Ollama
+examples_OpenAPI/ollama/basic/hello_world.py
+examples_OpenAPI/ollama/basic/hello_world_jupyter.py
+examples_OpenAPI/ollama/basic/hello_world.py
+examples_OpenAPI/ollama/basic/failed/agent_lifecycle_example.py
+examples_OpenAPI/ollama/basic/failed/lifecycle_example.py
+
+
+
+
 
 ## Core Concepts
 
@@ -53,7 +95,7 @@ async def main():
     ollama_settings = ModelSettings(
         provider="ollama",  # Specify Ollama as the provider
         ollama_base_url="http://localhost:11434",  # Ollama service address
-        ollama_default_model="phi4:latest",  # Use phi4 model
+        ollama_default_model="llama3.2",  # Use phi4 model
         temperature=0.7  # Optional: control creativity
     )
     

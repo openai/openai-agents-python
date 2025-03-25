@@ -21,7 +21,7 @@ class ModelSettings:
     ollama_base_url: str = "http://localhost:11434"
     """The base URL for the Ollama API."""
 
-    ollama_default_model: str = "phi4:latest"
+    ollama_default_model: str = "llama3.2"
     """The default model to use for Ollama."""
 
     temperature: float | None = None
