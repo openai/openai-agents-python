@@ -274,7 +274,7 @@ def get_sync_fact_checking_guardrail(triggers: bool, output_info: Any | None = N
 
 
 @pytest.mark.asyncio
-async def test_sync_fact_guardrail():
+async def test_sync_fact_checking_guardrail():
     guardrail = FactCheckingGuardrail(guardrail_function=get_sync_fact_checking_guardrail(triggers=False))
     result = await guardrail.run(
         agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
@@ -297,3 +297,88 @@ async def test_sync_fact_guardrail():
     )
     assert result.output.tripwire_triggered
     assert result.output.output_info == "test"
+
+
+def get_async_fact_checking_guardrail(triggers: bool, output_info: Any | None = None):
+    async def async_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any, agent_input: Any
+    ):
+        return GuardrailFunctionOutput(
+            output_info=output_info,
+            tripwire_triggered=triggers,
+        )
+
+    return async_guardrail
+
+
+@pytest.mark.asyncio
+async def test_async_fact_checking_guardrail():
+    guardrail = FactCheckingGuardrail(guardrail_function=get_async_fact_checking_guardrail(triggers=False))
+    result = await guardrail.run(
+        agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+    )
+    assert not result.output.tripwire_triggered
+    assert result.output.output_info is None
+
+    guardrail = FactCheckingGuardrail(guardrail_function=get_async_fact_checking_guardrail(triggers=True))
+    result = await guardrail.run(
+        agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+    )
+    assert result.output.tripwire_triggered
+    assert result.output.output_info is None
+
+    guardrail = FactCheckingGuardrail(
+        guardrail_function=get_async_fact_checking_guardrail(triggers=True, output_info="test")
+    )
+    result = await guardrail.run(
+        agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+    )
+    assert result.output.tripwire_triggered
+    assert result.output.output_info == "test"
+
+
+@pytest.mark.asyncio
+async def test_invalid_fact_checking_guardrail_raises_user_error():
+    with pytest.raises(UserError):
+        # Purposely ignoring type error
+        guardrail = FactCheckingGuardrail(guardrail_function="foo")  # type: ignore
+        await guardrail.run(
+            agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+        )
+
+
+@fact_checking_guardrail
+def decorated_fact_checking_guardrail(
+    context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any, agent_input: Any
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(
+        output_info="test_5",
+        tripwire_triggered=False,
+    )
+
+
+@fact_checking_guardrail(name="Custom name")
+def decorated_named_fact_checking_guardrail(
+    context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any, agent_input: Any
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(
+        output_info="test_6",
+        tripwire_triggered=False,
+    )
+
+@pytest.mark.asyncio
+async def test_fact_checking_guardrail_decorators():
+    guardrail = decorated_fact_checking_guardrail
+    result = await guardrail.run(
+        agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+    )
+    assert not result.output.tripwire_triggered
+    assert result.output.output_info == "test_5"
+
+    guardrail = decorated_named_fact_checking_guardrail
+    result = await guardrail.run(
+        agent=Agent(name="test"), agent_input="test", agent_output="test", context=RunContextWrapper(context=None)
+    )
+    assert not result.output.tripwire_triggered
+    assert result.output.output_info == "test_6"
+    assert guardrail.get_name() == "Custom name"

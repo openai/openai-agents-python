@@ -417,13 +417,13 @@ _FactCheckingGuardrailAsync = Callable[
 @overload
 def fact_checking_guardrail(
     func: _FactCheckingGuardrailFuncSync[TContext_co],
-) -> OutputGuardrail[TContext_co]: ...
+) -> FactCheckingGuardrail[TContext_co]: ...
 
 
 @overload
 def fact_checking_guardrail(
     func: _FactCheckingGuardrailAsync[TContext_co],
-) -> OutputGuardrail[TContext_co]: ...
+) -> FactCheckingGuardrail[TContext_co]: ...
 
 
 @overload
@@ -432,7 +432,7 @@ def fact_checking_guardrail(
     name: str | None = None,
 ) -> Callable[
     [_FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co]],
-    OutputGuardrail[TContext_co],
+    FactCheckingGuardrail[TContext_co],
 ]: ...
 
 
