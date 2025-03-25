@@ -67,6 +67,32 @@ class OutputGuardrailResult:
     output: GuardrailFunctionOutput
     """The output of the guardrail function."""
 
+@dataclass
+class FactCheckingGuardrailResult:
+    """The result of a guardrail run."""
+
+    guardrail: FactCheckingGuardrail[Any]
+    """
+    The guardrail that was run.
+    """
+
+    agent_input: Any
+    """
+    The input of the agent that was checked by the guardrail.
+    """
+
+    agent_output: Any
+    """
+    The output of the agent that was checked by the guardrail.
+    """
+
+    agent: Agent[Any]
+    """
+    The agent that was checked by the guardrail.
+    """
+
+    output: GuardrailFunctionOutput
+    """The output of the guardrail function."""
 
 @dataclass
 class InputGuardrail(Generic[TContext]):
@@ -174,6 +200,63 @@ class OutputGuardrail(Generic[TContext]):
         return OutputGuardrailResult(
             guardrail=self,
             agent=agent,
+            agent_output=agent_output,
+            output=output,
+        )
+
+
+@dataclass
+class FactCheckingGuardrail(Generic[TContext]):
+    """Fact checking guardrails are checks that run on the final output and the input of an agent.
+    They can be used to do check if the output passes certain validation criteria
+
+    You can use the `@fact_checking_guardrail()` decorator to turn a function into an `OutputGuardrail`,
+    or create an `OutputGuardrail` manually.
+
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, a
+    `OutputGuardrailTripwireTriggered` exception will be raised.
+    """
+
+    guardrail_function: Callable[
+        [RunContextWrapper[TContext], Agent[Any], Any, Any],
+        MaybeAwaitable[GuardrailFunctionOutput],
+    ]
+    """A function that receives the final agent, its output, and the context, and returns a
+     `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
+     include information about the guardrail's output.
+    """
+
+    name: str | None = None
+    """The name of the guardrail, used for tracing. If not provided, we'll use the guardrail
+    function's name.
+    """
+
+    def get_name(self) -> str:
+        if self.name:
+            return self.name
+
+        return self.guardrail_function.__name__
+
+    async def run(
+        self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any, agent_input: Any
+    ) -> FactCheckingGuardrailResult:
+        if not callable(self.guardrail_function):
+            raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
+
+        output = self.guardrail_function(context, agent, agent_output, agent_input)
+        if inspect.isawaitable(output):
+            return FactCheckingGuardrailResult(
+                guardrail=self,
+                agent=agent,
+                agent_input=agent_input,
+                agent_output=agent_output,
+                output=await output,
+            )
+
+        return FactCheckingGuardrailResult(
+            guardrail=self,
+            agent=agent,
+            agent_input=agent_input,
             agent_output=agent_output,
             output=output,
         )
@@ -309,6 +392,75 @@ def output_guardrail(
 
     def decorator(
         f: _OutputGuardrailFuncSync[TContext_co] | _OutputGuardrailFuncAsync[TContext_co],
+    ) -> OutputGuardrail[TContext_co]:
+        return OutputGuardrail(guardrail_function=f, name=name)
+
+    if func is not None:
+        # Decorator was used without parentheses
+        return decorator(func)
+
+    # Decorator used with keyword arguments
+    return decorator
+
+
+_FactCheckingGuardrailFuncSync = Callable[
+    [RunContextWrapper[TContext_co], "Agent[Any]", Any, Any],
+    GuardrailFunctionOutput,
+]
+_FactCheckingGuardrailAsync = Callable[
+    [RunContextWrapper[TContext_co], "Agent[Any]", Any, Any],
+    Awaitable[GuardrailFunctionOutput],
+]
+
+
+@overload
+def fact_checking_guardrail(
+    func: _FactCheckingGuardrailFuncSync[TContext_co],
+) -> OutputGuardrail[TContext_co]: ...
+
+
+@overload
+def fact_checking_guardrail(
+    func: _FactCheckingGuardrailAsync[TContext_co],
+) -> OutputGuardrail[TContext_co]: ...
+
+
+@overload
+def fact_checking_guardrail(
+    *,
+    name: str | None = None,
+) -> Callable[
+    [_FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co]],
+    OutputGuardrail[TContext_co],
+]: ...
+
+
+def fact_checking_guardrail(
+    func: _FactCheckingGuardrailFuncSync[TContext_co]
+    | _FactCheckingGuardrailAsync[TContext_co]
+    | None = None,
+    *,
+    name: str | None = None,
+) -> (
+    OutputGuardrail[TContext_co]
+    | Callable[
+        [_FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co]],
+        OutputGuardrail[TContext_co],
+    ]
+):
+    """
+    Decorator that transforms a sync or async function into an `OutputGuardrail`.
+    It can be used directly (no parentheses) or with keyword args, e.g.:
+
+        @output_guardrail
+        def my_sync_guardrail(...): ...
+
+        @output_guardrail(name="guardrail_name")
+        async def my_async_guardrail(...): ...
+    """
+
+    def decorator(
+        f: _FactCheckingGuardrailFuncSync[TContext_co] | _FactCheckingGuardrailAsync[TContext_co],
     ) -> OutputGuardrail[TContext_co]:
         return OutputGuardrail(guardrail_function=f, name=name)
 
