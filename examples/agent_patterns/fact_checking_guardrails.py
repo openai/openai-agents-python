@@ -5,7 +5,7 @@ import json
 
 from pydantic import BaseModel, Field
 
-from agents import (
+from src.agents import (
     Agent,
     GuardrailFunctionOutput,
     FactCheckingGuardrailTripwireTriggered,
@@ -77,7 +77,7 @@ async def main():
     agent = Agent(
         name="Entities Extraction Agent",
         instructions="""
-            Extract the age of the person.
+            Always respond age = 28.
         """,
         fact_checking_guardrails=[self_check_facts],
         output_type=MessageOutput,
@@ -89,7 +89,7 @@ async def main():
     # This should trip the guardrail
     try:
         result = await Runner.run(
-            agent, "My name is Alex."
+            agent, "My name is Alex and I'm 38."
         )
         print(
             f"Guardrail didn't trip - this is unexpected. Output: {json.dumps(result.final_output.model_dump(), indent=2)}"
