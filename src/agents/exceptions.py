@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .guardrail import InputGuardrailResult, OutputGuardrailResult
+    from .guardrail import InputGuardrailResult, OutputGuardrailResult, FactCheckingGuardrailResult
 
 
 class AgentsException(Exception):
@@ -57,6 +57,18 @@ class OutputGuardrailTripwireTriggered(AgentsException):
     """The result data of the guardrail that was triggered."""
 
     def __init__(self, guardrail_result: "OutputGuardrailResult"):
+        self.guardrail_result = guardrail_result
+        super().__init__(
+            f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
+        )
+
+class FactCheckingGuardrailTripwireTriggered(AgentsException):
+    """Exception raised when a guardrail tripwire is triggered."""
+
+    guardrail_result: "FactCheckingGuardrailResult"
+    """The result data of the guardrail that was triggered."""
+
+    def __init__(self, guardrail_result: "FactCheckingGuardrailResult"):
         self.guardrail_result = guardrail_result
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"

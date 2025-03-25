@@ -25,8 +25,16 @@ from .exceptions import (
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
+    FactCheckingGuardrailTripwireTriggered,
 )
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import (
+    InputGuardrail,
+    InputGuardrailResult,
+    OutputGuardrail,
+    OutputGuardrailResult,
+    FactCheckingGuardrail,
+    FactCheckingGuardrailResult
+)
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
@@ -73,6 +81,9 @@ class RunConfig:
 
     output_guardrails: list[OutputGuardrail[Any]] | None = None
     """A list of output guardrails to run on the final output of the run."""
+
+    fact_checking_guardrails: list[FactCheckingGuardrail[Any]] | None = None
+    """A list of fact checking guardrails to run on the original input and the final output of the run."""
 
     tracing_disabled: bool = False
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
@@ -841,6 +852,45 @@ class Runner:
                     )
                 )
                 raise OutputGuardrailTripwireTriggered(result)
+            else:
+                guardrail_results.append(result)
+
+        return guardrail_results
+
+    @classmethod
+    async def _run_fact_checking_guardrails(
+            cls,
+            guardrails: list[FactCheckingGuardrail[TContext]],
+            agent: Agent[TContext],
+            agent_output: Any,
+            agent_input: Any,
+            context: RunContextWrapper[TContext],
+    ) -> list[FactCheckingGuardrailResult]:
+        if not guardrails:
+            return []
+
+        guardrail_tasks = [
+            asyncio.create_task(
+                RunImpl.run_single_fact_checking_guardrail(guardrail, agent, agent_output, context, agent_input)
+            )
+            for guardrail in guardrails
+        ]
+
+        guardrail_results = []
+
+        for done in asyncio.as_completed(guardrail_tasks):
+            result = await done
+            if result.output.tripwire_triggered:
+                # Cancel all guardrail tasks if a tripwire is triggered.
+                for t in guardrail_tasks:
+                    t.cancel()
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Guardrail tripwire triggered",
+                        data={"guardrail": result.guardrail.get_name()},
+                    )
+                )
+                raise FactCheckingGuardrailTripwireTriggered(result)
             else:
                 guardrail_results.append(result)
 

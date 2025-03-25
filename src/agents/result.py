@@ -8,11 +8,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import TypeVar
 
-from ._run_impl import QueueCompleteSentinel
-from .agent import Agent
 from .agent_output import AgentOutputSchema
 from .exceptions import InputGuardrailTripwireTriggered, MaxTurnsExceeded
-from .guardrail import InputGuardrailResult, OutputGuardrailResult
+from .guardrail import InputGuardrailResult, OutputGuardrailResult, FactCheckingGuardrailResult
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .logger import logger
 from .stream_events import StreamEvent
@@ -49,6 +47,9 @@ class RunResultBase(abc.ABC):
 
     output_guardrail_results: list[OutputGuardrailResult]
     """Guardrail results for the final output of the agent."""
+
+    fact_checking_guardrail_results: list[FactCheckingGuardrailResult]
+    """Guardrail results for the original input and the final output of the agent."""
 
     @property
     @abc.abstractmethod
@@ -135,6 +136,7 @@ class RunResultStreaming(RunResultBase):
     _run_impl_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    _fact_checking_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
 
     @property
@@ -211,6 +213,11 @@ class RunResultStreaming(RunResultBase):
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
+        if self._fact_checking_guardrails_task and self._fact_checking_guardrails_task.done():
+            exc = self._fact_checking_guardrails_task.exception()
+            if exc and isinstance(exc, Exception):
+                self._stored_exception = exc
+
     def _cleanup_tasks(self):
         if self._run_impl_task and not self._run_impl_task.done():
             self._run_impl_task.cancel()
@@ -220,6 +227,9 @@ class RunResultStreaming(RunResultBase):
 
         if self._output_guardrails_task and not self._output_guardrails_task.done():
             self._output_guardrails_task.cancel()
+
+        if self._fact_checking_guardrails_task and not self._fact_checking_guardrails_task.done():
+            self._fact_checking_guardrails_task.cancel()
 
     def __str__(self) -> str:
         return pretty_print_run_result_streaming(self)

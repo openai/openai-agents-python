@@ -31,7 +31,7 @@ from .agent import Agent, ToolsToFinalOutputResult
 from .agent_output import AgentOutputSchema
 from .computer import AsyncComputer, Computer
 from .exceptions import AgentsException, ModelBehaviorError, UserError
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult, FactCheckingGuardrail, FactCheckingGuardrailResult
 from .handoffs import Handoff, HandoffInputData
 from .items import (
     HandoffCallItem,
@@ -655,6 +655,20 @@ class RunImpl:
     ) -> OutputGuardrailResult:
         with guardrail_span(guardrail.get_name()) as span_guardrail:
             result = await guardrail.run(agent=agent, agent_output=agent_output, context=context)
+            span_guardrail.span_data.triggered = result.output.tripwire_triggered
+            return result
+
+    @classmethod
+    async def run_single_fact_checking_guardrail(
+            cls,
+            guardrail: FactCheckingGuardrail[TContext],
+            agent: Agent[Any],
+            agent_output: Any,
+            context: RunContextWrapper[TContext],
+            agent_input: Any,
+    ) -> FactCheckingGuardrailResult:
+        with guardrail_span(guardrail.get_name()) as span_guardrail:
+            result = await guardrail.run(agent=agent, agent_output=agent_output, context=context, agent_input=agent_input)
             span_guardrail.span_data.triggered = result.output.tripwire_triggered
             return result
 

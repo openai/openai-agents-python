@@ -449,7 +449,7 @@ def fact_checking_guardrail(
     ]
 ):
     """
-    Decorator that transforms a sync or async function into an `OutputGuardrail`.
+    Decorator that transforms a sync or async function into an `FactCheckingGuardrail`.
     It can be used directly (no parentheses) or with keyword args, e.g.:
 
         @fact_checking_guardrail
