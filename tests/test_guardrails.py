@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from src.agents import (
+from agents import (
     Agent,
     GuardrailFunctionOutput,
     InputGuardrail,
@@ -14,7 +14,7 @@ from src.agents import (
     TResponseInputItem,
     UserError,
 )
-from src.agents.guardrail import input_guardrail, output_guardrail, fact_checking_guardrail
+from agents.guardrail import input_guardrail, output_guardrail, fact_checking_guardrail
 
 
 def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
@@ -365,6 +365,7 @@ def decorated_named_fact_checking_guardrail(
         output_info="test_6",
         tripwire_triggered=False,
     )
+
 
 @pytest.mark.asyncio
 async def test_fact_checking_guardrail_decorators():
