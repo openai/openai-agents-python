@@ -10,7 +10,7 @@ uv run python  python examples/mcp/filesystem_example/main.py
 
 ## Details
 
-The example uses the `MCPServerStdio` class from `agents`, with the command:
+The example uses the `MCPServerStdio` class from `agents.mcp`, with the command:
 
 ```bash
 npx -y "@modelcontextprotocol/server-filesystem" <samples_directory>

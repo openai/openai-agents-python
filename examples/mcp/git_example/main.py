@@ -29,7 +29,10 @@ async def main():
     # Ask the user for the directory path
     directory_path = input("Please enter the path to the git repository: ")
 
-    async with MCPServerStdio(params={"command": "uvx", "args": ["mcp-server-git"]}) as server:
+    async with MCPServerStdio(
+        cache_tools_list=True,  # Cache the tools list, for demonstration
+        params={"command": "uvx", "args": ["mcp-server-git"]},
+    ) as server:
         with trace(workflow_name="MCP Git Example"):
             await run(server, directory_path)
 

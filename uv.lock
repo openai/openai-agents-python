@@ -1,5 +1,4 @@
 version = 1
-revision = 1
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.10'",
@@ -1087,7 +1086,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.0.6"
+version = "0.0.7"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
@@ -1143,7 +1142,6 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz"]
 
 [package.metadata.requires-dev]
 dev = [

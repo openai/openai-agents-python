@@ -1,4 +1,4 @@
-# Model context protocol
+# Model context protocol (MCP)
 
 The [Model context protocol](https://modelcontextprotocol.io/introduction) (aka MCP) is a way to provide tools and context to the LLM. From the MCP docs:
 
@@ -46,6 +46,15 @@ Every time an Agent runs, it calls `list_tools()` on the MCP server. This can be
 
 If you want to invalidate the cache, you can call `invalidate_tools_cache()` on the servers.
 
-## End-to-end example
+## End-to-end examples
 
 View complete working examples at [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp).
+
+## Tracing
+
+[Tracing](./tracing.md) automatically captures MCP operations, including:
+
+1. Calls to the MCP server to list tools
+2. MCP-related info on function calls
+
+![MCP Tracing Screenshot](./assets/images/mcp-tracing.jpg)
