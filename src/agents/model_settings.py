@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Literal
 
 
@@ -47,14 +47,9 @@ class ModelSettings:
         override on top of this instance."""
         if override is None:
             return self
-        return ModelSettings(
-            temperature=override.temperature if override.temperature is not None else self.temperature,
-            top_p=override.top_p if override.top_p is not None else self.top_p,
-            frequency_penalty=override.frequency_penalty if override.frequency_penalty is not None else self.frequency_penalty,
-            presence_penalty=override.presence_penalty if override.presence_penalty is not None else self.presence_penalty,
-            tool_choice=override.tool_choice if override.tool_choice is not None else self.tool_choice,
-            parallel_tool_calls=override.parallel_tool_calls if override.parallel_tool_calls is not None else self.parallel_tool_calls,
-            truncation=override.truncation if override.truncation is not None else self.truncation,
-            max_tokens=override.max_tokens if override.max_tokens is not None else self.max_tokens,
-            store=override.store if override.store is not None else self.store,
-        )
+
+        new_values = {
+            k: getattr(override, k) if getattr(override, k) is not None else getattr(self, k)
+            for k in asdict(self)
+        }
+        return ModelSettings(**new_values)
