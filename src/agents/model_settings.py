@@ -30,7 +30,7 @@ class ModelSettings:
     tool_choice: Literal["auto", "required", "none"] | str | None = None
     """The tool choice to use when calling the model."""
 
-    parallel_tool_calls: bool | None = False
+    parallel_tool_calls: bool | None = None
     """Whether to use parallel tool calls when calling the model."""
 
     truncation: Literal["auto", "disabled"] | None = None
@@ -39,7 +39,7 @@ class ModelSettings:
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
 
-    store: bool = True
+    store: bool | None = None
     """Whether to store the generated model response for later retrieval."""
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
