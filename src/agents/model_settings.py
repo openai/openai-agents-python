@@ -31,7 +31,8 @@ class ModelSettings:
     """The tool choice to use when calling the model."""
 
     parallel_tool_calls: bool | None = None
-    """Whether to use parallel tool calls when calling the model."""
+    """Whether to use parallel tool calls when calling the model. 
+    Defaults to False if not provided."""
 
     truncation: Literal["auto", "disabled"] | None = None
     """The truncation strategy to use when calling the model."""
@@ -40,7 +41,8 @@ class ModelSettings:
     """The maximum number of output tokens to generate."""
 
     store: bool | None = None
-    """Whether to store the generated model response for later retrieval."""
+    """Whether to store the generated model response for later retrieval. 
+    Defaults to True if not provided."""
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
@@ -50,6 +52,6 @@ class ModelSettings:
 
         new_values = {
             k: getattr(override, k) if getattr(override, k) is not None else getattr(self, k)
-            for k in asdict(self)
+            for k in self.__dataclass_fields__
         }
         return ModelSettings(**new_values)
