@@ -48,13 +48,13 @@ class ModelSettings:
         if override is None:
             return self
         return ModelSettings(
-            temperature=override.temperature or self.temperature,
-            top_p=override.top_p or self.top_p,
-            frequency_penalty=override.frequency_penalty or self.frequency_penalty,
-            presence_penalty=override.presence_penalty or self.presence_penalty,
-            tool_choice=override.tool_choice or self.tool_choice,
-            parallel_tool_calls=override.parallel_tool_calls or self.parallel_tool_calls,
-            truncation=override.truncation or self.truncation,
-            max_tokens=override.max_tokens or self.max_tokens,
+            temperature=override.temperature if override.temperature is not None else self.temperature,
+            top_p=override.top_p if override.top_p is not None else self.top_p,
+            frequency_penalty=override.frequency_penalty if override.frequency_penalty is not None else self.frequency_penalty,
+            presence_penalty=override.presence_penalty if override.presence_penalty is not None else self.presence_penalty,
+            tool_choice=override.tool_choice if override.tool_choice is not None else self.tool_choice,
+            parallel_tool_calls=override.parallel_tool_calls if override.parallel_tool_calls is not None else self.parallel_tool_calls,
+            truncation=override.truncation if override.truncation is not None else self.truncation,
+            max_tokens=override.max_tokens if override.max_tokens is not None else self.max_tokens,
             store=override.store if override.store is not None else self.store,
         )
