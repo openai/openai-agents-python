@@ -706,19 +706,17 @@ class RunImpl:
 
     @classmethod
     async def run_single_fact_checking_guardrail(
-            cls,
-            guardrail: FactCheckingGuardrail[TContext],
-            agent: Agent[Any],
-            agent_output: Any,
-            context: RunContextWrapper[TContext],
-            agent_input: Any,
+        cls,
+        guardrail: FactCheckingGuardrail[TContext],
+        agent: Agent[Any],
+        agent_output: Any,
+        context: RunContextWrapper[TContext],
+        agent_input: Any,
     ) -> FactCheckingGuardrailResult:
         with guardrail_span(guardrail.get_name()) as span_guardrail:
             result = await guardrail.run(
-                agent=agent,
-                agent_output=agent_output,
-                context=context,
-                agent_input=agent_input)
+                agent=agent, agent_output=agent_output, context=context, agent_input=agent_input
+            )
             span_guardrail.span_data.triggered = result.output.tripwire_triggered
             return result
 

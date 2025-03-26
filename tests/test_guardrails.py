@@ -264,10 +264,9 @@ async def test_output_guardrail_decorators():
 
 
 def get_sync_fact_checking_guardrail(triggers: bool, output_info: Any | None = None):
-    def sync_guardrail(context: RunContextWrapper[Any],
-                       agent: Agent[Any],
-                       agent_output: Any,
-                       agent_input: Any):
+    def sync_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any, agent_input: Any
+    ):
         return GuardrailFunctionOutput(
             output_info=output_info,
             tripwire_triggered=triggers,
@@ -279,23 +278,25 @@ def get_sync_fact_checking_guardrail(triggers: bool, output_info: Any | None = N
 @pytest.mark.asyncio
 async def test_sync_fact_checking_guardrail():
     guardrail = FactCheckingGuardrail(
-        guardrail_function=get_sync_fact_checking_guardrail(triggers=False))
+        guardrail_function=get_sync_fact_checking_guardrail(triggers=False)
+    )
     result = await guardrail.run(
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info is None
 
     guardrail = FactCheckingGuardrail(
-        guardrail_function=get_sync_fact_checking_guardrail(triggers=True))
+        guardrail_function=get_sync_fact_checking_guardrail(triggers=True)
+    )
     result = await guardrail.run(
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert result.output.tripwire_triggered
     assert result.output.output_info is None
@@ -307,7 +308,7 @@ async def test_sync_fact_checking_guardrail():
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert result.output.tripwire_triggered
     assert result.output.output_info == "test"
@@ -328,23 +329,25 @@ def get_async_fact_checking_guardrail(triggers: bool, output_info: Any | None = 
 @pytest.mark.asyncio
 async def test_async_fact_checking_guardrail():
     guardrail = FactCheckingGuardrail(
-        guardrail_function=get_async_fact_checking_guardrail(triggers=False))
+        guardrail_function=get_async_fact_checking_guardrail(triggers=False)
+    )
     result = await guardrail.run(
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info is None
 
     guardrail = FactCheckingGuardrail(
-        guardrail_function=get_async_fact_checking_guardrail(triggers=True))
+        guardrail_function=get_async_fact_checking_guardrail(triggers=True)
+    )
     result = await guardrail.run(
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert result.output.tripwire_triggered
     assert result.output.output_info is None
@@ -356,7 +359,7 @@ async def test_async_fact_checking_guardrail():
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert result.output.tripwire_triggered
     assert result.output.output_info == "test"
@@ -371,7 +374,7 @@ async def test_invalid_fact_checking_guardrail_raises_user_error():
             agent=Agent(name="test"),
             agent_input="test",
             agent_output="test",
-            context=RunContextWrapper(context=None)
+            context=RunContextWrapper(context=None),
         )
 
 
@@ -402,7 +405,7 @@ async def test_fact_checking_guardrail_decorators():
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_5"
@@ -412,7 +415,7 @@ async def test_fact_checking_guardrail_decorators():
         agent=Agent(name="test"),
         agent_input="test",
         agent_output="test",
-        context=RunContextWrapper(context=None)
+        context=RunContextWrapper(context=None),
     )
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_6"

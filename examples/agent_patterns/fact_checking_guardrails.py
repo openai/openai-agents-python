@@ -7,13 +7,12 @@ from pydantic import BaseModel, Field
 
 from agents import (
     Agent,
-    GuardrailFunctionOutput,
     FactCheckingGuardrailTripwireTriggered,
+    GuardrailFunctionOutput,
     RunContextWrapper,
     Runner,
     fact_checking_guardrail,
 )
-
 
 """
 This example shows how to use fact checking guardrails.
@@ -51,15 +50,13 @@ guardrail_agent = Agent(
 
 
 @fact_checking_guardrail
-async def self_check_facts(context: RunContextWrapper, agent: Agent, output: MessageOutput, evidence: str) \
-        -> GuardrailFunctionOutput:
+async def self_check_facts(
+    context: RunContextWrapper, agent: Agent, output: MessageOutput, evidence: str
+) -> GuardrailFunctionOutput:
     """This is a facts checking guardrail function, which happens to call an agent to check if the output
-        is coherent with the input.
-        """
-    message = (
-        f"Input: {evidence}\n"
-        f"Age: {output.age}"
-    )
+    is coherent with the input.
+    """
+    message = f"Input: {evidence}\nAge: {output.age}"
 
     print(f"message: {message}")
 
@@ -88,15 +85,14 @@ async def main():
 
     # This should trip the guardrail
     try:
-        result = await Runner.run(
-            agent, "My name is Alex and I'm 38."
-        )
+        result = await Runner.run(agent, "My name is Alex and I'm 38.")
         print(
             f"Guardrail didn't trip - this is unexpected. Output: {json.dumps(result.final_output.model_dump(), indent=2)}"
         )
 
     except FactCheckingGuardrailTripwireTriggered as e:
         print(f"Guardrail tripped. Info: {e.guardrail_result.output.output_info}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

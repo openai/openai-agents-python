@@ -62,6 +62,7 @@ class OutputGuardrailTripwireTriggered(AgentsException):
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
         )
 
+
 class FactCheckingGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a guardrail tripwire is triggered."""
 

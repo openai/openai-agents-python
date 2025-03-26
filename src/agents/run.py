@@ -270,12 +270,12 @@ class Runner:
                             context_wrapper,
                         )
                         fact_checking_guardrail_results = await cls._run_fact_checking_guardrails(
-                            current_agent.fact_checking_guardrails +
-                            (run_config.fact_checking_guardrails or []),
+                            current_agent.fact_checking_guardrails
+                            + (run_config.fact_checking_guardrails or []),
                             current_agent,
                             turn_result.next_step.output,
                             context_wrapper,
-                            original_input
+                            original_input,
                         )
                         return RunResult(
                             input=original_input,
@@ -616,15 +616,15 @@ class Runner:
                         )
 
                         try:
-                            output_guardrail_results = \
-                                await streamed_result._output_guardrails_task
+                            output_guardrail_results = await streamed_result._output_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             output_guardrail_results = []
 
                         try:
-                            fact_checking_guardrails_results = \
+                            fact_checking_guardrails_results = (
                                 await streamed_result._fact_checking_guardrails_task
+                            )
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             fact_checking_guardrails_results = []
@@ -920,12 +920,12 @@ class Runner:
 
     @classmethod
     async def _run_fact_checking_guardrails(
-            cls,
-            guardrails: list[FactCheckingGuardrail[TContext]],
-            agent: Agent[TContext],
-            agent_output: Any,
-            context: RunContextWrapper[TContext],
-            agent_input: Any,
+        cls,
+        guardrails: list[FactCheckingGuardrail[TContext]],
+        agent: Agent[TContext],
+        agent_output: Any,
+        context: RunContextWrapper[TContext],
+        agent_input: Any,
     ) -> list[FactCheckingGuardrailResult]:
         if not guardrails:
             return []
@@ -933,11 +933,8 @@ class Runner:
         guardrail_tasks = [
             asyncio.create_task(
                 RunImpl.run_single_fact_checking_guardrail(
-                    guardrail,
-                    agent,
-                    agent_output,
-                    context,
-                    agent_input)
+                    guardrail, agent, agent_output, context, agent_input
+                )
             )
             for guardrail in guardrails
         ]

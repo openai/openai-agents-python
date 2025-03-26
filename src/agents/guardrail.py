@@ -67,6 +67,7 @@ class OutputGuardrailResult:
     output: GuardrailFunctionOutput
     """The output of the guardrail function."""
 
+
 @dataclass
 class FactCheckingGuardrailResult:
     """The result of a guardrail run."""
@@ -93,6 +94,7 @@ class FactCheckingGuardrailResult:
 
     output: GuardrailFunctionOutput
     """The output of the guardrail function."""
+
 
 @dataclass
 class InputGuardrail(Generic[TContext]):
@@ -240,11 +242,11 @@ class FactCheckingGuardrail(Generic[TContext]):
         return self.guardrail_function.__name__
 
     async def run(
-            self,
-            context: RunContextWrapper[TContext],
-            agent: Agent[Any],
-            agent_output: Any,
-            agent_input: Any,
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[Any],
+        agent_output: Any,
+        agent_input: Any,
     ) -> FactCheckingGuardrailResult:
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")
