@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .guardrail import InputGuardrailResult, OutputGuardrailResult, FactCheckingGuardrailResult
+    from .guardrail import FactCheckingGuardrailResult, InputGuardrailResult, OutputGuardrailResult
 
 
 class AgentsException(Exception):

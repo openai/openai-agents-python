@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
 
 from typing_extensions import TypeAlias, TypedDict
 
-from .guardrail import InputGuardrail, OutputGuardrail, FactCheckingGuardrail
+from .guardrail import FactCheckingGuardrail, InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
 from .logger import logger
@@ -130,7 +130,8 @@ class Agent(Generic[TContext]):
     """
 
     fact_checking_guardrails: list[FactCheckingGuardrail[TContext]] = field(default_factory=list)
-    """A list of checks that run on the original input and the final output of the agent, after generating a response.
+    """A list of checks that run on the original input
+    and the final output of the agent, after generating a response.
     Runs only if the agent produces a final output.
     """
 

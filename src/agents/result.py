@@ -10,7 +10,7 @@ from typing_extensions import TypeVar
 
 from .agent_output import AgentOutputSchema
 from .exceptions import InputGuardrailTripwireTriggered, MaxTurnsExceeded
-from .guardrail import InputGuardrailResult, OutputGuardrailResult, FactCheckingGuardrailResult
+from .guardrail import FactCheckingGuardrailResult, InputGuardrailResult, OutputGuardrailResult
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .logger import logger
 from .stream_events import StreamEvent

@@ -211,11 +211,12 @@ class FactCheckingGuardrail(Generic[TContext]):
     """Fact checking guardrails are checks that run on the final output and the input of an agent.
     They can be used to do check if the output passes certain validation criteria
 
-    You can use the `@fact_checking_guardrail()` decorator to turn a function into an `OutputGuardrail`,
+    You can use the `@fact_checking_guardrail()`
+    decorator to turn a function into an `FactCheckingGuardrail`,
     or create an `OutputGuardrail` manually.
 
     Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, a
-    `OutputGuardrailTripwireTriggered` exception will be raised.
+    `FactCheckingGuardrailTripwireTriggered` exception will be raised.
     """
 
     guardrail_function: Callable[
@@ -239,7 +240,11 @@ class FactCheckingGuardrail(Generic[TContext]):
         return self.guardrail_function.__name__
 
     async def run(
-        self, context: RunContextWrapper[TContext], agent: Agent[Any], agent_output: Any, agent_input: Any
+            self,
+            context: RunContextWrapper[TContext],
+            agent: Agent[Any],
+            agent_output: Any,
+            agent_input: Any,
     ) -> FactCheckingGuardrailResult:
         if not callable(self.guardrail_function):
             raise UserError(f"Guardrail function must be callable, got {self.guardrail_function}")

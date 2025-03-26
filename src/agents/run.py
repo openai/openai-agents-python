@@ -22,19 +22,19 @@ from .agent import Agent
 from .agent_output import AgentOutputSchema
 from .exceptions import (
     AgentsException,
+    FactCheckingGuardrailTripwireTriggered,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
-    FactCheckingGuardrailTripwireTriggered,
 )
 from .guardrail import (
+    FactCheckingGuardrail,
+    FactCheckingGuardrailResult,
     InputGuardrail,
     InputGuardrailResult,
     OutputGuardrail,
     OutputGuardrailResult,
-    FactCheckingGuardrail,
-    FactCheckingGuardrailResult
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
@@ -85,7 +85,8 @@ class RunConfig:
     """A list of output guardrails to run on the final output of the run."""
 
     fact_checking_guardrails: list[FactCheckingGuardrail[Any]] | None = None
-    """A list of fact checking guardrails to run on the original input and the final output of the run."""
+    """A list of fact checking guardrails to run on the original
+    input and the final output of the run."""
 
     tracing_disabled: bool = False
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
@@ -269,7 +270,8 @@ class Runner:
                             context_wrapper,
                         )
                         fact_checking_guardrail_results = await cls._run_fact_checking_guardrails(
-                            current_agent.fact_checking_guardrails + (run_config.fact_checking_guardrails or []),
+                            current_agent.fact_checking_guardrails +
+                            (run_config.fact_checking_guardrails or []),
                             current_agent,
                             turn_result.next_step.output,
                             context_wrapper,
@@ -614,13 +616,15 @@ class Runner:
                         )
 
                         try:
-                            output_guardrail_results = await streamed_result._output_guardrails_task
+                            output_guardrail_results = \
+                                await streamed_result._output_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             output_guardrail_results = []
 
                         try:
-                            fact_checking_guardrails_results = await streamed_result._fact_checking_guardrails_task
+                            fact_checking_guardrails_results = \
+                                await streamed_result._fact_checking_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             fact_checking_guardrails_results = []
@@ -928,7 +932,12 @@ class Runner:
 
         guardrail_tasks = [
             asyncio.create_task(
-                RunImpl.run_single_fact_checking_guardrail(guardrail, agent, agent_output, context, agent_input)
+                RunImpl.run_single_fact_checking_guardrail(
+                    guardrail,
+                    agent,
+                    agent_output,
+                    context,
+                    agent_input)
             )
             for guardrail in guardrails
         ]
