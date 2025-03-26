@@ -529,7 +529,8 @@ class RunImpl:
         run_config: RunConfig,
     ) -> SingleStepResult:
         # If there is more than one handoff, add tool responses that reject those handoffs
-        if len(run_handoffs) > 1:
+        multiple_handoffs = len(run_handoffs) > 1
+        if multiple_handoffs:
             output_message = "Multiple handoffs detected, ignoring this one."
             new_step_items.extend(
                 [
@@ -551,6 +552,16 @@ class RunImpl:
                 context_wrapper, actual_handoff.tool_call.arguments
             )
             span_handoff.span_data.to_agent = new_agent.name
+            if multiple_handoffs:
+                requested_agents = [handoff.handoff.agent_name for handoff in run_handoffs]
+                span_handoff.set_error(
+                    SpanError(
+                        message="Multiple handoffs requested",
+                        data={
+                            "requested_agents": requested_agents,
+                        },
+                    )
+                )
 
             # Append a tool output item for the handoff
             new_step_items.append(
