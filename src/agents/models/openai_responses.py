@@ -246,6 +246,7 @@ class OpenAIResponsesModel(Model):
             stream=stream,
             extra_headers=_HEADERS,
             text=response_format,
+            store=model_settings.store,
         )
 
     def _get_client(self) -> AsyncOpenAI:

@@ -532,6 +532,7 @@ class OpenAIChatCompletionsModel(Model):
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
+            store=model_settings.store,
             extra_headers=_HEADERS,
         )
 
