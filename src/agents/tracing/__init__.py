@@ -9,6 +9,7 @@ from .create import (
     get_current_trace,
     guardrail_span,
     handoff_span,
+    mcp_tools_span,
     response_span,
     speech_group_span,
     speech_span,
@@ -25,6 +26,7 @@ from .span_data import (
     GenerationSpanData,
     GuardrailSpanData,
     HandoffSpanData,
+    MCPListToolsSpanData,
     ResponseSpanData,
     SpanData,
     SpeechGroupSpanData,
@@ -59,6 +61,7 @@ __all__ = [
     "GenerationSpanData",
     "GuardrailSpanData",
     "HandoffSpanData",
+    "MCPListToolsSpanData",
     "ResponseSpanData",
     "SpeechGroupSpanData",
     "SpeechSpanData",
@@ -69,6 +72,7 @@ __all__ = [
     "speech_group_span",
     "speech_span",
     "transcription_span",
+    "mcp_tools_span",
 ]
 
 

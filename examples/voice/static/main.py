@@ -1,6 +1,8 @@
 import asyncio
 import random
 
+import numpy as np
+
 from agents import Agent, function_tool
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 from agents.voice import (
@@ -77,6 +79,9 @@ async def main():
                 print("Received audio")
             elif event.type == "voice_stream_event_lifecycle":
                 print(f"Received lifecycle event: {event.event}")
+
+        # Add 1 second of silence to the end of the stream to avoid cutting off the last audio.
+        player.add_audio(np.zeros(24000 * 1, dtype=np.int16))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
+    "mcp; python_version >= '3.10'",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -34,6 +35,7 @@ Repository = "https://github.com/openai/openai-agents-python"
 
 [project.optional-dependencies]
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <16"]
+viz = ["graphviz>=0.17"]
 
 [dependency-groups]
 dev = [
@@ -55,7 +57,9 @@ dev = [
     "pynput",
     "textual",
     "websockets",
+    "graphviz",
 ]
+
 [tool.uv.workspace]
 members = ["agents"]
 

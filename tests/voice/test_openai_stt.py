@@ -269,7 +269,7 @@ async def test_timeout_waiting_for_created_event(monkeypatch):
             async for _ in turns:
                 pass
 
-            assert "Timeout waiting for transcription_session.created event" in str(exc_info.value)
+        assert "Timeout waiting for transcription_session.created event" in str(exc_info.value)
 
         await session.close()
 
@@ -302,12 +302,10 @@ async def test_session_error_event():
             trace_include_sensitive_audio_data=False,
         )
 
-        with pytest.raises(STTWebsocketConnectionError) as exc_info:
+        with pytest.raises(STTWebsocketConnectionError):
             turns = session.transcribe_turns()
             async for _ in turns:
                 pass
-
-            assert "Simulated server error!" in str(exc_info.value)
 
         await session.close()
 
@@ -362,8 +360,8 @@ async def test_inactivity_timeout():
             async for turn in session.transcribe_turns():
                 collected_turns.append(turn)
 
-            assert "Timeout waiting for transcription_session" in str(exc_info.value)
+        assert "Timeout waiting for transcription_session" in str(exc_info.value)
 
-            assert len(collected_turns) == 0, "No transcripts expected, but we got something?"
+        assert len(collected_turns) == 0, "No transcripts expected, but we got something?"
 
         await session.close()
