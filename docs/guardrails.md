@@ -2,7 +2,7 @@
 
 Guardrails run _in parallel_ to your agents, enabling you to do checks and validations of user input. For example, imagine you have an agent that uses a very smart (and hence slow/expensive) model to help with customer requests. You wouldn't want malicious users to ask the model to help them with their math homework. So, you can run a guardrail with a fast/cheap model. If the guardrail detects malicious usage, it can immediately raise an error, which stops the expensive model from running and saves you time/money.
 
-There are two three kinds of guardrails:
+There are three kinds of guardrails:
 
 1. Input guardrails run on the initial user input
 2. Output guardrails run on the final agent output
@@ -47,7 +47,7 @@ Fact Checking guardrails run in 3 steps:
 
 ## Tripwires
 
-If the input or output fails the guardrail, the Guardrail can signal this with a tripwire. As soon as we see a guardrail that has triggered the tripwires, we immediately raise a `{Input,Output}GuardrailTripwireTriggered` exception and halt the Agent execution.
+If the input or output fails the guardrail, the Guardrail can signal this with a tripwire. As soon as we see a guardrail that has triggered the tripwires, we immediately raise a `{Input,Output,FactChecking}GuardrailTripwireTriggered` exception and halt the Agent execution.
 
 ## Implementing a guardrail
 
@@ -170,7 +170,6 @@ async def main():
 Fact checking guardrails are similar.
 
 ```python
-import asyncio
 import json
 
 from pydantic import BaseModel, Field
@@ -248,7 +247,7 @@ async def self_check_facts( # (3)!
 
 
 async def main():
-    agent = Agent( # (3)!
+    agent = Agent( # (4)!
         name="Entities Extraction Agent",
         instructions="""
             Always respond age = 28.
@@ -271,9 +270,6 @@ async def main():
 
     except FactCheckingGuardrailTripwireTriggered as e:
         print(f"Guardrail tripped. Info: {e.guardrail_result.output.output_info}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
 1. This is the actual agent's output type.
