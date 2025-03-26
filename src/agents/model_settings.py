@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Literal
 
 
@@ -50,8 +50,9 @@ class ModelSettings:
         if override is None:
             return self
 
-        new_values = {
-            k: getattr(override, k) if getattr(override, k) is not None else getattr(self, k)
-            for k in self.__dataclass_fields__
+        changes = {
+            field.name: getattr(override, field.name)
+            for field in fields(self)
+            if getattr(override, field.name) is not None
         }
-        return ModelSettings(**new_values)
+        return replace(self, **changes)
