@@ -5,7 +5,7 @@ This example uses the [filesystem MCP server](https://github.com/modelcontextpro
 Run it via:
 
 ```
-uv run python  python examples/mcp/filesystem_example/main.py
+uv run python examples/mcp/filesystem_example/main.py
 ```
 
 ## Details
