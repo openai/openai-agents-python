@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import TypeVar
 
+from ._run_impl import QueueCompleteSentinel
 from .agent_output import AgentOutputSchema
 from .exceptions import InputGuardrailTripwireTriggered, MaxTurnsExceeded
 from .guardrail import FactCheckingGuardrailResult, InputGuardrailResult, OutputGuardrailResult
@@ -16,7 +17,6 @@ from .logger import logger
 from .stream_events import StreamEvent
 from .tracing import Trace
 from .util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
-from ._run_impl import QueueCompleteSentinel
 
 if TYPE_CHECKING:
     from .agent import Agent
