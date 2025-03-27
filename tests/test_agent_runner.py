@@ -14,8 +14,10 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     ModelBehaviorError,
+    ModelSettings,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
+    RunConfig,
     RunContextWrapper,
     Runner,
     UserError,
@@ -634,3 +636,31 @@ async def test_tool_use_behavior_custom_function():
 
     assert len(result.raw_responses) == 2, "should have two model responses"
     assert result.final_output == "the_final_output", "should have used the custom function"
+
+
+@pytest.mark.asyncio
+async def test_model_settings_override():
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        model_settings=ModelSettings(temperature=1.0, max_tokens=1000)
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_text_message("a_message"),
+            ],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="user_message",
+        run_config=RunConfig(model_settings=ModelSettings(0.5)),
+    )
+
+    # temperature is overridden by Runner.run, but max_tokens is not
+    assert model.last_turn_args["model_settings"].temperature == 0.5
+    assert model.last_turn_args["model_settings"].max_tokens == 1000

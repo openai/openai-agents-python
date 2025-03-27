@@ -54,7 +54,7 @@ def _ensure_strict_json_schema(
     elif (
         typ == "object"
         and "additionalProperties" in json_schema
-        and json_schema["additionalProperties"] is True
+        and json_schema["additionalProperties"]
     ):
         raise UserError(
             "additionalProperties should not be set for object types. This could be because "
