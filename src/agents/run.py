@@ -630,7 +630,8 @@ class Runner:
                             fact_checking_guardrails_results = []
 
                         streamed_result.output_guardrail_results = output_guardrail_results
-                        streamed_result.fact_checking_guardrail_results = fact_checking_guardrails_results
+                        streamed_result.fact_checking_guardrail_results = (
+                            fact_checking_guardrails_results)
                         streamed_result.final_output = turn_result.next_step.output
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
