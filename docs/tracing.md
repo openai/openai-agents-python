@@ -111,3 +111,4 @@ To customize this default setup, to send traces to alternative or additional bac
 -   [Maxim AI](https://www.getmaxim.ai/docs/observe/integrations/openai-agents-sdk)
 -   [Comet Opik](https://www.comet.com/docs/opik/tracing/integrations/openai_agents)
 -   [Langfuse](https://langfuse.com/docs/integrations/openaiagentssdk/openai-agents)
+-   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
