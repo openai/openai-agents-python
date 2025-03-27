@@ -4,7 +4,7 @@ import abc
 import asyncio
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -34,7 +34,7 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def cleanup(self):
+    async def cleanup(self) -> Self:
         """Cleanup the server. For example, this might mean closing a subprocess or
         closing a network connection.
         """
