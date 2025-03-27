@@ -131,7 +131,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
-    # Supresses warnings about missing annotations for params
+    # Suppresses warnings about missing annotations for params
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
     logger.setLevel(logging.ERROR)
