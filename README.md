@@ -4,6 +4,47 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 
 <img src="https://cdn.openai.com/API/docs/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
 
+## 🌟 新しいプロジェクト構造
+
+このリポジトリは、Python（OpenAI Agents SDK）とNext.js（フロントエンド）のコードを含む混合プロジェクトです。明確な分離のため、以下のディレクトリ構造になっています：
+
+```
+project-root/
+├── python/           # Python関連のすべてのコード
+│   ├── src/          # OpenAI Agents SDKのソースコード
+│   ├── requirements_bot/ # 要件ボット関連のPythonコード
+│   ├── tests/        # テストコード
+│   ├── examples/     # サンプルコード
+│   └── pyproject.toml # Python設定ファイル
+│
+├── nextjs/           # Next.js関連のすべてのコード
+│   ├── pages/        # Next.jsのページコンポーネント
+│   ├── public/       # 静的ファイル
+│   ├── styles/       # CSSスタイル
+│   └── package.json  # Node.js依存関係
+│
+└── docs/             # プロジェクト全体のドキュメント
+```
+
+## 🚀 使用方法
+
+### Pythonコードの実行 (OpenAI Agents SDK)
+
+```bash
+cd python
+python -m venv env
+source env/bin/activate  # Windowsの場合: env\Scripts\activate
+pip install -e .
+```
+
+### Next.jsフロントエンドの実行
+
+```bash
+cd nextjs
+npm install
+npm run dev  # localhost:3000でサーバーが起動します
+```
+
 ### Core concepts:
 
 1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
@@ -29,6 +70,8 @@ source env/bin/activate
 ```
 pip install openai-agents
 ```
+
+For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
 
 ## Hello world example
 

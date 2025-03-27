@@ -1,5 +1,8 @@
 # macOS Files
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -109,6 +112,7 @@ env.bak/
 venv.bak/
 .venv39
 .venv_res
+temp_venv/
 
 # Spyder project settings
 .spyderproject
@@ -134,8 +138,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# PyCharm
+# IDE settings
 .idea/
+.vscode/
+*.code-workspace
 
 # Ruff stuff:
 .ruff_cache/
@@ -155,25 +161,46 @@ node_modules/
 
 # 一時ファイル
 temp/
-temp_venv/
 script_*.sh
 *_*.txt
 *_*.json
 !package*.json
 
-# macOS追加除外
-._*
-.Spotlight-V100
-.Trashes
-
-# IDE設定
-.vscode/
-*.code-workspace
-
-# プロジェクト特有のファイル
+# 大きなディレクトリを完全に除外
 python/
 nextjs/
+examples/
+docs/
+src/
+tests/
+
+# その他不要なディレクトリ
 examples/financial_research_agent/
 examples/mcp/
 examples/voice/
-package-lock.json
+
+# 一時ファイルやバイナリファイル
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.exe
+*.bin
+*.dat
+*.db
+*.sqlite3
+*.log
+*.swp
+*.swo
+*~
+
+# キャッシュ関連
+.cache/
+**/.cache/
+**/__pycache__/
+
+# その他特殊ファイル
+Makefile
+pyproject.toml
+uv.lock
