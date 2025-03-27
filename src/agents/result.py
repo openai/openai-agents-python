@@ -16,9 +16,9 @@ from .logger import logger
 from .stream_events import StreamEvent
 from .tracing import Trace
 from .util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
+from ._run_impl import QueueCompleteSentinel
 
 if TYPE_CHECKING:
-    from ._run_impl import QueueCompleteSentinel
     from .agent import Agent
 
 T = TypeVar("T")
