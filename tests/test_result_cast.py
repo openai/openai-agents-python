@@ -14,6 +14,7 @@ def create_run_result(final_output: Any) -> RunResult:
         final_output=final_output,
         input_guardrail_results=[],
         output_guardrail_results=[],
+        fact_checking_guardrail_results=[],
         _last_agent=Agent(name="test"),
     )
 
