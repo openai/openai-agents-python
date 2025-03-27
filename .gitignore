@@ -135,10 +135,45 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#.idea/
+.idea/
 
 # Ruff stuff:
 .ruff_cache/
 
 # PyPI configuration file
 .pypirc
+
+# 設定ファイル
+requirements_bot/config.py
+
+# Node.js 関連ファイル
+node_modules/
+**/node_modules/
+.npm
+.next/
+*.node
+
+# 一時ファイル
+temp/
+temp_venv/
+script_*.sh
+*_*.txt
+*_*.json
+!package*.json
+
+# macOS追加除外
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE設定
+.vscode/
+*.code-workspace
+
+# プロジェクト特有のファイル
+python/
+nextjs/
+examples/financial_research_agent/
+examples/mcp/
+examples/voice/
+package-lock.json

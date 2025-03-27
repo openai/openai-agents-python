@@ -1,0 +1,15 @@
+services:
+  requirements-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./:/app
+      - ./temp:/app/temp
+    env_file:
+      - .env
+    tty: true
+    stdin_open: true
+    command: python -m requirements_bot.main
+    environment:
+      - PYTHONPATH=/app:/app/python 
