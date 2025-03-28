@@ -112,3 +112,4 @@ To customize this default setup, to send traces to alternative or additional bac
 -   [Comet Opik](https://www.comet.com/docs/opik/tracing/integrations/openai_agents)
 -   [Langfuse](https://langfuse.com/docs/integrations/openaiagentssdk/openai-agents)
 -   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
+-   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
