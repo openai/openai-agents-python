@@ -10,6 +10,7 @@ from .agent_output import AgentOutputSchema
 from .computer import AsyncComputer, Button, Computer, Environment
 from .exceptions import (
     AgentsException,
+    FactCheckingGuardrailTripwireTriggered,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
@@ -17,11 +18,14 @@ from .exceptions import (
     UserError,
 )
 from .guardrail import (
+    FactCheckingGuardrail,
+    FactCheckingGuardrailResult,
     GuardrailFunctionOutput,
     InputGuardrail,
     InputGuardrailResult,
     OutputGuardrail,
     OutputGuardrailResult,
+    fact_checking_guardrail,
     input_guardrail,
     output_guardrail,
 )
@@ -164,6 +168,7 @@ __all__ = [
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
+    "FactCheckingGuardrailTripwireTriggered",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
     "UserError",
@@ -171,9 +176,12 @@ __all__ = [
     "InputGuardrailResult",
     "OutputGuardrail",
     "OutputGuardrailResult",
+    "FactCheckingGuardrail",
+    "FactCheckingGuardrailResult",
     "GuardrailFunctionOutput",
     "input_guardrail",
     "output_guardrail",
+    "fact_checking_guardrail",
     "handoff",
     "Handoff",
     "HandoffInputData",
