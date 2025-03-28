@@ -11,7 +11,9 @@ from agents import (
     HandoffOutputItem,
     ItemHelpers,
     MessageOutputItem,
+    ModelSettings,
     RunContextWrapper,
+    RunConfig,
     Runner,
     ToolCallItem,
     ToolCallOutputItem,
@@ -74,9 +76,13 @@ async def update_seat(
     assert context.context.flight_number is not None, "Flight number is required"
     return f"Updated seat to {new_seat} for confirmation number {confirmation_number}"
 
-
-### HOOKS
-
+@function_tool
+async def respond_to_user(response: str) -> str:
+    """
+    Use this function to send a message back to the end user. The agent should call this whenever
+    you want to produce a user-facing response.
+    """
+    return response
 
 async def on_seat_booking_handoff(context: RunContextWrapper[AirlineAgentContext]) -> None:
     flight_number = f"FLT-{random.randint(100, 999)}"
@@ -95,7 +101,7 @@ faq_agent = Agent[AirlineAgentContext](
     1. Identify the last question asked by the customer.
     2. Use the faq lookup tool to answer the question. Do not rely on your own knowledge.
     3. If you cannot answer the question, transfer back to the triage agent.""",
-    tools=[faq_lookup_tool],
+    tools=[faq_lookup_tool, respond_to_user],
 )
 
 seat_booking_agent = Agent[AirlineAgentContext](
@@ -109,7 +115,7 @@ seat_booking_agent = Agent[AirlineAgentContext](
     2. Ask the customer what their desired seat number is.
     3. Use the update seat tool to update the seat on the flight.
     If the customer asks a question that is not related to the routine, transfer back to the triage agent. """,
-    tools=[update_seat],
+    tools=[update_seat, respond_to_user],
 )
 
 triage_agent = Agent[AirlineAgentContext](
@@ -122,7 +128,12 @@ triage_agent = Agent[AirlineAgentContext](
     handoffs=[
         faq_agent,
         handoff(agent=seat_booking_agent, on_handoff=on_seat_booking_handoff),
+        respond_to_user
     ],
+    tools=[respond_to_user],
+    model_settings=ModelSettings(tool_choice="required"),
+    tool_use_behavior={"stop_at_tool_names": ["respond_to_user"]},
+
 )
 
 faq_agent.handoffs.append(triage_agent)
@@ -145,8 +156,9 @@ async def main():
         user_input = input("Enter your message: ")
         with trace("Customer service", group_id=conversation_id):
             input_items.append({"content": user_input, "role": "user"})
-            result = await Runner.run(current_agent, input_items, context=context)
+            result = await Runner.run(current_agent, input_items, context=context,run_config=RunConfig(tracing_disabled=True))
 
+            last_tool_name: str | None = None
             for new_item in result.new_items:
                 agent_name = new_item.agent.name
                 if isinstance(new_item, MessageOutputItem):
@@ -156,9 +168,13 @@ async def main():
                         f"Handed off from {new_item.source_agent.name} to {new_item.target_agent.name}"
                     )
                 elif isinstance(new_item, ToolCallItem):
-                    print(f"{agent_name}: Calling a tool")
+                    last_tool_name = getattr(new_item.raw_item, "name", None)
+                    print(f"{agent_name} called tool:{f' {last_tool_name}' if last_tool_name else ''}")
                 elif isinstance(new_item, ToolCallOutputItem):
-                    print(f"{agent_name}: Tool call output: {new_item.output}")
+                    if last_tool_name == "respond_to_user":
+                        print(f"{agent_name}: {new_item.output}")
+                    else:
+                        print(f"{agent_name}: Tool call output: {new_item.output}")
                 else:
                     print(f"{agent_name}: Skipping item: {new_item.__class__.__name__}")
             input_items = result.to_input_list()

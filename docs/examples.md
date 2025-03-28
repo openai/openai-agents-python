@@ -7,14 +7,14 @@ Check out a variety of sample implementations of the SDK in the examples section
 
 - **agent_patterns:**
   Examples in this category illustrate common agent design patterns, such as
-  
+
     - Deterministic workflows
     - Agents as tools
     - Parallel agent execution
 
 - **basic:**
   These examples showcase foundational capabilities of the SDK, such as
-  
+
     - Dynamic system prompts
     - Streaming outputs
     - Lifecycle events
@@ -31,6 +31,7 @@ Check out a variety of sample implementations of the SDK in the examples section
 
 - **customer_service** and **research_bot:**
   Two more built-out examples that illustrate real-world applications
-  
-    - **customer_service**: Example customer service system for an airline.
+
+    - **customer_service**: Example customer service system for an airline, with
+    `tool_choice` required for the triage agent.
     - **research_bot**: Simple deep research clone.
