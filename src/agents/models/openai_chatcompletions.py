@@ -536,6 +536,7 @@ class OpenAIChatCompletionsModel(Model):
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
             store=store,
+            seed=self._non_null_or_not_given(model_settings.seed),
             extra_headers=_HEADERS,
         )
 
