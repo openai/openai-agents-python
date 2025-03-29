@@ -20,8 +20,7 @@ class TTSModelSettings:
     """Settings for a TTS model."""
 
     voice: (
-        str
-        | Literal[
+        Literal[
             "alloy",
             "ash",
             "ballad",

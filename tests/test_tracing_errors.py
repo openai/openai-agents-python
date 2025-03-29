@@ -244,9 +244,10 @@ async def test_multiple_handoff_doesnt_error():
                                 },
                             },
                             {"type": "generation"},
-                            {"type": "handoff",
-                             "data": {"from_agent": "test", "to_agent": "test"},
-                             "error": {
+                            {
+                                "type": "handoff",
+                                "data": {"from_agent": "test", "to_agent": "test"},
+                                "error": {
                                     "data": {
                                         "requested_agents": [
                                             "test",
@@ -255,7 +256,7 @@ async def test_multiple_handoff_doesnt_error():
                                     },
                                     "message": "Multiple handoffs requested",
                                 },
-                             },
+                            },
                         ],
                     },
                     {
@@ -383,10 +384,7 @@ async def test_handoffs_lead_to_correct_agent_spans():
                             {"type": "generation"},
                             {
                                 "type": "handoff",
-                                "data": {
-                                    "from_agent": "test_agent_3",
-                                    "to_agent": "test_agent_1"
-                                },
+                                "data": {"from_agent": "test_agent_3", "to_agent": "test_agent_1"},
                                 "error": {
                                     "data": {
                                         "requested_agents": [
