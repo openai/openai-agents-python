@@ -642,9 +642,7 @@ async def test_tool_use_behavior_custom_function():
 async def test_model_settings_override():
     model = FakeModel()
     agent = Agent(
-        name="test",
-        model=model,
-        model_settings=ModelSettings(temperature=1.0, max_tokens=1000)
+        name="test", model=model, model_settings=ModelSettings(temperature=1.0, max_tokens=1000)
     )
 
     model.add_multiple_turn_outputs(
