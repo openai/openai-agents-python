@@ -7,13 +7,14 @@ requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=1.66.5",
+    "openai>=1.69.0",
     "pydantic>=2.10, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
     "mcp; python_version >= '3.10'",
+    "numpy>=2.0.2",
 ]
 classifiers = [
     "Typing :: Typed",
