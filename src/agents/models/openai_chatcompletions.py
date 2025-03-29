@@ -536,6 +536,7 @@ class OpenAIChatCompletionsModel(Model):
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
             store=store,
+            reasoning=self._non_null_or_not_given(model_settings.reasoning),
             extra_headers=_HEADERS,
         )
 
@@ -555,6 +556,7 @@ class OpenAIChatCompletionsModel(Model):
             temperature=model_settings.temperature,
             tools=[],
             parallel_tool_calls=parallel_tool_calls or False,
+            reasoning=model_settings.reasoning,
         )
         return response, ret
 
