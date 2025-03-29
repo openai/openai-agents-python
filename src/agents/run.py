@@ -212,15 +212,14 @@ class Runner:
                     )
 
                     if current_turn == 1:
-                        input_guardrail_results, turn_result = await asyncio.gather(
-                            cls._run_input_guardrails(
+                        input_guardrail_results = await cls._run_input_guardrails(
                                 starting_agent,
                                 starting_agent.input_guardrails
                                 + (run_config.input_guardrails or []),
                                 copy.deepcopy(input),
                                 context_wrapper,
-                            ),
-                            cls._run_single_turn(
+                        )
+                        turn_result = await cls._run_single_turn(
                                 agent=current_agent,
                                 all_tools=all_tools,
                                 original_input=original_input,
@@ -230,7 +229,6 @@ class Runner:
                                 run_config=run_config,
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
-                            ),
                         )
                     else:
                         turn_result = await cls._run_single_turn(
