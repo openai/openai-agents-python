@@ -44,7 +44,7 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
     MaybeAwaitable[ToolsToFinalOutputResult],
 ]
 """A function that takes a run context and a list of tool results, and returns a
-`ToolToFinalOutputResult`.
+`ToolsToFinalOutputResult`.
 """
 
 
