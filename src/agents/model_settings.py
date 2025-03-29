@@ -40,6 +40,12 @@ class ModelSettings:
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
 
+    reasoning: dict[str, str] | None = None
+    """Controls reasoning behavior for reasoning-capable models.
+    For o-series models: Use 'effort' key with values 'low', 'medium', or 'high' to control
+    reasoning effort. For computer_use_preview: Use 'generate_summary' key with values
+    'concise' or 'detailed' to get reasoning summaries."""
+
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
     Defaults to True if not provided."""
