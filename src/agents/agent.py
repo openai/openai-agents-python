@@ -12,6 +12,7 @@ from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
 from .logger import logger
+from .mcp import MCPUtil
 from .model_settings import ModelSettings
 from .models.interface import Model
 from .run_context import RunContextWrapper, TContext
@@ -21,6 +22,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
+    from .mcp import MCPServer
     from .result import RunResult
 
 
@@ -107,6 +109,16 @@ class Agent(Generic[TContext]):
     tools: list[Tool] = field(default_factory=list)
     """A list of tools that the agent can use."""
 
+    mcp_servers: list[MCPServer] = field(default_factory=list)
+    """A list of [Model Context Protocol](https://modelcontextprotocol.io/) servers that
+    the agent can use. Every time the agent runs, it will include tools from these servers in the
+    list of available tools.
+
+    NOTE: You are expected to manage the lifecycle of these servers. Specifically, you must call
+    `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
+    longer needed.
+    """
+
     input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
     """A list of checks that run in parallel to the agent's execution, before generating a
     response. Runs only if the agent is the first agent in the chain.
@@ -142,6 +154,10 @@ class Agent(Generic[TContext]):
       NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
       web search, etc are always processed by the LLM.
     """
+
+    reset_tool_choice: bool = True
+    """Whether to reset the tool choice to the default value after a tool has been called. Defaults
+    to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:
@@ -205,3 +221,12 @@ class Agent(Generic[TContext]):
             logger.error(f"Instructions must be a string or a function, got {self.instructions}")
 
         return None
+
+    async def get_mcp_tools(self) -> list[Tool]:
+        """Fetches the available tools from the MCP servers."""
+        return await MCPUtil.get_all_function_tools(self.mcp_servers)
+
+    async def get_all_tools(self) -> list[Tool]:
+        """All agent tools, including MCP tools and function tools."""
+        mcp_tools = await self.get_mcp_tools()
+        return mcp_tools + self.tools

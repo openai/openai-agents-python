@@ -12,6 +12,7 @@ from .span_data import (
     GenerationSpanData,
     GuardrailSpanData,
     HandoffSpanData,
+    MCPListToolsSpanData,
     ResponseSpanData,
     SpeechGroupSpanData,
     SpeechSpanData,
@@ -420,6 +421,34 @@ def speech_group_span(
     """
     return GLOBAL_TRACE_PROVIDER.create_span(
         span_data=SpeechGroupSpanData(input=input),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def mcp_tools_span(
+    server: str | None = None,
+    result: list[str] | None = None,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[MCPListToolsSpanData]:
+    """Create a new MCP list tools span. The span will not be started automatically, you should
+    either do `with mcp_tools_span() ...` or call `span.start()` + `span.finish()` manually.
+
+    Args:
+        server: The name of the MCP server.
+        result: The result of the MCP list tools call.
+        span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
+            recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
+            correctly formatted.
+        parent: The parent span or trace. If not provided, we will automatically use the current
+            trace/span as the parent.
+        disabled: If True, we will return a Span but the Span will not be recorded.
+    """
+    return GLOBAL_TRACE_PROVIDER.create_span(
+        span_data=MCPListToolsSpanData(server=server, result=result),
         span_id=span_id,
         parent=parent,
         disabled=disabled,

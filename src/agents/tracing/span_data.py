@@ -49,12 +49,19 @@ class AgentSpanData(SpanData):
 
 
 class FunctionSpanData(SpanData):
-    __slots__ = ("name", "input", "output")
+    __slots__ = ("name", "input", "output", "mcp_data")
 
-    def __init__(self, name: str, input: str | None, output: Any | None):
+    def __init__(
+        self,
+        name: str,
+        input: str | None,
+        output: Any | None,
+        mcp_data: dict[str, Any] | None = None,
+    ):
         self.name = name
         self.input = input
         self.output = output
+        self.mcp_data = mcp_data
 
     @property
     def type(self) -> str:
@@ -66,6 +73,7 @@ class FunctionSpanData(SpanData):
             "name": self.name,
             "input": self.input,
             "output": str(self.output) if self.output else None,
+            "mcp_data": self.mcp_data,
         }
 
 
@@ -281,4 +289,26 @@ class SpeechGroupSpanData(SpanData):
         return {
             "type": self.type,
             "input": self.input,
+        }
+
+
+class MCPListToolsSpanData(SpanData):
+    __slots__ = (
+        "server",
+        "result",
+    )
+
+    def __init__(self, server: str | None = None, result: list[str] | None = None):
+        self.server = server
+        self.result = result
+
+    @property
+    def type(self) -> str:
+        return "mcp_tools"
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "server": self.server,
+            "result": self.result,
         }

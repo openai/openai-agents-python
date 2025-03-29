@@ -41,14 +41,14 @@ async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
     return f"User {wrapper.context.name} is 47 years old"
 
 async def main():
-    user_info = UserInfo(name="John", uid=123)  # (3)!
+    user_info = UserInfo(name="John", uid=123)
 
-    agent = Agent[UserInfo](  # (4)!
+    agent = Agent[UserInfo](  # (3)!
         name="Assistant",
         tools=[fetch_user_age],
     )
 
-    result = await Runner.run(
+    result = await Runner.run(  # (4)!
         starting_agent=agent,
         input="What is the age of the user?",
         context=user_info,

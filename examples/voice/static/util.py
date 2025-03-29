@@ -62,6 +62,7 @@ class AudioPlayer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.stream.stop()  # wait for the stream to finish
         self.stream.close()
 
     def add_audio(self, audio_data: npt.NDArray[np.int16]):

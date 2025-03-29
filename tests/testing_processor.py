@@ -80,26 +80,44 @@ def fetch_events() -> list[TestSpanProcessorEvent]:
     return SPAN_PROCESSOR_TESTING._events
 
 
-def fetch_normalized_spans():
+def assert_no_spans():
+    spans = fetch_ordered_spans()
+    if spans:
+        raise AssertionError(f"Expected 0 spans, got {len(spans)}")
+
+
+def assert_no_traces():
+    traces = fetch_traces()
+    if traces:
+        raise AssertionError(f"Expected 0 traces, got {len(traces)}")
+    assert_no_spans()
+
+
+def fetch_normalized_spans(
+    keep_span_id: bool = False, keep_trace_id: bool = False
+) -> list[dict[str, Any]]:
     nodes: dict[tuple[str, str | None], dict[str, Any]] = {}
     traces = []
     for trace_obj in fetch_traces():
         trace = trace_obj.export()
         assert trace
         assert trace.pop("object") == "trace"
-        assert trace.pop("id").startswith("trace_")
+        assert trace["id"].startswith("trace_")
+        if not keep_trace_id:
+            del trace["id"]
         trace = {k: v for k, v in trace.items() if v is not None}
         nodes[(trace_obj.trace_id, None)] = trace
         traces.append(trace)
 
-    if not traces:
-        assert not fetch_ordered_spans()
+    assert traces, "Use assert_no_traces() to check for empty traces"
 
     for span_obj in fetch_ordered_spans():
         span = span_obj.export()
         assert span
         assert span.pop("object") == "trace.span"
-        assert span.pop("id").startswith("span_")
+        assert span["id"].startswith("span_")
+        if not keep_span_id:
+            del span["id"]
         assert datetime.fromisoformat(span.pop("started_at"))
         assert datetime.fromisoformat(span.pop("ended_at"))
         parent_id = span.pop("parent_id")

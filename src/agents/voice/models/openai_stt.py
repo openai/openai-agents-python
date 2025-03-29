@@ -10,9 +10,8 @@ from typing import Any, cast
 
 from openai import AsyncOpenAI
 
-from agents.exceptions import AgentsException
-
 from ... import _debug
+from ...exceptions import AgentsException
 from ...logger import logger
 from ...tracing import Span, SpanError, TranscriptionSpanData, transcription_span
 from ..exceptions import STTWebsocketConnectionError
