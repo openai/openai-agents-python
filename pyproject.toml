@@ -54,7 +54,6 @@ dev = [
     "pynput",
     "types-pynput",
     "sounddevice",
-    "pynput",
     "textual",
     "websockets",
     "graphviz",
