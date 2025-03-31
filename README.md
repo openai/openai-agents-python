@@ -32,6 +32,11 @@ pip install openai-agents
 
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
 
+3. Set API key
+```
+export OPENAI_API_KEY="your_api_key"
+```
+
 ## Hello world example
 
 ```python
