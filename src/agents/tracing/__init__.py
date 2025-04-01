@@ -9,8 +9,12 @@ from .create import (
     get_current_trace,
     guardrail_span,
     handoff_span,
+    mcp_tools_span,
     response_span,
+    speech_group_span,
+    speech_span,
     trace,
+    transcription_span,
 )
 from .processor_interface import TracingProcessor
 from .processors import default_exporter, default_processor
@@ -22,8 +26,12 @@ from .span_data import (
     GenerationSpanData,
     GuardrailSpanData,
     HandoffSpanData,
+    MCPListToolsSpanData,
     ResponseSpanData,
     SpanData,
+    SpeechGroupSpanData,
+    SpeechSpanData,
+    TranscriptionSpanData,
 )
 from .spans import Span, SpanError
 from .traces import Trace
@@ -53,10 +61,18 @@ __all__ = [
     "GenerationSpanData",
     "GuardrailSpanData",
     "HandoffSpanData",
+    "MCPListToolsSpanData",
     "ResponseSpanData",
+    "SpeechGroupSpanData",
+    "SpeechSpanData",
+    "TranscriptionSpanData",
     "TracingProcessor",
     "gen_trace_id",
     "gen_span_id",
+    "speech_group_span",
+    "speech_span",
+    "transcription_span",
+    "mcp_tools_span",
 ]
 
 

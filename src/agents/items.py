@@ -129,8 +129,10 @@ class ToolCallOutputItem(RunItemBase[Union[FunctionCallOutput, ComputerCallOutpu
     raw_item: FunctionCallOutput | ComputerCallOutput
     """The raw item from the model."""
 
-    output: str
-    """The output of the tool call."""
+    output: Any
+    """The output of the tool call. This is whatever the tool call returned; the `raw_item`
+    contains a string representation of the output.
+    """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
 

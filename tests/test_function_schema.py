@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal
 
@@ -421,7 +422,7 @@ def test_var_keyword_dict_annotation():
     def func(**kwargs: dict[str, int]):
         return kwargs
 
-    fs = function_schema(func, use_docstring_info=False)
+    fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
 
     properties = fs.params_json_schema.get("properties", {})
     # The name of the field is "kwargs", and it's a JSON object i.e. a dict.
@@ -512,3 +513,13 @@ def test_context_with_other_params():
     args, kwargs_dict = func_schema.to_call_args(parsed)
     result = func_with_context_and_params(context, *args, **kwargs_dict)
     assert result == "42 explicit"
+
+    
+def test_schema_with_mapping_raises_strict_mode_error():
+    """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
+
+    def func_with_mapping(test_one: Mapping[str, int]) -> str:
+        return "foo"
+
+    with pytest.raises(UserError):
+        function_schema(func_with_mapping)

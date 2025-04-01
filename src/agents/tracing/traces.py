@@ -4,8 +4,8 @@ import abc
 import contextvars
 from typing import Any
 
+from ..logger import logger
 from . import util
-from .logger import logger
 from .processor_interface import TracingProcessor
 from .scope import Scope
 

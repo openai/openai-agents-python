@@ -79,7 +79,7 @@ multiply_agent = Agent(
 
 start_agent = Agent(
     name="Start Agent",
-    instructions="Generate a random number. If it's even, stop. If it's odd, hand off to the multipler agent.",
+    instructions="Generate a random number. If it's even, stop. If it's odd, hand off to the multiplier agent.",
     tools=[random_number],
     output_type=FinalResult,
     handoffs=[multiply_agent],

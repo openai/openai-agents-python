@@ -4,8 +4,9 @@ import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
-from agents import Agent, AgentOutputSchema, ModelBehaviorError, Runner, UserError, _utils
+from agents import Agent, AgentOutputSchema, ModelBehaviorError, Runner, UserError
 from agents.agent_output import _WRAPPER_DICT_KEY
+from agents.util import _json
 
 
 def test_plain_text_output():
@@ -77,7 +78,7 @@ def test_bad_json_raises_error(mocker):
     output_schema = Runner._get_output_schema(agent)
     assert output_schema, "Should have an output tool config with a structured output type"
 
-    mock_validate_json = mocker.patch.object(_utils, "validate_json")
+    mock_validate_json = mocker.patch.object(_json, "validate_json")
     mock_validate_json.return_value = ["foo"]
 
     with pytest.raises(ModelBehaviorError):
@@ -110,4 +111,5 @@ def test_structured_output_is_strict():
 def test_setting_strict_false_works():
     output_wrapper = AgentOutputSchema(output_type=Foo, strict_json_schema=False)
     assert not output_wrapper.strict_json_schema
+    assert output_wrapper.json_schema() == Foo.model_json_schema()
     assert output_wrapper.json_schema() == Foo.model_json_schema()

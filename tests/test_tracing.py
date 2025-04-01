@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from inline_snapshot import snapshot
 
 from agents.tracing import (
     Span,
@@ -17,7 +18,12 @@ from agents.tracing import (
 )
 from agents.tracing.spans import SpanError
 
-from .testing_processor import fetch_events, fetch_ordered_spans, fetch_traces
+from .testing_processor import (
+    SPAN_PROCESSOR_TESTING,
+    assert_no_traces,
+    fetch_events,
+    fetch_normalized_spans,
+)
 
 ### HELPERS
 
@@ -47,7 +53,7 @@ def simple_tracing():
     x = trace("test")
     x.start()
 
-    span_1 = agent_span(name="agent_1", parent=x)
+    span_1 = agent_span(name="agent_1", span_id="span_1", parent=x)
     span_1.start()
     span_1.finish()
 
@@ -66,33 +72,36 @@ def simple_tracing():
 def test_simple_tracing() -> None:
     simple_tracing()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 3
-    assert len(traces) == 1
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    first_span = spans[0]
-    standard_span_checks(first_span, trace_id=trace_id, parent_id=None, span_type="agent")
-    assert first_span.span_data.name == "agent_1"
-
-    second_span = spans[1]
-    standard_span_checks(second_span, trace_id=trace_id, parent_id=None, span_type="custom")
-    assert second_span.span_id == "span_2"
-    assert second_span.span_data.name == "custom_1"
-
-    third_span = spans[2]
-    standard_span_checks(
-        third_span, trace_id=trace_id, parent_id=second_span.span_id, span_type="custom"
+    assert fetch_normalized_spans(keep_span_id=True) == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "children": [
+                    {
+                        "type": "agent",
+                        "id": "span_1",
+                        "data": {"name": "agent_1"},
+                    },
+                    {
+                        "type": "custom",
+                        "id": "span_2",
+                        "data": {"name": "custom_1", "data": {}},
+                        "children": [
+                            {
+                                "type": "custom",
+                                "id": "span_3",
+                                "data": {"name": "custom_2", "data": {}},
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
     )
-    assert third_span.span_id == "span_3"
-    assert third_span.span_data.name == "custom_2"
 
 
 def ctxmanager_spans():
-    with trace(workflow_name="test", trace_id="123", group_id="456"):
+    with trace(workflow_name="test", trace_id="trace_123", group_id="456"):
         with custom_span(name="custom_1", span_id="span_1"):
             with custom_span(name="custom_2", span_id="span_1_inner"):
                 pass
@@ -104,36 +113,38 @@ def ctxmanager_spans():
 def test_ctxmanager_spans() -> None:
     ctxmanager_spans()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 3
-    assert len(traces) == 1
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    first_span = spans[0]
-    standard_span_checks(first_span, trace_id=trace_id, parent_id=None, span_type="custom")
-    assert first_span.span_id == "span_1"
-
-    first_inner_span = spans[1]
-    standard_span_checks(
-        first_inner_span, trace_id=trace_id, parent_id=first_span.span_id, span_type="custom"
+    assert fetch_normalized_spans(keep_span_id=True) == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "group_id": "456",
+                "children": [
+                    {
+                        "type": "custom",
+                        "id": "span_1",
+                        "data": {"name": "custom_1", "data": {}},
+                        "children": [
+                            {
+                                "type": "custom",
+                                "id": "span_1_inner",
+                                "data": {"name": "custom_2", "data": {}},
+                            }
+                        ],
+                    },
+                    {"type": "custom", "id": "span_2", "data": {"name": "custom_2", "data": {}}},
+                ],
+            }
+        ]
     )
-    assert first_inner_span.span_id == "span_1_inner"
-
-    second_span = spans[2]
-    standard_span_checks(second_span, trace_id=trace_id, parent_id=None, span_type="custom")
-    assert second_span.span_id == "span_2"
 
 
 async def run_subtask(span_id: str | None = None) -> None:
     with generation_span(span_id=span_id):
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.0001)
 
 
 async def simple_async_tracing():
-    with trace(workflow_name="test", trace_id="123", group_id="456"):
+    with trace(workflow_name="test", trace_id="trace_123", group_id="group_456"):
         await run_subtask(span_id="span_1")
         await run_subtask(span_id="span_2")
 
@@ -142,21 +153,18 @@ async def simple_async_tracing():
 async def test_async_tracing() -> None:
     await simple_async_tracing()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 2
-    assert len(traces) == 1
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    # We don't care about ordering here, just that they're there
-    for s in spans:
-        standard_span_checks(s, trace_id=trace_id, parent_id=None, span_type="generation")
-
-    ids = [span.span_id for span in spans]
-    assert "span_1" in ids
-    assert "span_2" in ids
+    assert fetch_normalized_spans(keep_span_id=True) == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "group_id": "group_456",
+                "children": [
+                    {"type": "generation", "id": "span_1"},
+                    {"type": "generation", "id": "span_2"},
+                ],
+            }
+        ]
+    )
 
 
 async def run_tasks_parallel(span_ids: list[str]) -> None:
@@ -171,13 +179,11 @@ async def run_tasks_as_children(first_span_id: str, second_span_id: str) -> None
 
 
 async def complex_async_tracing():
-    with trace(workflow_name="test", trace_id="123", group_id="456"):
-        await asyncio.sleep(0.01)
+    with trace(workflow_name="test", trace_id="trace_123", group_id="456"):
         await asyncio.gather(
             run_tasks_parallel(["span_1", "span_2"]),
             run_tasks_parallel(["span_3", "span_4"]),
         )
-        await asyncio.sleep(0.01)
         await asyncio.gather(
             run_tasks_as_children("span_5", "span_6"),
             run_tasks_as_children("span_7", "span_8"),
@@ -186,39 +192,38 @@ async def complex_async_tracing():
 
 @pytest.mark.asyncio
 async def test_complex_async_tracing() -> None:
-    await complex_async_tracing()
+    for _ in range(300):
+        SPAN_PROCESSOR_TESTING.clear()
+        await complex_async_tracing()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 8
-    assert len(traces) == 1
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    # First ensure 1,2,3,4 exist and are in parallel with the trace as parent
-    for span_id in ["span_1", "span_2", "span_3", "span_4"]:
-        span = next((s for s in spans if s.span_id == span_id), None)
-        assert span is not None
-        standard_span_checks(span, trace_id=trace_id, parent_id=None, span_type="generation")
-
-    # Ensure 5 and 7 exist and have the trace as parent
-    for span_id in ["span_5", "span_7"]:
-        span = next((s for s in spans if s.span_id == span_id), None)
-        assert span is not None
-        standard_span_checks(span, trace_id=trace_id, parent_id=None, span_type="generation")
-
-    # Ensure 6 and 8 exist and have 5 and 7 as parents
-    six = next((s for s in spans if s.span_id == "span_6"), None)
-    assert six is not None
-    standard_span_checks(six, trace_id=trace_id, parent_id="span_5", span_type="generation")
-    eight = next((s for s in spans if s.span_id == "span_8"), None)
-    assert eight is not None
-    standard_span_checks(eight, trace_id=trace_id, parent_id="span_7", span_type="generation")
+        assert fetch_normalized_spans(keep_span_id=True) == (
+            [
+                {
+                    "workflow_name": "test",
+                    "group_id": "456",
+                    "children": [
+                        {"type": "generation", "id": "span_1"},
+                        {"type": "generation", "id": "span_2"},
+                        {"type": "generation", "id": "span_3"},
+                        {"type": "generation", "id": "span_4"},
+                        {
+                            "type": "generation",
+                            "id": "span_5",
+                            "children": [{"type": "generation", "id": "span_6"}],
+                        },
+                        {
+                            "type": "generation",
+                            "id": "span_7",
+                            "children": [{"type": "generation", "id": "span_8"}],
+                        },
+                    ],
+                }
+            ]
+        )
 
 
 def spans_with_setters():
-    with trace(workflow_name="test", trace_id="123", group_id="456"):
+    with trace(workflow_name="test", trace_id="trace_123", group_id="456"):
         with agent_span(name="agent_1") as span_a:
             span_a.span_data.name = "agent_2"
 
@@ -236,34 +241,33 @@ def spans_with_setters():
 def test_spans_with_setters() -> None:
     spans_with_setters()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 4
-    assert len(traces) == 1
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    # Check the spans
-    first_span = spans[0]
-    standard_span_checks(first_span, trace_id=trace_id, parent_id=None, span_type="agent")
-    assert first_span.span_data.name == "agent_2"
-
-    second_span = spans[1]
-    standard_span_checks(
-        second_span, trace_id=trace_id, parent_id=first_span.span_id, span_type="function"
-    )
-    assert second_span.span_data.input == "i"
-    assert second_span.span_data.output == "o"
-
-    third_span = spans[2]
-    standard_span_checks(
-        third_span, trace_id=trace_id, parent_id=first_span.span_id, span_type="generation"
-    )
-
-    fourth_span = spans[3]
-    standard_span_checks(
-        fourth_span, trace_id=trace_id, parent_id=first_span.span_id, span_type="handoff"
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "group_id": "456",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {"name": "agent_2"},
+                        "children": [
+                            {
+                                "type": "function",
+                                "data": {"name": "function_1", "input": "i", "output": "o"},
+                            },
+                            {
+                                "type": "generation",
+                                "data": {"input": [{"foo": "bar"}]},
+                            },
+                            {
+                                "type": "handoff",
+                                "data": {"from_agent": "agent_1", "to_agent": "agent_2"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
     )
 
 
@@ -276,14 +280,11 @@ def disabled_tracing():
 
 def test_disabled_tracing():
     disabled_tracing()
-
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 0
-    assert len(traces) == 0
+    assert_no_traces()
 
 
 def enabled_trace_disabled_span():
-    with trace(workflow_name="test", trace_id="123"):
+    with trace(workflow_name="test", trace_id="trace_123"):
         with agent_span(name="agent_1"):
             with function_span(name="function_1", disabled=True):
                 with generation_span():
@@ -293,17 +294,19 @@ def enabled_trace_disabled_span():
 def test_enabled_trace_disabled_span():
     enabled_trace_disabled_span()
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 1  # Only the agent span is recorded
-    assert len(traces) == 1  # The trace is recorded
-
-    trace = traces[0]
-    standard_trace_checks(trace, name_check="test")
-    trace_id = trace.trace_id
-
-    first_span = spans[0]
-    standard_span_checks(first_span, trace_id=trace_id, parent_id=None, span_type="agent")
-    assert first_span.span_data.name == "agent_1"
+    assert fetch_normalized_spans() == snapshot(
+        [
+            {
+                "workflow_name": "test",
+                "children": [
+                    {
+                        "type": "agent",
+                        "data": {"name": "agent_1"},
+                    }
+                ],
+            }
+        ]
+    )
 
 
 def test_start_and_end_called_manual():
@@ -367,9 +370,7 @@ async def test_noop_span_doesnt_record():
         with custom_span(name="span_1") as span:
             span.set_error(SpanError(message="test", data={}))
 
-    spans, traces = fetch_ordered_spans(), fetch_traces()
-    assert len(spans) == 0
-    assert len(traces) == 0
+    assert_no_traces()
 
     assert t.export() is None
     assert span.export() is None

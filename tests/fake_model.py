@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 from openai.types.responses import Response, ResponseCompletedEvent
 
@@ -31,6 +32,7 @@ class FakeModel(Model):
             [initial_output] if initial_output else []
         )
         self.tracing_enabled = tracing_enabled
+        self.last_turn_args: dict[str, Any] = {}
 
     def set_next_output(self, output: list[TResponseOutputItem] | Exception):
         self.turn_outputs.append(output)
@@ -53,6 +55,14 @@ class FakeModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
     ) -> ModelResponse:
+        self.last_turn_args = {
+            "system_instructions": system_instructions,
+            "input": input,
+            "model_settings": model_settings,
+            "tools": tools,
+            "output_schema": output_schema,
+        }
+
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
 

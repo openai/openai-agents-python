@@ -674,7 +674,7 @@ async def test_streaming_events():
     total_expected_item_count = sum(expected_item_type_map.values())
 
     assert event_counts["run_item_stream_event"] == total_expected_item_count, (
-        f"Expectd {total_expected_item_count} events, got {event_counts['run_item_stream_event']}"
+        f"Expected {total_expected_item_count} events, got {event_counts['run_item_stream_event']}"
         f"Expected events were: {expected_item_type_map}, got {event_counts}"
     )
 
