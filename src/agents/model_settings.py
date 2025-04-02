@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from typing import Literal
 
+from openai.types.shared import Reasoning
+
 
 @dataclass
 class ModelSettings:
@@ -40,7 +42,7 @@ class ModelSettings:
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
 
-    reasoning: dict[str, str] | None = None
+    reasoning: Reasoning | None = None
     """Controls reasoning behavior for reasoning-capable models.
     For o-series models: Use 'effort' key with values 'low', 'medium', or 'high' to control
     reasoning effort. For computer_use_preview: Use 'generate_summary' key with values
