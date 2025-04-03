@@ -521,6 +521,8 @@ class OpenAIChatCompletionsModel(Model):
         # Match the behavior of Responses where store is True when not given
         store = model_settings.store if model_settings.store is not None else True
 
+        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+
         ret = await self._get_client().chat.completions.create(
             model=self.model,
             messages=converted_messages,
@@ -536,7 +538,7 @@ class OpenAIChatCompletionsModel(Model):
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
             store=store,
-            reasoning=self._non_null_or_not_given(model_settings.reasoning),
+            reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             extra_headers=_HEADERS,
         )
 
