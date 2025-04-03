@@ -43,10 +43,9 @@ class ModelSettings:
     """The maximum number of output tokens to generate."""
 
     reasoning: Reasoning | None = None
-    """Controls reasoning behavior for reasoning-capable models.
-    For o-series models: Use 'effort' key with values 'low', 'medium', or 'high' to control
-    reasoning effort. For computer_use_preview: Use 'generate_summary' key with values
-    'concise' or 'detailed' to get reasoning summaries."""
+    """Configuration options for 
+    [reasoning models](https://platform.openai.com/docs/guides/reasoning).
+    """
 
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
