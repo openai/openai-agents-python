@@ -537,6 +537,7 @@ class OpenAIChatCompletionsModel(Model):
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
             store=store,
             extra_headers=_HEADERS,
+            metadata=model_settings.metadata,
         )
 
         if isinstance(ret, ChatCompletion):

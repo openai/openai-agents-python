@@ -40,6 +40,9 @@ class ModelSettings:
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
 
+    metadata: dict[str, str] | None = None
+    """Metadata to include with the model response call."""
+
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
     Defaults to True if not provided."""
