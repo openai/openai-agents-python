@@ -43,7 +43,7 @@ class ModelSettings:
     """The maximum number of output tokens to generate."""
 
     reasoning: Reasoning | None = None
-    """Configuration options for 
+    """Configuration options for
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
