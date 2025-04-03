@@ -5,7 +5,7 @@ This example uses a local SSE server in [server.py](server.py).
 Run the example via:
 
 ```
-uv run python  python examples/mcp/sse_example/main.py
+uv run python examples/mcp/sse_example/main.py
 ```
 
 ## Details
