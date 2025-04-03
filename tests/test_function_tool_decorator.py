@@ -3,6 +3,7 @@ import json
 from typing import Any, Optional
 
 import pytest
+from inline_snapshot import snapshot
 
 from agents import function_tool
 from agents.run_context import RunContextWrapper
@@ -198,3 +199,37 @@ async def test_all_optional_params_function():
     input_data = {"x": 10, "y": "world", "z": 99}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "10_world_99"
+
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Get the weather for a given city.
+
+    Args:
+        city: The city to get the weather for.
+    """
+    return f"The weather in {city} is sunny."
+
+
+@pytest.mark.asyncio
+async def test_extract_descriptions_from_docstring():
+    """Ensure that we extract function and param descriptions from docstrings."""
+
+    tool = get_weather
+    assert tool.description == "Get the weather for a given city."
+    params_json_schema = tool.params_json_schema
+    assert params_json_schema == snapshot(
+        {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "description": "The city to get the weather for.",
+                    "title": "City",
+                    "type": "string",
+                }
+            },
+            "title": "get_weather_args",
+            "required": ["city"],
+            "additionalProperties": False,
+        }
+    )

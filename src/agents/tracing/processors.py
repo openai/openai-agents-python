@@ -182,7 +182,6 @@ class BatchTraceProcessor(TracingProcessor):
         # Track when we next *must* perform a scheduled export
         self._next_export_time = time.time() + self._schedule_delay
 
-        self._shutdown_event = threading.Event()
         self._worker_thread = threading.Thread(target=self._run, daemon=True)
         self._worker_thread.start()
 

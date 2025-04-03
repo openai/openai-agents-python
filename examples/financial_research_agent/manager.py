@@ -38,7 +38,7 @@ class FinancialResearchManager:
         with trace("Financial research trace", trace_id=trace_id):
             self.printer.update_item(
                 "trace_id",
-                f"View trace: https://platform.openai.com/traces/{trace_id}",
+                f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}",
                 is_done=True,
                 hide_checkmark=True,
             )

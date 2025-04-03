@@ -2,6 +2,8 @@ import functools
 import json
 from typing import TYPE_CHECKING, Any
 
+from agents.strict_schema import ensure_strict_json_schema
+
 from .. import _debug
 from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
@@ -19,12 +21,14 @@ class MCPUtil:
     """Set of utilities for interop between MCP and Agents SDK tools."""
 
     @classmethod
-    async def get_all_function_tools(cls, servers: list["MCPServer"]) -> list[Tool]:
+    async def get_all_function_tools(
+        cls, servers: list["MCPServer"], convert_schemas_to_strict: bool
+    ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
         for server in servers:
-            server_tools = await cls.get_function_tools(server)
+            server_tools = await cls.get_function_tools(server, convert_schemas_to_strict)
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
                 raise UserError(
@@ -37,25 +41,37 @@ class MCPUtil:
         return tools
 
     @classmethod
-    async def get_function_tools(cls, server: "MCPServer") -> list[Tool]:
+    async def get_function_tools(
+        cls, server: "MCPServer", convert_schemas_to_strict: bool
+    ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
         with mcp_tools_span(server=server.name) as span:
             tools = await server.list_tools()
             span.span_data.result = [tool.name for tool in tools]
 
-        return [cls.to_function_tool(tool, server) for tool in tools]
+        return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
 
     @classmethod
-    def to_function_tool(cls, tool: "MCPTool", server: "MCPServer") -> FunctionTool:
+    def to_function_tool(
+        cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
+    ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
         invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
+        schema, is_strict = tool.inputSchema, False
+        if convert_schemas_to_strict:
+            try:
+                schema = ensure_strict_json_schema(schema)
+                is_strict = True
+            except Exception as e:
+                logger.info(f"Error converting MCP schema to strict mode: {e}")
+
         return FunctionTool(
             name=tool.name,
             description=tool.description or "",
-            params_json_schema=tool.inputSchema,
+            params_json_schema=schema,
             on_invoke_tool=invoke_func,
-            strict_json_schema=False,
+            strict_json_schema=is_strict,
         )
 
     @classmethod

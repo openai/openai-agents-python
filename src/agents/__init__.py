@@ -100,6 +100,7 @@ from .tracing import (
     transcription_span,
 )
 from .usage import Usage
+from .version import __version__
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
@@ -247,4 +248,5 @@ __all__ = [
     "gen_trace_id",
     "gen_span_id",
     "default_tool_error_function",
+    "__version__",
 ]

@@ -48,6 +48,10 @@ class ModelSettings:
     reasoning effort. For computer_use_preview: Use 'generate_summary' key with values
     'concise' or 'detailed' to get reasoning summaries."""
 
+    metadata: dict[str, str] | None = None
+    """Metadata to include with the model response call."""
+
+
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
     Defaults to True if not provided."""
