@@ -244,6 +244,9 @@ class MCPServerSseParams(TypedDict):
     sse_read_timeout: NotRequired[float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
+    transport: NotRequired[httpx.AsyncHTTPTransport]
+    """The transport for the SSE connection."""
+
 
 class MCPServerSse(_MCPServerWithClientSession):
     """MCP server implementation that uses the HTTP with SSE transport. See the [spec]
@@ -293,6 +296,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             headers=self.params.get("headers", None),
             timeout=self.params.get("timeout", 5),
             sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+            transport=self.params.get("transport", None),
         )
 
     @property
