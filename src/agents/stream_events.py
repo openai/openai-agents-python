@@ -31,7 +31,7 @@ class RunItemStreamEvent:
     name: Literal[
         "message_output_created",
         "handoff_requested",
-        "handoff_occured",
+        "handoff_occurred",
         "tool_called",
         "tool_output",
         "reasoning_item_created",
