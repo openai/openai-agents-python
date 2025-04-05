@@ -1,0 +1,23 @@
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: gpt-4o
+      api_key: "os.environ/OPENAI_API_KEY"
+      api_base: https://api.openai.com/v1
+  - model_name: claude-3-7
+    litellm_params: 
+      model: claude-3-7-sonnet-20250219
+      api_key: "os.environ/ANTHROPIC_API_KEY" # does os.getenv("ANTHROPIC_API_KEY")
+      base_url: 'https://api.anthropic.com'
+  - model_name: qwen2.5:14b
+    litellm_params:
+      model: ollama/qwen2.5:14b
+      api_base: http://localhost:8000
+      api_key: "os.environ/OLLAMA"
+
+litellm_settings: # module level litellm settings - https://github.com/BerriAI/litellm/blob/main/litellm/__init__.py
+  drop_params: True
+  # set_verbose: True
+
+general_settings: 
+  port: 4000
