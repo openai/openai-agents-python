@@ -27,7 +27,9 @@ ToolParams = ParamSpec("ToolParams")
 ToolFunctionWithoutContext = Callable[ToolParams, Any]
 ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
 
-ToolFunction = Union[ToolFunctionWithoutContext[ToolParams], ToolFunctionWithContext[ToolParams]]
+ToolFunction = Union[
+    ToolFunctionWithoutContext[ToolParams], ToolFunctionWithContext[ToolParams]
+]
 
 
 @dataclass
@@ -244,7 +246,9 @@ def function_tool(
                     else schema.params_pydantic_model()
                 )
             except ValidationError as e:
-                raise ModelBehaviorError(f"Invalid JSON input for tool {schema.name}: {e}") from e
+                raise ModelBehaviorError(
+                    f"Invalid JSON input for tool {schema.name}: {e}"
+                ) from e
 
             args, kwargs_dict = schema.to_call_args(parsed)
 
