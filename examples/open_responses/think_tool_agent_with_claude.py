@@ -13,7 +13,7 @@ model with Open Responses API.
 
 # Set custom parameters.
 BASE_URL = os.getenv("OPEN_RESPONSES_URL") or "http://localhost:8080/v1" #Either set OPEN_RESPONSES_URL in environment variable or put it directly here.
-API_KEY = os.getenv("CLAUDE_API_KEY") or "" #Either set GROK_API_KEY in environment variable or put it directly here.
+API_KEY = os.getenv("CLAUDE_API_KEY") or "" #Either set GROQ_API_KEY in environment variable or put it directly here.
 MODEL_NAME = "claude-3-7-sonnet-20250219"
 
 # Define custom headers.
