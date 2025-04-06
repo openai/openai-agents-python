@@ -1,6 +1,10 @@
 # Agent Visualization
 
-Agent visualization allows you to generate a structured graphical representation of agents and their relationships using **Graphviz**. This is useful for understanding how agents, tools, and handoffs interact within an application.
+Agent visualization allows you to generate a structured graphical representation of agents and their relationships. Two rendering options are available:
+- **Graphviz** (offline): Default renderer that generates graphs locally
+- **Mermaid** (online): Alternative renderer that uses mermaid.ink API
+
+This is useful for understanding how agents, tools, and handoffs interact within an application.
 
 ## Installation
 
@@ -17,6 +21,15 @@ You can generate an agent visualization using the `draw_graph` function. This fu
 - **Agents** are represented as yellow boxes.
 - **Tools** are represented as green ellipses.
 - **Handoffs** are directed edges from one agent to another.
+
+The renderer can be specified using the `renderer` parameter:
+```python
+# Using Graphviz (default)
+draw_graph(agent, renderer="graphviz")
+
+# Using Mermaid API
+draw_graph(agent, renderer="mermaid")
+```
 
 ### Example Usage
 
@@ -82,5 +95,3 @@ draw_graph(triage_agent, filename="agent_graph.png")
 ```
 
 This will generate `agent_graph.png` in the working directory.
-
-
