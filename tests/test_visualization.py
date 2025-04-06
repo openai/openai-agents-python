@@ -1,37 +1,51 @@
+import dataclasses
 from unittest.mock import Mock, patch
-import io
-import base64
 
-import graphviz  # type: ignore
 import pytest
 
 from agents import Agent
 from agents.extensions.visualization import (
+    Edge,
+    EdgeType,
+    Graph,
+    GraphBuilder,
+    GraphView,
+    GraphvizRenderer,
+    MermaidRenderer,
+    Node,
+    NodeType,
     draw_graph,
     get_all_edges,
     get_all_nodes,
     get_main_graph,
-    Graph,
-    GraphBuilder,
-    GraphvizRenderer,
-    GraphRenderer,
-    Node,
-    Edge,
-    NodeType,
-    EdgeType,
-    MermaidRenderer,
-    GraphView
 )
 from agents.handoffs import Handoff
 
-
 # Common test graph elements
-START_NODE = '"__start__" [label="__start__", shape=ellipse, style=filled, fillcolor=lightblue, width=0.5, height=0.3];'
-END_NODE = '"__end__" [label="__end__", shape=ellipse, style=filled, fillcolor=lightblue, width=0.5, height=0.3];'
-AGENT_NODE = '"Agent1" [label="Agent1", shape=box, style=filled, fillcolor=lightyellow, width=1.5, height=0.8];'
-TOOL1_NODE = '"Tool1" [label="Tool1", shape=ellipse, style=filled, fillcolor=lightgreen, width=0.5, height=0.3];'
-TOOL2_NODE = '"Tool2" [label="Tool2", shape=ellipse, style=filled, fillcolor=lightgreen, width=0.5, height=0.3];'
-HANDOFF_NODE = '"Handoff1" [label="Handoff1", shape=box, style=filled, fillcolor=lightyellow, width=1.5, height=0.8];'
+START_NODE = (
+    '"__start__" [label="__start__", shape=ellipse, style=filled, '
+    "fillcolor=lightblue, width=0.5, height=0.3];"
+)
+END_NODE = (
+    '"__end__" [label="__end__", shape=ellipse, style=filled, '
+    "fillcolor=lightblue, width=0.5, height=0.3];"
+)
+AGENT_NODE = (
+    '"Agent1" [label="Agent1", shape=box, style=filled, '
+    "fillcolor=lightyellow, width=1.5, height=0.8];"
+)
+TOOL1_NODE = (
+    '"Tool1" [label="Tool1", shape=ellipse, style=filled, '
+    "fillcolor=lightgreen, width=0.5, height=0.3];"
+)
+TOOL2_NODE = (
+    '"Tool2" [label="Tool2", shape=ellipse, style=filled, '
+    "fillcolor=lightgreen, width=0.5, height=0.3];"
+)
+HANDOFF_NODE = (
+    '"Handoff1" [label="Handoff1", shape=box, style=filled, '
+    "fillcolor=lightyellow, width=1.5, height=0.8];"
+)
 
 
 @pytest.fixture
@@ -69,7 +83,7 @@ def mock_recursive_agents():
 def test_graph_builder(mock_agent):
     builder = GraphBuilder()
     graph = builder.build_from_agent(mock_agent)
-    
+
     # Check nodes
     assert "__start__" in graph.nodes
     assert "__end__" in graph.nodes
@@ -77,7 +91,7 @@ def test_graph_builder(mock_agent):
     assert "Tool1" in graph.nodes
     assert "Tool2" in graph.nodes
     assert "Handoff1" in graph.nodes
-    
+
     # Check node types
     assert graph.nodes["__start__"].type == NodeType.START
     assert graph.nodes["__end__"].type == NodeType.END
@@ -94,12 +108,25 @@ def test_graph_builder(mock_agent):
     tool2_to_agent = Edge("Tool2", "Agent1", EdgeType.TOOL)
     agent_to_handoff = Edge("Agent1", "Handoff1", EdgeType.HANDOFF)
 
-    assert any(e.source == start_to_agent.source and e.target == start_to_agent.target for e in graph.edges)
-    assert any(e.source == agent_to_tool1.source and e.target == agent_to_tool1.target for e in graph.edges)
-    assert any(e.source == tool1_to_agent.source and e.target == tool1_to_agent.target for e in graph.edges)
-    assert any(e.source == agent_to_tool2.source and e.target == agent_to_tool2.target for e in graph.edges)
-    assert any(e.source == tool2_to_agent.source and e.target == tool2_to_agent.target for e in graph.edges)
-    assert any(e.source == agent_to_handoff.source and e.target == agent_to_handoff.target for e in graph.edges)
+    assert any(
+        e.source == start_to_agent.source and e.target == start_to_agent.target for e in graph.edges
+    )
+    assert any(
+        e.source == agent_to_tool1.source and e.target == agent_to_tool1.target for e in graph.edges
+    )
+    assert any(
+        e.source == tool1_to_agent.source and e.target == tool1_to_agent.target for e in graph.edges
+    )
+    assert any(
+        e.source == agent_to_tool2.source and e.target == agent_to_tool2.target for e in graph.edges
+    )
+    assert any(
+        e.source == tool2_to_agent.source and e.target == tool2_to_agent.target for e in graph.edges
+    )
+    assert any(
+        e.source == agent_to_handoff.source and e.target == agent_to_handoff.target
+        for e in graph.edges
+    )
 
 
 def test_graphviz_renderer(mock_agent):
@@ -107,7 +134,7 @@ def test_graphviz_renderer(mock_agent):
     graph = builder.build_from_agent(mock_agent)
     renderer = GraphvizRenderer()
     dot_code = renderer.render(graph)
-    
+
     assert "digraph G" in dot_code
     assert "graph [splines=true];" in dot_code
     assert 'node [fontname="Arial"];' in dot_code
@@ -123,48 +150,54 @@ def test_graphviz_renderer(mock_agent):
 def test_recursive_graph_builder(mock_recursive_agents):
     builder = GraphBuilder()
     graph = builder.build_from_agent(mock_recursive_agents)
-    
+
     # Check nodes
     assert "Agent1" in graph.nodes
     assert "Agent2" in graph.nodes
     assert graph.nodes["Agent1"].type == NodeType.AGENT
     assert graph.nodes["Agent2"].type == NodeType.AGENT
-    
+
     # Check edges
     agent1_to_agent2 = Edge("Agent1", "Agent2", EdgeType.HANDOFF)
     agent2_to_agent1 = Edge("Agent2", "Agent1", EdgeType.HANDOFF)
-    
-    assert any(e.source == agent1_to_agent2.source and e.target == agent1_to_agent2.target for e in graph.edges)
-    assert any(e.source == agent2_to_agent1.source and e.target == agent2_to_agent1.target for e in graph.edges)
+
+    assert any(
+        e.source == agent1_to_agent2.source and e.target == agent1_to_agent2.target
+        for e in graph.edges
+    )
+    assert any(
+        e.source == agent2_to_agent1.source and e.target == agent2_to_agent1.target
+        for e in graph.edges
+    )
 
 
 def test_graph_validation():
     graph = Graph()
-    
+
     # Test adding valid nodes and edges
     node1 = Node("1", "Node 1", NodeType.AGENT)
     node2 = Node("2", "Node 2", NodeType.TOOL)
     graph.add_node(node1)
     graph.add_node(node2)
-    
+
     valid_edge = Edge("1", "2", EdgeType.TOOL)
     graph.add_edge(valid_edge)
-    
+
     # Test adding edge with non-existent source
     invalid_edge1 = Edge("3", "2", EdgeType.TOOL)
     with pytest.raises(ValueError, match="Source node '3' does not exist in the graph"):
         graph.add_edge(invalid_edge1)
-    
+
     # Test adding edge with non-existent target
     invalid_edge2 = Edge("1", "3", EdgeType.TOOL)
     with pytest.raises(ValueError, match="Target node '3' does not exist in the graph"):
         graph.add_edge(invalid_edge2)
-        
+
     # Test helper methods
     assert graph.has_node("1")
     assert graph.has_node("2")
     assert not graph.has_node("3")
-    
+
     assert graph.get_node("1") == node1
     assert graph.get_node("2") == node2
     assert graph.get_node("3") is None
@@ -172,26 +205,26 @@ def test_graph_validation():
 
 def test_node_immutability():
     node = Node("1", "Node 1", NodeType.AGENT)
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         node.id = "2"
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         node.label = "Node 2"
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         node.type = NodeType.TOOL
 
 
 def test_edge_immutability():
     edge = Edge("1", "2", EdgeType.TOOL)
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         edge.source = "3"
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         edge.target = "3"
-    with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):
         edge.type = EdgeType.HANDOFF
 
 
 def test_draw_graph_with_invalid_renderer(mock_agent):
-    with pytest.raises(ValueError, match=f"Unsupported renderer: invalid"):
+    with pytest.raises(ValueError, match="Unsupported renderer: invalid"):
         draw_graph(mock_agent, renderer="invalid")
 
 
@@ -306,12 +339,12 @@ def test_recursive_handoff_loop(mock_recursive_agents):
         dot = get_main_graph(mock_recursive_agents)
 
     assert (
-        '"Agent1" [label="Agent1", shape=box, style=filled, fillcolor=lightyellow, width=1.5, height=0.8];'
-        in dot
+        '"Agent1" [label="Agent1", shape=box, style=filled, '
+        "fillcolor=lightyellow, width=1.5, height=0.8];" in dot
     )
     assert (
-        '"Agent2" [label="Agent2", shape=box, style=filled, fillcolor=lightyellow, width=1.5, height=0.8];'
-        in dot
+        '"Agent2" [label="Agent2", shape=box, style=filled, '
+        "fillcolor=lightyellow, width=1.5, height=0.8];" in dot
     )
     assert '"Agent1" -> "Agent2";' in dot
     assert '"Agent2" -> "Agent1";' in dot
@@ -322,10 +355,10 @@ def test_mermaid_renderer(mock_agent):
     graph = builder.build_from_agent(mock_agent)
     renderer = MermaidRenderer()
     mermaid_code = renderer.render(graph)
-    
+
     # Test flowchart header
     assert "graph TD" in mermaid_code
-    
+
     # Test node rendering
     assert "__start__(__start__)" in mermaid_code
     assert "style __start__ fill:lightblue" in mermaid_code
@@ -339,7 +372,7 @@ def test_mermaid_renderer(mock_agent):
     assert "style Tool2 fill:lightgreen" in mermaid_code
     assert "Handoff1[Handoff1]" in mermaid_code
     assert "style Handoff1 fill:lightyellow" in mermaid_code
-    
+
     # Test edge rendering
     assert "__start__ --> Agent1" in mermaid_code
     assert "Agent1 -.-> Tool1" in mermaid_code
