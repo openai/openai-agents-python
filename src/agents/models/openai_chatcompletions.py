@@ -923,12 +923,13 @@ class _Converter:
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
+                arguments = func_call["arguments"] if func_call["arguments"] else "{}"
                 new_tool_call = ChatCompletionMessageToolCallParam(
                     id=func_call["call_id"],
                     type="function",
                     function={
                         "name": func_call["name"],
-                        "arguments": func_call["arguments"],
+                        "arguments": arguments,
                     },
                 )
                 tool_calls.append(new_tool_call)
@@ -971,7 +972,7 @@ class ToolConverter:
             }
 
         raise UserError(
-            f"Hosted tools are not supported with the ChatCompletions API. FGot tool type: "
+            f"Hosted tools are not supported with the ChatCompletions API. Got tool type: "
             f"{type(tool)}, tool: {tool}"
         )
 

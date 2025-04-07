@@ -2,10 +2,11 @@ import logging
 from typing import Any
 
 import pytest
+from inline_snapshot import snapshot
 from mcp.types import Tool as MCPTool
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
-from agents import FunctionTool, RunContextWrapper
+from agents import Agent, FunctionTool, RunContextWrapper
 from agents.exceptions import AgentsException, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
 
@@ -18,7 +19,16 @@ class Foo(BaseModel):
 
 
 class Bar(BaseModel):
-    qux: str
+    qux: dict[str, str]
+
+
+Baz = TypeAdapter(dict[str, str])
+
+
+def _convertible_schema() -> dict[str, Any]:
+    schema = Foo.model_json_schema()
+    schema["additionalProperties"] = False
+    return schema
 
 
 @pytest.mark.asyncio
@@ -47,7 +57,7 @@ async def test_get_all_function_tools():
     server3.add_tool(names[4], schemas[4])
 
     servers: list[MCPServer] = [server1, server2, server3]
-    tools = await MCPUtil.get_all_function_tools(servers)
+    tools = await MCPUtil.get_all_function_tools(servers, convert_schemas_to_strict=False)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
 
@@ -55,6 +65,11 @@ async def test_get_all_function_tools():
         assert isinstance(tool, FunctionTool)
         assert tool.params_json_schema == schemas[idx]
         assert tool.name == names[idx]
+
+    # Also make sure it works with strict schemas
+    tools = await MCPUtil.get_all_function_tools(servers, convert_schemas_to_strict=True)
+    assert len(tools) == 5
+    assert all(tool.name in names for tool in tools)
 
 
 @pytest.mark.asyncio
@@ -107,3 +122,141 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agent_convert_schemas_true():
+    """Test that setting convert_schemas_to_strict to True converts non-strict schemas to strict.
+    - 'foo' tool is already strict and remains strict.
+    - 'bar' tool is non-strict and becomes strict (additionalProperties set to False, etc).
+    """
+    strict_schema = Foo.model_json_schema()
+    non_strict_schema = Baz.json_schema()
+    possible_to_convert_schema = _convertible_schema()
+
+    server = FakeMCPServer()
+    server.add_tool("foo", strict_schema)
+    server.add_tool("bar", non_strict_schema)
+    server.add_tool("baz", possible_to_convert_schema)
+    agent = Agent(
+        name="test_agent", mcp_servers=[server], mcp_config={"convert_schemas_to_strict": True}
+    )
+    tools = await agent.get_mcp_tools()
+
+    foo_tool = next(tool for tool in tools if tool.name == "foo")
+    assert isinstance(foo_tool, FunctionTool)
+    bar_tool = next(tool for tool in tools if tool.name == "bar")
+    assert isinstance(bar_tool, FunctionTool)
+    baz_tool = next(tool for tool in tools if tool.name == "baz")
+    assert isinstance(baz_tool, FunctionTool)
+
+    # Checks that additionalProperties is set to False
+    assert foo_tool.params_json_schema == snapshot(
+        {
+            "properties": {
+                "bar": {"title": "Bar", "type": "string"},
+                "baz": {"title": "Baz", "type": "integer"},
+            },
+            "required": ["bar", "baz"],
+            "title": "Foo",
+            "type": "object",
+            "additionalProperties": False,
+        }
+    )
+    assert foo_tool.strict_json_schema is True, "foo_tool should be strict"
+
+    # Checks that additionalProperties is set to False
+    assert bar_tool.params_json_schema == snapshot(
+        {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+        }
+    )
+    assert bar_tool.strict_json_schema is False, "bar_tool should not be strict"
+
+    # Checks that additionalProperties is set to False
+    assert baz_tool.params_json_schema == snapshot(
+        {
+            "properties": {
+                "bar": {"title": "Bar", "type": "string"},
+                "baz": {"title": "Baz", "type": "integer"},
+            },
+            "required": ["bar", "baz"],
+            "title": "Foo",
+            "type": "object",
+            "additionalProperties": False,
+        }
+    )
+    assert baz_tool.strict_json_schema is True, "baz_tool should be strict"
+
+
+@pytest.mark.asyncio
+async def test_agent_convert_schemas_false():
+    """Test that setting convert_schemas_to_strict to False leaves tool schemas as non-strict.
+    - 'foo' tool remains strict.
+    - 'bar' tool remains non-strict (additionalProperties remains True).
+    """
+    strict_schema = Foo.model_json_schema()
+    non_strict_schema = Baz.json_schema()
+    possible_to_convert_schema = _convertible_schema()
+
+    server = FakeMCPServer()
+    server.add_tool("foo", strict_schema)
+    server.add_tool("bar", non_strict_schema)
+    server.add_tool("baz", possible_to_convert_schema)
+
+    agent = Agent(
+        name="test_agent", mcp_servers=[server], mcp_config={"convert_schemas_to_strict": False}
+    )
+    tools = await agent.get_mcp_tools()
+
+    foo_tool = next(tool for tool in tools if tool.name == "foo")
+    assert isinstance(foo_tool, FunctionTool)
+    bar_tool = next(tool for tool in tools if tool.name == "bar")
+    assert isinstance(bar_tool, FunctionTool)
+    baz_tool = next(tool for tool in tools if tool.name == "baz")
+    assert isinstance(baz_tool, FunctionTool)
+
+    assert foo_tool.params_json_schema == strict_schema
+    assert foo_tool.strict_json_schema is False, "Shouldn't be converted unless specified"
+
+    assert bar_tool.params_json_schema == non_strict_schema
+    assert bar_tool.strict_json_schema is False
+
+    assert baz_tool.params_json_schema == possible_to_convert_schema
+    assert baz_tool.strict_json_schema is False, "Shouldn't be converted unless specified"
+
+
+@pytest.mark.asyncio
+async def test_agent_convert_schemas_unset():
+    """Test that leaving convert_schemas_to_strict unset (defaulting to False) leaves tool schemas
+    as non-strict.
+    - 'foo' tool remains strict.
+    - 'bar' tool remains non-strict.
+    """
+    strict_schema = Foo.model_json_schema()
+    non_strict_schema = Baz.json_schema()
+    possible_to_convert_schema = _convertible_schema()
+
+    server = FakeMCPServer()
+    server.add_tool("foo", strict_schema)
+    server.add_tool("bar", non_strict_schema)
+    server.add_tool("baz", possible_to_convert_schema)
+    agent = Agent(name="test_agent", mcp_servers=[server])
+    tools = await agent.get_mcp_tools()
+
+    foo_tool = next(tool for tool in tools if tool.name == "foo")
+    assert isinstance(foo_tool, FunctionTool)
+    bar_tool = next(tool for tool in tools if tool.name == "bar")
+    assert isinstance(bar_tool, FunctionTool)
+    baz_tool = next(tool for tool in tools if tool.name == "baz")
+    assert isinstance(baz_tool, FunctionTool)
+
+    assert foo_tool.params_json_schema == strict_schema
+    assert foo_tool.strict_json_schema is False, "Shouldn't be converted unless specified"
+
+    assert bar_tool.params_json_schema == non_strict_schema
+    assert bar_tool.strict_json_schema is False
+
+    assert baz_tool.params_json_schema == possible_to_convert_schema
+    assert baz_tool.strict_json_schema is False, "Shouldn't be converted unless specified"

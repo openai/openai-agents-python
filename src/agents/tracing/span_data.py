@@ -236,7 +236,7 @@ class TranscriptionSpanData(SpanData):
 
 
 class SpeechSpanData(SpanData):
-    __slots__ = ("input", "output", "model", "model_config", "first_byte_at")
+    __slots__ = ("input", "output", "model", "model_config", "first_content_at")
 
     def __init__(
         self,

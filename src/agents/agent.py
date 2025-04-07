@@ -6,7 +6,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
 
-from typing_extensions import TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
@@ -44,13 +44,22 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
     MaybeAwaitable[ToolsToFinalOutputResult],
 ]
 """A function that takes a run context and a list of tool results, and returns a
-`ToolToFinalOutputResult`.
+`ToolsToFinalOutputResult`.
 """
 
 
 class StopAtTools(TypedDict):
     stop_at_tool_names: list[str]
     """A list of tool names, any of which will stop the agent from running further."""
+
+
+class MCPConfig(TypedDict):
+    """Configuration for MCP servers."""
+
+    convert_schemas_to_strict: NotRequired[bool]
+    """If True, we will attempt to convert the MCP schemas to strict-mode schemas. This is a
+    best-effort conversion, so some schemas may not be convertible. Defaults to False.
+    """
 
 
 @dataclass
@@ -118,6 +127,9 @@ class Agent(Generic[TContext]):
     `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
     longer needed.
     """
+
+    mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
+    """Configuration for MCP servers."""
 
     input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
     """A list of checks that run in parallel to the agent's execution, before generating a
@@ -224,7 +236,8 @@ class Agent(Generic[TContext]):
 
     async def get_mcp_tools(self) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
-        return await MCPUtil.get_all_function_tools(self.mcp_servers)
+        convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
+        return await MCPUtil.get_all_function_tools(self.mcp_servers, convert_schemas_to_strict)
 
     async def get_all_tools(self) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
