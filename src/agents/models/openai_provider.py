@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import DefaultAsyncHttpxClient, OpenAIError
 
 from . import _openai_shared
+from ._openai_shared import TOpenAIClient, create_client
 from .interface import Model, ModelProvider
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel
 
 DEFAULT_MODEL: str = "gpt-4o"
-
+_logger = logging.getLogger(__name__)
 
 _http_client: httpx.AsyncClient | None = None
 
@@ -29,10 +32,11 @@ class OpenAIProvider(ModelProvider):
         *,
         api_key: str | None = None,
         base_url: str | None = None,
-        openai_client: AsyncOpenAI | None = None,
+        openai_client: TOpenAIClient | None = None,
         organization: str | None = None,
         project: str | None = None,
         use_responses: bool | None = None,
+        default_model: str = DEFAULT_MODEL,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -46,12 +50,13 @@ class OpenAIProvider(ModelProvider):
             organization: The organization to use for the OpenAI client.
             project: The project to use for the OpenAI client.
             use_responses: Whether to use the OpenAI responses API.
+            default_model: The default model to use if none is specified.
         """
         if openai_client is not None:
             assert api_key is None and base_url is None, (
                 "Don't provide api_key or base_url if you provide openai_client"
             )
-            self._client: AsyncOpenAI | None = openai_client
+            self._client: TOpenAIClient | None = openai_client
         else:
             self._client = None
             self._stored_api_key = api_key
@@ -64,23 +69,42 @@ class OpenAIProvider(ModelProvider):
         else:
             self._use_responses = _openai_shared.get_use_responses_by_default()
 
+        self._default_model = default_model
+
     # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
     # AsyncOpenAI() raises an error if you don't have an API key set.
-    def _get_client(self) -> AsyncOpenAI:
+    def _get_client(self) -> TOpenAIClient:
         if self._client is None:
-            self._client = _openai_shared.get_default_openai_client() or AsyncOpenAI(
-                api_key=self._stored_api_key or _openai_shared.get_default_openai_key(),
-                base_url=self._stored_base_url,
-                organization=self._stored_organization,
-                project=self._stored_project,
-                http_client=shared_http_client(),
-            )
+            default_client = _openai_shared.get_default_openai_client()
+            if default_client:
+                self._client = default_client
+            else:
+                try:
+                    self._client = create_client(
+                        api_key=self._stored_api_key,
+                        base_url=self._stored_base_url,
+                        organization=self._stored_organization,
+                        project=self._stored_project,
+                        http_client=shared_http_client(),
+                    )
+                except OpenAIError as e:
+                    _logger.error(f"Failed to create OpenAI client: {e}")
+                    raise
 
         return self._client
 
     def get_model(self, model_name: str | None) -> Model:
+        """Get a model instance by name.
+
+        Args:
+            model_name: The name of the model to get. If None, uses the default model.
+
+        Returns:
+            An OpenAI model implementation (either Responses or ChatCompletions
+            based on configuration)
+        """
         if model_name is None:
-            model_name = DEFAULT_MODEL
+            model_name = self._default_model
 
         client = self._get_client()
 

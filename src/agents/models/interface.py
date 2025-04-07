@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import enum
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..agent_output import AgentOutputSchema
 from ..handoffs import Handoff
@@ -29,6 +31,76 @@ class ModelTracing(enum.Enum):
 
     def include_data(self) -> bool:
         return self == ModelTracing.ENABLED
+
+
+@dataclass
+class ModelRetrySettings:
+    """Settings for retrying model calls on failure.
+
+    This class helps manage backoff and retry logic when API calls fail.
+    """
+
+    max_retries: int = 3
+    """Maximum number of retries to attempt."""
+
+    initial_backoff_seconds: float = 1.0
+    """Initial backoff time in seconds before the first retry."""
+
+    max_backoff_seconds: float = 30.0
+    """Maximum backoff time in seconds between retries."""
+
+    backoff_multiplier: float = 2.0
+    """Multiplier for backoff time after each retry."""
+
+    retryable_status_codes: list[int] = field(default_factory=lambda: [429, 500, 502, 503, 504])
+    """HTTP status codes that should trigger a retry."""
+
+    async def execute_with_retry(
+        self,
+        operation: Callable[[], Any],
+        should_retry: Callable[[Exception], bool] | None = None
+    ) -> Any:
+        """Execute an operation with retry logic.
+
+        Args:
+            operation: Async function to execute
+            should_retry: Optional function to determine if an exception should trigger a retry
+
+        Returns:
+            The result of the operation if successful
+
+        Raises:
+            The last exception encountered if all retries fail
+        """
+        last_exception = None
+        backoff = self.initial_backoff_seconds
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await operation()
+            except Exception as e:
+                last_exception = e
+
+                # Check if we should retry
+                if attempt >= self.max_retries:
+                    break
+
+                should_retry_exception = True
+                if should_retry is not None:
+                    should_retry_exception = should_retry(e)
+
+                if not should_retry_exception:
+                    break
+
+                # Wait before retrying
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * self.backoff_multiplier, self.max_backoff_seconds)
+
+        if last_exception:
+            raise last_exception
+
+        # This should never happen, but just in case
+        raise RuntimeError("Retry logic failed in an unexpected way")
 
 
 class Model(abc.ABC):
