@@ -5,6 +5,6 @@ openai_client = OpenAI(base_url="http://localhost:8080/v1", api_key=os.getenv("O
 
 response = openai_client.responses.create(
     model="gpt-4o-mini",
-    input="Write a poem on Masaic"
+    input="Tell me a joke"
 )
 print("Generated response:", response.output[0].content[0].text)

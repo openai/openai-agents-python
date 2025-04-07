@@ -14,7 +14,7 @@ async def main():
         model=OpenAIResponsesModel(model="gpt-4o-mini", openai_client=client)
     )
 
-    result = await Runner.run(agent, "Write a poem on Masaic.")
+    result = await Runner.run(agent, "Tell me a joke")
     print(result.final_output)
     # Function calls itself,
     # Looping in smaller pieces,
