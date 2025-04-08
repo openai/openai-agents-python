@@ -101,30 +101,41 @@ def test_graph_builder(mock_agent):
     assert graph.nodes["Handoff1"].type == NodeType.HANDOFF
 
     # Check edges
-    start_to_agent = Edge("__start__", "Agent1", EdgeType.HANDOFF)
-    agent_to_tool1 = Edge("Agent1", "Tool1", EdgeType.TOOL)
-    tool1_to_agent = Edge("Tool1", "Agent1", EdgeType.TOOL)
-    agent_to_tool2 = Edge("Agent1", "Tool2", EdgeType.TOOL)
-    tool2_to_agent = Edge("Tool2", "Agent1", EdgeType.TOOL)
-    agent_to_handoff = Edge("Agent1", "Handoff1", EdgeType.HANDOFF)
+    start_node = graph.nodes["__start__"]
+    agent_node = graph.nodes["Agent1"]
+    tool1_node = graph.nodes["Tool1"]
+    tool2_node = graph.nodes["Tool2"]
+    handoff_node = graph.nodes["Handoff1"]
+
+    start_to_agent = Edge(start_node, agent_node, EdgeType.HANDOFF)
+    agent_to_tool1 = Edge(agent_node, tool1_node, EdgeType.TOOL)
+    tool1_to_agent = Edge(tool1_node, agent_node, EdgeType.TOOL)
+    agent_to_tool2 = Edge(agent_node, tool2_node, EdgeType.TOOL)
+    tool2_to_agent = Edge(tool2_node, agent_node, EdgeType.TOOL)
+    agent_to_handoff = Edge(agent_node, handoff_node, EdgeType.HANDOFF)
 
     assert any(
-        e.source == start_to_agent.source and e.target == start_to_agent.target for e in graph.edges
+        e.source.id == start_to_agent.source.id and e.target.id == start_to_agent.target.id
+        for e in graph.edges
     )
     assert any(
-        e.source == agent_to_tool1.source and e.target == agent_to_tool1.target for e in graph.edges
+        e.source.id == agent_to_tool1.source.id and e.target.id == agent_to_tool1.target.id
+        for e in graph.edges
     )
     assert any(
-        e.source == tool1_to_agent.source and e.target == tool1_to_agent.target for e in graph.edges
+        e.source.id == tool1_to_agent.source.id and e.target.id == tool1_to_agent.target.id
+        for e in graph.edges
     )
     assert any(
-        e.source == agent_to_tool2.source and e.target == agent_to_tool2.target for e in graph.edges
+        e.source.id == agent_to_tool2.source.id and e.target.id == agent_to_tool2.target.id
+        for e in graph.edges
     )
     assert any(
-        e.source == tool2_to_agent.source and e.target == tool2_to_agent.target for e in graph.edges
+        e.source.id == tool2_to_agent.source.id and e.target.id == tool2_to_agent.target.id
+        for e in graph.edges
     )
     assert any(
-        e.source == agent_to_handoff.source and e.target == agent_to_handoff.target
+        e.source.id == agent_to_handoff.source.id and e.target.id == agent_to_handoff.target.id
         for e in graph.edges
     )
 
@@ -158,15 +169,18 @@ def test_recursive_graph_builder(mock_recursive_agents):
     assert graph.nodes["Agent2"].type == NodeType.AGENT
 
     # Check edges
-    agent1_to_agent2 = Edge("Agent1", "Agent2", EdgeType.HANDOFF)
-    agent2_to_agent1 = Edge("Agent2", "Agent1", EdgeType.HANDOFF)
+    agent1_node = graph.nodes["Agent1"]
+    agent2_node = graph.nodes["Agent2"]
+
+    agent1_to_agent2 = Edge(agent1_node, agent2_node, EdgeType.HANDOFF)
+    agent2_to_agent1 = Edge(agent2_node, agent1_node, EdgeType.HANDOFF)
 
     assert any(
-        e.source == agent1_to_agent2.source and e.target == agent1_to_agent2.target
+        e.source.id == agent1_to_agent2.source.id and e.target.id == agent1_to_agent2.target.id
         for e in graph.edges
     )
     assert any(
-        e.source == agent2_to_agent1.source and e.target == agent2_to_agent1.target
+        e.source.id == agent2_to_agent1.source.id and e.target.id == agent2_to_agent1.target.id
         for e in graph.edges
     )
 
@@ -180,16 +194,17 @@ def test_graph_validation():
     graph.add_node(node1)
     graph.add_node(node2)
 
-    valid_edge = Edge("1", "2", EdgeType.TOOL)
+    valid_edge = Edge(node1, node2, EdgeType.TOOL)
     graph.add_edge(valid_edge)
 
     # Test adding edge with non-existent source
-    invalid_edge1 = Edge("3", "2", EdgeType.TOOL)
+    node3 = Node("3", "Node 3", NodeType.TOOL)
+    invalid_edge1 = Edge(node3, node2, EdgeType.TOOL)
     with pytest.raises(ValueError, match="Source node '3' does not exist in the graph"):
         graph.add_edge(invalid_edge1)
 
     # Test adding edge with non-existent target
-    invalid_edge2 = Edge("1", "3", EdgeType.TOOL)
+    invalid_edge2 = Edge(node1, node3, EdgeType.TOOL)
     with pytest.raises(ValueError, match="Target node '3' does not exist in the graph"):
         graph.add_edge(invalid_edge2)
 

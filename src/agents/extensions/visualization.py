@@ -35,8 +35,8 @@ class Node:
 
 @dataclass(frozen=True)
 class Edge:
-    source: str
-    target: str
+    source: Node
+    target: Node
     type: EdgeType
 
 
@@ -57,10 +57,10 @@ class Graph:
         Raises:
             ValueError: If the source or target node does not exist in the graph.
         """
-        if edge.source not in self.nodes:
-            raise ValueError(f"Source node '{edge.source}' does not exist in the graph")
-        if edge.target not in self.nodes:
-            raise ValueError(f"Target node '{edge.target}' does not exist in the graph")
+        if edge.source.id not in self.nodes:
+            raise ValueError(f"Source node '{edge.source.id}' does not exist in the graph")
+        if edge.target.id not in self.nodes:
+            raise ValueError(f"Target node '{edge.target.id}' does not exist in the graph")
         self.edges.append(edge)
 
     def has_node(self, node_id: str) -> bool:
@@ -123,13 +123,19 @@ class GraphBuilder:
 
         # Connect start node if root agent
         if not parent:
-            graph.add_edge(Edge("__start__", agent.name, EdgeType.HANDOFF))
+            graph.add_edge(
+                Edge(graph.get_node("__start__"), graph.get_node(agent.name), EdgeType.HANDOFF)
+            )
 
         # Add tool nodes and edges
         for tool in agent.tools:
             graph.add_node(Node(tool.name, tool.name, NodeType.TOOL))
-            graph.add_edge(Edge(agent.name, tool.name, EdgeType.TOOL))
-            graph.add_edge(Edge(tool.name, agent.name, EdgeType.TOOL))
+            graph.add_edge(
+                Edge(graph.get_node(agent.name), graph.get_node(tool.name), EdgeType.TOOL)
+            )
+            graph.add_edge(
+                Edge(graph.get_node(tool.name), graph.get_node(agent.name), EdgeType.TOOL)
+            )
 
         # Add current agent's ID to visited set
         self._visited.add(id(agent))
@@ -140,16 +146,26 @@ class GraphBuilder:
             has_handoffs = True
             if isinstance(handoff, Handoff):
                 graph.add_node(Node(handoff.agent_name, handoff.agent_name, NodeType.HANDOFF))
-                graph.add_edge(Edge(agent.name, handoff.agent_name, EdgeType.HANDOFF))
+                graph.add_edge(
+                    Edge(
+                        graph.get_node(agent.name),
+                        graph.get_node(handoff.agent_name),
+                        EdgeType.HANDOFF,
+                    )
+                )
             elif isinstance(handoff, Agent):
                 graph.add_node(Node(handoff.name, handoff.name, NodeType.AGENT))
-                graph.add_edge(Edge(agent.name, handoff.name, EdgeType.HANDOFF))
+                graph.add_edge(
+                    Edge(graph.get_node(agent.name), graph.get_node(handoff.name), EdgeType.HANDOFF)
+                )
                 if id(handoff) not in self._visited:
                     self._add_agent_nodes_and_edges(handoff, agent, graph)
 
         # Connect to end node if no handoffs
         if not has_handoffs and not isinstance(agent, Tool):
-            graph.add_edge(Edge(agent.name, "__end__", EdgeType.HANDOFF))
+            graph.add_edge(
+                Edge(graph.get_node(agent.name), graph.get_node("__end__"), EdgeType.HANDOFF)
+            )
 
 
 T = TypeVar("T")
@@ -236,8 +252,8 @@ class GraphvizRenderer(GraphRenderer[str]):
 
     def _render_edge(self, edge: Edge) -> str:
         if edge.type == EdgeType.TOOL:
-            return f'"{edge.source}" -> "{edge.target}" [style=dotted, penwidth=1.5];'
-        return f'"{edge.source}" -> "{edge.target}";'
+            return f'"{edge.source.id}" -> "{edge.target.id}" [style=dotted, penwidth=1.5];'
+        return f'"{edge.source.id}" -> "{edge.target.id}";'
 
 
 class MermaidRenderer(GraphRenderer[str]):
@@ -292,8 +308,8 @@ class MermaidRenderer(GraphRenderer[str]):
         return f"{node_id}{start}{node.label}{end}\nstyle {node_id} fill:{color}\n"
 
     def _render_edge(self, edge: Edge) -> str:
-        source = self._sanitize_id(edge.source)
-        target = self._sanitize_id(edge.target)
+        source = self._sanitize_id(edge.source.id)
+        target = self._sanitize_id(edge.target.id)
         if edge.type == EdgeType.TOOL:
             return f"{source} -.-> {target}\n"
         return f"{source} --> {target}\n"
