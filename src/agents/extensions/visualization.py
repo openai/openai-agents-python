@@ -111,10 +111,13 @@ class GraphBuilder:
 
     def _add_agent_nodes_and_edges(
         self,
-        agent: Agent,
+        agent: Agent | None,
         parent: Optional[Agent],
         graph: Graph,
     ) -> None:
+        if agent is None:
+            return
+
         # Add agent node
         graph.add_node(Node(agent.name, agent.name, NodeType.AGENT))
 
