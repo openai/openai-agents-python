@@ -3,7 +3,7 @@ import base64
 import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Literal, Optional, TypeVar
 
 import graphviz
 import requests
@@ -324,24 +324,23 @@ class GraphView:
 
 
 def draw_graph(
-    agent: Agent, filename: Optional[str] = None, renderer: str = "graphviz"
+    agent: Agent,
+    filename: str | None = None,
+    renderer: Literal["graphviz", "mermaid"] = "graphviz",
 ) -> GraphView:
     """
     Draws the graph for the given agent using the specified renderer.
 
     Args:
         agent (Agent): The agent for which the graph is to be drawn.
-        filename (str, optional): The name of the file to save the graph as PNG. Defaults to None.
-        renderer (str, optional): The renderer to use. Must be one of: "graphviz" (offline),
-            "mermaid" (requires internet). Defaults to "graphviz".
+        filename (str | None): The name of the file to save the graph as PNG. Defaults to None.
+        renderer (Literal["graphviz", "mermaid"]): The renderer to use. Defaults to "graphviz".
 
     Returns:
         GraphView: A view object that can be used to display the graph.
 
     Raises:
         ValueError: If the specified renderer is not supported.
-        requests.RequestException: If using mermaid renderer and unable to connect
-            to mermaid.ink API.
     """
     builder = GraphBuilder()
     graph = builder.build_from_agent(agent)
