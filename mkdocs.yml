@@ -18,79 +18,6 @@ theme:
     primary: black
   logo: assets/logo.svg
   favicon: images/favicon-platform.svg
-nav:
-  - Intro: index.md
-  - Quickstart: quickstart.md
-  - Examples: examples.md
-  - Documentation:
-      - agents.md
-      - running_agents.md
-      - results.md
-      - streaming.md
-      - tools.md
-      - mcp.md
-      - handoffs.md
-      - tracing.md
-      - context.md
-      - guardrails.md
-      - multi_agent.md
-      - models.md
-      - config.md
-      - visualization.md
-      - Voice agents:
-          - voice/quickstart.md
-          - voice/pipeline.md
-          - voice/tracing.md
-  - API Reference:
-      - Agents:
-          - ref/index.md
-          - ref/agent.md
-          - ref/run.md
-          - ref/tool.md
-          - ref/result.md
-          - ref/stream_events.md
-          - ref/handoffs.md
-          - ref/lifecycle.md
-          - ref/items.md
-          - ref/run_context.md
-          - ref/usage.md
-          - ref/exceptions.md
-          - ref/guardrail.md
-          - ref/model_settings.md
-          - ref/agent_output.md
-          - ref/function_schema.md
-          - ref/models/interface.md
-          - ref/models/openai_chatcompletions.md
-          - ref/models/openai_responses.md
-          - ref/mcp/server.md
-          - ref/mcp/util.md
-      - Tracing:
-          - ref/tracing/index.md
-          - ref/tracing/create.md
-          - ref/tracing/traces.md
-          - ref/tracing/spans.md
-          - ref/tracing/processor_interface.md
-          - ref/tracing/processors.md
-          - ref/tracing/scope.md
-          - ref/tracing/setup.md
-          - ref/tracing/span_data.md
-          - ref/tracing/util.md
-      - Voice:
-          - ref/voice/pipeline.md
-          - ref/voice/workflow.md
-          - ref/voice/input.md
-          - ref/voice/result.md
-          - ref/voice/pipeline_config.md
-          - ref/voice/events.md
-          - ref/voice/exceptions.md
-          - ref/voice/model.md
-          - ref/voice/utils.md
-          - ref/voice/models/openai_provider.md
-          - ref/voice/models/openai_stt.md
-          - ref/voice/models/openai_tts.md
-      - Extensions:
-          - ref/extensions/handoff_filters.md
-          - ref/extensions/handoff_prompt.md
 
 plugins:
   - search
@@ -113,10 +40,125 @@ plugins:
             heading_level: 3
             # Show inherited members
             inherited_members: true
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+          nav:
+            - Intro: index.md
+            - Quickstart: quickstart.md
+            - Examples: examples.md
+            - Documentation:
+                - agents.md
+                - running_agents.md
+                - results.md
+                - streaming.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - models.md
+                - config.md
+                - visualization.md
+                - Voice agents:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+            - API Reference:
+                - Agents:
+                    - ref/index.md
+                    - ref/agent.md
+                    - ref/run.md
+                    - ref/tool.md
+                    - ref/result.md
+                    - ref/stream_events.md
+                    - ref/handoffs.md
+                    - ref/lifecycle.md
+                    - ref/items.md
+                    - ref/run_context.md
+                    - ref/usage.md
+                    - ref/exceptions.md
+                    - ref/guardrail.md
+                    - ref/model_settings.md
+                    - ref/agent_output.md
+                    - ref/function_schema.md
+                    - ref/models/interface.md
+                    - ref/models/openai_chatcompletions.md
+                    - ref/models/openai_responses.md
+                    - ref/mcp/server.md
+                    - ref/mcp/util.md
+                - Tracing:
+                    - ref/tracing/index.md
+                    - ref/tracing/create.md
+                    - ref/tracing/traces.md
+                    - ref/tracing/spans.md
+                    - ref/tracing/processor_interface.md
+                    - ref/tracing/processors.md
+                    - ref/tracing/scope.md
+                    - ref/tracing/setup.md
+                    - ref/tracing/span_data.md
+                    - ref/tracing/util.md
+                - Voice:
+                    - ref/voice/pipeline.md
+                    - ref/voice/workflow.md
+                    - ref/voice/input.md
+                    - ref/voice/result.md
+                    - ref/voice/pipeline_config.md
+                    - ref/voice/events.md
+                    - ref/voice/exceptions.md
+                    - ref/voice/model.md
+                    - ref/voice/utils.md
+                    - ref/voice/models/openai_provider.md
+                    - ref/voice/models/openai_stt.md
+                    - ref/voice/models/openai_tts.md
+                - Extensions:
+                    - ref/extensions/handoff_filters.md
+                    - ref/extensions/handoff_prompt.md
+
+        - locale: ja
+          name: 日本語
+          build: true
+          nav:
+            - はじめに: index.md
+            - クイックスタート: quickstart.md
+            - サンプル例: examples.md
+            - ドキュメント:
+                - agents.md
+                - running_agents.md
+                - results.md
+                - streaming.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - models.md
+                - config.md
+                - visualization.md
+                - 音声エージェント:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
 
 extra:
   # Remove material generation message in footer
   generator: false
+  language: en
+  alternate:
+    - name: English
+      link: /openai-agents-python/
+      lang: en
+    - name: 日本語
+      link: /openai-agents-python/ja/
+      lang: ja
 
 markdown_extensions:
   - pymdownx.superfences:

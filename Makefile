@@ -42,6 +42,11 @@ old_version_tests:
 build-docs:
 	uv run mkdocs build
 
+.PHONY: build-full-docs
+build-full-docs:
+	uv run docs/scripts/translate_docs.py
+	uv run mkdocs build
+
 .PHONY: serve-docs
 serve-docs:
 	uv run mkdocs serve
