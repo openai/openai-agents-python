@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from typing import Literal
 
+from openai.types.shared import Reasoning
+
 
 @dataclass
 class ModelSettings:
@@ -39,6 +41,14 @@ class ModelSettings:
 
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
+
+    reasoning: Reasoning | None = None
+    """Configuration options for
+    [reasoning models](https://platform.openai.com/docs/guides/reasoning).
+    """
+
+    metadata: dict[str, str] | None = None
+    """Metadata to include with the model response call."""
 
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.

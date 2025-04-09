@@ -518,8 +518,8 @@ class OpenAIChatCompletionsModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        # Match the behavior of Responses where store is True when not given
-        store = model_settings.store if model_settings.store is not None else True
+        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        store = _Converter.get_store_param(self._get_client(), model_settings)
 
         ret = await self._get_client().chat.completions.create(
             model=self.model,
@@ -535,8 +535,10 @@ class OpenAIChatCompletionsModel(Model):
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
             stream_options={"include_usage": True} if stream else NOT_GIVEN,
-            store=store,
+            store=self._non_null_or_not_given(store),
+            reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             extra_headers=_HEADERS,
+            metadata=self._non_null_or_not_given(model_settings.metadata),
         )
 
         if isinstance(ret, ChatCompletion):
@@ -555,6 +557,7 @@ class OpenAIChatCompletionsModel(Model):
             temperature=model_settings.temperature,
             tools=[],
             parallel_tool_calls=parallel_tool_calls or False,
+            reasoning=model_settings.reasoning,
         )
         return response, ret
 
@@ -565,6 +568,12 @@ class OpenAIChatCompletionsModel(Model):
 
 
 class _Converter:
+    @classmethod
+    def get_store_param(cls, client: AsyncOpenAI, model_settings: ModelSettings) -> bool | None:
+        # Match the behavior of Responses where store is True when not given
+        default_store = True if str(client.base_url).startswith("https://api.openai.com") else None
+        return model_settings.store if model_settings.store is not None else default_store
+
     @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | None

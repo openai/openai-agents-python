@@ -108,7 +108,7 @@ class Agent(Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `model_settings.DEFAULT_MODEL`.
+    `openai_provider.DEFAULT_MODEL` (currently "gpt-4o").
     """
 
     model_settings: ModelSettings = field(default_factory=ModelSettings)

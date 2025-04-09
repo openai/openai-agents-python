@@ -59,6 +59,11 @@ class MCPUtil:
         """Convert an MCP tool to an Agents SDK function tool."""
         invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
         schema, is_strict = tool.inputSchema, False
+
+        # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
+        if "properties" not in schema:
+            schema["properties"] = {}
+
         if convert_schemas_to_strict:
             try:
                 schema = ensure_strict_json_schema(schema)
