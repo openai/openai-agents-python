@@ -325,8 +325,7 @@ class SpeechSpanData(SpanData):
 
 class SpeechGroupSpanData(SpanData):
     """
-    Represents a Speech Group Span in the trace, parenting one or many Speech Spans
-    Includes input.
+    Represents a Speech Group Span in the trace.
     """
 
     __slots__ = "input"
