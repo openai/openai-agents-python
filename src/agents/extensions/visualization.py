@@ -10,7 +10,6 @@ import requests
 
 from agents import Agent
 from agents.handoffs import Handoff
-from agents.tool import Tool
 
 
 class NodeType(Enum):
@@ -118,54 +117,44 @@ class GraphBuilder:
         if agent is None:
             return
 
+        start_node = graph.get_node("__start__")
+        end_node = graph.get_node("__end__")
+
         # Add agent node
-        graph.add_node(Node(agent.name, agent.name, NodeType.AGENT))
+        agent_id = str(id(agent))
+        agent_node = Node(agent_id, agent.name, NodeType.AGENT)
+        graph.add_node(agent_node)
+        self._visited.add(agent_id)
 
         # Connect start node if root agent
         if not parent:
-            graph.add_edge(
-                Edge(graph.get_node("__start__"), graph.get_node(agent.name), EdgeType.HANDOFF)
-            )
+            graph.add_edge(Edge(start_node, agent_node, EdgeType.HANDOFF))
 
         # Add tool nodes and edges
         for tool in agent.tools:
-            graph.add_node(Node(tool.name, tool.name, NodeType.TOOL))
-            graph.add_edge(
-                Edge(graph.get_node(agent.name), graph.get_node(tool.name), EdgeType.TOOL)
-            )
-            graph.add_edge(
-                Edge(graph.get_node(tool.name), graph.get_node(agent.name), EdgeType.TOOL)
-            )
-
-        # Add current agent's ID to visited set
-        self._visited.add(id(agent))
+            tool_id = str(id(tool))
+            tool_node = Node(tool_id, tool.name, NodeType.TOOL)
+            graph.add_node(tool_node)
+            graph.add_edge(Edge(agent_node, tool_node, EdgeType.TOOL))
+            graph.add_edge(Edge(tool_node, agent_node, EdgeType.TOOL))
 
         # Process handoffs
-        has_handoffs = False
         for handoff in agent.handoffs:
-            has_handoffs = True
+            handoff_id = str(id(handoff))
             if isinstance(handoff, Handoff):
-                graph.add_node(Node(handoff.agent_name, handoff.agent_name, NodeType.HANDOFF))
-                graph.add_edge(
-                    Edge(
-                        graph.get_node(agent.name),
-                        graph.get_node(handoff.agent_name),
-                        EdgeType.HANDOFF,
-                    )
-                )
+                handoff_node = Node(handoff_id, handoff.agent_name, NodeType.HANDOFF)
+                graph.add_node(handoff_node)
+                graph.add_edge(Edge(agent_node, handoff_node, EdgeType.HANDOFF))
             elif isinstance(handoff, Agent):
-                graph.add_node(Node(handoff.name, handoff.name, NodeType.AGENT))
-                graph.add_edge(
-                    Edge(graph.get_node(agent.name), graph.get_node(handoff.name), EdgeType.HANDOFF)
-                )
-                if id(handoff) not in self._visited:
+                handoff_node = Node(handoff_id, handoff.name, NodeType.AGENT)
+                graph.add_node(handoff_node)
+                graph.add_edge(Edge(agent_node, handoff_node, EdgeType.HANDOFF))
+                if handoff_id not in self._visited:
                     self._add_agent_nodes_and_edges(handoff, agent, graph)
 
         # Connect to end node if no handoffs
-        if not has_handoffs and not isinstance(agent, Tool):
-            graph.add_edge(
-                Edge(graph.get_node(agent.name), graph.get_node("__end__"), EdgeType.HANDOFF)
-            )
+        if not agent.handoffs:
+            graph.add_edge(Edge(agent_node, end_node, EdgeType.HANDOFF))
 
 
 T = TypeVar("T")
@@ -321,7 +310,10 @@ class MermaidRenderer(GraphRenderer[str]):
 
 class GraphView:
     def __init__(
-        self, rendered_graph: str, renderer: GraphRenderer, filename: Optional[str] = None
+        self,
+        rendered_graph: str,
+        renderer: GraphRenderer,
+        filename: Optional[str] = None,
     ):
         self.rendered_graph = rendered_graph
         self.renderer = renderer
