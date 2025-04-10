@@ -121,7 +121,7 @@ async def homework_guardrail(ctx, agent, input_data):
 Let's put it all together and run the entire workflow, using handoffs and the input guardrail.
 
 ```python
-from agents import Agent, InputGuardrail,GuardrailFunctionOutput, Runner
+from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
 from pydantic import BaseModel
 import asyncio
 

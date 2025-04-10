@@ -2,7 +2,7 @@
 
 ## 前提条件
 
-まず、Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。その後、SDK のオプションである音声関連の依存関係をインストールします。
+Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境を設定してください。その後、SDK からオプションの音声依存関係をインストールします。
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -10,11 +10,11 @@ pip install 'openai-agents[voice]'
 
 ## コンセプト
 
-理解すべき主なコンセプトは [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは以下の 3 ステップで構成されています。
+知っておくべき主なコンセプトは、[`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは3ステップのプロセスです。
 
-1. 音声認識モデルを実行し、音声をテキストに変換します。
-2. 通常はエージェントを用いたワークフローであるコードを実行し、実行結果を生成します。
-3. テキスト読み上げモデルを実行し、実行結果のテキストを再び音声に変換します。
+1. 音声をテキストに変換する音声認識モデルを実行します。
+2. 通常はエージェントワークフローであるコードを実行して、結果を生成します。
+3. 結果のテキストを音声に戻すテキスト読み上げモデルを実行します。
 
 ```mermaid
 graph LR
@@ -44,7 +44,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントを設定します。この SDK でエージェントを作成したことがあれば、馴染みのある内容です。ここでは、複数のエージェント、ハンドオフ、およびツールを設定します。
+まず、いくつかのエージェントを設定しましょう。この SDK でエージェントを構築したことがある場合、これは馴染みがあるはずです。エージェント、ハンドオフ、ツールを用意します。
 
 ```python
 import asyncio
@@ -88,32 +88,32 @@ agent = Agent(
 
 ## 音声パイプライン
 
-ここでは、ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用し、シンプルな音声パイプラインを設定します。
+[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] をワークフローとして使用して、シンプルな音声パイプラインを設定します。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
-## パイプラインの実行
+## パイプラインを実行する
 
 ```python
 import numpy as np
 import sounddevice as sd
 from agents.voice import AudioInput
 
-# 簡単のため、ここでは 3 秒間の無音を作成します
-# 実際にはマイクからの音声データを使用します
+# For simplicity, we'll just create 3 seconds of silence
+# In reality, you'd get microphone data
 buffer = np.zeros(24000 * 3, dtype=np.int16)
 audio_input = AudioInput(buffer=buffer)
 
 result = await pipeline.run(audio_input)
 
-# `sounddevice` を使ってオーディオプレイヤーを作成します
+# Create an audio player using `sounddevice`
 player = sd.OutputStream(samplerate=24000, channels=1, dtype=np.int16)
 player.start()
 
-# 音声ストリームをリアルタイムで再生します
+# Play the audio stream as it comes in
 async for event in result.stream():
     if event.type == "voice_stream_event_audio":
         player.write(event.data)
@@ -177,11 +177,11 @@ async def main():
 
     result = await pipeline.run(audio_input)
 
-    # `sounddevice` を使ってオーディオプレイヤーを作成します
+    # Create an audio player using `sounddevice`
     player = sd.OutputStream(samplerate=24000, channels=1, dtype=np.int16)
     player.start()
 
-    # 音声ストリームをリアルタイムで再生します
+    # Play the audio stream as it comes in
     async for event in result.stream():
         if event.type == "voice_stream_event_audio":
             player.write(event.data)
@@ -191,4 +191,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-このコード例を実行すると、エージェントがあなたに話しかけます。実際にエージェントと会話できるデモについては、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) のコード例を参照してください。
+この例を実行すると、エージェントがあなたに話しかけます！ [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例をチェックして、自分でエージェントと話すデモを見てください。
