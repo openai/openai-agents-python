@@ -59,6 +59,7 @@ dev = [
     "textual",
     "websockets",
     "graphviz",
+    "fastapi = "^0.110.0",
 ]
 
 [tool.uv.workspace]
