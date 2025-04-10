@@ -15,6 +15,9 @@ dependencies = [
     "types-requests>=2.0, <3",
     "mcp>=1.6.0, <2; python_version >= '3.10'",
     "mkdocs-static-i18n>=1.3.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.34.0",
+
 ]
 classifiers = [
     "Typing :: Typed",
@@ -59,7 +62,6 @@ dev = [
     "textual",
     "websockets",
     "graphviz",
-    "fastapi = "^0.110.0",
 ]
 
 [tool.uv.workspace]
