@@ -54,6 +54,10 @@ class ModelSettings:
     """Whether to store the generated model response for later retrieval.
     Defaults to True if not provided."""
 
+    include_usage: bool | None = None
+    """Whether to include usage chunk.
+    Defaults to True if not provided."""
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""
