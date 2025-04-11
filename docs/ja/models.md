@@ -1,6 +1,6 @@
 # モデル
 
-エージェント SDK は、次の 2 種類の OpenAI モデルをサポートしています。
+Agents SDK は、OpenAI モデルを次の 2 つの形式でサポートしています。
 
 -   **推奨**: 新しい [Responses API](https://platform.openai.com/docs/api-reference/responses) を使用して OpenAI API を呼び出す [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]。
 -   [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) を使用して OpenAI API を呼び出す [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel]。
@@ -51,11 +51,24 @@ async def main():
 1. OpenAI モデルの名前を直接設定します。
 2. [`Model`][agents.models.interface.Model] 実装を提供します。
 
+エージェントに使用するモデルをさらに設定したい場合は、`temperature` などのオプションのモデル設定パラメーターを提供する [`ModelSettings`][agents.models.interface.ModelSettings] を渡すことができます。
+
+```python
+from agents import Agent, ModelSettings
+
+english_agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+    model="gpt-4o",
+    model_settings=ModelSettings(temperature=0.1),
+)
+```
+
 ## 他の LLM プロバイダーの使用
 
 他の LLM プロバイダーを 3 つの方法で使用できます（例は[こちら](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/)）。
 
-1. [`set_default_openai_client`][agents.set_default_openai_client] は、`AsyncOpenAI` のインスタンスを LLM クライアントとしてグローバルに使用したい場合に便利です。これは、LLM プロバイダーが OpenAI 互換の API エンドポイントを持っている場合で、`base_url` と `api_key` を設定できます。[examples/model_providers/custom_example_global.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py) に設定可能な例があります。
+1. [`set_default_openai_client`][agents.set_default_openai_client] は、`AsyncOpenAI` のインスタンスを LLM クライアントとしてグローバルに使用したい場合に便利です。LLM プロバイダーが OpenAI 互換の API エンドポイントを持っている場合に、`base_url` と `api_key` を設定できます。[examples/model_providers/custom_example_global.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py) に設定可能な例があります。
 2. [`ModelProvider`][agents.models.interface.ModelProvider] は `Runner.run` レベルで使用します。これにより、「この実行のすべてのエージェントにカスタムモデルプロバイダーを使用する」と指定できます。[examples/model_providers/custom_example_provider.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py) に設定可能な例があります。
 3. [`Agent.model`][agents.agent.Agent.model] では、特定のエージェントインスタンスにモデルを指定できます。これにより、異なるエージェントに対して異なるプロバイダーを組み合わせて使用することができます。[examples/model_providers/custom_example_agent.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py) に設定可能な例があります。
 
@@ -84,10 +97,10 @@ SDK はデフォルトで Responses API を使用しますが、ほとんどの�
 
 ### 適切な形式のデータのサポート
 
-一部のモデルプロバイダーは[適切な形式のデータ](https://platform.openai.com/docs/guides/structured-outputs)をサポートしていません。これにより、次のようなエラーが発生することがあります。
+一部のモデルプロバイダーは、[適切な形式のデータ](https://platform.openai.com/docs/guides/structured-outputs)をサポートしていません。これにより、次のようなエラーが発生することがあります。
 
 ```
 BadRequestError: Error code: 400 - {'error': {'message': "'response_format.type' : value is not one of the allowed values ['text','json_object']", 'type': 'invalid_request_error'}}
 ```
 
-これは一部のモデルプロバイダーの欠点で、JSON 出力をサポートしていますが、出力に使用する `json_schema` を指定することはできません。この問題の修正に取り組んでいますが、JSON スキーマ出力をサポートしているプロバイダーに依存することをお勧めします。さもないと、アプリが不正な JSON のために頻繁に壊れることになります。
+これは一部のモデルプロバイダーの欠点であり、JSON 出力をサポートしていますが、出力に使用する `json_schema` を指定することはできません。これに対する修正に取り組んでいますが、JSON スキーマ出力をサポートしているプロバイダーに依存することをお勧めします。さもないと、アプリが不正な JSON のために頻繁に壊れることになります。
