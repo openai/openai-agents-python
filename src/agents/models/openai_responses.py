@@ -248,7 +248,7 @@ class OpenAIResponsesModel(Model):
             text=response_format,
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
-            metadata=model_settings.metadata,
+            metadata=self._non_null_or_not_given(model_settings.metadata)
         )
 
     def _get_client(self) -> AsyncOpenAI:
