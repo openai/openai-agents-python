@@ -148,9 +148,11 @@ class LocalPlaywrightComputer(AsyncComputer):
         await self.page.mouse.move(x, y)
 
     async def keypress(self, keys: list[str]) -> None:
-        for key in keys:
-            mapped_key = CUA_KEY_TO_PLAYWRIGHT_KEY.get(key.lower(), key)
-            await self.page.keyboard.press(mapped_key)
+        mapped_keys = [CUA_KEY_TO_PLAYWRIGHT_KEY.get(key.lower(), key) for key in keys]
+        for key in mapped_keys:
+            await self.page.keyboard.down(key)
+        for key in reversed(mapped_keys):
+            await self.page.keyboard.up(key)
 
     async def drag(self, path: list[tuple[int, int]]) -> None:
         if not path:

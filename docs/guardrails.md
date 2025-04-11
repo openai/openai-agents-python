@@ -29,7 +29,7 @@ Output guardrails run in 3 steps:
 
 !!! Note
 
-    Output guardrails are intended to run on the final agent input, so an agent's guardrails only run if the agent is the *last* agent. Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
+    Output guardrails are intended to run on the final agent output, so an agent's guardrails only run if the agent is the *last* agent. Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
 
 ## Tripwires
 
@@ -111,8 +111,8 @@ class MessageOutput(BaseModel): # (1)!
     response: str
 
 class MathOutput(BaseModel): # (2)!
-    is_math: bool
     reasoning: str
+    is_math: bool
 
 guardrail_agent = Agent(
     name="Guardrail check",

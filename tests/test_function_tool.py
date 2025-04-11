@@ -49,10 +49,10 @@ async def test_simple_function():
     assert tool.name == "simple_function"
 
     result = await tool.on_invoke_tool(RunContextWrapper(None), '{"a": 1}')
-    assert result == "6"
+    assert result == 6
 
     result = await tool.on_invoke_tool(RunContextWrapper(None), '{"a": 1, "b": 2}')
-    assert result == "3"
+    assert result == 3
 
     # Missing required argument should raise an error
     with pytest.raises(ModelBehaviorError):

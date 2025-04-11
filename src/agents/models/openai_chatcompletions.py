@@ -54,7 +54,7 @@ from openai.types.responses import (
     ResponseUsage,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
-from openai.types.responses.response_usage import OutputTokensDetails
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from .. import _debug
 from ..agent_output import AgentOutputSchema
@@ -420,6 +420,11 @@ class OpenAIChatCompletionsModel(Model):
                         and usage.completion_tokens_details.reasoning_tokens
                         else 0
                     ),
+                    input_tokens_details=InputTokensDetails(
+                        cached_tokens=usage.prompt_tokens_details.cached_tokens
+                        if usage.prompt_tokens_details and usage.prompt_tokens_details.cached_tokens
+                        else 0
+                    ),
                 )
                 if usage
                 else None
@@ -513,6 +518,11 @@ class OpenAIChatCompletionsModel(Model):
                 f"Response format: {response_format}\n"
             )
 
+        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        store = _Converter.get_store_param(self._get_client(), model_settings)
+
+        stream_options = _Converter.get_stream_options_param(self._get_client(), model_settings)
+
         ret = await self._get_client().chat.completions.create(
             model=self.model,
             messages=converted_messages,
@@ -526,8 +536,11 @@ class OpenAIChatCompletionsModel(Model):
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            stream_options={"include_usage": True} if stream else NOT_GIVEN,
+            stream_options=self._non_null_or_not_given(stream_options),
+            store=self._non_null_or_not_given(store),
+            reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             extra_headers=_HEADERS,
+            metadata=self._non_null_or_not_given(model_settings.metadata),
         )
 
         if isinstance(ret, ChatCompletion):
@@ -546,6 +559,7 @@ class OpenAIChatCompletionsModel(Model):
             temperature=model_settings.temperature,
             tools=[],
             parallel_tool_calls=parallel_tool_calls or False,
+            reasoning=model_settings.reasoning,
         )
         return response, ret
 
@@ -556,6 +570,27 @@ class OpenAIChatCompletionsModel(Model):
 
 
 class _Converter:
+
+    @classmethod
+    def is_openai(cls, client: AsyncOpenAI):
+        return str(client.base_url).startswith("https://api.openai.com")
+
+    @classmethod
+    def get_store_param(cls, client: AsyncOpenAI, model_settings: ModelSettings) -> bool | None:
+        # Match the behavior of Responses where store is True when not given
+        default_store = True if cls.is_openai(client) else None
+        return model_settings.store if model_settings.store is not None else default_store
+
+    @classmethod
+    def get_stream_options_param(
+            cls, client: AsyncOpenAI, model_settings: ModelSettings
+    ) -> dict[str, bool] | None:
+        default_include_usage = True if cls.is_openai(client) else None
+        include_usage = model_settings.include_usage if model_settings.include_usage is not None \
+            else default_include_usage
+        stream_options = {"include_usage": include_usage} if include_usage is not None else None
+        return stream_options
+
     @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | None
@@ -914,12 +949,13 @@ class _Converter:
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
+                arguments = func_call["arguments"] if func_call["arguments"] else "{}"
                 new_tool_call = ChatCompletionMessageToolCallParam(
                     id=func_call["call_id"],
                     type="function",
                     function={
                         "name": func_call["name"],
-                        "arguments": func_call["arguments"],
+                        "arguments": arguments,
                     },
                 )
                 tool_calls.append(new_tool_call)
@@ -962,7 +998,7 @@ class ToolConverter:
             }
 
         raise UserError(
-            f"Hosted tools are not supported with the ChatCompletions API. FGot tool type: "
+            f"Hosted tools are not supported with the ChatCompletions API. Got tool type: "
             f"{type(tool)}, tool: {tool}"
         )
 

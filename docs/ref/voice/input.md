@@ -1,0 +1,3 @@
+# `Input`
+
+::: agents.voice.input

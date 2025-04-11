@@ -15,3 +15,8 @@ def gen_trace_id() -> str:
 def gen_span_id() -> str:
     """Generates a new span ID."""
     return f"span_{uuid.uuid4().hex[:24]}"
+
+
+def gen_group_id() -> str:
+    """Generates a new group ID."""
+    return f"group_{uuid.uuid4().hex[:24]}"

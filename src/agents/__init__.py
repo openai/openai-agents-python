@@ -5,7 +5,7 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from . import _config
-from .agent import Agent
+from .agent import Agent, ToolsToFinalOutputFunction, ToolsToFinalOutputResult
 from .agent_output import AgentOutputSchema
 from .computer import AsyncComputer, Button, Computer, Environment
 from .exceptions import (
@@ -57,6 +57,7 @@ from .tool import (
     ComputerTool,
     FileSearchTool,
     FunctionTool,
+    FunctionToolResult,
     Tool,
     WebSearchTool,
     default_tool_error_function,
@@ -69,10 +70,15 @@ from .tracing import (
     GenerationSpanData,
     GuardrailSpanData,
     HandoffSpanData,
+    MCPListToolsSpanData,
     Span,
     SpanData,
     SpanError,
+    SpeechGroupSpanData,
+    SpeechSpanData,
     Trace,
+    TracingProcessor,
+    TranscriptionSpanData,
     add_trace_processor,
     agent_span,
     custom_span,
@@ -84,12 +90,17 @@ from .tracing import (
     get_current_trace,
     guardrail_span,
     handoff_span,
+    mcp_tools_span,
     set_trace_processors,
     set_tracing_disabled,
     set_tracing_export_api_key,
+    speech_group_span,
+    speech_span,
     trace,
+    transcription_span,
 )
 from .usage import Usage
+from .version import __version__
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
@@ -136,6 +147,8 @@ def enable_verbose_stdout_logging():
 
 __all__ = [
     "Agent",
+    "ToolsToFinalOutputFunction",
+    "ToolsToFinalOutputResult",
     "Runner",
     "Model",
     "ModelProvider",
@@ -189,6 +202,7 @@ __all__ = [
     "AgentUpdatedStreamEvent",
     "StreamEvent",
     "FunctionTool",
+    "FunctionToolResult",
     "ComputerTool",
     "FileSearchTool",
     "Tool",
@@ -206,8 +220,13 @@ __all__ = [
     "handoff_span",
     "set_trace_processors",
     "set_tracing_disabled",
+    "speech_group_span",
+    "transcription_span",
+    "speech_span",
+    "mcp_tools_span",
     "trace",
     "Trace",
+    "TracingProcessor",
     "SpanError",
     "Span",
     "SpanData",
@@ -217,6 +236,10 @@ __all__ = [
     "GenerationSpanData",
     "GuardrailSpanData",
     "HandoffSpanData",
+    "SpeechGroupSpanData",
+    "SpeechSpanData",
+    "MCPListToolsSpanData",
+    "TranscriptionSpanData",
     "set_default_openai_key",
     "set_default_openai_client",
     "set_default_openai_api",
@@ -225,4 +248,5 @@ __all__ = [
     "gen_trace_id",
     "gen_span_id",
     "default_tool_error_function",
+    "__version__",
 ]

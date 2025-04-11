@@ -9,17 +9,28 @@ if TYPE_CHECKING:
 
 
 class SpanData(abc.ABC):
+    """
+    Represents span data in the trace.
+    """
+
     @abc.abstractmethod
     def export(self) -> dict[str, Any]:
+        """Export the span data as a dictionary."""
         pass
 
     @property
     @abc.abstractmethod
     def type(self) -> str:
+        """Return the type of the span."""
         pass
 
 
 class AgentSpanData(SpanData):
+    """
+    Represents an Agent Span in the trace.
+    Includes name, handoffs, tools, and output type.
+    """
+
     __slots__ = ("name", "handoffs", "tools", "output_type")
 
     def __init__(
@@ -49,12 +60,24 @@ class AgentSpanData(SpanData):
 
 
 class FunctionSpanData(SpanData):
-    __slots__ = ("name", "input", "output")
+    """
+    Represents a Function Span in the trace.
+    Includes input, output and MCP data (if applicable).
+    """
 
-    def __init__(self, name: str, input: str | None, output: str | None):
+    __slots__ = ("name", "input", "output", "mcp_data")
+
+    def __init__(
+        self,
+        name: str,
+        input: str | None,
+        output: Any | None,
+        mcp_data: dict[str, Any] | None = None,
+    ):
         self.name = name
         self.input = input
         self.output = output
+        self.mcp_data = mcp_data
 
     @property
     def type(self) -> str:
@@ -65,11 +88,17 @@ class FunctionSpanData(SpanData):
             "type": self.type,
             "name": self.name,
             "input": self.input,
-            "output": self.output,
+            "output": str(self.output) if self.output else None,
+            "mcp_data": self.mcp_data,
         }
 
 
 class GenerationSpanData(SpanData):
+    """
+    Represents a Generation Span in the trace.
+    Includes input, output, model, model configuration, and usage.
+    """
+
     __slots__ = (
         "input",
         "output",
@@ -108,6 +137,11 @@ class GenerationSpanData(SpanData):
 
 
 class ResponseSpanData(SpanData):
+    """
+    Represents a Response Span in the trace.
+    Includes response and input.
+    """
+
     __slots__ = ("response", "input")
 
     def __init__(
@@ -132,6 +166,11 @@ class ResponseSpanData(SpanData):
 
 
 class HandoffSpanData(SpanData):
+    """
+    Represents a Handoff Span in the trace.
+    Includes source and desitnation agents.
+    """
+
     __slots__ = ("from_agent", "to_agent")
 
     def __init__(self, from_agent: str | None, to_agent: str | None):
@@ -151,6 +190,11 @@ class HandoffSpanData(SpanData):
 
 
 class CustomSpanData(SpanData):
+    """
+    Represents a Custom Span in the trace.
+    Includes name and data property bag.
+    """
+
     __slots__ = ("name", "data")
 
     def __init__(self, name: str, data: dict[str, Any]):
@@ -170,6 +214,11 @@ class CustomSpanData(SpanData):
 
 
 class GuardrailSpanData(SpanData):
+    """
+    Represents a Guardrail Span in the trace.
+    Includes name and triggered status.
+    """
+
     __slots__ = ("name", "triggered")
 
     def __init__(self, name: str, triggered: bool = False):
@@ -185,4 +234,141 @@ class GuardrailSpanData(SpanData):
             "type": self.type,
             "name": self.name,
             "triggered": self.triggered,
+        }
+
+
+class TranscriptionSpanData(SpanData):
+    """
+    Represents a Transcription Span in the trace.
+    Includes input, output, model, and model configuration.
+    """
+
+    __slots__ = (
+        "input",
+        "output",
+        "model",
+        "model_config",
+    )
+
+    def __init__(
+        self,
+        input: str | None = None,
+        input_format: str | None = "pcm",
+        output: str | None = None,
+        model: str | None = None,
+        model_config: Mapping[str, Any] | None = None,
+    ):
+        self.input = input
+        self.input_format = input_format
+        self.output = output
+        self.model = model
+        self.model_config = model_config
+
+    @property
+    def type(self) -> str:
+        return "transcription"
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "input": {
+                "data": self.input or "",
+                "format": self.input_format,
+            },
+            "output": self.output,
+            "model": self.model,
+            "model_config": self.model_config,
+        }
+
+
+class SpeechSpanData(SpanData):
+    """
+    Represents a Speech Span in the trace.
+    Includes input, output, model, model configuration, and first content timestamp.
+    """
+
+    __slots__ = ("input", "output", "model", "model_config", "first_content_at")
+
+    def __init__(
+        self,
+        input: str | None = None,
+        output: str | None = None,
+        output_format: str | None = "pcm",
+        model: str | None = None,
+        model_config: Mapping[str, Any] | None = None,
+        first_content_at: str | None = None,
+    ):
+        self.input = input
+        self.output = output
+        self.output_format = output_format
+        self.model = model
+        self.model_config = model_config
+        self.first_content_at = first_content_at
+
+    @property
+    def type(self) -> str:
+        return "speech"
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "input": self.input,
+            "output": {
+                "data": self.output or "",
+                "format": self.output_format,
+            },
+            "model": self.model,
+            "model_config": self.model_config,
+            "first_content_at": self.first_content_at,
+        }
+
+
+class SpeechGroupSpanData(SpanData):
+    """
+    Represents a Speech Group Span in the trace.
+    """
+
+    __slots__ = "input"
+
+    def __init__(
+        self,
+        input: str | None = None,
+    ):
+        self.input = input
+
+    @property
+    def type(self) -> str:
+        return "speech-group"
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "input": self.input,
+        }
+
+
+class MCPListToolsSpanData(SpanData):
+    """
+    Represents an MCP List Tools Span in the trace.
+    Includes server and result.
+    """
+
+    __slots__ = (
+        "server",
+        "result",
+    )
+
+    def __init__(self, server: str | None = None, result: list[str] | None = None):
+        self.server = server
+        self.result = result
+
+    @property
+    def type(self) -> str:
+        return "mcp_tools"
+
+    def export(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "server": self.server,
+            "result": self.result,
         }
