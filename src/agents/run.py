@@ -22,12 +22,20 @@ from .agent import Agent
 from .agent_output import AgentOutputSchema
 from .exceptions import (
     AgentsException,
+    FactCheckingGuardrailTripwireTriggered,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
 )
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import (
+    FactCheckingGuardrail,
+    FactCheckingGuardrailResult,
+    InputGuardrail,
+    InputGuardrailResult,
+    OutputGuardrail,
+    OutputGuardrailResult,
+)
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
@@ -75,6 +83,10 @@ class RunConfig:
 
     output_guardrails: list[OutputGuardrail[Any]] | None = None
     """A list of output guardrails to run on the final output of the run."""
+
+    fact_checking_guardrails: list[FactCheckingGuardrail[Any]] | None = None
+    """A list of fact checking guardrails to run on the original
+    input and the final output of the run."""
 
     tracing_disabled: bool = False
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
@@ -257,6 +269,14 @@ class Runner:
                             turn_result.next_step.output,
                             context_wrapper,
                         )
+                        fact_checking_guardrail_results = await cls._run_fact_checking_guardrails(
+                            current_agent.fact_checking_guardrails
+                            + (run_config.fact_checking_guardrails or []),
+                            current_agent,
+                            turn_result.next_step.output,
+                            context_wrapper,
+                            original_input,
+                        )
                         return RunResult(
                             input=original_input,
                             new_items=generated_items,
@@ -265,6 +285,7 @@ class Runner:
                             _last_agent=current_agent,
                             input_guardrail_results=input_guardrail_results,
                             output_guardrail_results=output_guardrail_results,
+                            fact_checking_guardrail_results=fact_checking_guardrail_results,
                         )
                     elif isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -414,6 +435,7 @@ class Runner:
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
+            fact_checking_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             _trace=new_trace,
         )
@@ -582,13 +604,34 @@ class Runner:
                             )
                         )
 
+                        streamed_result._fact_checking_guardrails_task = asyncio.create_task(
+                            cls._run_fact_checking_guardrails(
+                                current_agent.fact_checking_guardrails
+                                + (run_config.fact_checking_guardrails or []),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
+                                copy.deepcopy(ItemHelpers.input_to_new_input_list(starting_input)),
+                            )
+                        )
+
                         try:
                             output_guardrail_results = await streamed_result._output_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             output_guardrail_results = []
 
+                        try:
+                            fact_checking_guardrails_results = (
+                                await streamed_result._fact_checking_guardrails_task
+                            )
+                        except Exception:
+                            # Exceptions will be checked in the stream_events loop
+                            fact_checking_guardrails_results = []
+
                         streamed_result.output_guardrail_results = output_guardrail_results
+                        streamed_result.fact_checking_guardrail_results = (
+                            fact_checking_guardrails_results)
                         streamed_result.final_output = turn_result.next_step.output
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -871,6 +914,47 @@ class Runner:
                     )
                 )
                 raise OutputGuardrailTripwireTriggered(result)
+            else:
+                guardrail_results.append(result)
+
+        return guardrail_results
+
+    @classmethod
+    async def _run_fact_checking_guardrails(
+        cls,
+        guardrails: list[FactCheckingGuardrail[TContext]],
+        agent: Agent[TContext],
+        agent_output: Any,
+        context: RunContextWrapper[TContext],
+        agent_input: Any,
+    ) -> list[FactCheckingGuardrailResult]:
+        if not guardrails:
+            return []
+
+        guardrail_tasks = [
+            asyncio.create_task(
+                RunImpl.run_single_fact_checking_guardrail(
+                    guardrail, agent, agent_output, context, agent_input
+                )
+            )
+            for guardrail in guardrails
+        ]
+
+        guardrail_results = []
+
+        for done in asyncio.as_completed(guardrail_tasks):
+            result = await done
+            if result.output.tripwire_triggered:
+                # Cancel all guardrail tasks if a tripwire is triggered.
+                for t in guardrail_tasks:
+                    t.cancel()
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Guardrail tripwire triggered",
+                        data={"guardrail": result.guardrail.get_name()},
+                    )
+                )
+                raise FactCheckingGuardrailTripwireTriggered(result)
             else:
                 guardrail_results.append(result)
 
