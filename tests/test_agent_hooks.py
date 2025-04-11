@@ -13,6 +13,7 @@ from agents.run import Runner
 from agents.run_context import RunContextWrapper, TContext
 from agents.tool import Tool
 
+from src.agents.items import ToolCallItem
 from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
@@ -54,6 +55,7 @@ class AgentHooksForTests(AgentHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
+        tool_call: ToolCallItem,
     ) -> None:
         self.events["on_tool_start"] += 1
 
