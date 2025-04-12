@@ -68,7 +68,7 @@ eng_to_non_eng_mapping = {
 }
 eng_to_non_eng_instructions = {
     "common": [
-        "* The term 'examples' must be code examples when the page mentions the code examples in the repo, it can be translated as either 'code exmaples' or 'sample code'.",
+        "* The term 'examples' must be code examples when the page mentions the code examples in the repo, it can be translated as either 'code examples' or 'sample code'.",
         "* The term 'primitives' can be translated as basic components.",
         "* When the terms 'instructions' and 'tools' are mentioned as API parameter names, they must be kept as is.",
         "* The terms 'temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty' as parameter names must be kept as is.",
