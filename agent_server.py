@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from agents import Agent, Runner
+from agents import Agent, Runner, tools
+from agents_onboarding import router as onboarding_router  # ✅ New router added
 from datetime import datetime
 import httpx
 import os
@@ -15,6 +16,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(onboarding_router)  # ✅ Mount /onboard endpoint here
 
 # === Define Agents ===
 manager_agent = Agent(
@@ -33,8 +36,19 @@ strategy_agent = Agent(
     instructions="""
 You create clear, actionable 7-day social media campaign strategies.
 If user input is unclear or missing platform, audience, or tone — ask for clarification.
-Respond in structured JSON.
-"""
+Respond in structured JSON like:
+{
+  "output_type": "strategy_plan",
+  "contains_image": false,
+  "details": {
+    "days": [
+      { "title": "...", "theme": "...", "cta": "..." }
+    ]
+  }
+}
+Only return JSON in this format.
+""",
+    tools=[tools.browser]
 )
 
 content_agent = Agent(
@@ -42,24 +56,65 @@ content_agent = Agent(
     instructions="""
 You write engaging, brand-aligned social content.
 If user input lacks platform or goal, ask for clarification.
-Return post drafts with caption, CTA, and hook.
-"""
+Return post drafts in this JSON format:
+{
+  "output_type": "content_variants",
+  "contains_image": false,
+  "details": {
+    "variants": [
+      {
+        "platform": "Instagram",
+        "caption": "...",
+        "hook": "...",
+        "cta": "..."
+      }
+    ]
+  }
+}
+Only respond in this format.
+""",
+    tools=[]
 )
 
 repurpose_agent = Agent(
     name="RepurposeAgent",
     instructions="""
 You convert existing posts into new formats for different platforms.
-If missing input post or target format, ask for clarification.
-"""
+Respond using this format:
+{
+  "output_type": "repurposed_posts",
+  "contains_image": false,
+  "details": {
+    "original": "...",
+    "repurposed": [
+      {
+        "platform": "...",
+        "caption": "...",
+        "format": "..."
+      }
+    ]
+  }
+}
+""",
+    tools=[]
 )
 
 feedback_agent = Agent(
     name="FeedbackAgent",
     instructions="""
 You evaluate content and offer improvements.
-If missing content or performance data, ask what’s needed.
-"""
+Respond in this structured format:
+{
+  "output_type": "content_feedback",
+  "contains_image": false,
+  "details": {
+    "original": "...",
+    "feedback": "...",
+    "suggested_edit": "..."
+  }
+}
+""",
+    tools=[tools.code_interpreter]
 )
 
 AGENT_MAP = {
@@ -77,6 +132,11 @@ async def run_agent(request: Request):
     linked_profile_strategy = data.get("linked_profile_strategy")
     agent_type = data.get("agent_type")  # Optional shortcut
     webhook_url = data.get("webhook_url")
+    image_url = data.get("image_url")
+    debug_info = {}
+
+    if image_url:
+        user_input += f"\nHere is the image to consider: {image_url}"
 
     # Step 1: If no agent_type, use Manager Agent to decide
     if not agent_type:
@@ -84,8 +144,8 @@ async def run_agent(request: Request):
         try:
             parsed = json.loads(manager_result.final_output)
             agent_type = parsed.get("route_to")
-        except:
-            return {"needs_clarification": True, "message": "Could not understand intent."}
+        except Exception as e:
+            return {"needs_clarification": True, "message": "Could not understand intent.", "debug_info": str(e)}
 
     agent = AGENT_MAP.get(agent_type)
     if not agent:
@@ -99,16 +159,37 @@ async def run_agent(request: Request):
             "message": result.requires_user_input,
         }
 
+    try:
+        parsed_output = json.loads(result.final_output)
+        output_type = parsed_output.get("output_type")
+        output_details = parsed_output.get("details")
+        contains_image = parsed_output.get("contains_image", False)
+
+        if not output_type or not output_details:
+            raise ValueError("Missing required output keys")
+    except Exception as e:
+        parsed_output = None
+        output_type = "raw_text"
+        output_details = result.final_output
+        contains_image = False
+        debug_info["validation_error"] = str(e)
+        debug_info["raw_output"] = result.final_output
+
     # Step 3: Format AgentSession
     session = {
         "agent_type": agent_type,
         "user_id": user_id,
         "input_details": data.get("input_details", {}),
-        "output_details": result.final_output,
+        "output_type": output_type,
+        "contains_image": contains_image,
+        "output_details": output_details,
         "linked_profile_strategy": linked_profile_strategy,
         "source_content_piece": data.get("source_content_piece"),
         "created_at": datetime.utcnow().isoformat(),
     }
+
+    if debug_info:
+        session["debug_info"] = debug_info
 
     # Step 4: Optionally push to external webhook (Make, Bubble, etc)
     if webhook_url:
