@@ -115,7 +115,7 @@ Respond in this structured format:
   }
 }
 """,
-  tools=[tool.CodeInterpreter()]
+  tools=[]
 )
 
 AGENT_MAP = {
