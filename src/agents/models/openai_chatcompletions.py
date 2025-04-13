@@ -521,6 +521,8 @@ class OpenAIChatCompletionsModel(Model):
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
         store = _Converter.get_store_param(self._get_client(), model_settings)
 
+        stream_options = _Converter.get_stream_options_param(self._get_client(), model_settings)
+
         ret = await self._get_client().chat.completions.create(
             model=self.model,
             messages=converted_messages,
@@ -534,7 +536,7 @@ class OpenAIChatCompletionsModel(Model):
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            stream_options={"include_usage": True} if stream else NOT_GIVEN,
+            stream_options=self._non_null_or_not_given(stream_options),
             store=self._non_null_or_not_given(store),
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             extra_headers=_HEADERS,
@@ -568,11 +570,26 @@ class OpenAIChatCompletionsModel(Model):
 
 
 class _Converter:
+
+    @classmethod
+    def is_openai(cls, client: AsyncOpenAI):
+        return str(client.base_url).startswith("https://api.openai.com")
+
     @classmethod
     def get_store_param(cls, client: AsyncOpenAI, model_settings: ModelSettings) -> bool | None:
         # Match the behavior of Responses where store is True when not given
-        default_store = True if str(client.base_url).startswith("https://api.openai.com") else None
+        default_store = True if cls.is_openai(client) else None
         return model_settings.store if model_settings.store is not None else default_store
+
+    @classmethod
+    def get_stream_options_param(
+            cls, client: AsyncOpenAI, model_settings: ModelSettings
+    ) -> dict[str, bool] | None:
+        default_include_usage = True if cls.is_openai(client) else None
+        include_usage = model_settings.include_usage if model_settings.include_usage is not None \
+            else default_include_usage
+        stream_options = {"include_usage": include_usage} if include_usage is not None else None
+        return stream_options
 
     @classmethod
     def convert_tool_choice(

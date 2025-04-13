@@ -32,11 +32,11 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 ```python
 @dataclass
 class UserContext:
-  uid: str
-  is_pro_user: bool
+    uid: str
+    is_pro_user: bool
 
-  async def fetch_purchases() -> list[Purchase]:
-     return ...
+    async def fetch_purchases() -> list[Purchase]:
+        return ...
 
 agent = Agent[UserContext](
     ...,
