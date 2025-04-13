@@ -4,7 +4,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from agents import Agent, Runner, tools
+from agents import Agent, Runner, tool
 from datetime import datetime
 import httpx
 import json
@@ -49,7 +49,7 @@ Respond in structured JSON like:
 }
 Only return JSON in this format.
 """,
-    tools=[tools.browser]
+    tools=[tool.browser]
 )
 
 content_agent = Agent(
@@ -115,7 +115,7 @@ Respond in this structured format:
   }
 }
 """,
-    tools=[tools.code_interpreter]
+    tools=[tool.code_interpreter]
 )
 
 AGENT_MAP = {
