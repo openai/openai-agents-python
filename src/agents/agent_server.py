@@ -50,7 +50,7 @@ Respond in structured JSON like:
 }
 Only return JSON in this format.
 """,
-tools=[Browser()]
+tools=[]
 )
 
 content_agent = Agent(
