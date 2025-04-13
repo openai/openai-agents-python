@@ -5,7 +5,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from agents import Agent, Runner, tool
-from agents.extensions.browser import Browser
 from datetime import datetime
 import httpx
 import json
