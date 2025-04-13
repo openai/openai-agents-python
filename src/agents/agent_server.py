@@ -1,15 +1,14 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from myagents import Agent, Runner, tools
-from agents_onboarding import router as onboarding_router  # ✅ New router added
+from agents import Agent, Runner, tools
 from datetime import datetime
 import httpx
-import os
 import json
+import os
 
 app = FastAPI()
 
@@ -20,8 +19,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.include_router(onboarding_router)  # ✅ Mount /onboard endpoint here
 
 # === Define Agents ===
 manager_agent = Agent(
