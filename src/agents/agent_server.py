@@ -10,6 +10,10 @@ import httpx
 import json
 import os
 
+# === Predefined Webhook URLs ===
+STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
+CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
+
 app = FastAPI()
 
 app.add_middleware(
@@ -132,7 +136,6 @@ async def run_agent(request: Request):
     user_id = data.get("user_id", "anonymous")
     linked_profile_strategy = data.get("linked_profile_strategy")
     agent_type = data.get("agent_type")  # Optional shortcut
-    webhook_url = data.get("webhook_url")
     image_url = data.get("image_url")
     debug_info = {}
 
@@ -146,7 +149,11 @@ async def run_agent(request: Request):
             parsed = json.loads(manager_result.final_output)
             agent_type = parsed.get("route_to")
         except Exception as e:
-            return {"needs_clarification": True, "message": "Could not understand intent.", "debug_info": str(e)}
+            return {
+                "needs_clarification": True,
+                "message": "Could not understand intent.",
+                "debug_info": str(e)
+            }
 
     agent = AGENT_MAP.get(agent_type)
     if not agent:
@@ -192,19 +199,18 @@ async def run_agent(request: Request):
     if debug_info:
         session["debug_info"] = debug_info
 
-    # Step 4: Optionally push to external webhook (Make, Bubble, etc)
-    if webhook_url:
-        async with httpx.AsyncClient() as client:
-            try:
-                if parsed_output is None:  # Clarification flow
-                    await client.post(webhook_url, json={
-                        "user_id": user_id,
-                        "message": result.final_output,
-                        "agent_type": agent_type,
-                    })
-                else:  # Structured output flow
-                    await client.post(webhook_url, json=session)
-            except Exception as e:
-                session["webhook_error"] = str(e)
+    # Step 4: Post to correct webhook
+    async with httpx.AsyncClient() as client:
+        try:
+            if parsed_output:
+                await client.post(STRUCTURED_WEBHOOK_URL, json=session)
+            else:
+                await client.post(CLARIFICATION_WEBHOOK_URL, json={
+                    "user_id": user_id,
+                    "message": result.final_output,
+                    "agent_type": agent_type,
+                })
+        except Exception as e:
+            session["webhook_error"] = str(e)
 
     return session
