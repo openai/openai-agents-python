@@ -1,21 +1,21 @@
 # Model context protocol (MCP)
 
-[Model context protocol](https://modelcontextprotocol.io/introduction) (別名 MCP) は、LLM にツールとコンテキストを提供する方法です。MCP ドキュメントからの引用:
+[Model context protocol](https://modelcontextprotocol.io/introduction)（通称 MCP）は、 LLM にツールやコンテキストを提供するための方法です。MCP ドキュメントからの引用です：
 
-> MCP は、アプリケーションが LLM にコンテキストを提供する方法を標準化するオープンプロトコルです。MCP を AI アプリケーションのための USB-C ポートのように考えてください。USB-C がデバイスをさまざまな周辺機器やアクセサリーに接続する標準化された方法を提供するのと同様に、MCP は AI モデルをさまざまなデータソースやツールに接続する標準化された方法を提供します。
+> MCP は、アプリケーションが LLM にコンテキストを提供する方法を標準化するオープンプロトコルです。MCP を AI アプリケーションのための USB-C ポートのようなものと考えてください。USB-C がさまざまな周辺機器やアクセサリにデバイスを接続する標準的な方法を提供するのと同様に、MCP は AI モデルをさまざまなデータソースやツールに接続する標準的な方法を提供します。
 
-エージェント SDK は MCP をサポートしています。これにより、エージェントにツールを提供するために幅広い MCP サーバーを使用できます。
+Agents SDK は MCP をサポートしています。これにより、幅広い MCP サーバーを利用して、エージェントにツールを提供することができます。
 
 ## MCP サーバー
 
-現在、MCP 仕様は使用するトランスポートメカニズムに基づいて2種類のサーバーを定義しています:
+現在、MCP 仕様では、使用するトランスポートメカニズムに基づいて 2 種類のサーバーが定義されています：
 
-1. **stdio** サーバーは、アプリケーションのサブプロセスとして実行されます。これらは「ローカルで」実行されると考えることができます。
+1. **stdio** サーバーは、アプリケーションのサブプロセスとして実行されます。ローカルで実行されるものと考えることができます。
 2. **HTTP over SSE** サーバーはリモートで実行されます。URL を介して接続します。
 
-これらのサーバーに接続するには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] と [`MCPServerSse`][agents.mcp.server.MCPServerSse] クラスを使用できます。
+これらのサーバーに接続するには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] および [`MCPServerSse`][agents.mcp.server.MCPServerSse] クラスを使用できます。
 
-例えば、[公式 MCP ファイルシステムサーバー](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) を使用する方法は次のとおりです。
+例えば、[公式 MCP ファイルシステムサーバー](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) を使用する場合は、次のようになります。
 
 ```python
 async with MCPServerStdio(
@@ -27,9 +27,9 @@ async with MCPServerStdio(
     tools = await server.list_tools()
 ```
 
-## MCP サーバーの使用
+## MCP サーバーの利用
 
-MCP サーバーはエージェントに追加できます。エージェント SDK は、エージェントが実行されるたびに MCP サーバーで `list_tools()` を呼び出します。これにより、LLM は MCP サーバーのツールを認識します。LLM が MCP サーバーのツールを呼び出すと、SDK はそのサーバーで `call_tool()` を呼び出します。
+MCP サーバーはエージェントに追加できます。Agents SDK は、エージェントが実行されるたびに MCP サーバーの `list_tools()` を呼び出します。これにより、LLM は MCP サーバーのツールを認識できるようになります。LLM が MCP サーバーのツールを呼び出すと、SDK はそのサーバーの `call_tool()` を呼び出します。
 
 ```python
 
@@ -40,21 +40,21 @@ agent=Agent(
 )
 ```
 
-## キャッシング
+## キャッシュ
 
-エージェントが実行されるたびに、MCP サーバーで `list_tools()` を呼び出します。これは、特にサーバーがリモートサーバーの場合、レイテンシーの影響を受ける可能性があります。ツールのリストを自動的にキャッシュするには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] と [`MCPServerSse`][agents.mcp.server.MCPServerSse] に `cache_tools_list=True` を渡すことができます。ツールリストが変更されないことが確実な場合にのみこれを行うべきです。
+エージェントが実行されるたびに、MCP サーバーの `list_tools()` が呼び出されます。特にサーバーがリモートの場合、これはレイテンシの原因となることがあります。ツールリストを自動的にキャッシュするには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] および [`MCPServerSse`][agents.mcp.server.MCPServerSse] の両方に `cache_tools_list=True` を渡すことができます。ツールリストが変更されないことが確実な場合のみ、この設定を行ってください。
 
-キャッシュを無効にしたい場合は、サーバーで `invalidate_tools_cache()` を呼び出すことができます。
+キャッシュを無効化したい場合は、サーバーで `invalidate_tools_cache()` を呼び出すことができます。
 
-## エンドツーエンドの例
+## エンドツーエンドの code examples
 
-[examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) で完全な動作例を確認してください。
+[examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) で、完全な動作 code examples をご覧いただけます。
 
 ## トレーシング
 
-[トレーシング](./tracing.md) は、MCP 操作を自動的にキャプチャします。これには以下が含まれます:
+[トレーシング](../tracing.md) は、以下を含む MCP の操作を自動的に記録します：
 
-1. ツールをリストするための MCP サーバーへの呼び出し
+1. MCP サーバーへのツールリスト取得の呼び出し
 2. 関数呼び出しに関する MCP 関連情報
 
-![MCP Tracing Screenshot](../assets/images/mcp-tracing.jpg)
+![MCP トレーシングのスクリーンショット](../assets/images/mcp-tracing.jpg)

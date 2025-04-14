@@ -127,7 +127,7 @@ plugins:
           nav:
             - はじめに: index.md
             - クイックスタート: quickstart.md
-            - サンプル例: examples.md
+            - コード例: examples.md
             - ドキュメント:
                 - agents.md
                 - running_agents.md

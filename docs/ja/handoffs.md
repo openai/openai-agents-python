@@ -1,18 +1,18 @@
 # ハンドオフ
 
-ハンドオフは、エージェントがタスクを他のエージェントに委任することを可能にします。これは、異なるエージェントが異なる分野に特化しているシナリオで特に有用です。例えば、カスタマーサポートアプリでは、注文状況、返金、FAQ などのタスクをそれぞれ専門に扱うエージェントがいるかもしれません。
+ハンドオフは、エージェントが他のエージェントにタスクを委任できる仕組みです。これは、異なるエージェントがそれぞれ異なる分野に特化しているシナリオで特に有用です。たとえば、カスタマーサポートアプリでは、注文状況、返金、FAQ などのタスクをそれぞれ専門に扱うエージェントが存在する場合があります。
 
-ハンドオフは LLM にとってツールとして表現されます。したがって、`Refund Agent` という名前のエージェントへのハンドオフがある場合、ツールは `transfer_to_refund_agent` と呼ばれます。
+ハンドオフは LLM からはツールとして認識されます。たとえば、`Refund Agent` という名前のエージェントへのハンドオフがある場合、そのツール名は `transfer_to_refund_agent` となります。
 
 ## ハンドオフの作成
 
-すべてのエージェントには [`handoffs`][agents.agent.Agent.handoffs] パラメーターがあり、これは `Agent` を直接取るか、ハンドオフをカスタマイズする `Handoff` オブジェクトを取ることができます。
+すべてのエージェントは [`handoffs`][agents.agent.Agent.handoffs] パラメーターを持っており、これは直接 `Agent` を指定することも、ハンドオフをカスタマイズする `Handoff` オブジェクトを指定することもできます。
 
-Agents SDK が提供する [`handoff()`][agents.handoffs.handoff] 関数を使用してハンドオフを作成できます。この関数を使用すると、ハンドオフ先のエージェントを指定し、オプションでオーバーライドや入力フィルターを設定できます。
+Agents SDK で提供されている [`handoff()`][agents.handoffs.handoff] 関数を使ってハンドオフを作成できます。この関数では、ハンドオフ先のエージェントや、オプションのオーバーライドや入力フィルターを指定できます。
 
 ### 基本的な使い方
 
-簡単なハンドオフを作成する方法は次のとおりです。
+シンプルなハンドオフの作成方法は以下の通りです。
 
 ```python
 from agents import Agent, handoff
@@ -24,18 +24,18 @@ refund_agent = Agent(name="Refund agent")
 triage_agent = Agent(name="Triage agent", handoffs=[billing_agent, handoff(refund_agent)])
 ```
 
-1. エージェントを直接使用することも（`billing_agent` のように）、`handoff()` 関数を使用することもできます。
+1. エージェントを直接指定する（例：`billing_agent`）ことも、`handoff()` 関数を使うこともできます。
 
 ### `handoff()` 関数によるハンドオフのカスタマイズ
 
-[`handoff()`][agents.handoffs.handoff] 関数を使用すると、さまざまなカスタマイズが可能です。
+[`handoff()`][agents.handoffs.handoff] 関数では、さまざまなカスタマイズが可能です。
 
 -   `agent`: ハンドオフ先のエージェントです。
--   `tool_name_override`: デフォルトでは `Handoff.default_tool_name()` 関数が使用され、`transfer_to_<agent_name>` に解決されます。これをオーバーライドできます。
--   `tool_description_override`: `Handoff.default_tool_description()` からのデフォルトのツール説明をオーバーライドします。
--   `on_handoff`: ハンドオフが呼び出されたときに実行されるコールバック関数です。ハンドオフが呼び出されるとすぐにデータ取得を開始するなどに役立ちます。この関数はエージェントコンテキストを受け取り、オプションで LLM が生成した入力も受け取ることができます。入力データは `input_type` パラメーターで制御されます。
--   `input_type`: ハンドオフが期待する入力のタイプ（オプション）。
--   `input_filter`: 次のエージェントが受け取る入力をフィルタリングできます。詳細は以下を参照してください。
+-   `tool_name_override`: デフォルトでは `Handoff.default_tool_name()` 関数が使われ、`transfer_to_<agent_name>` となります。これを上書きできます。
+-   `tool_description_override`: デフォルトのツール説明（`Handoff.default_tool_description()`）を上書きできます。
+-   `on_handoff`: ハンドオフが呼び出されたときに実行されるコールバック関数です。たとえば、ハンドオフが呼び出されたタイミングでデータ取得を開始するなどに便利です。この関数はエージェントコンテキストを受け取り、オプションで LLM が生成した入力も受け取れます。入力データは `input_type` パラメーターで制御します。
+-   `input_type`: ハンドオフで期待される入力の型（オプション）です。
+-   `input_filter`: 次のエージェントが受け取る入力をフィルタリングできます。詳細は下記をご覧ください。
 
 ```python
 from agents import Agent, handoff, RunContextWrapper
@@ -55,7 +55,7 @@ handoff_obj = handoff(
 
 ## ハンドオフ入力
 
-特定の状況では、LLM がハンドオフを呼び出す際にデータを提供することを望む場合があります。例えば、「エスカレーションエージェント」へのハンドオフを想像してください。理由を提供してログに記録したいかもしれません。
+状況によっては、LLM にハンドオフ時に何らかのデータを提供してほしい場合があります。たとえば、「エスカレーションエージェント」へのハンドオフを考えてみましょう。この場合、理由を提供して記録できるようにしたいことがあります。
 
 ```python
 from pydantic import BaseModel
@@ -79,9 +79,9 @@ handoff_obj = handoff(
 
 ## 入力フィルター
 
-ハンドオフが発生すると、新しいエージェントが会話を引き継ぎ、以前の会話履歴全体を見ることができます。これを変更したい場合は、[`input_filter`][agents.handoffs.Handoff.input_filter] を設定できます。入力フィルターは、既存の入力を [`HandoffInputData`][agents.handoffs.HandoffInputData] 経由で受け取り、新しい `HandoffInputData` を返す必要がある関数です。
+ハンドオフが発生すると、新しいエージェントが会話を引き継ぎ、これまでの会話履歴全体を見ることができます。これを変更したい場合は、[`input_filter`][agents.handoffs.Handoff.input_filter] を設定できます。入力フィルターは、[`HandoffInputData`][agents.handoffs.HandoffInputData] を受け取り、新しい `HandoffInputData` を返す関数です。
 
-一般的なパターン（例えば、履歴からすべてのツール呼び出しを削除する）が [`agents.extensions.handoff_filters`][] に実装されています。
+よくあるパターン（たとえば履歴からすべてのツール呼び出しを削除するなど）は、[`agents.extensions.handoff_filters`][] で実装されています。
 
 ```python
 from agents import Agent, handoff
@@ -99,7 +99,7 @@ handoff_obj = handoff(
 
 ## 推奨プロンプト
 
-LLM がハンドオフを正しく理解するために、エージェントにハンドオフに関する情報を含めることをお勧めします。[`agents.extensions.handoff_prompt.RECOMMENDED_PROMPT_PREFIX`][] に推奨されるプレフィックスがあります。または、[`agents.extensions.handoff_prompt.prompt_with_handoff_instructions`][] を呼び出して、プロンプトに推奨データを自動的に追加できます。
+LLM がハンドオフを正しく理解できるようにするため、エージェントにハンドオフに関する情報を含めることを推奨します。[`agents.extensions.handoff_prompt.RECOMMENDED_PROMPT_PREFIX`][] で推奨されるプレフィックスを利用するか、[`agents.extensions.handoff_prompt.prompt_with_handoff_instructions`][] を呼び出して、推奨データをプロンプトに自動追加できます。
 
 ```python
 from agents import Agent

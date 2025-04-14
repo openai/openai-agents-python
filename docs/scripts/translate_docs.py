@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 # logging.basicConfig(level=logging.INFO)
 # logging.getLogger("openai").setLevel(logging.DEBUG)
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 
 # Define the source and target directories
 source_dir = "docs"
@@ -94,18 +94,17 @@ def built_instructions(target_language: str, lang_code: str) -> str:
     )
     return f"""You are an expert technical translator.
 
-Your task: translate the markdown passed as a user input from English into {target_language}.  
+Your task: translate the markdown passed as a user input from English into {target_language}.
+The inputs are the official OpenAI Agents SDK framework documentation, and your translation outputs'll be used for serving the official {target_language} version of them. Thus, accuracy, clarity, and fidelity to the original are critical.
 
 ############################
 ##  OUTPUT REQUIREMENTS  ##
 ############################
-- Return **only** the translated markdown, with the original markdown structure preserved.
-- Do **not** add explanations, comments, or metadata.
+You must return **only** the translated markdown. Do not include any commentary, metadata, or explanations. The original markdown structure must be strictly preserved.
 
 #########################
 ##  GENERAL RULES      ##
 #########################
-- The output quality must be great enough to be used for public documentation.
 - Be professional and polite.
 - Keep the tone **natural** and concise.
 - Do not omit any content. If a segment should stay in English, copy it verbatim.
@@ -149,9 +148,17 @@ Translate these terms exactly as provided (no extra spaces):
 If you are uncertain about a term, leave the original English term in parentheses after your translation.
 
 #########################
-##  FINAL REMINDER     ##
+##  WORKFLOW           ##
 #########################
-Return **only** the translated markdown text. No extra commentary.
+
+Follow the following workflow to translate the given markdown text data:
+
+1. Read the input markdown text given by the user.
+2. Translate the markdown file into {target_language}, carefully following the requirements above.
+3. Perform a self-review to evaluate the quality of the translation, focusing on naturalness, accuracy, and consistency in detail.
+4. If improvements are necessary, refine the content without changing the original meaning.
+5. Continue improving the translation until you are fully satisfied with the result.
+6. Once the final output is ready, return **only** the translated markdown text. No extra commentary.
 """
 
 
