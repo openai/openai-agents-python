@@ -245,6 +245,8 @@ class OpenAIResponsesModel(Model):
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
             extra_headers=_HEADERS,
+            extra_query=model_settings.extra_query,
+            extra_body=model_settings.extra_body,
             text=response_format,
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
