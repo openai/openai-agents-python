@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Union
 
 from pydantic import BaseModel, Field
 
@@ -32,7 +31,7 @@ a phone number.
 class MessageOutput(BaseModel):
     reasoning: str = Field(description="Thoughts on how to respond to the user's message")
     response: str = Field(description="The response to the user's message")
-    user_name: Union[str, None] = Field(description="The name of the user who sent the message, if known")
+    user_name: str | None = Field(description="The name of the user who sent the message, if known")
 
 
 @output_guardrail

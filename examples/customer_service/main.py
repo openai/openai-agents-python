@@ -2,7 +2,6 @@ from __future__ import annotations as _annotations
 
 import asyncio
 import random
-from typing import Union
 import uuid
 
 from pydantic import BaseModel
@@ -27,10 +26,10 @@ from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 
 
 class AirlineAgentContext(BaseModel):
-    passenger_name: Union[str, None] = None
-    confirmation_number: Union[str, None] = None
-    seat_number: Union[str, None] = None
-    flight_number: Union[str, None] = None
+    passenger_name: str | None = None
+    confirmation_number: str | None = None
+    seat_number: str | None = None
+    flight_number: str | None = None
 
 
 ### TOOLS
