@@ -314,6 +314,15 @@ wheels = [
 ]
 
 [[package]]
+name = "eval-type-backport"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/ea/8b0ac4469d4c347c6a385ff09dc3c048c2d021696664e26c7ee6791631b5/eval_type_backport-0.2.2.tar.gz", hash = "sha256:f0576b4cf01ebb5bd358d02314d31846af5e07678387486e2c798af0e7d849c1", size = 9079 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/31/55cd413eaccd39125368be33c46de24a1f639f2e12349b0361b4678f3915/eval_type_backport-0.2.2-py3-none-any.whl", hash = "sha256:cb6ad7c393517f476f96d456d0412ea80f0a8cf96f6892834cd9340149111b0a", size = 5830 },
+]
+
+[[package]]
 name = "evdev"
 version = "1.9.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1102,6 +1111,7 @@ name = "openai-agents"
 version = "0.0.9"
 source = { editable = "." }
 dependencies = [
+    { name = "eval-type-backport" },
     { name = "griffe" },
     { name = "mcp", marker = "python_full_version >= '3.10'" },
     { name = "mkdocs-static-i18n" },
@@ -1146,6 +1156,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "eval-type-backport", specifier = ">=0.2.2" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffe", specifier = ">=1.5.6,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.6.0,<2" },
