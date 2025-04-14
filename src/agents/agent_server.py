@@ -196,8 +196,13 @@ async def run_agent(request: Request):
     if webhook_url:
         async with httpx.AsyncClient() as client:
             try:
-                await client.post(webhook_url, json=session)
-            except Exception as e:
-                session["webhook_error"] = str(e)
+                if parsed_output is None:  # Clarification flow
+                    await client.post(clarification_webhook_url, json={
+                        "user_id": user_id,
+                        "message": result.final_output,
+                        "agent_type": agent_type,
+                    })
+                else:  # Structured output flow
+                    await client.post(structured_webhook_url, json=session)
 
     return session
