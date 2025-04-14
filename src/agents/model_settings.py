@@ -4,6 +4,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Literal
 
 from openai.types.shared import Reasoning
+from openai._types import Body, Query
 
 
 @dataclass
@@ -57,6 +58,14 @@ class ModelSettings:
     include_usage: bool | None = None
     """Whether to include usage chunk.
     Defaults to True if not provided."""
+
+    extra_query: Query | None = None
+    """Additional query fields to provide with the request.
+    Defaults to None if not provided."""
+
+    extra_body: Body | None = None
+    """Additional body fields to provide with the request.
+    Defaults to None if not provided."""
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
