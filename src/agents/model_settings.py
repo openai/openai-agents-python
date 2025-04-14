@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from typing import Literal
 
-from openai.types.shared import Reasoning
 from openai._types import Body, Query
+from openai.types.shared import Reasoning
 
 
 @dataclass
