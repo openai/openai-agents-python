@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -44,8 +45,7 @@ from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
 
-DEFAULT_MAX_TURNS = 10
-
+DEFAULT_MAX_TURNS = os.environ.get("DEFAULT_MAX_TURNS", 10)
 
 @dataclass
 class RunConfig:
