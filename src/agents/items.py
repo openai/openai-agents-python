@@ -166,9 +166,11 @@ class ModelResponse:
     usage: Usage
     """The usage information for the response."""
 
-    referenceable_id: str | None
+    response_id: str | None
     """An ID for the response which can be used to refer to the response in subsequent calls to the
     model. Not supported by all model providers.
+    If using OpenAI models via the Responses API, this is the `response_id` parameter, and it can
+    be passed to `Runner.run`.
     """
 
     def to_input_items(self) -> list[TResponseInputItem]:

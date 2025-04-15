@@ -108,6 +108,7 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -156,7 +157,7 @@ class OpenAIChatCompletionsModel(Model):
             return ModelResponse(
                 output=items,
                 usage=usage,
-                referenceable_id=None,
+                response_id=None,
             )
 
     async def stream_response(
@@ -168,6 +169,8 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -497,7 +500,11 @@ class OpenAIChatCompletionsModel(Model):
             span.span_data.input = converted_messages
 
         parallel_tool_calls = (
-            True if model_settings.parallel_tool_calls and tools and len(tools) > 0 else NOT_GIVEN
+            True
+            if model_settings.parallel_tool_calls and tools and len(tools) > 0
+            else False
+            if model_settings.parallel_tool_calls is False
+            else NOT_GIVEN
         )
         tool_choice = _Converter.convert_tool_choice(model_settings.tool_choice)
         response_format = _Converter.convert_response_format(output_schema)

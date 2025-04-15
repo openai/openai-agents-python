@@ -54,6 +54,8 @@ class FakeModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         self.last_turn_args = {
             "system_instructions": system_instructions,
@@ -81,7 +83,7 @@ class FakeModel(Model):
             return ModelResponse(
                 output=output,
                 usage=Usage(),
-                referenceable_id=None,
+                response_id=None,
             )
 
     async def stream_response(
@@ -93,6 +95,8 @@ class FakeModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()

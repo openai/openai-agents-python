@@ -69,6 +69,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -79,6 +80,7 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
+                    previous_response_id,
                     stream=False,
                 )
 
@@ -120,7 +122,7 @@ class OpenAIResponsesModel(Model):
         return ModelResponse(
             output=response.output,
             usage=usage,
-            referenceable_id=response.id,
+            response_id=response.id,
         )
 
     async def stream_response(
@@ -132,6 +134,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        previous_response_id: str | None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -145,6 +148,7 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
+                    previous_response_id,
                     stream=True,
                 )
 
@@ -180,6 +184,7 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[True],
     ) -> AsyncStream[ResponseStreamEvent]: ...
 
@@ -192,6 +197,7 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[False],
     ) -> Response: ...
 
@@ -203,6 +209,7 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[True] | Literal[False] = False,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
@@ -229,9 +236,11 @@ class OpenAIResponsesModel(Model):
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
+                f"Previous response id: {previous_response_id}\n"
             )
 
         return await self._client.responses.create(
+            previous_response_id=self._non_null_or_not_given(previous_response_id),
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,

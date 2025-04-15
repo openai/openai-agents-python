@@ -117,6 +117,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
     ) -> RunResult:
         """Run a workflow starting at the given agent. The agent will run in a loop until a final
         output is generated. The loop runs like so:
@@ -141,6 +142,8 @@ class Runner:
                 AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
+            previous_response_id: The ID of the previous response, if using OpenAI models via the
+                Responses API, this allows you to skip passing in input from the previous turn.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of the last
@@ -230,6 +233,7 @@ class Runner:
                                 run_config=run_config,
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
+                                previous_response_id=previous_response_id,
                             ),
                         )
                     else:
@@ -243,6 +247,7 @@ class Runner:
                             run_config=run_config,
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
+                            previous_response_id=previous_response_id,
                         )
                     should_run_agent_start_hooks = False
 
@@ -291,6 +296,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
     ) -> RunResult:
         """Run a workflow synchronously, starting at the given agent. Note that this just wraps the
         `run` method, so it will not work if there's already an event loop (e.g. inside an async
@@ -319,6 +325,8 @@ class Runner:
                 AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
+            previous_response_id: The ID of the previous response, if using OpenAI models via the
+                Responses API, this allows you to skip passing in input from the previous turn.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of the last
@@ -332,6 +340,7 @@ class Runner:
                 max_turns=max_turns,
                 hooks=hooks,
                 run_config=run_config,
+                previous_response_id=previous_response_id,
             )
         )
 
@@ -344,6 +353,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
     ) -> RunResultStreaming:
         """Run a workflow starting at the given agent in streaming mode. The returned result object
         contains a method you can use to stream semantic events as they are generated.
@@ -370,7 +380,8 @@ class Runner:
                 AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-
+            previous_response_id: The ID of the previous response, if using OpenAI models via the
+                Responses API, this allows you to skip passing in input from the previous turn.
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
@@ -428,6 +439,7 @@ class Runner:
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 run_config=run_config,
+                previous_response_id=previous_response_id,
             )
         )
         return streamed_result
@@ -485,6 +497,7 @@ class Runner:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
+        previous_response_id: str | None,
     ):
         current_span: Span[AgentSpanData] | None = None
         current_agent = starting_agent
@@ -554,6 +567,7 @@ class Runner:
                         should_run_agent_start_hooks,
                         tool_use_tracker,
                         all_tools,
+                        previous_response_id,
                     )
                     should_run_agent_start_hooks = False
 
@@ -623,6 +637,7 @@ class Runner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
+        previous_response_id: str | None,
     ) -> SingleStepResult:
         if should_run_agent_start_hooks:
             await asyncio.gather(
@@ -662,6 +677,7 @@ class Runner:
             get_model_tracing_impl(
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
+            previous_response_id=previous_response_id,
         ):
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
@@ -677,7 +693,7 @@ class Runner:
                 final_response = ModelResponse(
                     output=event.response.output,
                     usage=usage,
-                    referenceable_id=event.response.id,
+                    response_id=event.response.id,
                 )
 
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
@@ -717,6 +733,7 @@ class Runner:
         run_config: RunConfig,
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
+        previous_response_id: str | None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -746,6 +763,7 @@ class Runner:
             context_wrapper,
             run_config,
             tool_use_tracker,
+            previous_response_id,
         )
 
         return await cls._get_single_step_result_from_response(
@@ -888,6 +906,7 @@ class Runner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
@@ -903,6 +922,7 @@ class Runner:
             tracing=get_model_tracing_impl(
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
+            previous_response_id=previous_response_id,
         )
 
         context_wrapper.usage.add(new_response.usage)
