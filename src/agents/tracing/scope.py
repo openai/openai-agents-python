@@ -18,6 +18,10 @@ _current_trace: contextvars.ContextVar["Trace | None"] = contextvars.ContextVar(
 
 
 class Scope:
+    """
+    Manages the current span and trace in the context.
+    """
+
     @classmethod
     def get_current_span(cls) -> "Span[Any] | None":
         return _current_span.get()

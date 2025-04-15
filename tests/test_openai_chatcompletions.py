@@ -282,7 +282,7 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     # Check OpenAI client was called for streaming
     assert completions.kwargs["stream"] is True
     assert completions.kwargs["store"] is NOT_GIVEN
-    assert completions.kwargs["stream_options"] == {"include_usage": True}
+    assert completions.kwargs["stream_options"] is NOT_GIVEN
     # Response is a proper openai Response
     assert isinstance(response, Response)
     assert response.id == FAKE_RESPONSES_ID

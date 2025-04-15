@@ -201,6 +201,9 @@ class TraceProvider:
         )
 
     def shutdown(self) -> None:
+        if self._disabled:
+            return
+
         try:
             logger.debug("Shutting down trace provider")
             self._multi_processor.shutdown()

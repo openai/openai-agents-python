@@ -51,6 +51,19 @@ async def main():
 1.  Sets the name of an OpenAI model directly.
 2.  Provides a [`Model`][agents.models.interface.Model] implementation.
 
+When you want to further configure the model used for an agent, you can pass [`ModelSettings`][agents.models.interface.ModelSettings], which provides optional model configuration parameters such as temperature.
+
+```python
+from agents import Agent, ModelSettings
+
+english_agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+    model="gpt-4o",
+    model_settings=ModelSettings(temperature=0.1),
+)
+```
+
 ## Using other LLM providers
 
 You can use other LLM providers in 3 ways (examples [here](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/)):

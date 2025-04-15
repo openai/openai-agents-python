@@ -63,7 +63,7 @@ Alternatively, you can customize the logs by adding handlers, filters, formatter
 ```python
 import logging
 
-logger =  logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
+logger = logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
 
 # To make all logs show up
 logger.setLevel(logging.DEBUG)

@@ -9,17 +9,28 @@ if TYPE_CHECKING:
 
 
 class SpanData(abc.ABC):
+    """
+    Represents span data in the trace.
+    """
+
     @abc.abstractmethod
     def export(self) -> dict[str, Any]:
+        """Export the span data as a dictionary."""
         pass
 
     @property
     @abc.abstractmethod
     def type(self) -> str:
+        """Return the type of the span."""
         pass
 
 
 class AgentSpanData(SpanData):
+    """
+    Represents an Agent Span in the trace.
+    Includes name, handoffs, tools, and output type.
+    """
+
     __slots__ = ("name", "handoffs", "tools", "output_type")
 
     def __init__(
@@ -49,6 +60,11 @@ class AgentSpanData(SpanData):
 
 
 class FunctionSpanData(SpanData):
+    """
+    Represents a Function Span in the trace.
+    Includes input, output and MCP data (if applicable).
+    """
+
     __slots__ = ("name", "input", "output", "mcp_data")
 
     def __init__(
@@ -78,6 +94,11 @@ class FunctionSpanData(SpanData):
 
 
 class GenerationSpanData(SpanData):
+    """
+    Represents a Generation Span in the trace.
+    Includes input, output, model, model configuration, and usage.
+    """
+
     __slots__ = (
         "input",
         "output",
@@ -116,6 +137,11 @@ class GenerationSpanData(SpanData):
 
 
 class ResponseSpanData(SpanData):
+    """
+    Represents a Response Span in the trace.
+    Includes response and input.
+    """
+
     __slots__ = ("response", "input")
 
     def __init__(
@@ -140,6 +166,11 @@ class ResponseSpanData(SpanData):
 
 
 class HandoffSpanData(SpanData):
+    """
+    Represents a Handoff Span in the trace.
+    Includes source and destination agents.
+    """
+
     __slots__ = ("from_agent", "to_agent")
 
     def __init__(self, from_agent: str | None, to_agent: str | None):
@@ -159,6 +190,11 @@ class HandoffSpanData(SpanData):
 
 
 class CustomSpanData(SpanData):
+    """
+    Represents a Custom Span in the trace.
+    Includes name and data property bag.
+    """
+
     __slots__ = ("name", "data")
 
     def __init__(self, name: str, data: dict[str, Any]):
@@ -178,6 +214,11 @@ class CustomSpanData(SpanData):
 
 
 class GuardrailSpanData(SpanData):
+    """
+    Represents a Guardrail Span in the trace.
+    Includes name and triggered status.
+    """
+
     __slots__ = ("name", "triggered")
 
     def __init__(self, name: str, triggered: bool = False):
@@ -197,6 +238,11 @@ class GuardrailSpanData(SpanData):
 
 
 class TranscriptionSpanData(SpanData):
+    """
+    Represents a Transcription Span in the trace.
+    Includes input, output, model, and model configuration.
+    """
+
     __slots__ = (
         "input",
         "output",
@@ -236,6 +282,11 @@ class TranscriptionSpanData(SpanData):
 
 
 class SpeechSpanData(SpanData):
+    """
+    Represents a Speech Span in the trace.
+    Includes input, output, model, model configuration, and first content timestamp.
+    """
+
     __slots__ = ("input", "output", "model", "model_config", "first_content_at")
 
     def __init__(
@@ -273,6 +324,10 @@ class SpeechSpanData(SpanData):
 
 
 class SpeechGroupSpanData(SpanData):
+    """
+    Represents a Speech Group Span in the trace.
+    """
+
     __slots__ = "input"
 
     def __init__(
@@ -293,6 +348,11 @@ class SpeechGroupSpanData(SpanData):
 
 
 class MCPListToolsSpanData(SpanData):
+    """
+    Represents an MCP List Tools Span in the trace.
+    Includes server and result.
+    """
+
     __slots__ = (
         "server",
         "result",
