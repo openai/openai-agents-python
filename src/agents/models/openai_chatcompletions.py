@@ -211,9 +211,13 @@ class OpenAIChatCompletionsModel(Model):
                     continue
 
                 delta = chunk.choices[0].delta
+                if hasattr(delta, "reasoning_content"):
+                    content = delta.reasoning_content if delta.reasoning_content else delta.content
+                else:
+                    content = delta.content
 
                 # Handle text
-                if delta.content:
+                if content:
                     if not state.text_content_index_and_output:
                         # Initialize a content tracker for streaming text
                         state.text_content_index_and_output = (
@@ -252,13 +256,13 @@ class OpenAIChatCompletionsModel(Model):
                     # Emit the delta for this segment of content
                     yield ResponseTextDeltaEvent(
                         content_index=state.text_content_index_and_output[0],
-                        delta=delta.content,
+                        delta=content,
                         item_id=FAKE_RESPONSES_ID,
                         output_index=0,
                         type="response.output_text.delta",
                     )
                     # Accumulate the text into the response part
-                    state.text_content_index_and_output[1].text += delta.content
+                    state.text_content_index_and_output[1].text += content
 
                 # Handle refusals (model declines to answer)
                 if delta.refusal:
