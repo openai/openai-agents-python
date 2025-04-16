@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 # The handoff input type is the type of data passed when the agent is called via a handoff.
 THandoffInput = TypeVar("THandoffInput", default=Any)
 
-OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Any]
-OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
+OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Awaitable[None] | None]
+OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
