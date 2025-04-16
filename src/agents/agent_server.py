@@ -10,6 +10,14 @@ import httpx
 import json
 import os
 
+# === Routing the other agent.py files
+from agent_onboarding import router as onboarding_router
+from agent_profilebuilder import router as profilebuilder_router
+
+app.include_router(onboarding_router)
+app.include_router(profilebuilder_router)
+
+
 # === Predefined Webhook URLs ===
 STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
 CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
