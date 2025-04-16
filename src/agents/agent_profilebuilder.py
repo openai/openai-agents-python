@@ -34,7 +34,11 @@ Respond in the following format:
   }
 }
 Only respond in this format.
-"""
+""",
+    tools=[{
+    "type": "web_search_preview",
+    "search_context_size": "low"
+    }]
 )
 
 @router.post("/profilebuilder")
