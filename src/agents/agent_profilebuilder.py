@@ -10,7 +10,7 @@ import httpx
 
 router = APIRouter()
 
-# === Predefined Webhook URL ===
+# Predefined webhook URL (set to your Bubble endpoint)
 WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_profilebuilder_return"
 
 # Define the ProfileBuilder agent
@@ -44,11 +44,13 @@ async def build_profile(request: Request):
     user_id = data.get("user_id", "anonymous")
     debug_info = {}
 
+    # Run the ProfileBuilder agent with the given user input
     result = await Runner.run(profile_builder_agent, input=user_input)
 
-    # === Clean output block (remove markdown code block formatting) ===
+    # Clean the output in case it is wrapped in markdown code block formatting
     clean_output = result.final_output.strip()
     if clean_output.startswith("```") and clean_output.endswith("```"):
+        # Remove the first and last lines (the markdown fences)
         clean_output = clean_output.split("\n", 1)[-1].rsplit("\n", 1)[0]
 
     try:
@@ -57,12 +59,8 @@ async def build_profile(request: Request):
         output_details = parsed_output.get("details")
         contains_image = parsed_output.get("contains_image", False)
 
-        if not output_type or not output_details:
-            raise ValueError("Missing required output keys")
-
         profile_summary = output_details.get("profile_summary")
         prompt_snippet = output_details.get("prompt_snippet")
-
     except Exception as e:
         output_type = "raw_text"
         profile_summary = result.final_output
@@ -71,6 +69,7 @@ async def build_profile(request: Request):
         debug_info["validation_error"] = str(e)
         debug_info["raw_output"] = result.final_output
 
+    # Build the profile data that will be sent to Bubble
     profile_data = {
         "user_id": user_id,
         "profile_summary_text": profile_summary,
@@ -81,6 +80,7 @@ async def build_profile(request: Request):
     if debug_info:
         profile_data["debug_info"] = debug_info
 
+    # Post the profile data to your predefined Bubble webhook
     async with httpx.AsyncClient() as client:
         try:
             await client.post(WEBHOOK_URL, json=profile_data)
