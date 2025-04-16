@@ -133,6 +133,7 @@ AGENT_MAP = {
 async def run_agent(request: Request):
     data = await request.json()
     user_input = data.get("input", "")
+    input_details = data.get("input_details", {})
     user_id = data.get("user_id", "anonymous")
     task_id = data.get("task_id")
     linked_profile_strategy = data.get("linked_profile_strategy")
@@ -142,6 +143,16 @@ async def run_agent(request: Request):
 
     if image_url:
         user_input += f"\nHere is the image to consider: {image_url}"
+
+    # Step 0.5: Flatten input_details into input prompt (if not empty)
+    if input_details:
+        detail_strings = []
+        for key, value in input_details.items():
+            if value and value.lower() != "null":
+                detail_strings.append(f"{key}: {value}")
+        if detail_strings:
+            user_input += "\n\nAdditional details:\n" + "\n".join(detail_strings)
+    
 
     # Step 1: If no agent_type, use Manager Agent to decide
     if not agent_type:
