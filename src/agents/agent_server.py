@@ -10,21 +10,10 @@ import httpx
 import json
 import os
 
-# === instantiate FastAPI, then include routers for other agent.py files ===
-app = FastAPI()
-from .agent_onboarding import router as onboarding_router
-from .agent_profilebuilder import router as profilebuilder_router
-
-app.include_router(onboarding_router)
-app.include_router(profilebuilder_router)
-
-
-# === Predefined Webhook URLs ===
-STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
-CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
-
+# === Instantiate FastAPI once ===
 app = FastAPI()
 
+# === Add middleware to the app ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,6 +21,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# === Include routers from other agent files ===
+from .agent_onboarding import router as onboarding_router
+from .agent_profilebuilder import router as profilebuilder_router
+
+app.include_router(onboarding_router)
+app.include_router(profilebuilder_router)
+
+# === Predefined Webhook URLs ===
+STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
+CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
 
 # === Define Agents ===
 manager_agent = Agent(
