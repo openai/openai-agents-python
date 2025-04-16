@@ -53,7 +53,7 @@ Respond in structured JSON like:
 }
 Only return JSON in this format.
 """,
-tools=[]
+    tools=[]
 )
 
 content_agent = Agent(
@@ -119,7 +119,7 @@ Respond in this structured format:
   }
 }
 """,
-  tools=[]
+    tools=[]
 )
 
 AGENT_MAP = {
@@ -144,7 +144,6 @@ async def run_agent(request: Request):
     if image_url:
         user_input += f"\nHere is the image to consider: {image_url}"
 
-    # Step 0.5: Flatten input_details into input prompt (if not empty)
     if input_details:
         detail_strings = []
         for key, value in input_details.items():
@@ -152,9 +151,7 @@ async def run_agent(request: Request):
                 detail_strings.append(f"{key}: {value}")
         if detail_strings:
             user_input += "\n\nAdditional details:\n" + "\n".join(detail_strings)
-    
 
-    # Step 1: If no agent_type, use Manager Agent to decide
     if not agent_type:
         manager_result = await Runner.run(manager_agent, input=user_input)
         try:
@@ -171,7 +168,6 @@ async def run_agent(request: Request):
     if not agent:
         return {"error": f"Unknown agent type: {agent_type}"}
 
-    # Step 2: Run the selected agent
     result = await Runner.run(agent, input=user_input)
     if hasattr(result, "requires_user_input"):
         return {
@@ -179,8 +175,13 @@ async def run_agent(request: Request):
             "message": result.requires_user_input,
         }
 
+    # === Clean Output Block ===
+    clean_output = result.final_output.strip()
+    if clean_output.startswith("```") and clean_output.endswith("```"):
+        clean_output = clean_output.split("\n", 1)[-1].rsplit("\n", 1)[0]
+
     try:
-        parsed_output = json.loads(result.final_output)
+        parsed_output = json.loads(clean_output)
         output_type = parsed_output.get("output_type")
         output_details = parsed_output.get("details")
         contains_image = parsed_output.get("contains_image", False)
@@ -195,7 +196,6 @@ async def run_agent(request: Request):
         debug_info["validation_error"] = str(e)
         debug_info["raw_output"] = result.final_output
 
-    # Step 3: Format AgentSession
     session = {
         "task_id": task_id,
         "agent_type": agent_type,
@@ -212,7 +212,6 @@ async def run_agent(request: Request):
     if debug_info:
         session["debug_info"] = debug_info
 
-    # Step 4: Post to correct webhook
     async with httpx.AsyncClient() as client:
         try:
             if parsed_output:
