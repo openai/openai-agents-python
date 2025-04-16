@@ -10,6 +10,9 @@ import httpx
 
 router = APIRouter()
 
+# === Predefined Webhook URLs ===
+WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_profilebuilder_return"
+
 # Define the ProfileBuilder agent
 profile_builder_agent = Agent(
     name="ProfileBuilderAgent",
@@ -82,8 +85,8 @@ async def build_profile(request: Request):
     if webhook_url:
         async with httpx.AsyncClient() as client:
             try:
-                await client.post(webhook_url, json=profile_data)
+                await client.post(WEBHOOK_URL, json=session)
             except Exception as e:
-                profile_data["webhook_error"] = str(e)
+                session["webhook_error"] = str(e)
 
     return profile_data
