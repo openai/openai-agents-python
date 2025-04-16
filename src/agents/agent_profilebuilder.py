@@ -4,7 +4,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import APIRouter, Request
 from agents import Agent, Runner
-from agents.tool import Tool  # Updated: import the Tool class
 from datetime import datetime
 import json
 import httpx
@@ -14,8 +13,9 @@ router = APIRouter()
 # Predefined webhook URL (set to your Bubble endpoint)
 WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_profilebuilder_return"
 
-# Define the ProfileBuilder agent with web search capability,
-# now using a Tool instance with the expected attributes.
+# Define the ProfileBuilder agent with web search capability.
+# Instead of instantiating a Tool (which is defined as a Union), we pass a dictionary 
+# with the required keys as per the OpenAI tools-web-search documentation.
 profile_builder_agent = Agent(
     name="ProfileBuilderAgent",
     instructions="""
@@ -38,7 +38,8 @@ Respond in the following format:
 }
 Only reply in this format.
 """,
-    tools=[Tool(name="web_search_preview", search_context_size="low")]
+    # Use a dict for the tool configuration.
+    tools=[{"type": "web_search_preview", "search_context_size": "low"}]
 )
 
 @router.post("/profilebuilder")
