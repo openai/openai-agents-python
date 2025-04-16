@@ -134,6 +134,7 @@ async def run_agent(request: Request):
     data = await request.json()
     user_input = data.get("input", "")
     user_id = data.get("user_id", "anonymous")
+    task_id = data.get("task_id")
     linked_profile_strategy = data.get("linked_profile_strategy")
     agent_type = data.get("agent_type")  # Optional shortcut
     image_url = data.get("image_url")
@@ -185,6 +186,7 @@ async def run_agent(request: Request):
 
     # Step 3: Format AgentSession
     session = {
+        "task_id": task_id,
         "agent_type": agent_type,
         "user_id": user_id,
         "input_details": data.get("input_details", {}),
@@ -209,6 +211,7 @@ async def run_agent(request: Request):
                     "user_id": user_id,
                     "message": result.final_output,
                     "agent_type": agent_type,
+                    "task_id": task_id
                 })
         except Exception as e:
             session["webhook_error"] = str(e)
