@@ -11,8 +11,8 @@ import json
 import os
 
 # === Routing the other agent.py files
-from agent_onboarding import router as onboarding_router
-from agent_profilebuilder import router as profilebuilder_router
+from .agent_onboarding import router as onboarding_router
+from .agent_profilebuilder import router as profilebuilder_router
 
 app.include_router(onboarding_router)
 app.include_router(profilebuilder_router)
