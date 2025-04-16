@@ -10,7 +10,8 @@ import httpx
 import json
 import os
 
-# === Routing the other agent.py files
+# === instantiate FastAPI, then include routers for other agent.py files ===
+app = FastAPI()
 from .agent_onboarding import router as onboarding_router
 from .agent_profilebuilder import router as profilebuilder_router
 
