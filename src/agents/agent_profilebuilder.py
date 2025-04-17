@@ -4,85 +4,93 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import APIRouter, Request
 from agents import Agent, Runner
-from agents.tool import WebSearchTool  # Import the concrete WebSearchTool class
+from agents.tool import WebSearchTool
 from datetime import datetime
 import json
 import httpx
 
 router = APIRouter()
 
-# Predefined webhook URL (set to your Bubble endpoint)
+# Predefined Bubble webhook URL
 WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_profilebuilder_return"
 
-# Define the ProfileBuilder agent with web search capability.
-# We instantiate WebSearchTool directly; note that WebSearchTool accepts an optional 'user_location'
-# and a 'search_context_size'. Here we set search_context_size to "low".
+# ProfileBuilder agent skeleton; tools will be set per-request for dynamic locale/fallback
 profile_builder_agent = Agent(
     name="ProfileBuilderAgent",
     instructions="""
 You are a profile builder assistant with web search capability.
-Based on the input text and any optionally linked external information, perform a web search for publicly available details about the influencer using the provided web search tool. Use any relevant data you find to enrich the influencer's profile.
-Then, construct a structured influencer profile that includes a concise profile summary and a prompt snippet with key characteristics.
 
-Respond in the following format:
+You will receive a set of key-value inputs (e.g., profile_uuid, handle URL, etc.).
+Your job:
+1. Use the provided fields (including fallback follower count if given).
+2. If a locale is provided, use it to tailor the web search tool's user_location.
+3. Perform web searches and reasoning to determine follower_count, posting_style, industry, engagement_rate, and any notable public context.
+4. Summarize this into JSON as follows:
 {
   "output_type": "structured_profile",
   "contains_image": false,
   "details": {
-    "profile_summary": "A concise summary of the influencer that includes details from web search if applicable.",
-    "prompt_snippet": {
-      "tone": "The influencer's style (e.g., playful, professional, authentic)",
-      "goal": "Key content goals (e.g., brand storytelling, engagement)",
-      "platform": "Primary platform (e.g., Instagram)"
-    }
+    "profile_uuid": "...",
+    "summary": "Concise profile summary...",
+    "prompt_snippet": { "tone": "...", "goal": "...", "platform": "..." },
+    "follower_count": 12345,
+    "posting_style": "...",
+    "industry": "...",
+    "engagement_rate": "...",
+    "additional_context": "..."
   }
 }
-Only reply in this format.
+Only return JSON with exactly these fields—no markdown or commentary.
 """,
-    tools=[WebSearchTool(search_context_size="low")]
+    tools=[]
 )
 
 @router.post("/profilebuilder")
 async def build_profile(request: Request):
     data = await request.json()
-    user_input = data.get("input", "")
-    user_id = data.get("user_id", "anonymous")
-    debug_info = {}
+    # Extract core identifiers and optional fallbacks
+    profile_uuid = data.pop("profile_uuid", None)
+    provided_fc = data.pop("provided_follower_count", None)
+    locale_text = data.pop("locale", None)
 
-    # Run the ProfileBuilder agent with the given user input.
-    result = await Runner.run(profile_builder_agent, input=user_input)
+    # Build tool list dynamically based on locale
+    user_loc = {"type": "approximate", "region": locale_text} if locale_text else None
+    tools = [WebSearchTool(user_location=user_loc, search_context_size="low")]
+    profile_builder_agent.tools = tools
 
-    # Clean the output in case it is wrapped in markdown code block formatting.
-    clean_output = result.final_output.strip()
-    if clean_output.startswith("```") and clean_output.endswith("```"):
-        clean_output = clean_output.split("\n", 1)[-1].rsplit("\n", 1)[0]
+    # Flatten remaining inputs into prompt lines
+    prompt_lines = []
+    for key, val in data.items():
+        if val not in (None, "", "null"):
+            prompt_lines.append(f"{key}: {val}")
+    if provided_fc is not None:
+        prompt_lines.append(f"Provided follower count: {provided_fc}")
 
+    # Construct the agent prompt
+    agent_input = f"Profile UUID: {profile_uuid}\n" + "\n".join(prompt_lines)
+
+    # Invoke the agent
+    result = await Runner.run(profile_builder_agent, input=agent_input)
+
+    # Clean markdown fences
+    output = result.final_output.strip()
+    if output.startswith("```") and output.endswith("```"):
+        output = output.split("\n", 1)[-1].rsplit("\n", 1)[0]
+
+    # Parse agent JSON response
     try:
-        parsed_output = json.loads(clean_output)
-        output_type = parsed_output.get("output_type")
-        output_details = parsed_output.get("details")
-        contains_image = parsed_output.get("contains_image", False)
+        parsed = json.loads(output)
+        details = parsed.get("details", {})
+    except Exception:
+        details = {}
 
-        profile_summary = output_details.get("profile_summary")
-        prompt_snippet = output_details.get("prompt_snippet")
-    except Exception as e:
-        output_type = "raw_text"
-        profile_summary = result.final_output
-        prompt_snippet = {}
-        contains_image = False
-        debug_info["validation_error"] = str(e)
-        debug_info["raw_output"] = result.final_output
+    # Build profile_data payload dynamically
+    profile_data = {"profile_uuid": profile_uuid}
+    for k, v in details.items():
+        profile_data[k] = v
+    profile_data["created_at"] = datetime.utcnow().isoformat()
 
-    profile_data = {
-        "user_id": user_id,
-        "profile_summary_text": profile_summary,
-        "profile_prompt_snippet": prompt_snippet,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-
-    if debug_info:
-        profile_data["debug_info"] = debug_info
-
+    # Post to Bubble webhook
     async with httpx.AsyncClient() as client:
         try:
             await client.post(WEBHOOK_URL, json=profile_data)
