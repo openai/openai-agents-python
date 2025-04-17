@@ -7,7 +7,18 @@ from concurrent.futures import ThreadPoolExecutor
 # logging.basicConfig(level=logging.INFO)
 # logging.getLogger("openai").setLevel(logging.DEBUG)
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o3")
+
+ENABLE_CODE_SNIPPET_EXCLUSION = True
+# gpt-4.5 needed this for better quality
+ENABLE_SMALL_CHUNK_TRANSLATION = False
+
+SEARCH_EXCLUSION = """---
+search:
+  exclude: true
+---
+"""
+
 
 # Define the source and target directories
 source_dir = "docs"
@@ -25,6 +36,7 @@ do_not_translate = [
     "Agents SDK",
     "Hello World",
     "Model context protocol",
+    "MCP",
     "structured outputs",
     "Chain-of-Thought",
     "Chat Completions",
@@ -109,6 +121,8 @@ You must return **only** the translated markdown. Do not include any commentary,
 - Keep the tone **natural** and concise.
 - Do not omit any content. If a segment should stay in English, copy it verbatim.
 - Do not change the markdown data structure, including the indentations.
+- Section titles starting with # or ## must be a noun form rather than a sentence.
+- Section titles must be translated except for the Do-Not-Translate list.
 - Keep all placeholders such as `CODE_BLOCK_*` and `CODE_LINE_PREFIX` unchanged.
 - Convert asset paths: `./assets/…` → `../assets/…`.  
   *Example:* `![img](./assets/pic.png)` → `![img](../assets/pic.png)`
@@ -178,10 +192,15 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     code_blocks: list[str] = []
     code_block_chunks: list[str] = []
     for line in lines:
-        if len(current_chunk) >= 120 and not in_code_block and line.startswith("#"):
+        if (
+            ENABLE_SMALL_CHUNK_TRANSLATION is True
+            and len(current_chunk) >= 120  # required for gpt-4.5
+            and not in_code_block
+            and line.startswith("#")
+        ):
             chunks.append("\n".join(current_chunk))
             current_chunk = []
-        if line.strip().startswith("```"):
+        if ENABLE_CODE_SNIPPET_EXCLUSION is True and line.strip().startswith("```"):
             code_block_chunks.append(line)
             if in_code_block is True:
                 code_blocks.append("\n".join(code_block_chunks))
@@ -220,6 +239,8 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     for idx, code_block in enumerate(code_blocks):
         translated_text = translated_text.replace(f"CODE_BLOCK_{idx:02}", code_block)
 
+    # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
+    translated_text = SEARCH_EXCLUSION + translated_text
     # Save the combined translated content
     with open(target_path, "w", encoding="utf-8") as f:
         f.write(translated_text)

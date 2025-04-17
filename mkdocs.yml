@@ -146,7 +146,9 @@ plugins:
                 - context.md
                 - guardrails.md
                 - multi_agent.md
-                - models.md
+                - モデル:
+                    - models/index.md
+                    - models/litellm.md
                 - config.md
                 - visualization.md
                 - 音声エージェント:

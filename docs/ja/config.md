@@ -1,8 +1,12 @@
+---
+search:
+  exclude: true
+---
 # SDK の設定
 
 ## API キーとクライアント
 
-デフォルトでは、SDK はインポート時に LLM リクエストやトレーシングのために `OPENAI_API_KEY` 環境変数を探します。アプリの起動前にこの環境変数を設定できない場合は、[set_default_openai_key()][agents.set_default_openai_key] 関数を使ってキーを設定できます。
+デフォルトでは、 SDK はインポートされた時点で LLM リクエストとトレーシングに使用する `OPENAI_API_KEY` 環境変数を探します。アプリ起動前にこの環境変数を設定できない場合は、 [set_default_openai_key()][agents.set_default_openai_key] 関数を利用してキーを設定できます。
 
 ```python
 from agents import set_default_openai_key
@@ -10,7 +14,7 @@ from agents import set_default_openai_key
 set_default_openai_key("sk-...")
 ```
 
-また、使用する OpenAI クライアントを設定することも可能です。デフォルトでは、SDK は環境変数または上記で設定したデフォルトキーを使って `AsyncOpenAI` インスタンスを作成します。これを変更したい場合は、[set_default_openai_client()][agents.set_default_openai_client] 関数を利用してください。
+また、使用する OpenAI クライアントを構成することも可能です。デフォルトでは、 SDK は環境変数または上記で設定したデフォルトキーを用いて `AsyncOpenAI` インスタンスを作成します。これを変更するには、 [set_default_openai_client()][agents.set_default_openai_client] 関数を使用します。
 
 ```python
 from openai import AsyncOpenAI
@@ -20,7 +24,7 @@ custom_client = AsyncOpenAI(base_url="...", api_key="...")
 set_default_openai_client(custom_client)
 ```
 
-さらに、使用する OpenAI API をカスタマイズすることもできます。デフォルトでは OpenAI Responses API を使用していますが、[set_default_openai_api()][agents.set_default_openai_api] 関数を使って Chat Completions API を利用するように上書きできます。
+さらに、使用する OpenAI API をカスタマイズすることもできます。既定では OpenAI Responses API を利用します。これを Chat Completions API に変更するには、 [set_default_openai_api()][agents.set_default_openai_api] 関数を使用してください。
 
 ```python
 from agents import set_default_openai_api
@@ -30,7 +34,7 @@ set_default_openai_api("chat_completions")
 
 ## トレーシング
 
-トレーシングはデフォルトで有効になっています。デフォルトでは、上記のセクションで説明した OpenAI API キー（環境変数または設定したデフォルトキー）を使用します。トレーシング専用の API キーを設定したい場合は、[`set_tracing_export_api_key`][agents.set_tracing_export_api_key] 関数を利用してください。
+トレーシングはデフォルトで有効になっています。前述の OpenAI API キー（環境変数または設定したデフォルトキー）が自動的に使用されます。トレーシングで使用する API キーを個別に設定したい場合は、 [`set_tracing_export_api_key`][agents.set_tracing_export_api_key] 関数を利用してください。
 
 ```python
 from agents import set_tracing_export_api_key
@@ -38,7 +42,7 @@ from agents import set_tracing_export_api_key
 set_tracing_export_api_key("sk-...")
 ```
 
-また、[`set_tracing_disabled()`][agents.set_tracing_disabled] 関数を使ってトレーシングを完全に無効化することもできます。
+トレーシングを完全に無効化するには、 [`set_tracing_disabled()`][agents.set_tracing_disabled] 関数を呼び出します。
 
 ```python
 from agents import set_tracing_disabled
@@ -48,9 +52,9 @@ set_tracing_disabled(True)
 
 ## デバッグログ
 
-SDK には、ハンドラーが設定されていない 2 つの Python ロガーがあります。デフォルトでは、警告やエラーは `stdout` に送信されますが、それ以外のログは抑制されます。
+ SDK にはハンドラーが設定されていない Python ロガーが 2 つあります。デフォルトでは、警告とエラーは `stdout` に出力されますが、それ以外のログは抑制されます。
 
-詳細なログ出力を有効にするには、[`enable_verbose_stdout_logging()`][agents.enable_verbose_stdout_logging] 関数を使用してください。
+詳細なログを有効にするには、 [`enable_verbose_stdout_logging()`][agents.enable_verbose_stdout_logging] 関数を使用します。
 
 ```python
 from agents import enable_verbose_stdout_logging
@@ -58,7 +62,7 @@ from agents import enable_verbose_stdout_logging
 enable_verbose_stdout_logging()
 ```
 
-また、ハンドラーやフィルター、フォーマッターなどを追加してログをカスタマイズすることも可能です。詳細は [Python ロギングガイド](https://docs.python.org/3/howto/logging.html) をご覧ください。
+必要に応じて、ハンドラー、フィルター、フォーマッターなどを追加してログをカスタマイズすることも可能です。詳しくは [Python ロギングガイド](https://docs.python.org/3/howto/logging.html) を参照してください。
 
 ```python
 import logging
@@ -77,17 +81,17 @@ logger.setLevel(logging.WARNING)
 logger.addHandler(logging.StreamHandler())
 ```
 
-### ログ内の機微なデータ
+### ログに含まれる機微情報
 
-一部のログには機微なデータ（たとえば ユーザー データ）が含まれる場合があります。これらのデータのログ出力を無効にしたい場合は、以下の環境変数を設定してください。
+特定のログには機微情報（たとえば ユーザー データ）が含まれる場合があります。この情報が記録されるのを防ぎたい場合は、次の環境変数を設定してください。
 
-LLM の入力および出力のログ出力を無効にするには:
+LLM の入力および出力のログを無効にする:
 
 ```bash
 export OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1
 ```
 
-ツールの入力および出力のログ出力を無効にするには:
+ツールの入力および出力のログを無効にする:
 
 ```bash
 export OPENAI_AGENTS_DONT_LOG_TOOL_DATA=1
