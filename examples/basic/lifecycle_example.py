@@ -4,8 +4,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agents import Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
-
+from agents import (
+    Agent,
+    RunContextWrapper,
+    RunHooks,
+    Runner,
+    Tool,
+    Usage,
+    function_tool,
+    ToolCallItem
+)
 
 class ExampleHooks(RunHooks):
     def __init__(self):
@@ -20,13 +28,21 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} started. Usage: {self._usage_to_str(context.usage)}"
         )
 
-    async def on_agent_end(self, context: RunContextWrapper, agent: Agent, output: Any) -> None:
+    async def on_agent_end(
+        self, context: RunContextWrapper, agent: Agent, output: Any
+    ) -> None:
         self.event_counter += 1
         print(
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
-    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+    async def on_tool_start(
+        self,
+        context: RunContextWrapper,
+        agent: Agent,
+        tool: Tool,
+        tool_call: ToolCallItem,
+    ) -> None:
         self.event_counter += 1
         print(
             f"### {self.event_counter}: Tool {tool.name} started. Usage: {self._usage_to_str(context.usage)}"

@@ -9,6 +9,7 @@ from typing_extensions import TypedDict
 
 from agents import Agent, RunContextWrapper, RunHooks, Runner, TContext, Tool
 
+from src.agents.items import ToolCallItem
 from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
@@ -52,6 +53,7 @@ class RunHooksForTests(RunHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
+        tool_call: ToolCallItem,
     ) -> None:
         self.events["on_tool_start"] += 1
 
