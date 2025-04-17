@@ -186,7 +186,12 @@ class RunResultStreaming(RunResultBase):
             self._event_queue.task_done()
 
         if self._trace:
-            self._trace.finish(reset_current=True)
+            try:
+                self._trace.finish(reset_current=True)
+            except ValueError:
+                logger.warning("ContextVar reset failed — switching to reset_current=False")
+                self._trace.finish(reset_current=False)
+
 
         self._cleanup_tasks()
 
