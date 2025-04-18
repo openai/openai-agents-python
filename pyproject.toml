@@ -61,6 +61,7 @@ dev = [
     "graphviz",
     "mkdocs-static-i18n>=1.3.0",
     "eval-type-backport>=0.2.2",
+    "fastapi >= 0.110.0, <1",
 ]
 
 [tool.uv.workspace]

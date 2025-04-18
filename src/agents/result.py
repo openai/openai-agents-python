@@ -185,9 +185,6 @@ class RunResultStreaming(RunResultBase):
             yield item
             self._event_queue.task_done()
 
-        if self._trace:
-            self._trace.finish(reset_current=True)
-
         self._cleanup_tasks()
 
         if self._stored_exception:

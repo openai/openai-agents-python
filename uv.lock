@@ -484,6 +484,20 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.115.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/55/ae499352d82338331ca1e28c7f4a63bfd09479b16395dce38cf50a39e2c2/fastapi-0.115.12.tar.gz", hash = "sha256:1e2c2a2646905f9e83d32f04a3f86aff4a286669c6c950ca95b5fd68c2602681", size = 295236 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/50/b3/b51f09c2ba432a576fe63758bddc81f78f0c6309d9e5c10d194313bf021e/fastapi-0.115.12-py3-none-any.whl", hash = "sha256:e94613d6c05e27be7ffebdd6ea5f388112e5e430c8f7d6494a9d1d88d43e814d", size = 95164 },
+]
+
+[[package]]
 name = "filelock"
 version = "3.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1496,6 +1510,7 @@ voice = [
 dev = [
     { name = "coverage" },
     { name = "eval-type-backport" },
+    { name = "fastapi" },
     { name = "graphviz" },
     { name = "inline-snapshot" },
     { name = "mkdocs" },
@@ -1536,6 +1551,7 @@ provides-extras = ["voice", "viz", "litellm"]
 dev = [
     { name = "coverage", specifier = ">=7.6.12" },
     { name = "eval-type-backport", specifier = ">=0.2.2" },
+    { name = "fastapi", specifier = ">=0.110.0,<1" },
     { name = "graphviz" },
     { name = "inline-snapshot", specifier = ">=0.20.7" },
     { name = "mkdocs", specifier = ">=1.6.0" },
@@ -2474,7 +2490,8 @@ name = "starlette"
 version = "0.46.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "python_full_version >= '3.10'" },
+    { name = "anyio" },
+    { name = "typing-extensions", marker = "python_full_version < '3.10'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ce/20/08dfcd9c983f6a6f4a1000d934b9e6d626cff8d2eeb77a89a68eef20a2b7/starlette-0.46.2.tar.gz", hash = "sha256:7f7361f34eed179294600af672f565727419830b54b7b084efe44bb82d2fccd5", size = 2580846 }
 wheels = [

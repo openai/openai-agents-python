@@ -404,10 +404,6 @@ class Runner:
                 disabled=run_config.tracing_disabled,
             )
         )
-        # Need to start the trace here, because the current trace contextvar is captured at
-        # asyncio.create_task time
-        if new_trace:
-            new_trace.start(mark_as_current=True)
 
         output_schema = cls._get_output_schema(starting_agent)
         context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
@@ -499,6 +495,9 @@ class Runner:
         run_config: RunConfig,
         previous_response_id: str | None,
     ):
+        if streamed_result._trace:
+            streamed_result._trace.start(mark_as_current=True)
+
         current_span: Span[AgentSpanData] | None = None
         current_agent = starting_agent
         current_turn = 0
@@ -625,6 +624,8 @@ class Runner:
         finally:
             if current_span:
                 current_span.finish(reset_current=True)
+            if streamed_result._trace:
+                streamed_result._trace.finish(reset_current=True)
 
     @classmethod
     async def _run_single_turn_streamed(
