@@ -6,7 +6,6 @@ from agents import Agent
 from agents.handoffs import Handoff
 from agents.tool import Tool
 
-
 def get_main_graph(agent: Agent) -> str:
     """
     Generates the main graph structure in DOT format for the given agent.
@@ -31,7 +30,7 @@ def get_main_graph(agent: Agent) -> str:
     return "".join(parts)
 
 
-def get_all_nodes(agent: Agent, parent: Optional[Agent] = None) -> str:
+def get_all_nodes(agent: Agent, parent: Optional[Agent] = None, visited=None) -> str:
     """
     Recursively generates the nodes for the given agent and its handoffs in DOT format.
 
@@ -41,47 +40,46 @@ def get_all_nodes(agent: Agent, parent: Optional[Agent] = None) -> str:
     Returns:
         str: The DOT format string representing the nodes.
     """
+    if visited is None:
+        visited = set()
+    
+    if agent.name in visited:
+        return ""  # Avoid infinite recursion
+
+    visited.add(agent.name)
     parts = []
 
-    # Start and end the graph
-    parts.append(
-        '"__start__" [label="__start__", shape=ellipse, style=filled, '
-        "fillcolor=lightblue, width=0.5, height=0.3];"
-        '"__end__" [label="__end__", shape=ellipse, style=filled, '
-        "fillcolor=lightblue, width=0.5, height=0.3];"
-    )
-    # Ensure parent agent node is colored
+    # Start and end nodes
     if not parent:
         parts.append(
-            f'"{agent.name}" [label="{agent.name}", shape=box, style=filled, '
-            "fillcolor=lightyellow, width=1.5, height=0.8];"
+            '"__start__" [label="__start__", shape=ellipse, style=filled, '
+            "fillcolor=lightblue, width=0.5, height=0.3];"
+            '"__end__" [label="__end__", shape=ellipse, style=filled, '
+            "fillcolor=lightblue, width=0.5, height=0.3];"
         )
 
+    # Agent node
+    parts.append(
+        f'"{agent.name}" [label="{agent.name}", shape=box, style=filled, '
+        "fillcolor=lightyellow, width=1.5, height=0.8];"
+    )
+
+    # Tools
     for tool in agent.tools:
         parts.append(
             f'"{tool.name}" [label="{tool.name}", shape=ellipse, style=filled, '
             f"fillcolor=lightgreen, width=0.5, height=0.3];"
         )
 
+    # Handoff agents
     for handoff in agent.handoffs:
-        if isinstance(handoff, Handoff):
-            parts.append(
-                f'"{handoff.agent_name}" [label="{handoff.agent_name}", '
-                f"shape=box, style=filled, style=rounded, "
-                f"fillcolor=lightyellow, width=1.5, height=0.8];"
-            )
         if isinstance(handoff, Agent):
-            parts.append(
-                f'"{handoff.name}" [label="{handoff.name}", '
-                f"shape=box, style=filled, style=rounded, "
-                f"fillcolor=lightyellow, width=1.5, height=0.8];"
-            )
-            parts.append(get_all_nodes(handoff))
+            parts.append(get_all_nodes(handoff, agent, visited))
 
     return "".join(parts)
 
 
-def get_all_edges(agent: Agent, parent: Optional[Agent] = None) -> str:
+def get_all_edges(agent: Agent, parent: Optional[Agent] = None, visited=None) -> str:
     """
     Recursively generates the edges for the given agent and its handoffs in DOT format.
 
@@ -92,6 +90,13 @@ def get_all_edges(agent: Agent, parent: Optional[Agent] = None) -> str:
     Returns:
         str: The DOT format string representing the edges.
     """
+    if visited is None:
+        visited = set()
+
+    if agent.name in visited:
+        return ""  # Avoid infinite recursion
+
+    visited.add(agent.name)
     parts = []
 
     if not parent:
@@ -103,13 +108,10 @@ def get_all_edges(agent: Agent, parent: Optional[Agent] = None) -> str:
         "{tool.name}" -> "{agent.name}" [style=dotted, penwidth=1.5];""")
 
     for handoff in agent.handoffs:
-        if isinstance(handoff, Handoff):
-            parts.append(f"""
-            "{agent.name}" -> "{handoff.agent_name}";""")
         if isinstance(handoff, Agent):
             parts.append(f"""
             "{agent.name}" -> "{handoff.name}";""")
-            parts.append(get_all_edges(handoff, agent))
+            parts.append(get_all_edges(handoff, agent, visited))
 
     if not agent.handoffs and not isinstance(agent, Tool):  # type: ignore
         parts.append(f'"{agent.name}" -> "__end__";')
