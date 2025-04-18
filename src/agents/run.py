@@ -934,7 +934,7 @@ class Runner:
         if agent.output_type is None or agent.output_type is str:
             return None
 
-        return AgentOutputSchema(agent.output_type)
+        return AgentOutputSchema(agent.output_type, strict_json_schema=agent.output_schema_strict)
 
     @classmethod
     def _get_handoffs(cls, agent: Agent[Any]) -> list[Handoff]:

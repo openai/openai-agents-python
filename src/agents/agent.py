@@ -144,6 +144,14 @@ class Agent(Generic[TContext]):
     output_type: type[Any] | None = None
     """The type of the output object. If not provided, the output will be `str`."""
 
+    output_schema_strict: bool = True
+    """Whether the output JSON schema passed to the LLM should be strict.
+
+    We **strongly** recommend setting this to True, as it increases the likelihood of correct JSON
+    being produced. However, for output types that cannot be converted to strict JSON, you can
+    set this to False.
+    """
+
     hooks: AgentHooks[TContext] | None = None
     """A class that receives callbacks on various lifecycle events for this agent.
     """
