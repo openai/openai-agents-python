@@ -15,6 +15,7 @@ from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
 from .models.interface import Model
+from .run import DEFAULT_MAX_TURNS
 from .run_context import RunContextWrapper, TContext
 from .tool import FunctionToolResult, Tool, function_tool
 from .util import _transforms
@@ -184,6 +185,7 @@ class Agent(Generic[TContext]):
         tool_name: str | None,
         tool_description: str | None,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -199,6 +201,8 @@ class Agent(Generic[TContext]):
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
                 provided, the last message from the agent will be used.
+            max_turns: The maximum number of turns to run the agent for. A turn is defined as one
+                AI invocation (including any tool calls that might occur).
         """
 
         @function_tool(
@@ -212,6 +216,7 @@ class Agent(Generic[TContext]):
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                max_turns=max_turns,
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
