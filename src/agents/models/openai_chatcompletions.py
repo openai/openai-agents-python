@@ -258,6 +258,7 @@ class OpenAIChatCompletionsModel(Model):
             extra_headers=HEADERS,
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
+            extra_headers=model_settings.extra_headers,
             metadata=self._non_null_or_not_given(model_settings.metadata),
         )
 
