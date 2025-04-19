@@ -255,7 +255,7 @@ class OpenAIChatCompletionsModel(Model):
             stream_options=self._non_null_or_not_given(stream_options),
             store=self._non_null_or_not_given(store),
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
-            extra_headers=HEADERS,
+            extra_headers={ **HEADERS, **(model_settings.extra_headers or {}) },
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),

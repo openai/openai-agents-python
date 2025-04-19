@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from typing import Literal
 
-from openai._types import Body, Query
+from openai._types import Body, Headers, Query
 from openai.types.shared import Reasoning
 
 
@@ -65,6 +65,10 @@ class ModelSettings:
 
     extra_body: Body | None = None
     """Additional body fields to provide with the request.
+    Defaults to None if not provided."""
+
+    extra_headers: Headers | None = None
+    """Additional headers to provide with the request.
     Defaults to None if not provided."""
 
     def resolve(self, override: ModelSettings | None) -> ModelSettings:

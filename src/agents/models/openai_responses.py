@@ -253,7 +253,7 @@ class OpenAIResponsesModel(Model):
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            extra_headers=_HEADERS,
+            extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             text=response_format,
