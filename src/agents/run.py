@@ -684,6 +684,7 @@ class Runner:
                     Usage(
                         requests=1,
                         input_tokens=event.response.usage.input_tokens,
+                        cached_tokens=event.response.usage.input_tokens_details.cached_tokens,
                         output_tokens=event.response.usage.output_tokens,
                         total_tokens=event.response.usage.total_tokens,
                     )
