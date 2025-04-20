@@ -81,7 +81,7 @@ draw_graph(triage_agent).view()
 デフォルトでは、`draw_graph` はグラフをインラインで表示します。ファイルとして保存するには、ファイル名を指定します:
 
 ```python
-draw_graph(triage_agent, filename="agent_graph.png")
+draw_graph(triage_agent, filename="agent_graph")
 ```
 
 これにより、作業ディレクトリに `agent_graph.png` が生成されます。

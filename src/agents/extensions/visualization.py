@@ -132,6 +132,6 @@ def draw_graph(agent: Agent, filename: Optional[str] = None) -> graphviz.Source:
     graph = graphviz.Source(dot_code)
 
     if filename:
-        graph.render(filename, format="png")
+        graph.render(filename, format="png", cleanup=True)
 
     return graph
