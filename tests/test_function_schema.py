@@ -99,7 +99,7 @@ def varargs_function(x: int, *numbers: float, flag: bool = False, **kwargs: Any)
 def test_varargs_function():
     """Test a function that uses *args and **kwargs."""
 
-    func_schema = function_schema(varargs_function)
+    func_schema = function_schema(varargs_function, strict_json_schema=False)
     # Check JSON schema structure
     assert isinstance(func_schema.params_json_schema, dict)
     assert func_schema.params_json_schema.get("title") == "varargs_function_args"

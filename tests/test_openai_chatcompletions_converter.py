@@ -4,7 +4,7 @@
 # See LICENSE file in the project root for full license information.
 
 """
-Unit tests for the internal `_Converter` class defined in
+Unit tests for the internal `Converter` class defined in
 `agents.models.openai_chatcompletions`. The converter is responsible for
 translating between internal "item" structures (e.g., `ResponseOutputMessage`
 and related types from `openai.types.responses`) and the ChatCompletion message
@@ -12,10 +12,10 @@ structures defined by the OpenAI client library.
 
 These tests exercise both conversion directions:
 
-- `_Converter.message_to_output_items` turns a `ChatCompletionMessage` (as
+- `Converter.message_to_output_items` turns a `ChatCompletionMessage` (as
   returned by the OpenAI API) into a list of `ResponseOutputItem` instances.
 
-- `_Converter.items_to_messages` takes in either a simple string prompt, or a
+- `Converter.items_to_messages` takes in either a simple string prompt, or a
   list of input/output items such as `ResponseOutputMessage` and
   `ResponseFunctionToolCallParam` dicts, and constructs a list of
   `ChatCompletionMessageParam` dicts suitable for sending back to the API.
@@ -41,8 +41,8 @@ from openai.types.responses.response_input_item_param import FunctionCallOutput
 from agents.agent_output import AgentOutputSchema
 from agents.exceptions import UserError
 from agents.items import TResponseInputItem
+from agents.models.chatcmpl_converter import Converter
 from agents.models.fake_id import FAKE_RESPONSES_ID
-from agents.models.openai_chatcompletions import _Converter
 
 
 def test_message_to_output_items_with_text_only():
@@ -51,7 +51,7 @@ def test_message_to_output_items_with_text_only():
     into a single ResponseOutputMessage containing one ResponseOutputText.
     """
     msg = ChatCompletionMessage(role="assistant", content="Hello")
-    items = _Converter.message_to_output_items(msg)
+    items = Converter.message_to_output_items(msg)
     # Expect exactly one output item (the message)
     assert len(items) == 1
     message_item = cast(ResponseOutputMessage, items[0])
@@ -72,7 +72,7 @@ def test_message_to_output_items_with_refusal():
     with a ResponseOutputRefusal content part.
     """
     msg = ChatCompletionMessage(role="assistant", refusal="I'm sorry")
-    items = _Converter.message_to_output_items(msg)
+    items = Converter.message_to_output_items(msg)
     assert len(items) == 1
     message_item = cast(ResponseOutputMessage, items[0])
     assert len(message_item.content) == 1
@@ -93,7 +93,7 @@ def test_message_to_output_items_with_tool_call():
         function=Function(name="myfn", arguments='{"x":1}'),
     )
     msg = ChatCompletionMessage(role="assistant", content="Hi", tool_calls=[tool_call])
-    items = _Converter.message_to_output_items(msg)
+    items = Converter.message_to_output_items(msg)
     # Should produce a message item followed by one function tool call item
     assert len(items) == 2
     message_item = cast(ResponseOutputMessage, items[0])
@@ -111,7 +111,7 @@ def test_items_to_messages_with_string_user_content():
     A simple string as the items argument should be converted into a user
     message param dict with the same content.
     """
-    result = _Converter.items_to_messages("Ask me anything")
+    result = Converter.items_to_messages("Ask me anything")
     assert isinstance(result, list)
     assert len(result) == 1
     msg = result[0]
@@ -130,7 +130,7 @@ def test_items_to_messages_with_easy_input_message():
             "content": "How are you?",
         }
     ]
-    messages = _Converter.items_to_messages(items)
+    messages = Converter.items_to_messages(items)
     assert len(messages) == 1
     out = messages[0]
     assert out["role"] == "user"
@@ -174,7 +174,7 @@ def test_items_to_messages_with_output_message_and_function_call():
         resp_msg.model_dump(),  # type:ignore
         func_item,
     ]
-    messages = _Converter.items_to_messages(items)
+    messages = Converter.items_to_messages(items)
     # Should return a single assistant message
     assert len(messages) == 1
     assistant = messages[0]
@@ -197,16 +197,16 @@ def test_items_to_messages_with_output_message_and_function_call():
 
 def test_convert_tool_choice_handles_standard_and_named_options() -> None:
     """
-    The `_Converter.convert_tool_choice` method should return NOT_GIVEN
+    The `Converter.convert_tool_choice` method should return NOT_GIVEN
     if no choice is provided, pass through values like "auto", "required",
     or "none" unchanged, and translate any other string into a function
     selection dict.
     """
-    assert _Converter.convert_tool_choice(None).__class__.__name__ == "NotGiven"
-    assert _Converter.convert_tool_choice("auto") == "auto"
-    assert _Converter.convert_tool_choice("required") == "required"
-    assert _Converter.convert_tool_choice("none") == "none"
-    tool_choice_dict = _Converter.convert_tool_choice("mytool")
+    assert Converter.convert_tool_choice(None).__class__.__name__ == "NotGiven"
+    assert Converter.convert_tool_choice("auto") == "auto"
+    assert Converter.convert_tool_choice("required") == "required"
+    assert Converter.convert_tool_choice("none") == "none"
+    tool_choice_dict = Converter.convert_tool_choice("mytool")
     assert isinstance(tool_choice_dict, dict)
     assert tool_choice_dict["type"] == "function"
     assert tool_choice_dict["function"]["name"] == "mytool"
@@ -214,20 +214,20 @@ def test_convert_tool_choice_handles_standard_and_named_options() -> None:
 
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:
     """
-    The `_Converter.convert_response_format` method should return NOT_GIVEN
+    The `Converter.convert_response_format` method should return NOT_GIVEN
     when no output schema is provided or if the output schema indicates
     plain text. For structured output schemas, it should return a dict
     with type `json_schema` and include the generated JSON schema and
     strict flag from the provided `AgentOutputSchema`.
     """
     # when output is plain text (schema None or output_type str), do not include response_format
-    assert _Converter.convert_response_format(None).__class__.__name__ == "NotGiven"
+    assert Converter.convert_response_format(None).__class__.__name__ == "NotGiven"
     assert (
-        _Converter.convert_response_format(AgentOutputSchema(str)).__class__.__name__ == "NotGiven"
+        Converter.convert_response_format(AgentOutputSchema(str)).__class__.__name__ == "NotGiven"
     )
     # For e.g. integer output, we expect a response_format dict
     schema = AgentOutputSchema(int)
-    resp_format = _Converter.convert_response_format(schema)
+    resp_format = Converter.convert_response_format(schema)
     assert isinstance(resp_format, dict)
     assert resp_format["type"] == "json_schema"
     assert resp_format["json_schema"]["name"] == "final_output"
@@ -247,7 +247,7 @@ def test_items_to_messages_with_function_output_item():
         "call_id": "somecall",
         "output": '{"foo": "bar"}',
     }
-    messages = _Converter.items_to_messages([func_output_item])
+    messages = Converter.items_to_messages([func_output_item])
     assert len(messages) == 1
     tool_msg = messages[0]
     assert tool_msg["role"] == "tool"
@@ -266,16 +266,16 @@ def test_extract_all_and_text_content_for_strings_and_lists():
     should filter to only the textual parts.
     """
     prompt = "just text"
-    assert _Converter.extract_all_content(prompt) == prompt
-    assert _Converter.extract_text_content(prompt) == prompt
+    assert Converter.extract_all_content(prompt) == prompt
+    assert Converter.extract_text_content(prompt) == prompt
     text1: ResponseInputTextParam = {"type": "input_text", "text": "one"}
     text2: ResponseInputTextParam = {"type": "input_text", "text": "two"}
-    all_parts = _Converter.extract_all_content([text1, text2])
+    all_parts = Converter.extract_all_content([text1, text2])
     assert isinstance(all_parts, list)
     assert len(all_parts) == 2
     assert all_parts[0]["type"] == "text" and all_parts[0]["text"] == "one"
     assert all_parts[1]["type"] == "text" and all_parts[1]["text"] == "two"
-    text_parts = _Converter.extract_text_content([text1, text2])
+    text_parts = Converter.extract_text_content([text1, text2])
     assert isinstance(text_parts, list)
     assert all(p["type"] == "text" for p in text_parts)
     assert [p["text"] for p in text_parts] == ["one", "two"]
@@ -288,12 +288,12 @@ def test_items_to_messages_handles_system_and_developer_roles():
     `message` typed dicts.
     """
     sys_items: list[TResponseInputItem] = [{"role": "system", "content": "setup"}]
-    sys_msgs = _Converter.items_to_messages(sys_items)
+    sys_msgs = Converter.items_to_messages(sys_items)
     assert len(sys_msgs) == 1
     assert sys_msgs[0]["role"] == "system"
     assert sys_msgs[0]["content"] == "setup"
     dev_items: list[TResponseInputItem] = [{"role": "developer", "content": "debug"}]
-    dev_msgs = _Converter.items_to_messages(dev_items)
+    dev_msgs = Converter.items_to_messages(dev_items)
     assert len(dev_msgs) == 1
     assert dev_msgs[0]["role"] == "developer"
     assert dev_msgs[0]["content"] == "debug"
@@ -301,7 +301,7 @@ def test_items_to_messages_handles_system_and_developer_roles():
 
 def test_maybe_input_message_allows_message_typed_dict():
     """
-    The `_Converter.maybe_input_message` should recognize a dict with
+    The `Converter.maybe_input_message` should recognize a dict with
     "type": "message" and a supported role as an input message. Ensure
     that such dicts are passed through by `items_to_messages`.
     """
@@ -311,9 +311,9 @@ def test_maybe_input_message_allows_message_typed_dict():
         "role": "user",
         "content": "hi",
     }
-    assert _Converter.maybe_input_message(message_dict) is not None
+    assert Converter.maybe_input_message(message_dict) is not None
     # items_to_messages should process this correctly
-    msgs = _Converter.items_to_messages([message_dict])
+    msgs = Converter.items_to_messages([message_dict])
     assert len(msgs) == 1
     assert msgs[0]["role"] == "user"
     assert msgs[0]["content"] == "hi"
@@ -331,7 +331,7 @@ def test_tool_call_conversion():
         type="function_call",
     )
 
-    messages = _Converter.items_to_messages([function_call])
+    messages = Converter.items_to_messages([function_call])
     assert len(messages) == 1
     tool_msg = messages[0]
     assert tool_msg["role"] == "assistant"
@@ -348,7 +348,7 @@ def test_tool_call_conversion():
 @pytest.mark.parametrize("role", ["user", "system", "developer"])
 def test_input_message_with_all_roles(role: str):
     """
-    The `_Converter.maybe_input_message` should recognize a dict with
+    The `Converter.maybe_input_message` should recognize a dict with
     "type": "message" and a supported role as an input message. Ensure
     that such dicts are passed through by `items_to_messages`.
     """
@@ -359,9 +359,9 @@ def test_input_message_with_all_roles(role: str):
         "role": casted_role,
         "content": "hi",
     }
-    assert _Converter.maybe_input_message(message_dict) is not None
+    assert Converter.maybe_input_message(message_dict) is not None
     # items_to_messages should process this correctly
-    msgs = _Converter.items_to_messages([message_dict])
+    msgs = Converter.items_to_messages([message_dict])
     assert len(msgs) == 1
     assert msgs[0]["role"] == casted_role
     assert msgs[0]["content"] == "hi"
@@ -372,7 +372,7 @@ def test_item_reference_errors():
     Test that item references are converted correctly.
     """
     with pytest.raises(UserError):
-        _Converter.items_to_messages(
+        Converter.items_to_messages(
             [
                 {
                     "type": "item_reference",
@@ -392,14 +392,14 @@ def test_unknown_object_errors():
     """
     with pytest.raises(UserError, match="Unhandled item type or structure"):
         # Purposely ignore the type error
-        _Converter.items_to_messages([TestObject()])  # type: ignore
+        Converter.items_to_messages([TestObject()])  # type: ignore
 
 
 def test_assistant_messages_in_history():
     """
     Test that assistant messages are added to the history.
     """
-    messages = _Converter.items_to_messages(
+    messages = Converter.items_to_messages(
         [
             {
                 "role": "user",

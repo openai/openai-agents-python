@@ -1,14 +1,12 @@
 import os
 import sys
 
-import pytest
 
-
-def pytest_collection_modifyitems(config, items):
+# Skip voice tests on Python 3.9
+def pytest_ignore_collect(collection_path, config):
     if sys.version_info[:2] == (3, 9):
         this_dir = os.path.dirname(__file__)
-        skip_marker = pytest.mark.skip(reason="Skipped on Python 3.9")
 
-        for item in items:
-            if item.fspath.dirname.startswith(this_dir):
-                item.add_marker(skip_marker)
+        if str(collection_path).startswith(this_dir):
+            return True
+

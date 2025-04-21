@@ -5,8 +5,7 @@ on:
     branches:
       - main
   pull_request:
-    branches:
-      - main
+    # All PRs, including stacked PRs
 
 env:
   UV_FROZEN: "1"

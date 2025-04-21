@@ -30,8 +30,8 @@ from agents import (
     OpenAIProvider,
     generation_span,
 )
+from agents.models.chatcmpl_helpers import ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
-from agents.models.openai_chatcompletions import _Converter
 
 
 @pytest.mark.allow_call_model_methods
@@ -67,6 +67,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
     )
     # Should have produced exactly one output message with one text part
     assert isinstance(resp, ModelResponse)
@@ -80,7 +81,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens == 7
     assert resp.usage.output_tokens == 5
     assert resp.usage.total_tokens == 12
-    assert resp.referenceable_id is None
+    assert resp.response_id is None
 
 
 @pytest.mark.allow_call_model_methods
@@ -115,6 +116,7 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
     )
     assert len(resp.output) == 1
     assert isinstance(resp.output[0], ResponseOutputMessage)
@@ -164,6 +166,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
     )
     # Expect a message item followed by a function tool call item.
     assert len(resp.output) == 2
@@ -298,32 +301,32 @@ def test_store_param():
 
     model_settings = ModelSettings()
     client = AsyncOpenAI()
-    assert _Converter.get_store_param(client, model_settings) is True, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should default to True for OpenAI API calls"
     )
 
     model_settings = ModelSettings(store=False)
-    assert _Converter.get_store_param(client, model_settings) is False, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is False, (
         "Should respect explicitly set store=False"
     )
 
     model_settings = ModelSettings(store=True)
-    assert _Converter.get_store_param(client, model_settings) is True, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
 
     client = AsyncOpenAI(base_url="http://www.notopenai.com")
     model_settings = ModelSettings()
-    assert _Converter.get_store_param(client, model_settings) is None, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is None, (
         "Should default to None for non-OpenAI API calls"
     )
 
     model_settings = ModelSettings(store=False)
-    assert _Converter.get_store_param(client, model_settings) is False, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is False, (
         "Should respect explicitly set store=False"
     )
 
     model_settings = ModelSettings(store=True)
-    assert _Converter.get_store_param(client, model_settings) is True, (
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )

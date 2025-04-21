@@ -168,7 +168,7 @@ class ResponseSpanData(SpanData):
 class HandoffSpanData(SpanData):
     """
     Represents a Handoff Span in the trace.
-    Includes source and desitnation agents.
+    Includes source and destination agents.
     """
 
     __slots__ = ("from_agent", "to_agent")

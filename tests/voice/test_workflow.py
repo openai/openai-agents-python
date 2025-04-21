@@ -51,6 +51,8 @@ class FakeStreamingModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         raise NotImplementedError("Not implemented")
 
@@ -63,6 +65,8 @@ class FakeStreamingModel(Model):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         output = self.get_next_output()
         for item in output:

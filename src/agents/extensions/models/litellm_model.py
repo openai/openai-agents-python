@@ -4,44 +4,63 @@ import dataclasses
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import Any, Literal, cast, overload
 
-from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
-from openai.types import ChatModel
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+import litellm.types
+
+from agents.exceptions import ModelBehaviorError
+
+try:
+    import litellm
+except ImportError as _e:
+    raise ImportError(
+        "`litellm` is required to use the LitellmModel. You can install it via the optional "
+        "dependency group: `pip install 'openai-agents[litellm]'`."
+    ) from _e
+
+from openai import NOT_GIVEN, AsyncStream, NotGiven
+from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageToolCall
+from openai.types.chat.chat_completion_message import (
+    Annotation,
+    AnnotationURLCitation,
+    ChatCompletionMessage,
+)
+from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import Response
 
-from .. import _debug
-from ..agent_output import AgentOutputSchema
-from ..handoffs import Handoff
-from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ..logger import logger
-from ..tool import Tool
-from ..tracing import generation_span
-from ..tracing.span_data import GenerationSpanData
-from ..tracing.spans import Span
-from ..usage import Usage
-from .chatcmpl_converter import Converter
-from .chatcmpl_helpers import HEADERS, ChatCmplHelpers
-from .chatcmpl_stream_handler import ChatCmplStreamHandler
-from .fake_id import FAKE_RESPONSES_ID
-from .interface import Model, ModelTracing
-
-if TYPE_CHECKING:
-    from ..model_settings import ModelSettings
+from ... import _debug
+from ...agent_output import AgentOutputSchema
+from ...handoffs import Handoff
+from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
+from ...logger import logger
+from ...model_settings import ModelSettings
+from ...models.chatcmpl_converter import Converter
+from ...models.chatcmpl_helpers import HEADERS
+from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
+from ...models.fake_id import FAKE_RESPONSES_ID
+from ...models.interface import Model, ModelTracing
+from ...tool import Tool
+from ...tracing import generation_span
+from ...tracing.span_data import GenerationSpanData
+from ...tracing.spans import Span
+from ...usage import Usage
 
 
-class OpenAIChatCompletionsModel(Model):
+class LitellmModel(Model):
+    """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
+    Anthropic, Gemini, Mistral, and many other models.
+    See supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
+    """
+
     def __init__(
         self,
-        model: str | ChatModel,
-        openai_client: AsyncOpenAI,
-    ) -> None:
+        model: str,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         self.model = model
-        self._client = openai_client
-
-    def _non_null_or_not_given(self, value: Any) -> Any:
-        return value if value is not None else NOT_GIVEN
+        self.base_url = base_url
+        self.api_key = api_key
 
     async def get_response(
         self,
@@ -57,7 +76,7 @@ class OpenAIChatCompletionsModel(Model):
         with generation_span(
             model=str(self.model),
             model_config=dataclasses.asdict(model_settings)
-            | {"base_url": str(self._client.base_url)},
+            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response = await self._fetch_response(
@@ -72,6 +91,8 @@ class OpenAIChatCompletionsModel(Model):
                 stream=False,
             )
 
+            assert isinstance(response.choices[0], litellm.types.utils.Choices)
+
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
@@ -79,16 +100,22 @@ class OpenAIChatCompletionsModel(Model):
                     f"LLM resp:\n{json.dumps(response.choices[0].message.model_dump(), indent=2)}\n"
                 )
 
-            usage = (
-                Usage(
-                    requests=1,
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens,
+            if hasattr(response, "usage"):
+                response_usage = response.usage
+                usage = (
+                    Usage(
+                        requests=1,
+                        input_tokens=response_usage.prompt_tokens,
+                        output_tokens=response_usage.completion_tokens,
+                        total_tokens=response_usage.total_tokens,
+                    )
+                    if response.usage
+                    else Usage()
                 )
-                if response.usage
-                else Usage()
-            )
+            else:
+                usage = Usage()
+                logger.warning("No usage information returned from Litellm")
+
             if tracing.include_data():
                 span_generation.span_data.output = [response.choices[0].message.model_dump()]
             span_generation.span_data.usage = {
@@ -96,7 +123,9 @@ class OpenAIChatCompletionsModel(Model):
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(response.choices[0].message)
+            items = Converter.message_to_output_items(
+                LitellmConverter.convert_message_to_openai(response.choices[0].message)
+            )
 
             return ModelResponse(
                 output=items,
@@ -116,13 +145,10 @@ class OpenAIChatCompletionsModel(Model):
         *,
         previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        """
-        Yields a partial message as it is generated, as well as the usage information.
-        """
         with generation_span(
             model=str(self.model),
             model_config=dataclasses.asdict(model_settings)
-            | {"base_url": str(self._client.base_url)},
+            | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
             disabled=tracing.is_disabled(),
         ) as span_generation:
             response, stream = await self._fetch_response(
@@ -179,7 +205,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[False],
-    ) -> ChatCompletion: ...
+    ) -> litellm.types.utils.ModelResponse: ...
 
     async def _fetch_response(
         self,
@@ -192,7 +218,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: bool = False,
-    ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+    ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         converted_messages = Converter.items_to_messages(input)
 
         if system_instructions:
@@ -211,7 +237,7 @@ class OpenAIChatCompletionsModel(Model):
             if model_settings.parallel_tool_calls and tools and len(tools) > 0
             else False
             if model_settings.parallel_tool_calls is False
-            else NOT_GIVEN
+            else None
         )
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         response_format = Converter.convert_response_format(output_schema)
@@ -225,6 +251,7 @@ class OpenAIChatCompletionsModel(Model):
             logger.debug("Calling LLM")
         else:
             logger.debug(
+                f"Calling Litellm model: {self.model}\n"
                 f"{json.dumps(converted_messages, indent=2)}\n"
                 f"Tools:\n{json.dumps(converted_tools, indent=2)}\n"
                 f"Stream: {stream}\n"
@@ -233,35 +260,39 @@ class OpenAIChatCompletionsModel(Model):
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
-        store = ChatCmplHelpers.get_store_param(self._get_client(), model_settings)
 
-        stream_options = ChatCmplHelpers.get_stream_options_param(
-            self._get_client(), model_settings, stream=stream
-        )
+        stream_options = None
+        if stream and model_settings.include_usage is not None:
+            stream_options = {"include_usage": model_settings.include_usage}
 
-        ret = await self._get_client().chat.completions.create(
+        extra_kwargs = {}
+        if model_settings.extra_query:
+            extra_kwargs["extra_query"] = model_settings.extra_query
+        if model_settings.metadata:
+            extra_kwargs["metadata"] = model_settings.metadata
+
+        ret = await litellm.acompletion(
             model=self.model,
             messages=converted_messages,
-            tools=converted_tools or NOT_GIVEN,
-            temperature=self._non_null_or_not_given(model_settings.temperature),
-            top_p=self._non_null_or_not_given(model_settings.top_p),
-            frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
+            tools=converted_tools or None,
+            temperature=model_settings.temperature,
+            top_p=model_settings.top_p,
+            frequency_penalty=model_settings.frequency_penalty,
+            presence_penalty=model_settings.presence_penalty,
+            max_tokens=model_settings.max_tokens,
+            tool_choice=self._remove_not_given(tool_choice),
+            response_format=self._remove_not_given(response_format),
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            stream_options=self._non_null_or_not_given(stream_options),
-            store=self._non_null_or_not_given(store),
-            reasoning_effort=self._non_null_or_not_given(reasoning_effort),
+            stream_options=stream_options,
+            reasoning_effort=reasoning_effort,
             extra_headers=HEADERS,
-            extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_not_given(model_settings.metadata),
+            api_key=self.api_key,
+            base_url=self.base_url,
+            **extra_kwargs,
         )
 
-        if isinstance(ret, ChatCompletion):
+        if isinstance(ret, litellm.types.utils.ModelResponse):
             return ret
 
         response = Response(
@@ -281,7 +312,71 @@ class OpenAIChatCompletionsModel(Model):
         )
         return response, ret
 
-    def _get_client(self) -> AsyncOpenAI:
-        if self._client is None:
-            self._client = AsyncOpenAI()
-        return self._client
+    def _remove_not_given(self, value: Any) -> Any:
+        if isinstance(value, NotGiven):
+            return None
+        return value
+
+
+class LitellmConverter:
+    @classmethod
+    def convert_message_to_openai(
+        cls, message: litellm.types.utils.Message
+    ) -> ChatCompletionMessage:
+        if message.role != "assistant":
+            raise ModelBehaviorError(f"Unsupported role: {message.role}")
+
+        tool_calls = (
+            [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
+            if message.tool_calls
+            else None
+        )
+
+        provider_specific_fields = message.get("provider_specific_fields", None)
+        refusal = (
+            provider_specific_fields.get("refusal", None) if provider_specific_fields else None
+        )
+
+        return ChatCompletionMessage(
+            content=message.content,
+            refusal=refusal,
+            role="assistant",
+            annotations=cls.convert_annotations_to_openai(message),
+            audio=message.get("audio", None),  # litellm deletes audio if not present
+            tool_calls=tool_calls,
+        )
+
+    @classmethod
+    def convert_annotations_to_openai(
+        cls, message: litellm.types.utils.Message
+    ) -> list[Annotation] | None:
+        annotations: list[litellm.types.llms.openai.ChatCompletionAnnotation] | None = message.get(
+            "annotations", None
+        )
+        if not annotations:
+            return None
+
+        return [
+            Annotation(
+                type="url_citation",
+                url_citation=AnnotationURLCitation(
+                    start_index=annotation["url_citation"]["start_index"],
+                    end_index=annotation["url_citation"]["end_index"],
+                    url=annotation["url_citation"]["url"],
+                    title=annotation["url_citation"]["title"],
+                ),
+            )
+            for annotation in annotations
+        ]
+
+    @classmethod
+    def convert_tool_call_to_openai(
+        cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
+    ) -> ChatCompletionMessageToolCall:
+        return ChatCompletionMessageToolCall(
+            id=tool_call.id,
+            type="function",
+            function=Function(
+                name=tool_call.function.name or "", arguments=tool_call.function.arguments
+            ),
+        )

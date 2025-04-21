@@ -44,6 +44,8 @@ class Model(abc.ABC):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> ModelResponse:
         """Get a response from the model.
 
@@ -55,6 +57,8 @@ class Model(abc.ABC):
             output_schema: The output schema to use.
             handoffs: The handoffs available to the model.
             tracing: Tracing configuration.
+            previous_response_id: the ID of the previous response. Generally not used by the model,
+                except for the OpenAI Responses API.
 
         Returns:
             The full model response.
@@ -71,6 +75,8 @@ class Model(abc.ABC):
         output_schema: AgentOutputSchema | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream a response from the model.
 
@@ -82,6 +88,8 @@ class Model(abc.ABC):
             output_schema: The output schema to use.
             handoffs: The handoffs available to the model.
             tracing: Tracing configuration.
+            previous_response_id: the ID of the previous response. Generally not used by the model,
+                except for the OpenAI Responses API.
 
         Returns:
             An iterator of response stream events, in OpenAI Responses format.

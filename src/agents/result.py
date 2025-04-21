@@ -80,6 +80,14 @@ class RunResultBase(abc.ABC):
 
         return original_items + new_items
 
+    @property
+    def last_response_id(self) -> str | None:
+        """Convenience method to get the response ID of the last model response."""
+        if not self.raw_responses:
+            return None
+
+        return self.raw_responses[-1].response_id
+
 
 @dataclass
 class RunResult(RunResultBase):
