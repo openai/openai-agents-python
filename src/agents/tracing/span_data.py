@@ -338,7 +338,7 @@ class SpeechGroupSpanData(SpanData):
 
     @property
     def type(self) -> str:
-        return "speech-group"
+        return "speech_group"
 
     def export(self) -> dict[str, Any]:
         return {

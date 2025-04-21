@@ -137,9 +137,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         async with self._cleanup_lock:
             try:
                 await self.exit_stack.aclose()
-                self.session = None
             except Exception as e:
                 logger.error(f"Error cleaning up server: {e}")
+            finally:
+                self.session = None
 
 
 class MCPServerStdioParams(TypedDict):

@@ -102,6 +102,12 @@ class BackendSpanExporter(TracingExporter):
             "OpenAI-Beta": "traces=v1",
         }
 
+        if self.organization:
+            headers["OpenAI-Organization"] = self.organization
+
+        if self.project:
+            headers["OpenAI-Project"] = self.project
+
         # Exponential backoff loop
         attempt = 0
         delay = self.base_delay
