@@ -10,6 +10,12 @@ import httpx
 import json
 import os
 
+# === added dotenv 2lines below
+from util.schemas import Inbound
+from util.services import handle_new_task, handle_new_message
+from dotenv import load_dotenv
+load_dotenv()
+
 # === Predefined Webhook URLs ===
 STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
 CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
