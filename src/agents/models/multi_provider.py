@@ -54,7 +54,7 @@ class MultiProviderMap:
 class MultiProvider(ModelProvider):
     """This ModelProvider maps to a Model based on the prefix of the model name. By default, the
     mapping is:
-    - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1"
+    - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1", "gpt-4.1"
     - "litellm/" prefix -> LitellmProvider. e.g. "litellm/openai/gpt-4.1"
 
     You can override or customize this mapping.
