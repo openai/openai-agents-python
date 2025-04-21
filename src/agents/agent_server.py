@@ -21,8 +21,8 @@ import httpx
 from agents import Agent, Runner, tool
 
 # 4) Pydantic schemas and service handlers
-from util.schemas import Inbound               # Union of NewTask, NewMessage
-from util.services import handle_new_task, handle_new_message
+from agents.util.schemas import Inbound             # Union of NewTask, NewMessage
+from agents.util.services import handle_new_task, handle_new_message
 
 # ───────────────────────────────────────────────────────────
 # 5) Agent definitions (Phase 1: keep here for simplicity)

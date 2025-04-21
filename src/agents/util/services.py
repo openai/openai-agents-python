@@ -1,5 +1,5 @@
 from your_orm_models import Task, AgentSession, Message  # adapt import path
-from util.webhook import post_webhook, STRUCTURED_URL, CLARIFICATION_URL
+from agents.util.webhook import post_webhook, STRUCTURED_URL, CLARIFICATION_URL
 from agents.runner import run_agent, decide_session  # your existing runner
 
 async def handle_new_task(p: NewTask):
