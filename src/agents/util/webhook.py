@@ -1,6 +1,6 @@
-import httpx, asyncio, logging, os
+import os, asyncio, logging, httpx
 
-STRUCTURED_URL   = os.getenv("BUBBLE_STRUCTURED_URL")
+STRUCTURED_URL    = os.getenv("BUBBLE_STRUCTURED_URL")
 CLARIFICATION_URL = os.getenv("BUBBLE_CHAT_URL")
 
 async def post_webhook(url: str, data: dict, retries: int = 3):
@@ -12,5 +12,5 @@ async def post_webhook(url: str, data: dict, retries: int = 3):
             return
         except Exception as e:
             if i == retries - 1:
-                logging.error("Webhook fail %s %s", url, e)
+                logging.error("Webhook failed %s: %s", url, e)
             await asyncio.sleep(2 ** i)
