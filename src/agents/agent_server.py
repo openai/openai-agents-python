@@ -1,33 +1,31 @@
 # File: src/agents/agent_server.py
 
-import sys
 import os
+import sys
+import json
+import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
 
-# 1) Load environment variables from .env
+# 1) Load environment variables
 load_dotenv()
 
-# 2) Ensure src/ is on the Python path so “util” is importable
+# 2) Add project src folder so "agents" can import its own util subpackage
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import parse_obj_as, ValidationError
-import json
-from datetime import datetime
-import httpx
 
 # 3) Core SDK imports
 from agents import Agent, Runner, tool
 
-# 4) Pydantic schemas and service handlers
-from agents.util.schemas import Inbound             # Union of NewTask, NewMessage
-from agents.util.services import handle_new_task, handle_new_message
+# 4) SDK guardrail types (so guardrail imports work)
+from agents.util._types import MaybeAwaitable
 
 # ───────────────────────────────────────────────────────────
-# 5) Agent definitions (Phase 1: keep here for simplicity)
+# 5) Agent definitions (Phase 1: keep them here)
 # ───────────────────────────────────────────────────────────
-# Manager: routes requests or asks for clarifications
 manager_agent = Agent(
     name="Manager",
     instructions="""
@@ -39,7 +37,6 @@ Respond in strict JSON like:
 """
 )
 
-# Strategy: builds a 7‑day social campaign plan
 strategy_agent = Agent(
     name="StrategyAgent",
     instructions="""
@@ -60,7 +57,6 @@ Only return JSON in this format.
     tools=[]
 )
 
-# Content: writes social post variants
 content_agent = Agent(
     name="ContentAgent",
     instructions="""
@@ -86,7 +82,6 @@ Only respond in this format.
     tools=[]
 )
 
-# Repurpose: converts posts into new formats
 repurpose_agent = Agent(
     name="RepurposeAgent",
     instructions="""
@@ -110,7 +105,6 @@ Respond using this format:
     tools=[]
 )
 
-# Feedback: critiques content and suggests improvements
 feedback_agent = Agent(
     name="FeedbackAgent",
     instructions="""
@@ -129,7 +123,6 @@ Respond in this structured format:
     tools=[]
 )
 
-# Map Manager’s routing keys to Agent instances
 AGENT_MAP = {
     "strategy":  strategy_agent,
     "content":   content_agent,
@@ -138,10 +131,8 @@ AGENT_MAP = {
 }
 # ───────────────────────────────────────────────────────────
 
-# 6) Instantiate FastAPI
+# 6) FastAPI app setup
 app = FastAPI()
-
-# 7) CORS middleware (adjust allow_origins as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -150,36 +141,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 8) Include your existing agent routers
+# 7) Your existing bubble‑hook routers (keep these unchanged)
 from .agent_onboarding import router as onboarding_router
 from .agent_profilebuilder import router as profilebuilder_router
-
 app.include_router(onboarding_router)
 app.include_router(profilebuilder_router)
 
-# 9) Unified /agent endpoint
+# 8) Bubble webhook URLs
+STRUCTURED_WEBHOOK_URL    = os.getenv("BUBBLE_STRUCTURED_URL")
+CLARIFICATION_WEBHOOK_URL = os.getenv("BUBBLE_CHAT_URL")
+
+# 9) Unified /agent endpoint handling both new_task and new_message
 @app.post("/agent")
-async def agent_endpoint(request: Request):
-    """
-    Handles all client calls:
-      - action = "new_task"
-      - action = "new_message"
-      - future actions as you add them to Inbound
-    """
-    body = await request.json()
-    try:
-        payload = parse_obj_as(Inbound, body)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=e.errors())
+async def agent_endpoint(req: Request):
+    data = await req.json()
+    action = data.get("action")
 
-    if payload.action == "new_task":
-        return await handle_new_task(payload)
+    # --- New Task ---
+    if action == "new_task":
+        user_input = data["user_prompt"]
+        # 1) Manager routes or asks clarification
+        mgr_result = await Runner.run(manager_agent, input=user_input)
+        try:
+            route = json.loads(mgr_result.final_output)
+            agent_type = route["route_to"]
+        except Exception:
+            raise HTTPException(400, "Manager failed to parse intent")
 
-    elif payload.action == "new_message":
-        return await handle_new_message(payload)
+        # 2) Run the selected agent
+        agent = AGENT_MAP.get(agent_type)
+        if not agent:
+            raise HTTPException(400, f"Unknown agent: {agent_type}")
+        result = await Runner.run(agent, input=user_input)
+
+        # 3) Send output back to Bubble
+        payload = {
+            "task_id":    data.get("task_id"),
+            "agent_type": agent_type,
+            "created_at": datetime.utcnow().isoformat(),
+            "output":     result.final_output,
+        }
+        webhook = STRUCTURED_WEBHOOK_URL
+        if not result.final_output:
+            webhook = CLARIFICATION_WEBHOOK_URL
+        async with httpx.AsyncClient() as client:
+            await client.post(webhook, json=payload)
+
+        return {"ok": True}
+
+    # --- New Message ---
+    elif action == "new_message":
+        user_msg = data["message"]
+        sess = data.get("agent_session_id")
+        agent = AGENT_MAP.get(sess, manager_agent)
+        result = await Runner.run(agent, input=user_msg)
+
+        payload = {
+            "task_id":    data.get("task_id"),
+            "agent_type": sess or "manager",
+            "created_at": datetime.utcnow().isoformat(),
+            "output":     result.final_output,
+        }
+        webhook = STRUCTURED_WEBHOOK_URL
+        if not result.final_output:
+            webhook = CLARIFICATION_WEBHOOK_URL
+        async with httpx.AsyncClient() as client:
+            await client.post(webhook, json=payload)
+
+        return {"ok": True}
 
     else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported action: {payload.action}"
-        )
+        raise HTTPException(400, "Unknown action")
