@@ -1,39 +1,33 @@
+# File: src/agents/agent_server.py
+
 import sys
 import os
+from dotenv import load_dotenv
+
+# 1) Load environment variables from .env
+load_dotenv()
+
+# 2) Ensure src/ is on the Python path so “util” is importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from agents import Agent, Runner, tool
+from pydantic import parse_obj_as, ValidationError
+import json
 from datetime import datetime
 import httpx
-import json
-import os
 
-# === Instantiate FastAPI once ===
-app = FastAPI()
+# 3) Core SDK imports
+from agents import Agent, Runner, tool
 
-# === Add middleware to the app ===
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 4) Pydantic schemas and service handlers
+from util.schemas import Inbound               # Union of NewTask, NewMessage
+from util.services import handle_new_task, handle_new_message
 
-# === Include routers from other agent files ===
-from .agent_onboarding import router as onboarding_router
-from .agent_profilebuilder import router as profilebuilder_router
-
-app.include_router(onboarding_router)
-app.include_router(profilebuilder_router)
-
-# === Predefined Webhook URLs ===
-STRUCTURED_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_return_output"
-CLARIFICATION_WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_chat_response"
-
-# === Define Agents ===
+# ───────────────────────────────────────────────────────────
+# 5) Agent definitions (Phase 1: keep here for simplicity)
+# ───────────────────────────────────────────────────────────
+# Manager: routes requests or asks for clarifications
 manager_agent = Agent(
     name="Manager",
     instructions="""
@@ -45,6 +39,7 @@ Respond in strict JSON like:
 """
 )
 
+# Strategy: builds a 7‑day social campaign plan
 strategy_agent = Agent(
     name="StrategyAgent",
     instructions="""
@@ -65,6 +60,7 @@ Only return JSON in this format.
     tools=[]
 )
 
+# Content: writes social post variants
 content_agent = Agent(
     name="ContentAgent",
     instructions="""
@@ -90,6 +86,7 @@ Only respond in this format.
     tools=[]
 )
 
+# Repurpose: converts posts into new formats
 repurpose_agent = Agent(
     name="RepurposeAgent",
     instructions="""
@@ -113,6 +110,7 @@ Respond using this format:
     tools=[]
 )
 
+# Feedback: critiques content and suggests improvements
 feedback_agent = Agent(
     name="FeedbackAgent",
     instructions="""
@@ -131,108 +129,57 @@ Respond in this structured format:
     tools=[]
 )
 
+# Map Manager’s routing keys to Agent instances
 AGENT_MAP = {
-    "strategy": strategy_agent,
-    "content": content_agent,
+    "strategy":  strategy_agent,
+    "content":   content_agent,
     "repurpose": repurpose_agent,
-    "feedback": feedback_agent,
+    "feedback":  feedback_agent,
 }
+# ───────────────────────────────────────────────────────────
 
+# 6) Instantiate FastAPI
+app = FastAPI()
+
+# 7) CORS middleware (adjust allow_origins as needed)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 8) Include your existing agent routers
+from .agent_onboarding import router as onboarding_router
+from .agent_profilebuilder import router as profilebuilder_router
+
+app.include_router(onboarding_router)
+app.include_router(profilebuilder_router)
+
+# 9) Unified /agent endpoint
 @app.post("/agent")
-async def run_agent(request: Request):
-    data = await request.json()
-    user_input = data.get("input", "")
-    input_details = data.get("input_details", {})
-    user_id = data.get("user_id", "anonymous")
-    task_id = data.get("task_id")
-    linked_profile_strategy = data.get("linked_profile_strategy")
-    agent_type = data.get("agent_type")  # Optional shortcut
-    image_url = data.get("image_url")
-    debug_info = {}
-
-    if image_url:
-        user_input += f"\nHere is the image to consider: {image_url}"
-
-    if input_details:
-        detail_strings = []
-        for key, value in input_details.items():
-            if value and value.lower() != "null":
-                detail_strings.append(f"{key}: {value}")
-        if detail_strings:
-            user_input += "\n\nAdditional details:\n" + "\n".join(detail_strings)
-
-    if not agent_type:
-        manager_result = await Runner.run(manager_agent, input=user_input)
-        try:
-            parsed = json.loads(manager_result.final_output)
-            agent_type = parsed.get("route_to")
-        except Exception as e:
-            return {
-                "needs_clarification": True,
-                "message": "Could not understand intent.",
-                "debug_info": str(e)
-            }
-
-    agent = AGENT_MAP.get(agent_type)
-    if not agent:
-        return {"error": f"Unknown agent type: {agent_type}"}
-
-    result = await Runner.run(agent, input=user_input)
-    if hasattr(result, "requires_user_input"):
-        return {
-            "needs_clarification": True,
-            "message": result.requires_user_input,
-        }
-
-    # === Clean Output Block ===
-    clean_output = result.final_output.strip()
-    if clean_output.startswith("```") and clean_output.endswith("```"):
-        clean_output = clean_output.split("\n", 1)[-1].rsplit("\n", 1)[0]
-
+async def agent_endpoint(request: Request):
+    """
+    Handles all client calls:
+      - action = "new_task"
+      - action = "new_message"
+      - future actions as you add them to Inbound
+    """
+    body = await request.json()
     try:
-        parsed_output = json.loads(clean_output)
-        output_type = parsed_output.get("output_type")
-        output_details = parsed_output.get("details")
-        contains_image = parsed_output.get("contains_image", False)
+        payload = parse_obj_as(Inbound, body)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=e.errors())
 
-        if not output_type or not output_details:
-            raise ValueError("Missing required output keys")
-    except Exception as e:
-        parsed_output = None
-        output_type = "raw_text"
-        output_details = result.final_output
-        contains_image = False
-        debug_info["validation_error"] = str(e)
-        debug_info["raw_output"] = result.final_output
+    if payload.action == "new_task":
+        return await handle_new_task(payload)
 
-    session = {
-        "task_id": task_id,
-        "agent_type": agent_type,
-        "user_id": user_id,
-        "input_details": data.get("input_details", {}),
-        "output_type": output_type,
-        "contains_image": contains_image,
-        "output_details": output_details,
-        "linked_profile_strategy": linked_profile_strategy,
-        "source_content_piece": data.get("source_content_piece"),
-        "created_at": datetime.utcnow().isoformat(),
-    }
+    elif payload.action == "new_message":
+        return await handle_new_message(payload)
 
-    if debug_info:
-        session["debug_info"] = debug_info
-
-    async with httpx.AsyncClient() as client:
-        try:
-            if parsed_output:
-                await client.post(STRUCTURED_WEBHOOK_URL, json=session)
-            else:
-                await client.post(CLARIFICATION_WEBHOOK_URL, json={
-                    "user_id": user_id,
-                    "message": result.final_output,
-                    "agent_type": agent_type,
-                    "task_id": task_id
-                })
-        except Exception as e:
-            session["webhook_error"] = str(e)
-
-    return session
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported action: {payload.action}"
+        )
