@@ -1,0 +1,8 @@
+# Instructions for GreetingAgent
+
+Given an input string that represents a person's name, generate a JSON object with keys "greeting" and "greeting_spanish" whose value is a polite greeting message, formatted as:
+
+{
+  "greeting": "Hello, <name>!",
+  "greeting_spanish": "Hola, <name>!"
+}
