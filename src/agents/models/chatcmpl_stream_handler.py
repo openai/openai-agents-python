@@ -48,6 +48,9 @@ class ChatCmplStreamHandler:
         usage: CompletionUsage | None = None
         state = StreamingState()
 
+        is_reasoning_model = False
+        emit_reasoning_content = False
+        emit_content = False
         async for chunk in stream:
             if not state.started:
                 state.started = True
@@ -62,9 +65,16 @@ class ChatCmplStreamHandler:
                 continue
 
             delta = chunk.choices[0].delta
+            reasoning_content = None
+            content = None
+            if hasattr(delta, "reasoning_content"):
+                reasoning_content = delta.reasoning_content
+                is_reasoning_model = True
+            if hasattr(delta, "content"):
+                content = delta.content
 
             # Handle text
-            if delta.content:
+            if reasoning_content or content:
                 if not state.text_content_index_and_output:
                     # Initialize a content tracker for streaming text
                     state.text_content_index_and_output = (
@@ -100,16 +110,59 @@ class ChatCmplStreamHandler:
                         ),
                         type="response.content_part.added",
                     )
-                # Emit the delta for this segment of content
-                yield ResponseTextDeltaEvent(
-                    content_index=state.text_content_index_and_output[0],
-                    delta=delta.content,
-                    item_id=FAKE_RESPONSES_ID,
-                    output_index=0,
-                    type="response.output_text.delta",
-                )
-                # Accumulate the text into the response part
-                state.text_content_index_and_output[1].text += delta.content
+
+                if reasoning_content is not None:
+                    if not emit_reasoning_content:
+                        emit_reasoning_content = True
+
+                        reasoning_content_title = "# reasoning content\n\n"
+                        # Emit the reasoning content title
+                        yield ResponseTextDeltaEvent(
+                            content_index=state.text_content_index_and_output[0],
+                            delta=reasoning_content_title,
+                            item_id=FAKE_RESPONSES_ID,
+                            output_index=0,
+                            type="response.output_text.delta",
+                        )
+                        # Accumulate the text into the response part
+                        state.text_content_index_and_output[1].text += reasoning_content_title
+
+                    # Emit the delta for this segment of content
+                    yield ResponseTextDeltaEvent(
+                        content_index=state.text_content_index_and_output[0],
+                        delta=reasoning_content,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        type="response.output_text.delta",
+                    )
+                    # Accumulate the text into the response part
+                    state.text_content_index_and_output[1].text += reasoning_content
+
+                if content is not None:
+                    if not emit_content and is_reasoning_model:
+                        emit_content = True
+                        content_title = "\n\n# content\n\n"
+                        # Emit the content title
+                        yield ResponseTextDeltaEvent(
+                            content_index=state.text_content_index_and_output[0],
+                            delta=content_title,
+                            item_id=FAKE_RESPONSES_ID,
+                            output_index=0,
+                            type="response.output_text.delta",
+                        )
+                        # Accumulate the text into the response part
+                        state.text_content_index_and_output[1].text += content_title
+
+                    # Emit the delta for this segment of content
+                    yield ResponseTextDeltaEvent(
+                        content_index=state.text_content_index_and_output[0],
+                        delta=content,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        type="response.output_text.delta",
+                    )
+                    # Accumulate the text into the response part
+                    state.text_content_index_and_output[1].text += content
 
             # Handle refusals (model declines to answer)
             if delta.refusal:
