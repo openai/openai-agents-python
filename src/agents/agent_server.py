@@ -243,7 +243,7 @@ async def agent_endpoint(req: Request):
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,  # or sess if in new_message
+                "agent_type": sess or "manager",
                 "message": result.requires_user_input,
                 "created_at": datetime.utcnow().isoformat()
             }
