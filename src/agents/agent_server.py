@@ -181,12 +181,18 @@ async def agent_endpoint(req: Request):
             "created_at": datetime.utcnow().isoformat(),
             "output":     result.final_output,
         }
-        webhook = STRUCTURED_WEBHOOK_URL
-        if not result.final_output:
-            webhook = CLARIFICATION_WEBHOOK_URL
-        async with httpx.AsyncClient() as client:
-            await client.post(webhook, json=payload)
+        # --- updated webhook logic 04.22.2025
+        try:
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            is_structured = False
+        
+        webhook = STRUCTURED_WEBHOOK_URL if is_structured else CLARIFICATION_WEBHOOK_URL
 
+        async with httpx.AsyncClient() as client:
+            print(f"Selected webhook: {webhook}") 
+            await client.post(webhook, json=payload)
         return {"ok": True}
 
     # --- New Message ---
@@ -202,10 +208,17 @@ async def agent_endpoint(req: Request):
             "created_at": datetime.utcnow().isoformat(),
             "output":     result.final_output,
         }
-        webhook = STRUCTURED_WEBHOOK_URL
-        if not result.final_output:
-            webhook = CLARIFICATION_WEBHOOK_URL
+        # --- updated webhook logic 04.22.2025
+        try:
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            is_structured = False
+        
+        webhook = STRUCTURED_WEBHOOK_URL if is_structured else CLARIFICATION_WEBHOOK_URL
+
         async with httpx.AsyncClient() as client:
+            print(f"Selected webhook: {webhook}") 
             await client.post(webhook, json=payload)
 
         return {"ok": True}
