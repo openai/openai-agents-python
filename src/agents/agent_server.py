@@ -175,12 +175,41 @@ async def agent_endpoint(req: Request):
         result = await Runner.run(agent, input=user_input)
 
         # 3) Send output back to Bubble
-        payload = {
-            "task_id":    data.get("task_id"),
-            "agent_type": agent_type,
-            "created_at": datetime.utcnow().isoformat(),
-            "output":     result.final_output,
-        }
+        # --- Determine webhook type and structure payload
+        try:
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            parsed_output = None
+            is_structured = False
+        
+        if getattr(result, "requires_user_input", None):
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess if in new_message
+                "message": result.requires_user_input,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess
+                "output_type": parsed_output.get("output_type"),
+                "output_details": parsed_output.get("details"),
+                "contains_image": parsed_output.get("contains_image", False),
+                "created_at": datetime.utcnow().isoformat()
+            }
+        else:
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess
+                "message": result.final_output,
+                "created_at": datetime.utcnow().isoformat()
+            }
+
         # --- updated webhook logic 04.22.2025
         try:
             parsed_output = json.loads(result.final_output)
@@ -202,12 +231,41 @@ async def agent_endpoint(req: Request):
         agent = AGENT_MAP.get(sess, manager_agent)
         result = await Runner.run(agent, input=user_msg)
 
-        payload = {
-            "task_id":    data.get("task_id"),
-            "agent_type": sess or "manager",
-            "created_at": datetime.utcnow().isoformat(),
-            "output":     result.final_output,
-        }
+        # --- Determine webhook type and structure payload
+        try:
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            parsed_output = None
+            is_structured = False
+        
+        if getattr(result, "requires_user_input", None):
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess if in new_message
+                "message": result.requires_user_input,
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess
+                "output_type": parsed_output.get("output_type"),
+                "output_details": parsed_output.get("details"),
+                "contains_image": parsed_output.get("contains_image", False),
+                "created_at": datetime.utcnow().isoformat()
+            }
+        else:
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,  # or sess
+                "message": result.final_output,
+                "created_at": datetime.utcnow().isoformat()
+            }
+
         # --- updated webhook logic 04.22.2025
         try:
             parsed_output = json.loads(result.final_output)
