@@ -173,6 +173,7 @@ async def agent_endpoint(req: Request):
         if not agent:
             raise HTTPException(400, f"Unknown agent: {agent_type}")
         result = await Runner.run(agent, input=user_input)
+        result.agent_type = agent_type  # Explicitly tag result
 
         # 3) Send output back to Bubble
         # --- Determine webhook type and structure payload
@@ -187,7 +188,7 @@ async def agent_endpoint(req: Request):
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,  # or sess if in new_message
+                "agent_type": getattr(result, "agent_type", agent_type),
                 "message": result.requires_user_input,
                 "created_at": datetime.utcnow().isoformat()
             }
@@ -195,7 +196,7 @@ async def agent_endpoint(req: Request):
             webhook = STRUCTURED_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,  # or sess
+                "agent_type": getattr(result, "agent_type", agent_type),
                 "output_type": parsed_output.get("output_type"),
                 "output_details": parsed_output.get("details"),
                 "contains_image": parsed_output.get("contains_image", False),
@@ -230,6 +231,7 @@ async def agent_endpoint(req: Request):
         sess = data.get("agent_session_id")
         agent = AGENT_MAP.get(sess, manager_agent)
         result = await Runner.run(agent, input=user_msg)
+        result.agent_type = sess or "manager"
 
         # --- Determine webhook type and structure payload
         try:
@@ -243,7 +245,7 @@ async def agent_endpoint(req: Request):
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": sess or "manager",
+                "agent_type": getattr(result, "agent_type", sess or "manager"),
                 "message": result.requires_user_input,
                 "created_at": datetime.utcnow().isoformat()
             }
@@ -251,7 +253,7 @@ async def agent_endpoint(req: Request):
             webhook = STRUCTURED_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,  # or sess
+                "agent_type": getattr(result, "agent_type", sess or "manager"),
                 "output_type": parsed_output.get("output_type"),
                 "output_details": parsed_output.get("details"),
                 "contains_image": parsed_output.get("contains_image", False),
