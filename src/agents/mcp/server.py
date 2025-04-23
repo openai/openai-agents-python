@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -69,6 +70,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
 
+        self.timeout: float = 5
+        """The timeout for the MCP ClientSession. Defaults to 5 seconds."""
+
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
@@ -101,7 +105,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
             read, write = transport
-            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            session = await self.exit_stack.enter_async_context(
+                ClientSession(
+                    read, write, read_timeout_seconds=timedelta(seconds=self.timeout)
+                )
+            )
             await session.initialize()
             self.session = session
         except Exception as e:
