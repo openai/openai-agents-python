@@ -1,8 +1,8 @@
 import pytest
-from openai.types.responses import ResponseTextDeltaEvent
-from .fake_model import FakeModel
 
 from agents import Agent, Runner
+
+from .fake_model import FakeModel
 
 
 @pytest.mark.asyncio
@@ -14,7 +14,7 @@ async def test_joker_streamed_jokes_with_cancel():
     num_events = 0
     stop_after = 1  # There are two that the model gives back.
 
-    async for event in result.stream_events():
+    async for _event in result.stream_events():
         num_events += 1
         if num_events == 1:
             result.cancel()
