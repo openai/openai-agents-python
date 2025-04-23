@@ -199,6 +199,20 @@ async def agent_endpoint(req: Request):
         },
         "created_at": datetime.utcnow().isoformat()
     }
+    webhook = CLARIFICATION_WEBHOOK_URL
+    payload = {
+        "task_id": data.get("task_id"),
+        "user_id": data.get("user_id"),
+        "agent_type": sess or "manager",
+        "message": {
+            "type": "text",
+            "content": result.requires_user_input
+        },
+        "metadata": {
+            "reason": "Agent requested clarification"
+        },
+        "created_at": datetime.utcnow().isoformat()
+    }
         elif is_structured:
             webhook = STRUCTURED_WEBHOOK_URL
             payload = {
@@ -250,6 +264,20 @@ async def agent_endpoint(req: Request):
             is_structured = False
 
         if getattr(result, "requires_user_input", None):
+    webhook = CLARIFICATION_WEBHOOK_URL
+    payload = {
+        "task_id": data.get("task_id"),
+        "user_id": data.get("user_id"),
+        "agent_type": sess or "manager",
+        "message": {
+            "type": "text",
+            "content": result.requires_user_input
+        },
+        "metadata": {
+            "reason": "Agent requested clarification"
+        },
+        "created_at": datetime.utcnow().isoformat()
+    }
     webhook = CLARIFICATION_WEBHOOK_URL
     payload = {
         "task_id": data.get("task_id"),
