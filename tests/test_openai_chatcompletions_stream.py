@@ -122,7 +122,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     using reasoning model.
     """
     delta1 = ChoiceDelta(content=None)
-    delta1.reasoning_content = "Okay"
+    setattr(delta1, "reasoning_content", "Okay")
     chunk1 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
@@ -208,7 +208,8 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     completed_resp = output_events[10].response
     assert isinstance(completed_resp.output[0], ResponseOutputMessage)
     assert isinstance(completed_resp.output[0].content[0], ResponseOutputText)
-    assert completed_resp.output[0].content[0].text == "# reasoning content\n\nOkay\n\n# content\n\nHello"
+    assert (completed_resp.output[0].content[0].text ==
+            "# reasoning content\n\nOkay\n\n# content\n\nHello")
 
 
 @pytest.mark.allow_call_model_methods
