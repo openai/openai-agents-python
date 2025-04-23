@@ -116,6 +116,103 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) -> None:
+    """
+    Validate that `stream_response` emits the correct sequence of events when
+    using reasoning model.
+    """
+    delta1 = ChoiceDelta(content=None)
+    delta1.reasoning_content = "Okay"
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=delta1)],
+    )
+
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="He"))],
+    )
+    chunk3 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(content="llo"))],
+    )
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2, chunk3):
+            yield c
+
+    # Patch _fetch_response to inject our fake stream
+    async def patched_fetch_response(self, *args, **kwargs):
+        # `_fetch_response` is expected to return a Response skeleton and the async stream
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    ):
+        output_events.append(event)
+    # We expect a response.created, then a response.output_item.added, content part added,
+    # two content delta events (for "He" and "llo"), a content part done, the assistant message
+    # output_item.done, and finally response.completed.
+    # There should be 8 events in total.
+    assert len(output_events) == 11
+    # First event indicates creation.
+    assert output_events[0].type == "response.created"
+    # The output item added and content part added events should mark the assistant message.
+    assert output_events[1].type == "response.output_item.added"
+    assert output_events[2].type == "response.content_part.added"
+    # Two text delta events.
+    assert output_events[3].type == "response.output_text.delta"
+    assert output_events[3].delta == "# reasoning content\n\n"
+    assert output_events[4].type == "response.output_text.delta"
+    assert output_events[4].delta == "Okay"
+    assert output_events[5].type == "response.output_text.delta"
+    assert output_events[5].delta == "\n\n# content\n\n"
+    assert output_events[6].type == "response.output_text.delta"
+    assert output_events[6].delta == "He"
+    assert output_events[7].type == "response.output_text.delta"
+    assert output_events[7].delta == "llo"
+    # After streaming, the content part and item should be marked done.
+    assert output_events[8].type == "response.content_part.done"
+    assert output_events[9].type == "response.output_item.done"
+    # Last event indicates completion of the stream.
+    assert output_events[10].type == "response.completed"
+    # The completed response should have one output message with full text.
+    completed_resp = output_events[10].response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
+    assert isinstance(completed_resp.output[0].content[0], ResponseOutputText)
+    assert completed_resp.output[0].content[0].text == "# reasoning content\n\nOkay\n\n# content\n\nHello"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_yields_events_for_refusal_content(monkeypatch) -> None:
     """
     Validate that when the model streams a refusal string instead of normal content,
