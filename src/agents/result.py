@@ -188,7 +188,6 @@ class RunResultStreaming(RunResultBase):
             try:
                 item = await self._event_queue.get()
             except asyncio.CancelledError:
-                self.cancel()  # Ensure tasks are cleaned up if the coroutine is cancelled
                 break
 
             if isinstance(item, QueueCompleteSentinel):
