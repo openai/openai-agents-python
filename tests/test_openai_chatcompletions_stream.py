@@ -122,7 +122,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     using reasoning model.
     """
     delta1 = ChoiceDelta(content=None)
-    setattr(delta1, "reasoning_content", "Okay")
+    setattr(delta1, "reasoning_content", "Okay")    # noqa: B010
     chunk1 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
