@@ -152,6 +152,17 @@ class RunResultStreaming(RunResultBase):
         """
         return self.current_agent
 
+    def cancel(self) -> None:
+        """Cancels the streaming run, stopping all background tasks and marking the run as complete."""
+        self._cleanup_tasks()  # Cancel all running tasks
+        self.is_complete = True  # Mark the run as complete to stop event streaming
+
+        # Optionally, clear the event queue to prevent processing stale events
+        while not self._event_queue.empty():
+            self._event_queue.get_nowait()
+        while not self._input_guardrail_queue.empty():
+            self._input_guardrail_queue.get_nowait()
+
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """Stream deltas for new items as they are generated. We're using the types from the
         OpenAI Responses API, so these are semantic events: each event has a `type` field that
@@ -174,6 +185,7 @@ class RunResultStreaming(RunResultBase):
             try:
                 item = await self._event_queue.get()
             except asyncio.CancelledError:
+                self.cancel()  # Ensure tasks are cleaned up if the coroutine is cancelled
                 break
 
             if isinstance(item, QueueCompleteSentinel):
