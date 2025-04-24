@@ -31,6 +31,7 @@ __all__ = [
     "STTModelSettings",
     "TTSModel",
     "TTSModelSettings",
+    "TTSVoice",
     "VoiceModelProvider",
     "StreamedAudioResult",
     "SingleAgentVoiceWorkflow",
