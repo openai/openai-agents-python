@@ -1,5 +1,3 @@
-# File: src/agents/agent_server.py
-
 import os
 import sys
 import json
@@ -129,9 +127,7 @@ AGENT_MAP = {
     "repurpose": repurpose_agent,
     "feedback":  feedback_agent,
 }
-# ───────────────────────────────────────────────────────────
 
-# 6) FastAPI app setup
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -141,26 +137,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 7) Your existing bubble‑hook routers (keep these unchanged)
 from .agent_onboarding import router as onboarding_router
 from .agent_profilebuilder import router as profilebuilder_router
 app.include_router(onboarding_router)
 app.include_router(profilebuilder_router)
 
-# 8) Bubble webhook URLs
 STRUCTURED_WEBHOOK_URL    = os.getenv("BUBBLE_STRUCTURED_URL")
 CLARIFICATION_WEBHOOK_URL = os.getenv("BUBBLE_CHAT_URL")
 
-# 9) Unified /agent endpoint handling both new_task and new_message
 @app.post("/agent")
 async def agent_endpoint(req: Request):
     data = await req.json()
     action = data.get("action")
 
-    # --- New Task ---
     if action == "new_task":
         user_input = data["user_prompt"]
-        # 1) Manager routes or asks clarification
         mgr_result = await Runner.run(manager_agent, input=user_input)
         try:
             route = json.loads(mgr_result.final_output)
@@ -168,154 +159,108 @@ async def agent_endpoint(req: Request):
         except Exception:
             raise HTTPException(400, "Manager failed to parse intent")
 
-        # 2) Run the selected agent
         agent = AGENT_MAP.get(agent_type)
         if not agent:
             raise HTTPException(400, f"Unknown agent: {agent_type}")
         result = await Runner.run(agent, input=user_input)
-        result.agent_type = agent_type  # Explicitly tag result
+        result.agent_type = agent_type
 
-        # 3) Send output back to Bubble
-        # --- Determine webhook type and structure payload
         try:
             parsed_output = json.loads(result.final_output)
             is_structured = "output_type" in parsed_output
         except Exception:
             parsed_output = None
             is_structured = False
-        
+
         if getattr(result, "requires_user_input", None):
-        webhook = CLARIFICATION_WEBHOOK_URL
-        payload = {
-            "task_id": data.get("task_id"),
-            "user_id": data.get("user_id"),
-            "agent_type": sess or "manager",
-            "message": {
-                "type": "text",
-                "content": result.requires_user_input
-            },
-            "metadata": {
-                "reason": "Agent requested clarification"
-            },
-            "created_at": datetime.utcnow().isoformat()
-        }
-        webhook = CLARIFICATION_WEBHOOK_URL
-        payload = {
-            "task_id": data.get("task_id"),
-            "user_id": data.get("user_id"),
-            "agent_type": sess or "manager",
-            "message": {
-                "type": "text",
-                "content": result.requires_user_input
-            },
-            "metadata": {
-                "reason": "Agent requested clarification"
-            },
-            "created_at": datetime.utcnow().isoformat()
-        }
-            elif is_structured:
-                webhook = STRUCTURED_WEBHOOK_URL
-                payload = {
-                    "task_id": data.get("task_id"),
-                    "agent_type": getattr(result, "agent_type", agent_type),
-                    "output_type": parsed_output.get("output_type"),
-                    "output_details": parsed_output.get("details"),
-                    "contains_image": parsed_output.get("contains_image", False),
-                    "created_at": datetime.utcnow().isoformat()
-                }
-            else:
-                webhook = CLARIFICATION_WEBHOOK_URL
-                payload = {
-                    "task_id": data.get("task_id"),
-                    "agent_type": agent_type,  # or sess
-                    "message": result.final_output,
-                    "created_at": datetime.utcnow().isoformat()
-                }
-    
-            # --- updated webhook logic 04.22.2025
-            try:
-                parsed_output = json.loads(result.final_output)
-                is_structured = "output_type" in parsed_output
-            except Exception:
-                is_structured = False
-            
-            webhook = STRUCTURED_WEBHOOK_URL if is_structured else CLARIFICATION_WEBHOOK_URL
-    
-            async with httpx.AsyncClient() as client:
-                print(f"Selected webhook: {webhook}") 
-                await client.post(webhook, json=payload)
-            return {"ok": True}
-    
-        # --- New Message ---
-        elif action == "new_message":
-            user_msg = data.get("message") or data.get("user_prompt")
-            if user_msg is None:
-                raise HTTPException(status_code=422, detail="Missing 'message' or 'user_prompt' in new_message")
-    
-            sess = data.get("agent_session_id")
-            agent = AGENT_MAP.get(sess, manager_agent)
-            result = await Runner.run(agent, input=user_msg)
-    
-            try:
-                parsed_output = json.loads(result.final_output)
-                is_structured = "output_type" in parsed_output
-            except Exception:
-                parsed_output = None
-                is_structured = False
-    
-            if getattr(result, "requires_user_input", None):
-        webhook = CLARIFICATION_WEBHOOK_URL
-        payload = {
-            "task_id": data.get("task_id"),
-            "user_id": data.get("user_id"),
-            "agent_type": sess or "manager",
-            "message": {
-                "type": "text",
-                "content": result.requires_user_input
-            },
-            "metadata": {
-                "reason": "Agent requested clarification"
-            },
-            "created_at": datetime.utcnow().isoformat()
-        }
-        webhook = CLARIFICATION_WEBHOOK_URL
-        payload = {
-            "task_id": data.get("task_id"),
-            "user_id": data.get("user_id"),
-            "agent_type": sess or "manager",
-            "message": {
-                "type": "text",
-                "content": result.requires_user_input
-            },
-            "metadata": {
-                "reason": "Agent requested clarification"
-            },
-            "created_at": datetime.utcnow().isoformat()
-        }
-            elif is_structured:
-                webhook = STRUCTURED_WEBHOOK_URL
-                payload = {
-                    "task_id": data.get("task_id"),
-                    "agent_type": sess or "manager",
-                    "output_type": parsed_output.get("output_type"),
-                    "output_details": parsed_output.get("details"),
-                    "contains_image": parsed_output.get("contains_image", False),
-                    "created_at": datetime.utcnow().isoformat()
-                }
-            else:
-                webhook = CLARIFICATION_WEBHOOK_URL
-                payload = {
-                    "task_id": data.get("task_id"),
-                    "agent_type": sess or "manager",
-                    "message": result.final_output,
-                    "created_at": datetime.utcnow().isoformat()
-                }
-    
-            async with httpx.AsyncClient() as client:
-                print(f"Selected webhook: {webhook}")
-                await client.post(webhook, json=payload)
-    
-            return {"ok": True}
-    
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message": {
+                    "type": "text",
+                    "content": result.requires_user_input
+                },
+                "metadata": {"reason": "Agent requested clarification"},
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,
+                "output_type": parsed_output.get("output_type"),
+                "output_details": parsed_output.get("details"),
+                "contains_image": parsed_output.get("contains_image", False),
+                "created_at": datetime.utcnow().isoformat()
+            }
         else:
-            raise HTTPException(400, "Unknown action")
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": agent_type,
+                "message": result.final_output,
+                "created_at": datetime.utcnow().isoformat()
+            }
+
+        async with httpx.AsyncClient() as client:
+            print(f"Selected webhook: {webhook}")
+            await client.post(webhook, json=payload)
+        return {"ok": True}
+
+    elif action == "new_message":
+        user_msg = data.get("message") or data.get("user_prompt")
+        if user_msg is None:
+            raise HTTPException(422, "Missing 'message' or 'user_prompt'")
+
+        sess = data.get("agent_session_id")
+        agent = AGENT_MAP.get(sess, manager_agent)
+        result = await Runner.run(agent, input=user_msg)
+
+        try:
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            parsed_output = None
+            is_structured = False
+
+        if getattr(result, "requires_user_input", None):
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": sess or "manager",
+                "message": {
+                    "type": "text",
+                    "content": result.requires_user_input
+                },
+                "metadata": {"reason": "Agent requested clarification"},
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": sess or "manager",
+                "output_type": parsed_output.get("output_type"),
+                "output_details": parsed_output.get("details"),
+                "contains_image": parsed_output.get("contains_image", False),
+                "created_at": datetime.utcnow().isoformat()
+            }
+        else:
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "agent_type": sess or "manager",
+                "message": result.final_output,
+                "created_at": datetime.utcnow().isoformat()
+            }
+
+        async with httpx.AsyncClient() as client:
+            print(f"Selected webhook: {webhook}")
+            await client.post(webhook, json=payload)
+        return {"ok": True}
+
+    else:
+        raise HTTPException(400, "Unknown action")
