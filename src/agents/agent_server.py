@@ -30,7 +30,8 @@ manager_agent = Agent(
 You are an intelligent router for user requests.
 Decide the intent behind the message: strategy, content, repurpose, feedback.
 If you are unsure or need more info, ask a clarifying question instead of routing.
-Respond in strict JSON like:
+If clarification is needed, respond only with a plain text clarification question.
+Otherwise, respond in strict JSON like:
 { "route_to": "strategy", "reason": "User wants a campaign plan" }
 """
 )
@@ -153,17 +154,35 @@ async def agent_endpoint(req: Request):
     if action == "new_task":
         user_input = data["user_prompt"]
         mgr_result = await Runner.run(manager_agent, input=user_input)
-        try:
-            route = json.loads(mgr_result.final_output)
-            agent_type = route["route_to"]
-        except Exception:
-            raise HTTPException(400, "Manager failed to parse intent")
 
-        agent = AGENT_MAP.get(agent_type)
-        if not agent:
-            raise HTTPException(400, f"Unknown agent: {agent_type}")
-        result = await Runner.run(agent, input=user_input)
-        result.agent_type = agent_type
+        try:
+            parsed_mgr = json.loads(mgr_result.final_output)
+            if "route_to" in parsed_mgr:
+                agent_type = parsed_mgr["route_to"]
+                agent = AGENT_MAP.get(agent_type)
+                if not agent:
+                    raise HTTPException(400, f"Unknown agent: {agent_type}")
+                result = await Runner.run(agent, input=user_input)
+                result.agent_type = agent_type
+            else:
+                raise ValueError("Missing route_to")
+        except Exception:
+            # Manager returned clarification as plain string
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": "manager",
+                "message": {
+                    "type": "text",
+                    "content": mgr_result.final_output.strip()
+                },
+                "metadata": {"reason": "Manager requested clarification"},
+                "created_at": datetime.utcnow().isoformat()
+            }
+            async with httpx.AsyncClient() as client:
+                await client.post(webhook, json=payload)
+            return {"ok": True}
 
         try:
             parsed_output = json.loads(result.final_output)
