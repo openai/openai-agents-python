@@ -56,6 +56,7 @@ class ChatCmplStreamHandler:
                     type="response.created",
                 )
 
+            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
             usage = chunk.usage if hasattr(chunk, "usage") else None
 
             if not chunk.choices or not chunk.choices[0].delta:
@@ -112,6 +113,7 @@ class ChatCmplStreamHandler:
                 state.text_content_index_and_output[1].text += delta.content
 
             # Handle refusals (model declines to answer)
+            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
             if hasattr(delta, "refusal") and delta.refusal:
                 if not state.refusal_content_index_and_output:
                     # Initialize a content tracker for streaming refusal text
