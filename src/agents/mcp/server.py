@@ -64,6 +64,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             by calling `invalidate_tools_cache()`. You should set this to `True` if you know the
             server will not change its tools list, because it can drastically improve latency
             (by avoiding a round-trip to the server every time).
+            
+            client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
         """
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
