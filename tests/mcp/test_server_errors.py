@@ -6,7 +6,7 @@ from agents.mcp.server import _MCPServerWithClientSession
 
 class CrashingClientSessionServer(_MCPServerWithClientSession):
     def __init__(self):
-        super().__init__(cache_tools_list=False)
+        super().__init__(cache_tools_list=False, client_session_timeout_seconds=5)
         self.cleanup_called = False
 
     def create_streams(self):
