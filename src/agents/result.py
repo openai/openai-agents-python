@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import TypeVar
 
+from agents.run_context import RunContextWrapper
+
 from ._run_impl import QueueCompleteSentinel
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -49,6 +51,9 @@ class RunResultBase(abc.ABC):
 
     output_guardrail_results: list[OutputGuardrailResult]
     """Guardrail results for the final output of the agent."""
+
+    context_wrapper: RunContextWrapper[Any]
+    """The context wrapper that was used to run the agent."""
 
     @property
     @abc.abstractmethod

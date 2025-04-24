@@ -170,6 +170,7 @@ class Runner:
 
             context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
                 context=context,  # type: ignore
+                _input=copy.deepcopy(input),
             )
 
             input_guardrail_results: list[InputGuardrailResult] = []
@@ -255,6 +256,9 @@ class Runner:
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
 
+                    context_wrapper._input = copy.deepcopy(original_input)
+                    context_wrapper._new_items = copy.deepcopy(generated_items)
+
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
                         output_guardrail_results = await cls._run_output_guardrails(
                             current_agent.output_guardrails + (run_config.output_guardrails or []),
@@ -270,6 +274,7 @@ class Runner:
                             _last_agent=current_agent,
                             input_guardrail_results=input_guardrail_results,
                             output_guardrail_results=output_guardrail_results,
+                            context_wrapper=context_wrapper,
                         )
                     elif isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -407,7 +412,8 @@ class Runner:
 
         output_schema = cls._get_output_schema(starting_agent)
         context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-            context=context  # type: ignore
+            context=context,  # type: ignore
+            _input=copy.deepcopy(input),
         )
 
         streamed_result = RunResultStreaming(
@@ -423,6 +429,7 @@ class Runner:
             output_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             trace=new_trace,
+            context_wrapper=context_wrapper,
         )
 
         # Kick off the actual agent loop in the background and return the streamed result object.
@@ -575,6 +582,9 @@ class Runner:
                     ]
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
+
+                    context_wrapper._input = copy.deepcopy(streamed_result.input)
+                    context_wrapper._new_items = copy.deepcopy(streamed_result.new_items)
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = turn_result.next_step.new_agent
