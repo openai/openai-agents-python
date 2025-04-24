@@ -209,6 +209,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 improve latency (by avoiding a round-trip to the server every time).
             name: A readable name for the server. If not provided, we'll create one from the
                 command.
+            client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
         """
         super().__init__(cache_tools_list, client_session_timeout_seconds)
 
@@ -285,6 +286,8 @@ class MCPServerSse(_MCPServerWithClientSession):
 
             name: A readable name for the server. If not provided, we'll create one from the
                 URL.
+
+            client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
         """
         super().__init__(cache_tools_list, client_session_timeout_seconds)
 
