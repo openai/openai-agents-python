@@ -110,7 +110,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 ClientSession(
                     read,
                     write,
-                    read_timeout_seconds=timedelta(seconds=self.client_session_timeout_seconds),
+                    timedelta(seconds=self.client_session_timeout_seconds)
+                    if self.client_session_timeout_seconds
+                    else None,
                 )
             )
             await session.initialize()
