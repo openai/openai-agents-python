@@ -7,6 +7,7 @@ from .model import (
     STTModelSettings,
     TTSModel,
     TTSModelSettings,
+    TTSVoice,
     VoiceModelProvider,
 )
 from .models.openai_model_provider import OpenAIVoiceModelProvider
