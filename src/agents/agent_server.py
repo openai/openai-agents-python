@@ -210,18 +210,22 @@ async def agent_endpoint(req: Request):
             webhook = STRUCTURED_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,
-                "output_type": parsed_output.get("output_type"),
-                "output_details": parsed_output.get("details"),
-                "contains_image": parsed_output.get("contains_image", False),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": agent_type,
-                "message": result.final_output,
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
 
@@ -265,18 +269,22 @@ async def agent_endpoint(req: Request):
             webhook = STRUCTURED_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": sess or "manager",
-                "output_type": parsed_output.get("output_type"),
-                "output_details": parsed_output.get("details"),
-                "contains_image": parsed_output.get("contains_image", False),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
-                "agent_type": sess or "manager",
-                "message": result.final_output,
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
 
