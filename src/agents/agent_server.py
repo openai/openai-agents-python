@@ -155,19 +155,18 @@ async def agent_endpoint(req: Request):
     if action == "new_task":
         user_input = data["user_prompt"]
         mgr_result = await Runner.run(manager_agent, input=user_input)
-    
         try:
             parsed_mgr = json.loads(mgr_result.final_output)
+
+            # ✅ Case 1: Manager routes to downstream agent
             if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
-                # Manager successfully routed to downstream agent
                 agent_type = parsed_mgr["route_to"]
                 agent = AGENT_MAP.get(agent_type)
                 if not agent:
                     raise HTTPException(400, f"Unknown agent: {agent_type}")
-    
+
                 result = await Runner.run(agent, input=user_input)
 
-                # Determine if agent output is structured or needs clarification
                 try:
                     parsed_output = json.loads(result.final_output)
                     is_structured = "output_type" in parsed_output
@@ -195,7 +194,7 @@ async def agent_endpoint(req: Request):
                         "user_id": data.get("user_id"),
                         "agent_type": agent_type,
                         "message_raw": json.dumps(parsed_output),
-                        "metadata_raw": json.dumps({ "reason": "Structured agent response" }),
+                        "metadata_raw": json.dumps({ "reason": "Structured agent output" }),
                         "created_at": datetime.utcnow().isoformat()
                     }
                 else:
@@ -212,17 +211,58 @@ async def agent_endpoint(req: Request):
                         "created_at": datetime.utcnow().isoformat()
                     }
 
-                async with httpx.AsyncClient() as client:
-                    print("=== Webhook Dispatch ===")
-                    print(f"Webhook URL: {webhook}")
-                    print("Payload being sent:")
-                    print(json.dumps(payload, indent=2))
-                    response = await client.post(webhook, json=payload)
-                    print(f"Response Status: {response.status_code}")
-                    print(f"Response Body: {response.text}")
-                    print("========================")
-                return {"ok": True}
+            # ✅ Case 2: Manager is unclear and returns a clarification question (not a route_to)
+            else:
+                webhook = CLARIFICATION_WEBHOOK_URL
+                payload = {
+                    "task_id": data.get("task_id"),
+                    "user_id": data.get("user_id"),
+                    "agent_type": "manager",
+                    "message_raw": json.dumps({
+                        "type": "clarification",
+                        "content": mgr_result.final_output.strip()
+                    }),
+                    "metadata_raw": json.dumps({ "reason": "Manager requested clarification" }),
+                    "created_at": datetime.utcnow().isoformat()
+                }
 
+        except Exception:
+            # Fallback for malformed manager output
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": "manager",
+                "message_raw": json.dumps({
+                    "type": "clarification",
+                    "content": mgr_result.final_output.strip()
+                }),
+                "metadata_raw": json.dumps({ "reason": "Manager output parsing error" }),
+                "created_at": datetime.utcnow().isoformat()
+            }
+
+        async with httpx.AsyncClient() as client:
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))
+            response = await client.post(webhook, json=payload)
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================")
+        return {"ok": True"}
+
+    
+        try:
+            parsed_mgr = json.loads(mgr_result.final_output)
+            if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
+                # Manager successfully routed to downstream agent
+                agent_type = parsed_mgr["route_to"]
+                agent = AGENT_MAP.get(agent_type)
+                if not agent:
+                    raise HTTPException(400, f"Unknown agent: {agent_type}")
+    
+                result = await Runner.run(agent, input=user_input)
                 parsed_output = None
                 is_structured = False
                 try:
