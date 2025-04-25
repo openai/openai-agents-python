@@ -181,7 +181,9 @@ async def agent_endpoint(req: Request):
                 "created_at": datetime.utcnow().isoformat()
             }
             async with httpx.AsyncClient() as client:
-                await client.post(webhook, json=payload)
+                response = await client.post(webhook, json=payload)
+            print(f"[Webhook Response] Status: {response.status_code}")
+            print(f"[Webhook Response] Body: {response.text}")
             return {"ok": True}
 
         try:
@@ -225,7 +227,9 @@ async def agent_endpoint(req: Request):
 
         async with httpx.AsyncClient() as client:
             print(f"Selected webhook: {webhook}")
-            await client.post(webhook, json=payload)
+            response = await client.post(webhook, json=payload)
+            print(f"[Webhook Response] Status: {response.status_code}")
+            print(f"[Webhook Response] Body: {response.text}")
         return {"ok": True}
 
     elif action == "new_message":
@@ -278,7 +282,9 @@ async def agent_endpoint(req: Request):
 
         async with httpx.AsyncClient() as client:
             print(f"Selected webhook: {webhook}")
-            await client.post(webhook, json=payload)
+            response = await client.post(webhook, json=payload)
+            print(f"[Webhook Response] Status: {response.status_code}")
+            print(f"[Webhook Response] Body: {response.text}")
         return {"ok": True}
 
     else:
