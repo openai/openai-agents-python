@@ -250,7 +250,7 @@ async def agent_endpoint(req: Request):
             print(f"Response Status: {response.status_code}")
             print(f"Response Body: {response.text}")
             print("========================")
-        return {"ok": True"}
+        return {"ok": True}
 
     
         try:
