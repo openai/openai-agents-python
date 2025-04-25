@@ -318,12 +318,16 @@ async def agent_endpoint(req: Request):
                 "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
-
         async with httpx.AsyncClient() as client:
-            print(f"Selected webhook: {webhook}")
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))
             response = await client.post(webhook, json=payload)
-            print(f"[Webhook Response] Status: {response.status_code}")
-            print(f"[Webhook Response] Body: {response.text}")
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================")
+            
         return {"ok": True}
 
     else:
