@@ -166,6 +166,63 @@ async def agent_endpoint(req: Request):
                     raise HTTPException(400, f"Unknown agent: {agent_type}")
     
                 result = await Runner.run(agent, input=user_input)
+
+                # Determine if agent output is structured or needs clarification
+                try:
+                    parsed_output = json.loads(result.final_output)
+                    is_structured = "output_type" in parsed_output
+                except Exception:
+                    parsed_output = None
+                    is_structured = False
+
+                if getattr(result, "requires_user_input", None):
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message_raw": json.dumps({
+                            "type": "clarification",
+                            "content": result.requires_user_input
+                        }),
+                        "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                elif is_structured:
+                    webhook = STRUCTURED_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message_raw": json.dumps(parsed_output),
+                        "metadata_raw": json.dumps({ "reason": "Structured agent response" }),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                else:
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message_raw": json.dumps({
+                            "type": "text",
+                            "content": result.final_output
+                        }),
+                        "metadata_raw": json.dumps({ "reason": "Agent returned unstructured output" }),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+
+                async with httpx.AsyncClient() as client:
+                    print("=== Webhook Dispatch ===")
+                    print(f"Webhook URL: {webhook}")
+                    print("Payload being sent:")
+                    print(json.dumps(payload, indent=2))
+                    response = await client.post(webhook, json=payload)
+                    print(f"Response Status: {response.status_code}")
+                    print(f"Response Body: {response.text}")
+                    print("========================")
+                return {"ok": True}
+
                 parsed_output = None
                 is_structured = False
                 try:
@@ -195,8 +252,7 @@ async def agent_endpoint(req: Request):
                         "task_id": data.get("task_id"),
                         "user_id": data.get("user_id"),
                         "agent_type": agent_type,
-                        "message_raw": json.dumps(parsed_output),
-                "metadata_raw": json.dumps({ "reason": "Final structured output" }),
+                        "message": parsed_output,
                         "created_at": datetime.utcnow().isoformat()
                     }
                 else:
@@ -286,8 +342,9 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
-                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
@@ -296,8 +353,9 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
-                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
 
@@ -348,8 +406,9 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
-                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
@@ -358,8 +417,9 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
-                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
                 "created_at": datetime.utcnow().isoformat()
             }
         async with httpx.AsyncClient() as client:
