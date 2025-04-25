@@ -180,7 +180,13 @@ async def agent_endpoint(req: Request):
                         "task_id": data.get("task_id"),
                         "user_id": data.get("user_id"),
                         "agent_type": agent_type,
-                        "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                        "message": {
+                            "type": "text",
+                            "content": result.requires_user_input
+                        },
+                        "metadata": {
+                            "reason": "Agent requested clarification"
+                        },
                         "created_at": datetime.utcnow().isoformat()
                     }
                 elif is_structured:
@@ -189,7 +195,8 @@ async def agent_endpoint(req: Request):
                         "task_id": data.get("task_id"),
                         "user_id": data.get("user_id"),
                         "agent_type": agent_type,
-                        "message": parsed_output,
+                        "message_raw": json.dumps(parsed_output),
+                "metadata_raw": json.dumps({ "reason": "Final structured output" }),
                         "created_at": datetime.utcnow().isoformat()
                     }
                 else:
@@ -198,7 +205,13 @@ async def agent_endpoint(req: Request):
                         "task_id": data.get("task_id"),
                         "user_id": data.get("user_id"),
                         "agent_type": agent_type,
-                        "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                        "message": {
+                            "type": "text",
+                            "content": result.final_output
+                        },
+                        "metadata": {
+                            "reason": "Agent returned unstructured output"
+                        },
                         "created_at": datetime.utcnow().isoformat()
                     }
     
@@ -209,7 +222,13 @@ async def agent_endpoint(req: Request):
                     "task_id": data.get("task_id"),
                     "user_id": data.get("user_id"),
                     "agent_type": "manager",
-                    "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                    "message": {
+                        "type": "text",
+                        "content": mgr_result.final_output.strip()
+                    },
+                    "metadata": {
+                        "reason": "Manager requested clarification"
+                    },
                     "created_at": datetime.utcnow().isoformat()
                 }
     
@@ -220,7 +239,13 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": "manager",
-                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "message": {
+                    "type": "text",
+                    "content": mgr_result.final_output.strip()
+                },
+                "metadata": {
+                    "reason": "Manager output parsing error"
+                },
                 "created_at": datetime.utcnow().isoformat()
             }
     
@@ -248,7 +273,11 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "message": {
+                    "type": "text",
+                    "content": result.requires_user_input
+                },
+                "metadata": {"reason": "Agent requested clarification"},
                 "created_at": datetime.utcnow().isoformat()
             }
         elif is_structured:
@@ -257,9 +286,8 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_type": "text",
-                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
-                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
+                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
@@ -268,9 +296,8 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_type": "text",
-                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
-                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
+                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
                 "created_at": datetime.utcnow().isoformat()
             }
 
@@ -308,7 +335,11 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": sess or "manager",
-                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "message": {
+                    "type": "text",
+                    "content": result.requires_user_input
+                },
+                "metadata": {"reason": "Agent requested clarification"},
                 "created_at": datetime.utcnow().isoformat()
             }
         elif is_structured:
@@ -317,9 +348,8 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_type": "text",
-                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
-                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
+                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
                 "created_at": datetime.utcnow().isoformat()
             }
         else:
@@ -328,9 +358,8 @@ async def agent_endpoint(req: Request):
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
                 "agent_type": agent_type,
-                "message_type": "text",
-                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
-                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "message_raw": json.dumps(parsed_output if parsed_output else { "type": "text", "content": result.final_output }),
+                "metadata_raw": json.dumps({ "reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message" }),
                 "created_at": datetime.utcnow().isoformat()
             }
         async with httpx.AsyncClient() as client:
