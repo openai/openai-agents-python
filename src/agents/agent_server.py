@@ -1,173 +1,132 @@
 import os
 import sys
 import json
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 
+# 1) Load environment variables
 load_dotenv()
+
+# 2) Add project src folder so "agents" can import its own util subpackage
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from agents import Agent, Runner
-from .agent_onboarding import router as onboarding_router
-from .agent_profilebuilder import router as profilebuilder_router
+# 3) Core SDK imports
+from agents import Agent, Runner, tool
 
-# Agent Definitions
+# 4) SDK guardrail types (so guardrail imports work)
+from agents.util._types import MaybeAwaitable
+
+# ───────────────────────────────────────────────────────────
+# 5) Agent definitions (Phase 1: keep them here)
+# ───────────────────────────────────────────────────────────
 manager_agent = Agent(
     name="Manager",
     instructions="""
 You are an intelligent router for user requests.
-Your outputs must follow one of these formats:
-
-If routing to another agent:
-{
-  "type": "internal",
-  "route_to": "strategy" // or "content", "repurpose", "feedback"
-}
-
-If asking for clarification:
-{
-  "type": "clarification",
-  "content": "Could you clarify what platform you want to use?"
-}
-
-Respond ONLY in one of the above JSON formats.
+Decide the intent behind the message: strategy, content, repurpose, feedback.
+If you are unsure or need more info, ask a clarifying question instead of routing.
+If clarification is needed, respond only with a plain text clarification question.
+Otherwise, respond in strict JSON like:
+{ "route_to": "strategy", "reason": "User wants a campaign plan" }
 """
 )
 
 strategy_agent = Agent(
     name="StrategyAgent",
     instructions="""
-You create detailed, actionable 7-day social media campaign strategies.
-Your outputs must follow one of these formats:
-
-If asking for clarification:
+You create clear, actionable 7-day social media campaign strategies.
+If user input is unclear or missing platform, audience, or tone — ask for clarification.
+Respond in structured JSON like:
 {
-  "type": "clarification",
-  "content": "Could you tell me your campaign tone and target audience?"
-}
-
-If outputting the full strategy:
-{
-  "type": "structured",
   "output_type": "strategy_plan",
   "contains_image": false,
   "details": {
     "days": [
-      { "title": "Day 1", "theme": "Awareness", "cta": "Visit our page" },
-      { "title": "Day 2", "theme": "Engagement", "cta": "Comment your thoughts" },
-      ...
+      { "title": "...", "theme": "...", "cta": "..." }
     ]
   }
 }
-
-Respond ONLY in one of the above JSON formats.
-"""
+Only return JSON in this format.
+""",
+    tools=[]
 )
 
 content_agent = Agent(
     name="ContentAgent",
     instructions="""
-You create brand-aligned social media content drafts.
-Your outputs must follow one of these formats:
-
-If asking for clarification:
+You write engaging, brand-aligned social content.
+If user input lacks platform or goal, ask for clarification.
+Return post drafts in this JSON format:
 {
-  "type": "clarification",
-  "content": "Which platform and tone should the posts match?"
-}
-
-If outputting content variations:
-{
-  "type": "structured",
   "output_type": "content_variants",
   "contains_image": false,
   "details": {
     "variants": [
       {
         "platform": "Instagram",
-        "caption": "Life’s a journey 🚀 #MondayMotivation",
-        "hook": "Feeling stuck?",
-        "cta": "Check out our tips!"
-      },
-      ...
+        "caption": "...",
+        "hook": "...",
+        "cta": "..."
+      }
     ]
   }
 }
-
-Respond ONLY in one of the above JSON formats.
-"""
+Only respond in this format.
+""",
+    tools=[]
 )
 
 repurpose_agent = Agent(
     name="RepurposeAgent",
     instructions="""
-You transform existing social media posts into new formats for different platforms.
-Your outputs must follow one of these formats:
-
-If asking for clarification:
+You convert existing posts into new formats for different platforms.
+Respond using this format:
 {
-  "type": "clarification",
-  "content": "Which platforms would you like to repurpose for?"
-}
-
-If outputting repurposed posts:
-{
-  "type": "structured",
   "output_type": "repurposed_posts",
   "contains_image": false,
   "details": {
-    "original": "Original Instagram caption here...",
+    "original": "...",
     "repurposed": [
       {
-        "platform": "Twitter",
-        "caption": "Short and punchy tweet version!"
-      },
-      ...
+        "platform": "...",
+        "caption": "...",
+        "format": "..."
+      }
     ]
   }
 }
-
-Respond ONLY in one of the above JSON formats.
-"""
+""",
+    tools=[]
 )
 
 feedback_agent = Agent(
     name="FeedbackAgent",
     instructions="""
-You review social media posts and suggest improvements.
-Your outputs must follow one of these formats:
-
-If asking for clarification:
+You evaluate content and offer improvements.
+Respond in this structured format:
 {
-  "type": "clarification",
-  "content": "Could you specify which post style (formal, casual, humorous) you want feedback on?"
-}
-
-If providing feedback:
-{
-  "type": "structured",
   "output_type": "content_feedback",
   "contains_image": false,
   "details": {
-    "original": "Original caption here...",
-    "feedback": "This caption is a bit generic. Consider adding a stronger emotional hook.",
-    "suggested_edit": "Transform your life starting today! 🚀 #Motivation"
+    "original": "...",
+    "feedback": "...",
+    "suggested_edit": "..."
   }
 }
-
-Respond ONLY in one of the above JSON formats.
-"""
+""",
+    tools=[]
 )
 
 AGENT_MAP = {
-    "strategy": strategy_agent,
-    "content": content_agent,
+    "strategy":  strategy_agent,
+    "content":   content_agent,
     "repurpose": repurpose_agent,
-    "feedback": feedback_agent,
+    "feedback":  feedback_agent,
 }
 
 app = FastAPI()
@@ -179,14 +138,92 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from .agent_onboarding import router as onboarding_router
+from .agent_profilebuilder import router as profilebuilder_router
 app.include_router(onboarding_router)
 app.include_router(profilebuilder_router)
 
-STRUCTURED_WEBHOOK_URL = os.getenv("BUBBLE_STRUCTURED_URL")
+STRUCTURED_WEBHOOK_URL    = os.getenv("BUBBLE_STRUCTURED_URL")
 CLARIFICATION_WEBHOOK_URL = os.getenv("BUBBLE_CHAT_URL")
 
-def log_and_send(webhook, payload):
-    async def _send():
+@app.post("/agent")
+async def agent_endpoint(req: Request):
+    data = await req.json()
+    action = data.get("action")
+
+    # PATCHED SECTION: new_task action handling
+    if action == "new_task":
+        user_input = data["user_prompt"]
+        mgr_result = await Runner.run(manager_agent, input=user_input)
+    
+        try:
+            parsed_mgr = json.loads(mgr_result.final_output)
+            if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
+                # Manager successfully routed to downstream agent
+                agent_type = parsed_mgr["route_to"]
+                agent = AGENT_MAP.get(agent_type)
+                if not agent:
+                    raise HTTPException(400, f"Unknown agent: {agent_type}")
+    
+                result = await Runner.run(agent, input=user_input)
+                parsed_output = None
+                is_structured = False
+                try:
+                    parsed_output = json.loads(result.final_output)
+                    is_structured = "output_type" in parsed_output
+                except Exception:
+                    pass
+    
+                if getattr(result, "requires_user_input", None):
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                elif is_structured:
+                    webhook = STRUCTURED_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message": parsed_output,
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                else:
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+    
+            else:
+                # Manager requested clarification directly
+                webhook = CLARIFICATION_WEBHOOK_URL
+                payload = {
+                    "task_id": data.get("task_id"),
+                    "user_id": data.get("user_id"),
+                    "agent_type": "manager",
+                    "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                    "created_at": datetime.utcnow().isoformat()
+                }
+    
+        except Exception:
+            # Manager returned malformed or unclear output
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": "manager",
+                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "created_at": datetime.utcnow().isoformat()
+            }
+    
         async with httpx.AsyncClient() as client:
             print("=== Webhook Dispatch ===")
             print(f"Webhook URL: {webhook}")
@@ -196,123 +233,117 @@ def log_and_send(webhook, payload):
             print(f"Response Status: {response.status_code}")
             print(f"Response Body: {response.text}")
             print("========================")
-    return _send()
-
-@app.post("/agent")
-async def agent_endpoint(req: Request):
-    data = await req.json()
-    action = data.get("action")
-    task_id = data.get("task_id")
-    user_id = data.get("user_id")
-
-    if action == "new_task":
-        user_input = data["user_prompt"]
-        manager_result = await Runner.run(manager_agent, input=user_input)
+        return {"ok": True}
 
         try:
-            parsed_mgr = json.loads(manager_result.final_output)
-            output_type = parsed_mgr.get("type")
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            parsed_output = None
+            is_structured = False
 
-            if output_type == "internal":
-                agent_type = parsed_mgr.get("route_to")
-                agent = AGENT_MAP.get(agent_type)
-                if not agent:
-                    raise HTTPException(400, f"Unknown agent type: {agent_type}")
+        if getattr(result, "requires_user_input", None):
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "created_at": datetime.utcnow().isoformat()
+            }
+        else:
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "created_at": datetime.utcnow().isoformat()
+            }
 
-                agent_result = await Runner.run(agent, input=user_input)
-                parsed_agent = json.loads(agent_result.final_output)
-
-                if parsed_agent.get("type") == "clarification":
-                    payload = {
-                        "task_id": task_id,
-                        "user_id": user_id,
-                        "agent_type": agent_type,
-                        "message": {
-                            "type": "text",
-                            "content": parsed_agent["content"]
-                        },
-                        "metadata": {"reason": "Agent requested clarification"},
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                    return await log_and_send(CLARIFICATION_WEBHOOK_URL, payload)
-
-                elif parsed_agent.get("type") == "structured":
-                    payload = {
-                        "task_id": task_id,
-                        "user_id": user_id,
-                        "agent_type": agent_type,
-                        "message": parsed_agent,
-                        "created_at": datetime.utcnow().isoformat()
-                    }
-                    return await log_and_send(STRUCTURED_WEBHOOK_URL, payload)
-
-                else:
-                    raise HTTPException(500, "Unexpected downstream agent output type.")
-
-            elif output_type == "clarification":
-                payload = {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "agent_type": "manager",
-                    "message": {
-                        "type": "text",
-                        "content": parsed_mgr["content"]
-                    },
-                    "metadata": {"reason": "Manager requested clarification"},
-                    "created_at": datetime.utcnow().isoformat()
-                }
-                return await log_and_send(CLARIFICATION_WEBHOOK_URL, payload)
-
-            else:
-                raise HTTPException(500, "Unexpected manager output type.")
-
-        except Exception as e:
-            raise HTTPException(500, f"Failed to parse manager output: {str(e)}")
+        async with httpx.AsyncClient() as client:
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))
+            response = await client.post(webhook, json=payload)
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================")
+        return {"ok": True}
 
     elif action == "new_message":
         user_msg = data.get("message") or data.get("user_prompt")
-        if not user_msg:
+        if user_msg is None:
             raise HTTPException(422, "Missing 'message' or 'user_prompt'")
-
+    
         sess = data.get("agent_session_id")
         agent_type = sess if sess in AGENT_MAP else "manager"
         agent = AGENT_MAP.get(agent_type, manager_agent)
-
         result = await Runner.run(agent, input=user_msg)
 
         try:
-            parsed = json.loads(result.final_output)
-            output_type = parsed.get("type")
+            parsed_output = json.loads(result.final_output)
+            is_structured = "output_type" in parsed_output
+        except Exception:
+            parsed_output = None
+            is_structured = False
 
-            if output_type == "clarification":
-                payload = {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "agent_type": agent_type,
-                    "message": {
-                        "type": "text",
-                        "content": parsed["content"]
-                    },
-                    "metadata": {"reason": "Agent requested clarification"},
-                    "created_at": datetime.utcnow().isoformat()
-                }
-                return await log_and_send(CLARIFICATION_WEBHOOK_URL, payload)
-
-            elif output_type == "structured":
-                payload = {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "agent_type": agent_type,
-                    "message": parsed,
-                    "created_at": datetime.utcnow().isoformat()
-                }
-                return await log_and_send(STRUCTURED_WEBHOOK_URL, payload)
-
-            else:
-                raise HTTPException(500, "Unexpected agent output type.")
-
-        except Exception as e:
-            raise HTTPException(500, f"Failed to parse agent output: {str(e)}")
+        if getattr(result, "requires_user_input", None):
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": sess or "manager",
+                "message_raw": json.dumps(parsed), "metadata_raw": json.dumps({ "reason": "Agent requested clarification" }),
+                "created_at": datetime.utcnow().isoformat()
+            }
+        elif is_structured:
+            webhook = STRUCTURED_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "created_at": datetime.utcnow().isoformat()
+            }
+        else:
+            webhook = CLARIFICATION_WEBHOOK_URL
+            payload = {
+                "task_id": data.get("task_id"),
+                "user_id": data.get("user_id"),
+                "agent_type": agent_type,
+                "message_type": "text",
+                "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
+                "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
+                "created_at": datetime.utcnow().isoformat()
+            }
+        async with httpx.AsyncClient() as client:
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))
+            response = await client.post(webhook, json=payload)
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================")
+            
+        return {"ok": True}
 
     else:
         raise HTTPException(400, "Unknown action")
