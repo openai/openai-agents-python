@@ -272,7 +272,7 @@ async def agent_endpoint(req: Request):
             raise HTTPException(422, "Missing 'message' or 'user_prompt'")
     
         sess = data.get("agent_session_id")
-        agent_type = sess or "manager"
+        agent_type = sess if sess in AGENT_MAP else "manager"
         agent = AGENT_MAP.get(agent_type, manager_agent)
         result = await Runner.run(agent, input=user_msg)
 
