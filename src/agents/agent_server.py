@@ -230,10 +230,14 @@ async def agent_endpoint(req: Request):
             }
 
         async with httpx.AsyncClient() as client:
-            print(f"Selected webhook: {webhook}")
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))  # Pretty-print payload
             response = await client.post(webhook, json=payload)
-            print(f"[Webhook Response] Status: {response.status_code}")
-            print(f"[Webhook Response] Body: {response.text}")
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================\n")
         return {"ok": True}
 
     elif action == "new_message":
@@ -289,10 +293,14 @@ async def agent_endpoint(req: Request):
             }
 
         async with httpx.AsyncClient() as client:
-            print(f"Selected webhook: {webhook}")
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))  # Pretty-print payload
             response = await client.post(webhook, json=payload)
-            print(f"[Webhook Response] Status: {response.status_code}")
-            print(f"[Webhook Response] Body: {response.text}")
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================\n")
         return {"ok": True}
 
     else:
