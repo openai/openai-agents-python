@@ -151,44 +151,88 @@ async def agent_endpoint(req: Request):
     data = await req.json()
     action = data.get("action")
 
+    # PATCHED SECTION: new_task action handling
     if action == "new_task":
         user_input = data["user_prompt"]
         mgr_result = await Runner.run(manager_agent, input=user_input)
-
+    
         try:
             parsed_mgr = json.loads(mgr_result.final_output)
-            # If manager returns a clarification message (plain text), skip routing
             if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
+                # Manager successfully routed to downstream agent
                 agent_type = parsed_mgr["route_to"]
                 agent = AGENT_MAP.get(agent_type)
                 if not agent:
                     raise HTTPException(400, f"Unknown agent: {agent_type}")
+    
                 result = await Runner.run(agent, input=user_input)
-                result.agent_type = agent_type
+                parsed_output = None
+                is_structured = False
+                try:
+                    parsed_output = json.loads(result.final_output)
+                    is_structured = "output_type" in parsed_output
+                except Exception:
+                    pass
+    
+                if getattr(result, "requires_user_input", None):
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message": {
+                            "type": "text",
+                            "content": result.requires_user_input
+                        },
+                        "metadata": {
+                            "reason": "Agent requested clarification"
+                        },
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                elif is_structured:
+                    webhook = STRUCTURED_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message": parsed_output,
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+                else:
+                    webhook = CLARIFICATION_WEBHOOK_URL
+                    payload = {
+                        "task_id": data.get("task_id"),
+                        "user_id": data.get("user_id"),
+                        "agent_type": agent_type,
+                        "message": {
+                            "type": "text",
+                            "content": result.final_output
+                        },
+                        "metadata": {
+                            "reason": "Agent returned unstructured output"
+                        },
+                        "created_at": datetime.utcnow().isoformat()
+                    }
+    
             else:
-                # Treat entire final_output as clarification string
+                # Manager requested clarification directly
                 webhook = CLARIFICATION_WEBHOOK_URL
                 payload = {
                     "task_id": data.get("task_id"),
                     "user_id": data.get("user_id"),
                     "agent_type": "manager",
-                    "message_type": "text",
-                    "message_content": mgr_result.final_output.strip(),
-                    "metadata_reason": "Manager requested clarification",
+                    "message": {
+                        "type": "text",
+                        "content": mgr_result.final_output.strip()
+                    },
+                    "metadata": {
+                        "reason": "Manager requested clarification"
+                    },
                     "created_at": datetime.utcnow().isoformat()
                 }
-                async with httpx.AsyncClient() as client:
-                    print("=== Webhook Dispatch ===")
-                    print(f"Webhook URL: {webhook}")
-                    print("Payload being sent:")
-                    print(json.dumps(payload, indent=2))
-                    response = await client.post(webhook, json=payload)
-                    print(f"Response Status: {response.status_code}")
-                    print(f"Response Body: {response.text}")
-                    print("========================")
-                return {"ok": True}
+    
         except Exception:
-            # Manager returned clarification as plain string
+            # Manager returned malformed or unclear output
             webhook = CLARIFICATION_WEBHOOK_URL
             payload = {
                 "task_id": data.get("task_id"),
@@ -198,19 +242,22 @@ async def agent_endpoint(req: Request):
                     "type": "text",
                     "content": mgr_result.final_output.strip()
                 },
-                "metadata": {"reason": "Manager requested clarification"},
+                "metadata": {
+                    "reason": "Manager output parsing error"
+                },
                 "created_at": datetime.utcnow().isoformat()
             }
-            async with httpx.AsyncClient() as client:
-                print("=== Webhook Dispatch ===")
-                print(f"Webhook URL: {webhook}")
-                print("Payload being sent:")
-                print(json.dumps(payload, indent=2))
-                response = await client.post(webhook, json=payload)
-                print(f"Response Status: {response.status_code}")
-                print(f"Response Body: {response.text}")
-                print("========================")
-            return {"ok": True}
+    
+        async with httpx.AsyncClient() as client:
+            print("=== Webhook Dispatch ===")
+            print(f"Webhook URL: {webhook}")
+            print("Payload being sent:")
+            print(json.dumps(payload, indent=2))
+            response = await client.post(webhook, json=payload)
+            print(f"Response Status: {response.status_code}")
+            print(f"Response Body: {response.text}")
+            print("========================")
+        return {"ok": True}
 
         try:
             parsed_output = json.loads(result.final_output)
