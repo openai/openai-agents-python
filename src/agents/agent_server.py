@@ -185,8 +185,7 @@ async def agent_endpoint(req: Request):
                     response = await client.post(webhook, json=payload)
                     print(f"Response Status: {response.status_code}")
                     print(f"Response Body: {response.text}")
-                    print("========================
-")
+                    print("========================")
                 return {"ok": True}
         except Exception:
             # Manager returned clarification as plain string
