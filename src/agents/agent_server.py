@@ -157,7 +157,8 @@ async def agent_endpoint(req: Request):
 
         try:
             parsed_mgr = json.loads(mgr_result.final_output)
-            if "route_to" in parsed_mgr:
+            # If manager returns a clarification message (plain text), skip routing
+            if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
                 agent_type = parsed_mgr["route_to"]
                 agent = AGENT_MAP.get(agent_type)
                 if not agent:
@@ -165,7 +166,28 @@ async def agent_endpoint(req: Request):
                 result = await Runner.run(agent, input=user_input)
                 result.agent_type = agent_type
             else:
-                raise ValueError("Missing route_to")
+                # Treat entire final_output as clarification string
+                webhook = CLARIFICATION_WEBHOOK_URL
+                payload = {
+                    "task_id": data.get("task_id"),
+                    "user_id": data.get("user_id"),
+                    "agent_type": "manager",
+                    "message_type": "text",
+                    "message_content": mgr_result.final_output.strip(),
+                    "metadata_reason": "Manager requested clarification",
+                    "created_at": datetime.utcnow().isoformat()
+                }
+                async with httpx.AsyncClient() as client:
+                    print("=== Webhook Dispatch ===")
+                    print(f"Webhook URL: {webhook}")
+                    print("Payload being sent:")
+                    print(json.dumps(payload, indent=2))
+                    response = await client.post(webhook, json=payload)
+                    print(f"Response Status: {response.status_code}")
+                    print(f"Response Body: {response.text}")
+                    print("========================
+")
+                return {"ok": True}
         except Exception:
             # Manager returned clarification as plain string
             webhook = CLARIFICATION_WEBHOOK_URL
@@ -211,7 +233,7 @@ async def agent_endpoint(req: Request):
             payload = {
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
-                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "agent_type": agent_type,
                 "message_type": "text",
                 "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
                 "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
@@ -222,7 +244,7 @@ async def agent_endpoint(req: Request):
             payload = {
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
-                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "agent_type": agent_type,
                 "message_type": "text",
                 "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
                 "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
@@ -230,14 +252,10 @@ async def agent_endpoint(req: Request):
             }
 
         async with httpx.AsyncClient() as client:
-            print("=== Webhook Dispatch ===")
-            print(f"Webhook URL: {webhook}")
-            print("Payload being sent:")
-            print(json.dumps(payload, indent=2))  # Pretty-print payload
+            print(f"Selected webhook: {webhook}")
             response = await client.post(webhook, json=payload)
-            print(f"Response Status: {response.status_code}")
-            print(f"Response Body: {response.text}")
-            print("========================\n")
+            print(f"[Webhook Response] Status: {response.status_code}")
+            print(f"[Webhook Response] Body: {response.text}")
         return {"ok": True}
 
     elif action == "new_message":
@@ -246,8 +264,7 @@ async def agent_endpoint(req: Request):
             raise HTTPException(422, "Missing 'message' or 'user_prompt'")
 
         sess = data.get("agent_session_id")
-        agent_type = sess or "manager"
-        agent = AGENT_MAP.get(agent_type, manager_agent)
+        agent = AGENT_MAP.get(sess, manager_agent)
         result = await Runner.run(agent, input=user_msg)
 
         try:
@@ -275,7 +292,7 @@ async def agent_endpoint(req: Request):
             payload = {
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
-                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "agent_type": agent_type,
                 "message_type": "text",
                 "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
                 "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
@@ -286,7 +303,7 @@ async def agent_endpoint(req: Request):
             payload = {
                 "task_id": data.get("task_id"),
                 "user_id": data.get("user_id"),
-                "agent_type": agent_type if action == "new_task" else sess or "manager",
+                "agent_type": agent_type,
                 "message_type": "text",
                 "message_content": result.requires_user_input if getattr(result, "requires_user_input", None) else result.final_output,
                 "metadata_reason": "Agent requested clarification" if getattr(result, "requires_user_input", None) else "Auto-forwarded message",
@@ -294,14 +311,10 @@ async def agent_endpoint(req: Request):
             }
 
         async with httpx.AsyncClient() as client:
-            print("=== Webhook Dispatch ===")
-            print(f"Webhook URL: {webhook}")
-            print("Payload being sent:")
-            print(json.dumps(payload, indent=2))  # Pretty-print payload
+            print(f"Selected webhook: {webhook}")
             response = await client.post(webhook, json=payload)
-            print(f"Response Status: {response.status_code}")
-            print(f"Response Body: {response.text}")
-            print("========================\n")
+            print(f"[Webhook Response] Status: {response.status_code}")
+            print(f"[Webhook Response] Body: {response.text}")
         return {"ok": True}
 
     else:
