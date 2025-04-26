@@ -69,10 +69,50 @@ class RouteCall(BaseModel):
 from agents import Tool  # <- make sure this exists in your SDK version
 
 TOOLS = [
-    Tool(name="route_to_strategy",  description="Send task to StrategyAgent",  parameters=RouteCall.schema()),
-    Tool(name="route_to_content",   description="Send task to ContentAgent",   parameters=RouteCall.schema()),
-    Tool(name="route_to_repurpose", description="Send task to RepurposeAgent", parameters=RouteCall.schema()),
-    Tool(name="route_to_feedback",  description="Send task to FeedbackAgent",  parameters=RouteCall.schema()),
+    {
+        "name": "route_to_strategy",
+        "description": "Send task to StrategyAgent",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"}
+            },
+            "required": ["reason"],
+        },
+    },
+    {
+        "name": "route_to_content",
+        "description": "Send task to ContentAgent",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"}
+            },
+            "required": ["reason"],
+        },
+    },
+    {
+        "name": "route_to_repurpose",
+        "description": "Send task to RepurposeAgent",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"}
+            },
+            "required": ["reason"],
+        },
+    },
+    {
+        "name": "route_to_feedback",
+        "description": "Send task to FeedbackAgent",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string"}
+            },
+            "required": ["reason"],
+        },
+    },
 ]
 
 manager_agent = Agent(
