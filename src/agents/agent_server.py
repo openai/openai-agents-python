@@ -18,6 +18,18 @@ from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # one endpoint is enough
 _now     = lambda: datetime.utcnow().isoformat()
 
+def canon(name: str | None) -> str:
+    """
+    Normalize any agent name:
+    'ContentAgent' → 'content'
+    'strategyagent' → 'strategy'
+    'manager'       → 'manager'
+    """
+    if not name:
+        return ""
+    name = name.lower().replace(" ", "").replace("_", "")
+    return name[:-5] if name.endswith("agent") else name
+
 async def send_webhook(payload: dict):
     async with httpx.AsyncClient() as c:
         print("=== Webhook Dispatch ===\n", json.dumps(payload, indent=2))
@@ -84,7 +96,9 @@ async def run_agent(req: Request):
     # who produced the final_output / clarification?
     speaker     = getattr(result, "agent", None)  # Agent object or None
     agent_name  = speaker.name if speaker else session_key
-    agent_key   = agent_name.lower().replace("agent", "").strip()
+    agent_key   = canon(agent_name)
+    if not agent_key:
+        agent_key = "manager"
         
     # message to Bubble
     if getattr(result, "requires_user_input", None):
@@ -107,8 +121,6 @@ async def run_agent(req: Request):
         trace = result.to_debug_dict()  # new SDK helper
     except Exception:
         trace = []
-    if not agent_key:
-        agent_key = "manager"
 
     payload = build_payload(task_id, user_id,
                             agent_key,
