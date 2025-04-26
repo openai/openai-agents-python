@@ -127,7 +127,7 @@ async def endpoint(req: Request):
     agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP.get(agent_key, manager_agent)
 
     # Run exactly **one** turn (max_turns=1) so we stay in control of webhooks
-    result = await Runner.run(agent_obj, input=user_text, max_turns=1)
+    result = await Runner.run(agent_obj, input=user_text, max_turns=5)  # plenty for manager + 1 downstream
 
     # If Manager handed off, Runner returned the *downstream* result but we need
     # the routing‑decision webhook first. We can check result.turns[0].role.
