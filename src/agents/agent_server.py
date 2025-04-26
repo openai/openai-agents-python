@@ -1,13 +1,4 @@
-# agents/agent_server.py — handoff‑based, dual‑webhook version 2025‑04‑26
-"""
-This file replaces the custom tool‑routing logic with **native SDK handoffs** while
-keeping:
-• Your five specialist agents with the same instructions.
-• Two‑layer webhook scheme (manager routing/clarifications → CHAT_URL; downstream
-  clarifications or structured JSON → CHAT_URL or STRUCT_URL).
-• Exact payload shapes Bubble already consumes.
-• No DB; Bubble still controls state via `agent_session_id`.
-"""
+# agents/agent_server.py — handoff-based, dual-webhook
 
 from __future__ import annotations
 import os, sys, json, httpx, asyncio
@@ -30,7 +21,7 @@ from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 _now = lambda: datetime.utcnow().isoformat()
 
 def clarify(task, user, agent, text, reason):
-    if agent is None:
+    if not agent:
         agent = "manager"
     return {
         "task_id": task, "user_id": user, "agent_type": agent,
@@ -40,7 +31,7 @@ def clarify(task, user, agent, text, reason):
     }
 
 def structured(task, user, agent, obj):
-    if agent is None:
+    if not agent:
         agent = "manager"
     return {
         "task_id": task, "user_id": user, "agent_type": agent,
@@ -57,10 +48,10 @@ CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")
 STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
 
 # ----------------------------------------------------------------------------
-# Specialist agents (instructions unchanged)
+# Specialist agents
 # ----------------------------------------------------------------------------
-strategy_agent  = Agent("StrategyAgent",  instructions="You create 7‑day social media strategies. Respond ONLY in structured JSON.")
-content_agent   = Agent("ContentAgent",   instructions="You write brand‑aligned social posts. Respond ONLY in structured JSON.")
+strategy_agent  = Agent("StrategyAgent",  instructions="You create 7-day social media strategies. Respond ONLY in structured JSON.")
+content_agent   = Agent("ContentAgent",   instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.")
 repurpose_agent = Agent("RepurposeAgent", instructions="You repurpose content across platforms. Respond ONLY in structured JSON.")
 feedback_agent  = Agent("FeedbackAgent",  instructions="You critique content and suggest edits. Respond ONLY in structured JSON.")
 
@@ -87,7 +78,7 @@ manager_agent = Agent(
 )
 
 # ----------------------------------------------------------------------------
-# Dispatcher for any agent result (unchanged logic)
+# Dispatcher for any agent result
 # ----------------------------------------------------------------------------
 async def _dispatch(task_id: str, user_id: str, agent_key: str, result):
     if getattr(result, "requires_user_input", None):
@@ -128,15 +119,15 @@ async def endpoint(req: Request):
 
     # Determine which agent handles this turn
     agent_key = data.get("agent_session_id") if action == "new_message" else "manager"
-    if agent_key is None:
+    if not agent_key or (agent_key not in AGENT_MAP and agent_key != "manager"):
         agent_key = "manager"
-    agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP.get(agent_key, manager_agent)
+    agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP[agent_key]
 
-    # Allow up to 5 turns so Manager + downstream can complete.
+    # Allow up to 10 turns so Manager + downstream can complete.
     result = await Runner.run(agent_obj, input=user_text, max_turns=10)
 
-    # If Manager handed off, Runner returned the *downstream* result but we need
-    # the routing‑decision webhook first. We can check result.turns[0].role.
+    # If Manager handed off, Runner returned the downstream result but we need
+    # the routing-decision webhook first.
     if agent_key == "manager" and result.turns and result.turns[0].role == "assistant" and "handoff" in result.turns[0].content:
         handoff_info = json.loads(result.turns[0].content)  # {'handoff': 'strategy', ...}
         route_to = handoff_info.get("handoff")
