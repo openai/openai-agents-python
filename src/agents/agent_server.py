@@ -138,7 +138,7 @@ async def agent_endpoint(req: Request):
     if action == "new_task":
         # 1. Manager decides what to do
         manager_result = await Runner.run(manager_agent, input=user_input)
-    
+
         # ── parse manager output (tiny try/except) ────────────
         try:
             mgr_json = json.loads(manager_result.final_output)
@@ -150,9 +150,9 @@ async def agent_endpoint(req: Request):
                 manager_result.final_output.strip(),
                 reason="Manager output parsing error"
             )
-        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-        return {"ok": True}
-    
+            await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+            return {"ok": True}
+
         # 2. Send manager-routing webhook (for transparency)
         payload = build_clarification_payload(
             task_id, user_id, "manager",
@@ -160,16 +160,15 @@ async def agent_endpoint(req: Request):
             reason="Manager routing decision"
         )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-    
-        # 3. Run the downstream agent *outside* the first try/except
+
+        # 3. Run the downstream agent
         if not route_to or route_to not in AGENT_MAP:
             # manager needs clarification – nothing more to do
             return {"ok": True}
-    
+
         downstream_type = route_to
         agent = AGENT_MAP[downstream_type]
         result = await Runner.run(agent, input=user_input)
-
 
     elif action == "new_message":
         agent_session = data.get("agent_session_id")
@@ -177,14 +176,14 @@ async def agent_endpoint(req: Request):
         agent = AGENT_MAP.get(downstream_type, manager_agent)
         result = await Runner.run(agent, input=user_input)
 
-    # Common: Dispatch downstream agent output
+    # ── common dispatch (exactly once per request) ──────────
     try:
-    parsed = json.loads(result.final_output)
-    is_structured = "output_type" in parsed
+        parsed = json.loads(result.final_output)
+        is_structured = "output_type" in parsed
     except Exception:
         parsed = None
         is_structured = False
-    
+
     if getattr(result, "requires_user_input", None):
         payload = build_clarification_payload(
             task_id, user_id, downstream_type,
@@ -192,13 +191,13 @@ async def agent_endpoint(req: Request):
             reason="Agent requested clarification"
         )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-    
+
     elif is_structured:
         payload = build_structured_payload(
             task_id, user_id, downstream_type, parsed
         )
         await dispatch_webhook(STRUCTURED_WEBHOOK_URL, payload)
-    
+
     else:
         payload = build_clarification_payload(
             task_id, user_id, downstream_type,
@@ -206,5 +205,5 @@ async def agent_endpoint(req: Request):
             reason="Agent returned unstructured output"
         )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-    
+
     return {"ok": True}
