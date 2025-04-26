@@ -66,53 +66,19 @@ STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
 class RouteCall(BaseModel):
     reason: str
 
-from agents import Tool  # <- make sure this exists in your SDK version
+from agents import Tool  # Tool dataclass from Agents SDK
+
+_JSON_PARAM = {
+    "type": "object",
+    "properties": {"reason": {"type": "string"}},
+    "required": ["reason"],
+}
 
 TOOLS = [
-    {
-        "name": "route_to_strategy",
-        "description": "Send task to StrategyAgent",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"}
-            },
-            "required": ["reason"],
-        },
-    },
-    {
-        "name": "route_to_content",
-        "description": "Send task to ContentAgent",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"}
-            },
-            "required": ["reason"],
-        },
-    },
-    {
-        "name": "route_to_repurpose",
-        "description": "Send task to RepurposeAgent",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"}
-            },
-            "required": ["reason"],
-        },
-    },
-    {
-        "name": "route_to_feedback",
-        "description": "Send task to FeedbackAgent",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string"}
-            },
-            "required": ["reason"],
-        },
-    },
+    Tool(name="route_to_strategy",  description="Send task to StrategyAgent",  parameters=_JSON_PARAM),
+    Tool(name="route_to_content",   description="Send task to ContentAgent",   parameters=_JSON_PARAM),
+    Tool(name="route_to_repurpose", description="Send task to RepurposeAgent", parameters=_JSON_PARAM),
+    Tool(name="route_to_feedback",  description="Send task to FeedbackAgent",  parameters=_JSON_PARAM),
 ]
 
 manager_agent = Agent(
