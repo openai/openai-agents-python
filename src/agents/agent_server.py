@@ -38,11 +38,32 @@ def structured(task, user, agent, obj):
         "message": obj, "created_at": _now(),
     }
 
-async def dispatch(url: str, payload: dict):
-    async with httpx.AsyncClient() as c:
-        print("=== Webhook Dispatch ===\n", json.dumps(payload, indent=2))
-        await c.post(url, json=payload)
-        print("========================")
+async def _dispatch(task_id: str, user_id: str, agent_key: str, result):
+    if getattr(result, "requires_user_input", None):
+        await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
+                                         result.requires_user_input,
+                                         "Agent requested clarification"))
+        return
+
+    # --- NEW robust JSON parse ---------------------------------------------
+    try:
+        clean = result.final_output.strip()
+        if clean.startswith("```"):                        # strip code fences
+            parts = clean.split("```", 2)
+            if len(parts) >= 3:
+                clean = parts[1].strip()
+        parsed = json.loads(clean)
+        if "output_type" in parsed:
+            await dispatch(STRUCT_URL,
+                           structured(task_id, user_id, agent_key, parsed))
+            return
+    except Exception:
+        pass
+    # -----------------------------------------------------------------------
+
+    await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
+                                     result.final_output.strip(),
+                                     "Agent returned unstructured output"))
 
 CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")
 STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
@@ -69,6 +90,9 @@ MANAGER_TXT = (
     "You are an intelligent router for user requests.\n"
     "If you need clarification, ask a question (requires_user_input).\n"
     "Otherwise delegate via a handoff to the correct agent."
+    If you are not asking a question, you MUST emit: {"handoff": "<agent_name>", "reason": "..."} and nothing else.
+    Never output the plan yourself.
+    Never wrap the JSON in code fences.
 )
 
 manager_agent = Agent(
