@@ -66,11 +66,13 @@ STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
 class RouteCall(BaseModel):
     reason: str
 
+from agents import Tool  # <- make sure this exists in your SDK version
+
 TOOLS = [
-    {"name": "route_to_strategy",  "description": "Send task to StrategyAgent",  "parameters": RouteCall.schema()},
-    {"name": "route_to_content",   "description": "Send task to ContentAgent",   "parameters": RouteCall.schema()},
-    {"name": "route_to_repurpose", "description": "Send task to RepurposeAgent", "parameters": RouteCall.schema()},
-    {"name": "route_to_feedback",  "description": "Send task to FeedbackAgent",  "parameters": RouteCall.schema()},
+    Tool(name="route_to_strategy",  description="Send task to StrategyAgent",  parameters=RouteCall.schema()),
+    Tool(name="route_to_content",   description="Send task to ContentAgent",   parameters=RouteCall.schema()),
+    Tool(name="route_to_repurpose", description="Send task to RepurposeAgent", parameters=RouteCall.schema()),
+    Tool(name="route_to_feedback",  description="Send task to FeedbackAgent",  parameters=RouteCall.schema()),
 ]
 
 manager_agent = Agent(
