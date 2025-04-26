@@ -24,11 +24,6 @@ async def send_webhook(payload: dict):
         await c.post(CHAT_URL, json=payload)     # always same URL
         print("========================")
 
-# derive the agent that produced the result (SDK-wide safe)
-speaker     = getattr(result, "agent", None)        # Agent object or None
-agent_name  = speaker.name if speaker else session_key
-agent_key   = agent_name.lower().replace("agent", "").strip()
-
 def build_payload(task_id, user_id, agent_type, message, reason, trace):
     return {
         "task_id":   task_id,
@@ -85,6 +80,11 @@ async def run_agent(req: Request):
 
     # let Runner drive full loop (handoffs + tools) until completion / clarification
     result = await Runner.run(current, input=text_in, max_turns=12)
+    
+    # derive the agent that produced the result (SDK-wide safe)
+	speaker     = getattr(result, "agent", None)        # Agent object or None
+	agent_name  = speaker.name if speaker else session_key
+	agent_key   = agent_name.lower().replace("agent", "").strip()
 
     # message to Bubble
     if getattr(result, "requires_user_input", None):
