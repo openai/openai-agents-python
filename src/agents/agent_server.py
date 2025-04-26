@@ -140,4 +140,4 @@ async def endpoint(req: Request):
 
     res = await Runner.run(agent_obj, input=user_text, max_turns=10)
     await _dispatch(task_id, user_id, agent_key, res)
-    return {"ok": True"}
+    return {"ok": True}
