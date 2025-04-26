@@ -29,6 +29,8 @@ manager_agent = Agent(
     instructions="""
 You are an intelligent router for user requests.
 Decide the intent: strategy, content, repurpose, feedback.
+Never wrap your JSON in ``` fences or any extra text.
+Respond with **only the JSON**.
 If unclear, ask a clarification. Otherwise respond strictly in JSON:
 { "route_to": "strategy", "reason": "..." }
 """
