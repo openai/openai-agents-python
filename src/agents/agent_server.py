@@ -107,6 +107,8 @@ async def run_agent(req: Request):
         trace = result.to_debug_dict()  # new SDK helper
     except Exception:
         trace = []
+    if not agent_key:
+        agent_key = "manager"
 
     payload = build_payload(task_id, user_id,
                             agent_key,
