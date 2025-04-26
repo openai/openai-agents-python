@@ -150,8 +150,8 @@ async def agent_endpoint(req: Request):
                 manager_result.final_output.strip(),
                 reason="Manager output parsing error"
             )
-            await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-            return {"ok": True}
+        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+        return {"ok": True}
     
         # 2. Send manager-routing webhook (for transparency)
         payload = build_clarification_payload(
