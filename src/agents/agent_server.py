@@ -136,34 +136,40 @@ async def agent_endpoint(req: Request):
     user_id = data.get("user_id")
 
     if action == "new_task":
-        # Always first pass through manager
+        # 1. Manager decides what to do
         manager_result = await Runner.run(manager_agent, input=user_input)
-
+    
+        # ── parse manager output (tiny try/except) ────────────
         try:
-            parsed_mgr = json.loads(manager_result.final_output)
-            if isinstance(parsed_mgr, dict) and "route_to" in parsed_mgr:
-                # (1) Send Manager's routing decision as a webhook
-                payload = build_clarification_payload(task_id, user_id, "manager", manager_result.final_output.strip(), reason="Manager routing decision")
-                await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-
-                # (2) Then run the downstream agent
-                downstream_type = parsed_mgr["route_to"]
-                agent = AGENT_MAP.get(downstream_type)
-                if not agent:
-                    raise HTTPException(400, f"Unknown agent type: {downstream_type}")
-
-                result = await Runner.run(agent, input=user_input)
-
-            else:
-                # Manager needs clarification directly
-                payload = build_clarification_payload(task_id, user_id, "manager", manager_result.final_output.strip(), reason="Manager requested clarification")
-                await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-                return {"ok": True}
-
+            mgr_json = json.loads(manager_result.final_output)
+            route_to = mgr_json.get("route_to")
         except Exception:
-            payload = build_clarification_payload(task_id, user_id, "manager", manager_result.final_output.strip(), reason="Manager output parsing error")
+            # malformed manager output → ask for clarification and return
+            payload = build_clarification_payload(
+                task_id, user_id, "manager",
+                manager_result.final_output.strip(),
+                reason="Manager output parsing error"
+            )
             await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
             return {"ok": True}
+    
+        # 2. Send manager-routing webhook (for transparency)
+        payload = build_clarification_payload(
+            task_id, user_id, "manager",
+            manager_result.final_output.strip(),
+            reason="Manager routing decision"
+        )
+        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+    
+        # 3. Run the downstream agent *outside* the first try/except
+        if not route_to or route_to not in AGENT_MAP:
+            # manager needs clarification – nothing more to do
+            return {"ok": True}
+    
+        downstream_type = route_to
+        agent = AGENT_MAP[downstream_type]
+        result = await Runner.run(agent, input=user_input)
+
 
     elif action == "new_message":
         agent_session = data.get("agent_session_id")
@@ -173,20 +179,32 @@ async def agent_endpoint(req: Request):
 
     # Common: Dispatch downstream agent output
     try:
-        parsed = json.loads(result.final_output)
-        is_structured = "output_type" in parsed
+    parsed = json.loads(result.final_output)
+    is_structured = "output_type" in parsed
     except Exception:
         parsed = None
         is_structured = False
-
+    
     if getattr(result, "requires_user_input", None):
-        payload = build_clarification_payload(task_id, user_id, downstream_type, result.requires_user_input)
+        payload = build_clarification_payload(
+            task_id, user_id, downstream_type,
+            result.requires_user_input,
+            reason="Agent requested clarification"
+        )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+    
     elif is_structured:
-        payload = build_structured_payload(task_id, user_id, downstream_type, parsed)
+        payload = build_structured_payload(
+            task_id, user_id, downstream_type, parsed
+        )
         await dispatch_webhook(STRUCTURED_WEBHOOK_URL, payload)
+    
     else:
-        payload = build_clarification_payload(task_id, user_id, downstream_type, result.final_output.strip(), reason="Agent returned unstructured output")
+        payload = build_clarification_payload(
+            task_id, user_id, downstream_type,
+            result.final_output.strip(),
+            reason="Agent returned unstructured output"
+        )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-
+    
     return {"ok": True}
