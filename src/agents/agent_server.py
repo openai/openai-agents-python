@@ -259,7 +259,7 @@ async def agent_endpoint(req: Request):
             print("========================")
         return {"ok": True}
 
-elif action == "new_message":
+    if action == "new_message":
         user_msg = data.get("message") or data.get("user_prompt")
         if user_msg is None:
             raise HTTPException(422, "Missing 'message' or 'user_prompt'")
