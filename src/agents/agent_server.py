@@ -109,31 +109,41 @@ async def endpoint(req: Request):
     if action == "new_task":
         mgr_res = await Runner.run(manager_agent, input=user_text, max_turns=1)
 
+        # a) manager asks clarification
         if getattr(mgr_res, "requires_user_input", None):
             await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
-                                             mgr_res.requires_user_input, "Manager requested clarification"))
+                                             mgr_res.requires_user_input,
+                                             "Manager requested clarification"))
             return {"ok": True}
 
+        # b) manager hand-off
         try:
             handoff_info = json.loads(mgr_res.final_output)
             route_to = handoff_info.get("handoff")
         except Exception:
             route_to = None
 
+        # **normalize key**  ("ContentAgent" → "content")
+        if route_to:
+            route_to = route_to.lower().removesuffix("agent")
+
         if route_to in AGENT_MAP:
+            # routing decision webhook
             await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
                                              json.dumps({"route_to": route_to,
                                                          "reason": handoff_info.get("reason", "")}),
                                              "Manager routing decision"))
+            # downstream run + webhook
             ds_res = await Runner.run(AGENT_MAP[route_to], input=user_text, max_turns=10)
             await _dispatch(task_id, user_id, route_to, ds_res)
             return {"ok": True}
 
+        # c) manager returned plain text
         await _dispatch(task_id, user_id, "manager", mgr_res)
         return {"ok": True}
 
     # NEW MESSAGE -----------------------------------------------------------
-    agent_key = data.get("agent_session_id") or "manager"
+    agent_key = (data.get("agent_session_id") or "manager").lower().removesuffix("agent")
     if agent_key not in AGENT_MAP and agent_key != "manager":
         agent_key = "manager"
     agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP[agent_key]
