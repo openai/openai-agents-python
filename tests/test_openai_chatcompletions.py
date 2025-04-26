@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -30,6 +31,7 @@ from agents import (
     OpenAIProvider,
     generation_span,
 )
+from agents.exceptions import ProviderError
 from agents.models.chatcmpl_helpers import ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
@@ -330,3 +332,41 @@ def test_store_param():
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+@pytest.mark.asyncio
+async def test_get_response_raises_provider_error_if_no_choices(monkeypatch):
+    # Import the class under test _inside_ the function so
+    # pytest’s conftest autouse fixtures don’t stomp it out.
+    import agents.models.openai_chatcompletions as chatmod
+
+    chatmod = importlib.reload(chatmod)
+
+    ModelClass = chatmod.OpenAIChatCompletionsModel
+
+    dummy_client = AsyncOpenAI(api_key="fake", base_url="http://localhost")
+    model = ModelClass(model="test-model", openai_client=dummy_client)
+
+    class FakeResponse:
+        choices = []
+        error = "service unavailable"
+
+    async def fake_fetch_response(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(ModelClass, "_fetch_response", fake_fetch_response)
+
+    settings = ModelSettings(temperature=0.0, max_tokens=1)
+    with pytest.raises(ProviderError) as exc:
+        await model.get_response(
+            system_instructions="",
+            input="Hello?",
+            model_settings=settings,
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+        )
+
+    assert "service unavailable" in str(exc.value)

@@ -61,3 +61,7 @@ class OutputGuardrailTripwireTriggered(AgentsException):
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
         )
+
+
+class ProviderError(AgentsException):
+    """Exception raised when the provider fails."""
