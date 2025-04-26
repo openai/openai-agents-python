@@ -122,11 +122,56 @@ async def dispatch_webhook(url, payload):
 # Main Endpoint
 # ───────────────────────────────────────────────────────────
 
+def _clean_json(text: str) -> str:
+    """Strip ``` fences / leading text so json.loads can succeed."""
+    text = text.strip()
+    if text.startswith("```"):
+        # take the first fenced block
+        parts = text.split("```")
+        if len(parts) >= 3:
+            text = parts[1]
+    # remove hints like ```json
+    if text.startswith("json"):
+        text = text[4:].strip()
+    return text.strip()
+
+async def _send_result(task_id, user_id, agent_type, result):
+    """Dispatch result from any agent."""
+    # 1. agent asks clarification
+    if getattr(result, "requires_user_input", None):
+        payload = build_clarification_payload(
+            task_id, user_id, agent_type,
+            result.requires_user_input,
+            reason="Agent requested clarification"
+        )
+        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+        return
+
+    # 2. try to parse structured output
+    try:
+        parsed = json.loads(result.final_output)
+        if "output_type" in parsed:
+            payload = build_structured_payload(
+                task_id, user_id, agent_type, parsed
+            )
+            await dispatch_webhook(STRUCTURED_WEBHOOK_URL, payload)
+            return
+    except Exception:
+        parsed = None     # fallthrough to unstructured
+
+    # 3. unstructured → clarification webhook
+    payload = build_clarification_payload(
+        task_id, user_id, agent_type,
+        result.final_output.strip(),
+        reason="Agent returned unstructured output"
+    )
+    await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+
 @app.post("/agent")
 async def agent_endpoint(req: Request):
     data = await req.json()
-    action = data.get("action")
 
+    action = data.get("action")
     if action not in ("new_task", "new_message"):
         raise HTTPException(400, "Unknown action")
 
@@ -137,75 +182,43 @@ async def agent_endpoint(req: Request):
     task_id = data.get("task_id")
     user_id = data.get("user_id")
 
+    # ──  NEW TASK  ──────────────────────────────────────────
     if action == "new_task":
-        # 1. Manager decides what to do
         manager_result = await Runner.run(manager_agent, input=user_input)
 
-        # ── parse manager output (tiny try/except) ────────────
+        raw = manager_result.final_output
+        print("Manager raw output:", raw)           # <-- keep while debugging
         try:
-            mgr_json = json.loads(manager_result.final_output)
+            mgr_json = json.loads(_clean_json(raw))
             route_to = mgr_json.get("route_to")
-        except Exception:
-            # malformed manager output → ask for clarification and return
-            payload = build_clarification_payload(
-                task_id, user_id, "manager",
-                manager_result.final_output.strip(),
-                reason="Manager output parsing error"
-            )
-            await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+        except Exception as e:
+            print("Manager parse error:", e)
+            await _send_result(task_id, user_id, "manager", manager_result)
             return {"ok": True}
 
-        # 2. Send manager-routing webhook (for transparency)
+        # (1) always send manager routing decision
         payload = build_clarification_payload(
             task_id, user_id, "manager",
-            manager_result.final_output.strip(),
+            json.dumps(mgr_json),                   # send clean JSON back
             reason="Manager routing decision"
         )
         await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
 
-        # 3. Run the downstream agent
-        if not route_to or route_to not in AGENT_MAP:
-            # manager needs clarification – nothing more to do
+        # (2) no valid route → we're done
+        if route_to not in AGENT_MAP:
             return {"ok": True}
 
+        # (3) run downstream agent and dispatch its result
         downstream_type = route_to
         agent = AGENT_MAP[downstream_type]
         result = await Runner.run(agent, input=user_input)
+        await _send_result(task_id, user_id, downstream_type, result)
+        return {"ok": True}
 
-    elif action == "new_message":
-        agent_session = data.get("agent_session_id")
-        downstream_type = agent_session if agent_session in AGENT_MAP else "manager"
-        agent = AGENT_MAP.get(downstream_type, manager_agent)
-        result = await Runner.run(agent, input=user_input)
-
-    # ── common dispatch (exactly once per request) ──────────
-    try:
-        parsed = json.loads(result.final_output)
-        is_structured = "output_type" in parsed
-    except Exception:
-        parsed = None
-        is_structured = False
-
-    if getattr(result, "requires_user_input", None):
-        payload = build_clarification_payload(
-            task_id, user_id, downstream_type,
-            result.requires_user_input,
-            reason="Agent requested clarification"
-        )
-        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-
-    elif is_structured:
-        payload = build_structured_payload(
-            task_id, user_id, downstream_type, parsed
-        )
-        await dispatch_webhook(STRUCTURED_WEBHOOK_URL, payload)
-
-    else:
-        payload = build_clarification_payload(
-            task_id, user_id, downstream_type,
-            result.final_output.strip(),
-            reason="Agent returned unstructured output"
-        )
-        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
-
-    return {"ok": True}
+    # ──  NEW MESSAGE  ───────────────────────────────────────
+    agent_session = data.get("agent_session_id")
+    downstream_type = agent_session if agent_session in AGENT_MAP else "manager"
+    agent = AGENT_MAP.get(downstream_type, manager_agent)
+    result = await Runner.run(agent, input=user_input)
+    await _send_result(task_id, user_id, downstream_type, result)
+    return {"ok": True"}
