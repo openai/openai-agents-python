@@ -1,64 +1,92 @@
-# agents/agent_server.py
+# agents/agent_server.py — tool‑call router version
+"""
+This revision keeps your existing webhook payloads & downstream agent instructions, but replaces the fragile
+JSON‑string parsing with **OpenAI Agents SDK tool calls**. The manager literally calls
+`route_to_strategy`, `route_to_content`, etc., so the routing decision is always structured.
 
-import os
-import sys
-import json
+Prerequisites
+-------------
+* **openai‑python ≥ 1.14** (or any release that exposes `.tool_calls`).
+  Make sure `requirements.txt` (or `pyproject.toml`) pins `openai>=1.14.0`.
+* No database changes; Bubble still sends back `agent_session_id` exactly like before.
+"""
+
+from __future__ import annotations
+import os, sys, json
 from datetime import datetime
-import asyncio
-
+from typing import Any
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
+from pydantic import BaseModel
 
-# Load environment variables
+# --- Agent SDK imports --------------------------------------------------------
 load_dotenv()
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from agents import Agent, Runner
-from agents.util._types import MaybeAwaitable
-from .agent_onboarding import router as onboarding_router
-from .agent_profilebuilder import router as profilebuilder_router
 
-# ───────────────────────────────────────────────────────────
-# Agents
-# ───────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# 1. Helper payload builders (unchanged)
+# -----------------------------------------------------------------------------
+
+def _now() -> str: return datetime.utcnow().isoformat()
+
+def build_clarification_payload(task_id: str, user_id: str, agent_type: str, message_text: str, reason: str):
+    return {
+        "task_id": task_id,
+        "user_id": user_id,
+        "agent_type": agent_type,
+        "message": {"type": "text", "content": message_text},
+        "metadata": {"reason": reason},
+        "created_at": _now(),
+    }
+
+def build_structured_payload(task_id: str, user_id: str, agent_type: str, obj: dict[str, Any]):
+    return {
+        "task_id": task_id,
+        "user_id": user_id,
+        "agent_type": agent_type,
+        "message": obj,
+        "created_at": _now(),
+    }
+
+async def dispatch_webhook(url: str, payload: dict):
+    async with httpx.AsyncClient() as client:
+        print("=== Webhook Dispatch ===\n" + json.dumps(payload, indent=2))
+        await client.post(url, json=payload)
+        print("========================")
+
+CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # clarification webhooks
+STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
+
+# -----------------------------------------------------------------------------
+# 2. Agent definitions (instructions untouched)
+# -----------------------------------------------------------------------------
+class RouteCall(BaseModel):
+    reason: str
+
+TOOLS = [
+    {"name": "route_to_strategy",  "description": "Send task to StrategyAgent",  "parameters": RouteCall.schema()},
+    {"name": "route_to_content",   "description": "Send task to ContentAgent",   "parameters": RouteCall.schema()},
+    {"name": "route_to_repurpose", "description": "Send task to RepurposeAgent", "parameters": RouteCall.schema()},
+    {"name": "route_to_feedback",  "description": "Send task to FeedbackAgent",  "parameters": RouteCall.schema()},
+]
+
 manager_agent = Agent(
     name="Manager",
-    instructions="""
-You are an intelligent router for user requests.
-Decide the intent: strategy, content, repurpose, feedback.
-Never wrap your JSON in ``` fences or any extra text.
-Respond with **only the JSON**.
-If unclear, ask a clarification. Otherwise respond strictly in JSON:
-{ "route_to": "strategy", "reason": "..." }
-"""
+    instructions=(
+        "You are an intelligent router for user requests.\n"
+        "First decide if you need clarification. If so, set requires_user_input.\n"
+        "Otherwise, call exactly ONE of the route_to_* tools with a reason."
+    ),
+    tools=TOOLS,
 )
 
-strategy_agent = Agent(
-    name="StrategyAgent",
-    instructions="You create 7-day social media strategies. Respond ONLY in structured JSON.",
-    tools=[]
-)
-
-content_agent = Agent(
-    name="ContentAgent",
-    instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.",
-    tools=[]
-)
-
-repurpose_agent = Agent(
-    name="RepurposeAgent",
-    instructions="You repurpose content across platforms. Respond ONLY in structured JSON.",
-    tools=[]
-)
-
-feedback_agent = Agent(
-    name="FeedbackAgent",
-    instructions="You critique content and suggest edits. Respond ONLY in structured JSON.",
-    tools=[]
-)
+strategy_agent  = Agent("StrategyAgent",  instructions="You create 7‑day social media strategies. Respond ONLY in structured JSON.")
+content_agent   = Agent("ContentAgent",   instructions="You write brand‑aligned social posts. Respond ONLY in structured JSON.")
+repurpose_agent = Agent("RepurposeAgent", instructions="You repurpose content across platforms. Respond ONLY in structured JSON.")
+feedback_agent  = Agent("FeedbackAgent",  instructions="You critique content and suggest edits. Respond ONLY in structured JSON.")
 
 AGENT_MAP = {
     "strategy": strategy_agent,
@@ -67,158 +95,81 @@ AGENT_MAP = {
     "feedback": feedback_agent,
 }
 
-STRUCTURED_WEBHOOK_URL = os.getenv("BUBBLE_STRUCTURED_URL")
-CLARIFICATION_WEBHOOK_URL = os.getenv("BUBBLE_CHAT_URL")
-
-# ───────────────────────────────────────────────────────────
-# FastAPI Setup
-# ───────────────────────────────────────────────────────────
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(onboarding_router)
-app.include_router(profilebuilder_router)
-
-# ───────────────────────────────────────────────────────────
-# Helpers
-# ───────────────────────────────────────────────────────────
-
-def build_clarification_payload(task_id, user_id, agent_type, message_text, reason="Agent requested clarification"):
-    return {
-        "task_id": task_id,
-        "user_id": user_id,
-        "agent_type": agent_type,
-        "message": { "type": "text", "content": message_text },
-        "metadata": { "reason": reason },
-        "created_at": datetime.utcnow().isoformat()
-    }
-
-def build_structured_payload(task_id, user_id, agent_type, structured_obj):
-    return {
-        "task_id": task_id,
-        "user_id": user_id,
-        "agent_type": agent_type,
-        "message": structured_obj,
-        "created_at": datetime.utcnow().isoformat()
-    }
-
-async def dispatch_webhook(url, payload):
-    async with httpx.AsyncClient() as client:
-        print("=== Webhook Dispatch ===")
-        print(f"Webhook URL: {url}")
-        print(json.dumps(payload, indent=2))
-        response = await client.post(url, json=payload)
-        print(f"Response Status: {response.status_code}")
-        print(f"Response Body: {response.text}")
-        print("========================")
-
-# ───────────────────────────────────────────────────────────
-# Main Endpoint
-# ───────────────────────────────────────────────────────────
-
-def _clean_json(text: str) -> str:
-    """Strip ``` fences / leading text so json.loads can succeed."""
-    text = text.strip()
-    if text.startswith("```"):
-        # take the first fenced block
-        parts = text.split("```")
-        if len(parts) >= 3:
-            text = parts[1]
-    # remove hints like ```json
-    if text.startswith("json"):
-        text = text[4:].strip()
-    return text.strip()
-
-async def _send_result(task_id, user_id, agent_type, result):
-    """Dispatch result from any agent."""
-    # 1. agent asks clarification
+# -----------------------------------------------------------------------------
+# 3. Common dispatcher for any agent result
+# -----------------------------------------------------------------------------
+async def _dispatch_result(task_id: str, user_id: str, agent_key: str, result):
+    # A) agent asks a question -----------------------------------------------
     if getattr(result, "requires_user_input", None):
-        payload = build_clarification_payload(
-            task_id, user_id, agent_type,
-            result.requires_user_input,
-            reason="Agent requested clarification"
+        await dispatch_webhook(
+            CHAT_URL,
+            build_clarification_payload(task_id, user_id, agent_key, result.requires_user_input, "Agent requested clarification"),
         )
-        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
         return
 
-    # 2. try to parse structured output
+    # B) structured JSON ------------------------------------------------------
     try:
         parsed = json.loads(result.final_output)
         if "output_type" in parsed:
-            payload = build_structured_payload(
-                task_id, user_id, agent_type, parsed
+            await dispatch_webhook(
+                STRUCT_URL,
+                build_structured_payload(task_id, user_id, agent_key, parsed),
             )
-            await dispatch_webhook(STRUCTURED_WEBHOOK_URL, payload)
             return
     except Exception:
-        parsed = None     # fallthrough to unstructured
+        pass
 
-    # 3. unstructured → clarification webhook
-    payload = build_clarification_payload(
-        task_id, user_id, agent_type,
-        result.final_output.strip(),
-        reason="Agent returned unstructured output"
+    # C) fallback clarification ----------------------------------------------
+    await dispatch_webhook(
+        CHAT_URL,
+        build_clarification_payload(task_id, user_id, agent_key, result.final_output.strip(), "Agent returned unstructured output"),
     )
-    await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
+
+# -----------------------------------------------------------------------------
+# 4. FastAPI setup
+# -----------------------------------------------------------------------------
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
 
 @app.post("/agent")
-async def agent_endpoint(req: Request):
+async def main_endpoint(req: Request):
     data = await req.json()
-
     action = data.get("action")
     if action not in ("new_task", "new_message"):
         raise HTTPException(400, "Unknown action")
 
-    user_input = data.get("user_prompt") or data.get("message")
-    if not user_input:
-        raise HTTPException(422, "Missing 'user_prompt' or 'message'")
+    task_id = data["task_id"]
+    user_id = data["user_id"]
+    user_text = data.get("user_prompt") or data.get("message")
+    if not user_text:
+        raise HTTPException(422, "Missing user_prompt or message")
 
-    task_id = data.get("task_id")
-    user_id = data.get("user_id")
+    # Determine which agent should run ---------------------------------------
+    agent_key = "manager" if action == "new_task" else data.get("agent_session_id", "manager")
+    agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP.get(agent_key, manager_agent)
 
-    # ──  NEW TASK  ──────────────────────────────────────────
-    if action == "new_task":
-        manager_result = await Runner.run(manager_agent, input=user_input)
+    result = await Runner.run(agent_obj, input=user_text)
 
-        raw = manager_result.final_output
-        print("Manager raw output:", raw)           # <-- keep while debugging
-        try:
-            mgr_json = json.loads(_clean_json(raw))
-            route_to = mgr_json.get("route_to")
-        except Exception as e:
-            print("Manager parse error:", e)
-            await _send_result(task_id, user_id, "manager", manager_result)
-            return {"ok": True}
+    # Special handling for Manager tool calls --------------------------------
+    if agent_key == "manager" and result.tool_calls:
+        tool_call = result.tool_calls[0]
+        route_to = tool_call["name"].removeprefix("route_to_")
+        reason   = tool_call["arguments"]["reason"]
 
-        # (1) always send manager routing decision
-        payload = build_clarification_payload(
-            task_id, user_id, "manager",
-            json.dumps(mgr_json),                   # send clean JSON back
-            reason="Manager routing decision"
+        # ① Send manager routing decision webhook
+        await dispatch_webhook(
+            CHAT_URL,
+            build_clarification_payload(task_id, user_id, "manager", json.dumps({"route_to": route_to, "reason": reason}), "Manager routing decision"),
         )
-        await dispatch_webhook(CLARIFICATION_WEBHOOK_URL, payload)
 
-        # (2) no valid route → we're done
-        if route_to not in AGENT_MAP:
+        # ② Run downstream agent immediately
+        downstream = AGENT_MAP.get(route_to)
+        if downstream is None:
             return {"ok": True}
-
-        # (3) run downstream agent and dispatch its result
-        downstream_type = route_to
-        agent = AGENT_MAP[downstream_type]
-        result = await Runner.run(agent, input=user_input)
-        await _send_result(task_id, user_id, downstream_type, result)
+        downstream_result = await Runner.run(downstream, input=user_text)
+        await _dispatch_result(task_id, user_id, route_to, downstream_result)
         return {"ok": True}
 
-    # ──  NEW MESSAGE  ───────────────────────────────────────
-    agent_session = data.get("agent_session_id")
-    downstream_type = agent_session if agent_session in AGENT_MAP else "manager"
-    agent = AGENT_MAP.get(downstream_type, manager_agent)
-    result = await Runner.run(agent, input=user_input)
-    await _send_result(task_id, user_id, downstream_type, result)
+    # Manager asked clarification OR we are in downstream flow ---------------
+    await _dispatch_result(task_id, user_id, agent_key, result)
     return {"ok": True}
