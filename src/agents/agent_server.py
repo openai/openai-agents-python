@@ -1,184 +1,144 @@
-# agents/agent_server.py — tool‑call router version
+# agents/agent_server.py — handoff‑based, dual‑webhook version 2025‑04‑26
 """
-This revision keeps your existing webhook payloads & downstream agent instructions, but replaces the fragile
-JSON‑string parsing with **OpenAI Agents SDK tool calls**. The manager literally calls
-`route_to_strategy`, `route_to_content`, etc., so the routing decision is always structured.
-
-Prerequisites
--------------
-* **openai‑python ≥ 1.14** (or any release that exposes `.tool_calls`).
-  Make sure `requirements.txt` (or `pyproject.toml`) pins `openai>=1.14.0`.
-* No database changes; Bubble still sends back `agent_session_id` exactly like before.
+This file replaces the custom tool‑routing logic with **native SDK handoffs** while
+keeping:
+• Your five specialist agents with the same instructions.
+• Two‑layer webhook scheme (manager routing/clarifications → CHAT_URL; downstream
+  clarifications or structured JSON → CHAT_URL or STRUCT_URL).
+• Exact payload shapes Bubble already consumes.
+• No DB; Bubble still controls state via `agent_session_id`.
 """
 
 from __future__ import annotations
-import os, sys, json
+import os, sys, json, httpx, asyncio
 from datetime import datetime
 from typing import Any
-import httpx
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-# --- Agent SDK imports --------------------------------------------------------
+# ── OpenAI Agents SDK imports ────────────────────────────────────────────────
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from agents import Agent, Runner
+from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
-# -----------------------------------------------------------------------------
-# 1. Helper payload builders (unchanged)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Helper payload builders
+# ----------------------------------------------------------------------------
+_now = lambda: datetime.utcnow().isoformat()
 
-def _now() -> str: return datetime.utcnow().isoformat()
-
-def build_clarification_payload(task_id: str, user_id: str, agent_type: str, message_text: str, reason: str):
+def clarify(task, user, agent, text, reason):
     return {
-        "task_id": task_id,
-        "user_id": user_id,
-        "agent_type": agent_type,
-        "message": {"type": "text", "content": message_text},
+        "task_id": task, "user_id": user, "agent_type": agent,
+        "message": {"type": "text", "content": text},
         "metadata": {"reason": reason},
         "created_at": _now(),
     }
 
-def build_structured_payload(task_id: str, user_id: str, agent_type: str, obj: dict[str, Any]):
+def structured(task, user, agent, obj):
     return {
-        "task_id": task_id,
-        "user_id": user_id,
-        "agent_type": agent_type,
-        "message": obj,
-        "created_at": _now(),
+        "task_id": task, "user_id": user, "agent_type": agent,
+        "message": obj, "created_at": _now(),
     }
 
-async def dispatch_webhook(url: str, payload: dict):
-    async with httpx.AsyncClient() as client:
-        print("=== Webhook Dispatch ===\n" + json.dumps(payload, indent=2))
-        await client.post(url, json=payload)
+async def dispatch(url: str, payload: dict):
+    async with httpx.AsyncClient() as c:
+        print("=== Webhook Dispatch ===\n", json.dumps(payload, indent=2))
+        await c.post(url, json=payload)
         print("========================")
 
-CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # clarification webhooks
-STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
+CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")
+STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
 
-# -----------------------------------------------------------------------------
-# 2. Agent & tool definitions (instructions unchanged)
-# -----------------------------------------------------------------------------
-
-class ToolDict(dict):
-    """Dict that also exposes .name so Runner.run works on any SDK version."""
-    def __init__(self, name: str, description: str):
-        schema = {
-            "type": "object",
-            "properties": {"reason": {"type": "string"}},
-            "required": ["reason"],
-        }
-        super().__init__(name=name, description=description, parameters=schema)
-        self.name = name
-
-TOOLS = [
-    ToolDict("route_to_strategy",  "Send task to StrategyAgent"),
-    ToolDict("route_to_content",   "Send task to ContentAgent"),
-    ToolDict("route_to_repurpose", "Send task to RepurposeAgent"),
-    ToolDict("route_to_feedback",  "Send task to FeedbackAgent"),
-]
-
-manager_agent = Agent(
-    name="Manager",
-    instructions=(
-        "You are an intelligent router for user requests.\n"
-        "First decide if you need clarification. If so, set requires_user_input.\n"
-        "Otherwise, call exactly ONE of the route_to_* tools with a reason."
-    ),
-    tools=TOOLS,
-)
-
+# ----------------------------------------------------------------------------
+# Specialist agents (instructions unchanged)
+# ----------------------------------------------------------------------------
 strategy_agent  = Agent("StrategyAgent",  instructions="You create 7‑day social media strategies. Respond ONLY in structured JSON.")
 content_agent   = Agent("ContentAgent",   instructions="You write brand‑aligned social posts. Respond ONLY in structured JSON.")
 repurpose_agent = Agent("RepurposeAgent", instructions="You repurpose content across platforms. Respond ONLY in structured JSON.")
 feedback_agent  = Agent("FeedbackAgent",  instructions="You critique content and suggest edits. Respond ONLY in structured JSON.")
 
 AGENT_MAP = {
-    "strategy": strategy_agent,
-    "content": content_agent,
+    "strategy":  strategy_agent,
+    "content":   content_agent,
     "repurpose": repurpose_agent,
-    "feedback": feedback_agent,
+    "feedback":  feedback_agent,
 }
 
-# -----------------------------------------------------------------------------
-# 3. Common dispatcher for any agent result
-# -----------------------------------------------------------------------------
-async def _dispatch_result(task_id: str, user_id: str, agent_key: str, result):
-    # A) agent asks a question -----------------------------------------------
-    if getattr(result, "requires_user_input", None):
-        await dispatch_webhook(
-            CHAT_URL,
-            build_clarification_payload(task_id, user_id, agent_key, result.requires_user_input, "Agent requested clarification"),
-        )
-        return
+# ----------------------------------------------------------------------------
+# Manager with handoffs
+# ----------------------------------------------------------------------------
+MANAGER_TXT = (
+    "You are an intelligent router for user requests.\n"
+    "If you need clarification, ask a question (requires_user_input).\n"
+    "Otherwise delegate via a handoff to the correct agent."
+)
 
-    # B) structured JSON ------------------------------------------------------
+manager_agent = Agent(
+    name="Manager",
+    instructions=prompt_with_handoff_instructions(MANAGER_TXT),
+    handoffs=list(AGENT_MAP.values()),
+)
+
+# ----------------------------------------------------------------------------
+# Dispatcher for any agent result (unchanged logic)
+# ----------------------------------------------------------------------------
+async def _dispatch(task_id: str, user_id: str, agent_key: str, result):
+    if getattr(result, "requires_user_input", None):
+        await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
+                                         result.requires_user_input, "Agent requested clarification"))
+        return
     try:
         parsed = json.loads(result.final_output)
         if "output_type" in parsed:
-            await dispatch_webhook(
-                STRUCT_URL,
-                build_structured_payload(task_id, user_id, agent_key, parsed),
-            )
+            await dispatch(STRUCT_URL, structured(task_id, user_id, agent_key, parsed))
             return
     except Exception:
         pass
+    await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
+                                     result.final_output.strip(), "Agent returned unstructured output"))
 
-    # C) fallback clarification ----------------------------------------------
-    await dispatch_webhook(
-        CHAT_URL,
-        build_clarification_payload(task_id, user_id, agent_key, result.final_output.strip(), "Agent returned unstructured output"),
-    )
-
-# -----------------------------------------------------------------------------
-# 4. FastAPI setup
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# FastAPI setup
+# ----------------------------------------------------------------------------
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
 
+# ----------------------------------------------------------------------------
+# Main endpoint
+# ----------------------------------------------------------------------------
 @app.post("/agent")
-async def main_endpoint(req: Request):
+async def endpoint(req: Request):
     data = await req.json()
     action = data.get("action")
     if action not in ("new_task", "new_message"):
         raise HTTPException(400, "Unknown action")
 
-    task_id = data["task_id"]
-    user_id = data["user_id"]
+    task_id, user_id = data["task_id"], data["user_id"]
     user_text = data.get("user_prompt") or data.get("message")
     if not user_text:
         raise HTTPException(422, "Missing user_prompt or message")
 
-    # Determine which agent should run ---------------------------------------
+    # Determine which agent handles this turn
     agent_key = "manager" if action == "new_task" else data.get("agent_session_id", "manager")
     agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP.get(agent_key, manager_agent)
 
-    result = await Runner.run(agent_obj, input=user_text)
+    # Run exactly **one** turn (max_turns=1) so we stay in control of webhooks
+    result = await Runner.run(agent_obj, input=user_text, max_turns=1)
 
-    # Special handling for Manager tool calls --------------------------------
-    if agent_key == "manager" and result.tool_calls:
-        tool_call = result.tool_calls[0]
-        route_to = tool_call["name"].removeprefix("route_to_")
-        reason   = tool_call["arguments"]["reason"]
+    # If Manager handed off, Runner returned the *downstream* result but we need
+    # the routing‑decision webhook first. We can check result.turns[0].role.
+    if agent_key == "manager" and result.turns and result.turns[0].role == "assistant" and "handoff" in result.turns[0].content:
+        handoff_info = json.loads(result.turns[0].content)  # {'handoff': 'strategy', ...}
+        route_to = handoff_info.get("handoff")
+        await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
+                                         json.dumps({"route_to": route_to, "reason": handoff_info.get("reason", "")}),
+                                         "Manager routing decision"))
+        agent_key = route_to  # downstream agent for webhook labeling
 
-        # ① Send manager routing decision webhook
-        await dispatch_webhook(
-            CHAT_URL,
-            build_clarification_payload(task_id, user_id, "manager", json.dumps({"route_to": route_to, "reason": reason}), "Manager routing decision"),
-        )
-
-        # ② Run downstream agent immediately
-        downstream = AGENT_MAP.get(route_to)
-        if downstream is None:
-            return {"ok": True}
-        downstream_result = await Runner.run(downstream, input=user_text)
-        await _dispatch_result(task_id, user_id, route_to, downstream_result)
-        return {"ok": True}
-
-    # Manager asked clarification OR we are in downstream flow ---------------
-    await _dispatch_result(task_id, user_id, agent_key, result)
+    # Send downstream agent output / clarifications
+    await _dispatch(task_id, user_id, agent_key, result)
     return {"ok": True}
