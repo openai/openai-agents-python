@@ -43,36 +43,28 @@ async def dispatch(url: str, payload: dict):
 CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")
 STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
 
-# ----------------------------------------------------------------------------
-# Tool wrapper that works with any SDK version
-# ----------------------------------------------------------------------------
-def make_tool(name: str, desc: str) -> SimpleNamespace:
-    schema = {
-        "type": "object",
-        "properties": {"reason": {"type": "string"}},
-        "required": ["reason"],
-    }
-    # SimpleNamespace gives us attribute access (Runner needs .name)
-    tool_obj = SimpleNamespace(name=name,
-                               description=desc,
-                               parameters=schema)
-    # store the dict version for later serialisation
-    tool_obj._asdict = {"name": name, "description": desc, "parameters": schema}
-    return tool_obj
+# -------------------------------------------------------------------- tools --
+class ToolDict(dict):
+    """
+    Subclass of dict that also exposes .name so Runner.run can access it.
+    Works with any SDK version because it's still a plain dict at JSON time.
+    """
+    def __init__(self, name: str, desc: str):
+        schema = {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}},
+            "required": ["reason"],
+        }
+        super().__init__(name=name, description=desc, parameters=schema)
+        self.name = name  # Runner needs this attribute
 
 TOOLS = [
-    make_tool("route_to_strategy",  "Send task to StrategyAgent"),
-    make_tool("route_to_content",   "Send task to ContentAgent"),
-    make_tool("route_to_repurpose", "Send task to RepurposeAgent"),
-    make_tool("route_to_feedback",  "Send task to FeedbackAgent"),
+    ToolDict("route_to_strategy",  "Send task to StrategyAgent"),
+    ToolDict("route_to_content",   "Send task to ContentAgent"),
+    ToolDict("route_to_repurpose", "Send task to RepurposeAgent"),
+    ToolDict("route_to_feedback",  "Send task to FeedbackAgent"),
 ]
 
-# convert to list-of-dicts for the actual API call
-TOOLS_FOR_API = [t._asdict for t in TOOLS]
-
-# ----------------------------------------------------------------------------
-# Agents
-# ----------------------------------------------------------------------------
 manager_agent = Agent(
     name="Manager",
     instructions=(
@@ -80,7 +72,7 @@ manager_agent = Agent(
         "If you need more info ask a question (requires_user_input).\n"
         "Otherwise call exactly ONE of the route_to_* tools with a reason."
     ),
-    tools=TOOLS_FOR_API,
+    tools=TOOLS,  # each element is both dict-like and has .name
 )
 
 strategy_agent  = Agent("StrategyAgent",  instructions="You create 7-day social media strategies. Respond ONLY in structured JSON.")
