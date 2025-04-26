@@ -1,5 +1,4 @@
-# agents/agent_server.py — handoff-based, dual-webhook
-
+# agents/agent_server.py — single webhook with full trace
 from __future__ import annotations
 import os, sys, json, httpx
 from datetime import datetime
@@ -7,150 +6,105 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# ── SDK --------------------------------------------------------------------
+# ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from agents import Agent, Runner
+
+# helper to prepend handoff instructions
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
-# ── helpers ----------------------------------------------------------------
-_now = lambda: datetime.utcnow().isoformat()
+# ── common helpers ─────────────────────────────────────────────────────────
+CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # one endpoint is enough
+_now     = lambda: datetime.utcnow().isoformat()
 
-def canon(name: str | None) -> str:
-    """Return canonical agent key ('ContentAgent' → 'content')."""
-    if not name:
-        return ""
-    name = name.lower().replace(" ", "").replace("_", "")
-    if name.endswith("agent"):
-        name = name[:-5]
-    return name
+async def send_webhook(payload: dict):
+    async with httpx.AsyncClient() as c:
+        print("=== Webhook Dispatch ===\n", json.dumps(payload, indent=2))
+        await c.post(CHAT_URL, json=payload)     # always same URL
+        print("========================")
 
-def clarify(task, user, agent, text, reason):
-    if not agent:
-        agent = "manager"
+def build_payload(task_id, user_id, agent_type, message, reason, trace):
     return {
-        "task_id": task, "user_id": user, "agent_type": agent,
-        "message": {"type": "text", "content": text},
-        "metadata": {"reason": reason},
+        "task_id":   task_id,
+        "user_id":   user_id,
+        "agent_type": agent_type,
+        "message":    message,                   # text | structured JSON
+        "metadata":  {"reason": reason},
+        "trace":      trace,                     # full execution chain
         "created_at": _now(),
     }
 
-def structured(task, user, agent, obj):
-    if not agent:
-        agent = "manager"
-    return {
-        "task_id": task, "user_id": user, "agent_type": agent,
-        "message": obj, "created_at": _now(),
-    }
+# ── specialist agents (instructions unchanged) ────────────────────────────
+strategy  = Agent("StrategyAgent",  instructions="You create 7-day social strategies. Respond ONLY in structured JSON.")
+content   = Agent("ContentAgent",   instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.")
+repurpose = Agent("RepurposeAgent", instructions="You repurpose content. Respond ONLY in structured JSON.")
+feedback  = Agent("FeedbackAgent",  instructions="You critique content. Respond ONLY in structured JSON.")
 
-async def dispatch(url: str, payload: dict):
-    async with httpx.AsyncClient() as c:
-        print("=== Webhook Dispatch ===\n", json.dumps(payload, indent=2))
-        await c.post(url, json=payload)
-        print("========================")
+AGENTS = { "strategy": strategy, "content": content, "repurpose": repurpose, "feedback": feedback }
 
-CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")
-STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
-
-# ── specialist agents ------------------------------------------------------
-strategy_agent  = Agent("StrategyAgent",  instructions="You create 7-day social media strategies. Respond ONLY in structured JSON.")
-content_agent   = Agent("ContentAgent",   instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.")
-repurpose_agent = Agent("RepurposeAgent", instructions="You repurpose content across platforms. Respond ONLY in structured JSON.")
-feedback_agent  = Agent("FeedbackAgent",  instructions="You critique content and suggest edits. Respond ONLY in structured JSON.")
-
-AGENT_MAP = {
-    "strategy":  strategy_agent,
-    "content":   content_agent,
-    "repurpose": repurpose_agent,
-    "feedback":  feedback_agent,
-}
-
-# ── manager ----------------------------------------------------------------
-MANAGER_TXT = prompt_with_handoff_instructions("""
+# ── Manager with native handoffs ───────────────────────────────────────────
+MANAGER_TXT = """
 You are an intelligent router for user requests.
 If you need clarification, ask a question (requires_user_input).
 Otherwise delegate via a handoff to the correct agent.
-If you are not asking a question, you MUST emit: {"handoff": "<agent_name>", "reason": "..."} and nothing else.
-Never output the plan yourself.
-Never wrap the JSON in code fences.
-""")
+When delegating, emit: {"handoff":"<agent_key>","reason":"..."} using one of: strategy, content, repurpose, feedback.
+Never output the final plan yourself.
+Never wrap JSON in code fences.
+"""
+manager = Agent("Manager",
+                instructions=prompt_with_handoff_instructions(MANAGER_TXT),
+                handoffs=list(AGENTS.values()))
 
-manager_agent = Agent("Manager", instructions=MANAGER_TXT, handoffs=list(AGENT_MAP.values()))
-
-# ── dispatch helper ---------------------------------------------------------
-async def _dispatch(task_id: str, user_id: str, agent_key: str, result):
-    if getattr(result, "requires_user_input", None):
-        await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
-                                         result.requires_user_input, "Agent requested clarification"))
-        return
-    try:
-        clean = result.final_output.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```", 2)[1].strip()
-        parsed = json.loads(clean)
-        if "output_type" in parsed:
-            await dispatch(STRUCT_URL, structured(task_id, user_id, agent_key, parsed))
-            return
-    except Exception:
-        pass
-    await dispatch(CHAT_URL, clarify(task_id, user_id, agent_key,
-                                     result.final_output.strip(), "Agent returned unstructured output"))
-
-# ── FastAPI set-up ----------------------------------------------------------
+# ── FastAPI boilerplate ────────────────────────────────────────────────────
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
-# ── main endpoint -----------------------------------------------------------
+# ── main endpoint ─────────────────────────────────────────────────────────
 @app.post("/agent")
-async def endpoint(req: Request):
-    data = await req.json()
+async def run_agent(req: Request):
+    data   = await req.json()
     action = data.get("action")
     if action not in ("new_task", "new_message"):
         raise HTTPException(400, "Unknown action")
 
     task_id, user_id = data["task_id"], data["user_id"]
-    user_text = data.get("user_prompt") or data.get("message")
-    if not user_text:
+    text_in          = data.get("user_prompt") or data.get("message")
+    if not text_in:
         raise HTTPException(422, "Missing user_prompt or message")
 
-    # NEW TASK --------------------------------------------------------------
-    if action == "new_task":
-        mgr_res = await Runner.run(manager_agent, input=user_text, max_turns=1)
+    # decide which agent continues this thread
+    session_key = data.get("agent_session_id") or "manager"
+    current     = manager if session_key == "manager" else AGENTS.get(session_key, manager)
 
-        # a) clarification
-        if getattr(mgr_res, "requires_user_input", None):
-            await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
-                                             mgr_res.requires_user_input,
-                                             "Manager requested clarification"))
-            return {"ok": True}
+    # let Runner drive full loop (handoffs + tools) until completion / clarification
+    result = await Runner.run(current, input=text_in, max_turns=12)
 
-        # b) hand-off
+    # message to Bubble
+    if getattr(result, "requires_user_input", None):
+        msg   = {"type":"text","content": result.requires_user_input}
+        cause = "Agent requested clarification"
+    else:
+        # try parse structured JSON; fallback to plain text
         try:
-            handoff_info = json.loads(mgr_res.final_output)
-            route_to = canon(handoff_info.get("handoff"))
+            parsed = json.loads(result.final_output)
+            if "output_type" in parsed:
+                msg, cause = parsed, "Agent returned structured output"
+            else:
+                raise ValueError
         except Exception:
-            route_to = ""
+            msg   = {"type":"text","content": result.final_output.strip()}
+            cause = "Agent returned unstructured output"
 
-        if route_to in AGENT_MAP:
-            await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
-                                             json.dumps({"route_to": route_to,
-                                                         "reason": handoff_info.get("reason", "")}),
-                                             "Manager routing decision"))
-            ds_res = await Runner.run(AGENT_MAP[route_to], input=user_text, max_turns=10)
-            await _dispatch(task_id, user_id, route_to, ds_res)
-            return {"ok": True}
+    # build trace (list of dicts with role, content, tool_calls, etc.)
+    try:
+        trace = result.to_debug_dict()  # new SDK helper
+    except Exception:
+        trace = []
 
-        # c) plain text
-        await _dispatch(task_id, user_id, "manager", mgr_res)
-        return {"ok": True}
-
-    # NEW MESSAGE -----------------------------------------------------------
-    agent_key = canon(data.get("agent_session_id") or "manager")
-    if agent_key not in AGENT_MAP and agent_key != "manager":
-        agent_key = "manager"
-    agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP[agent_key]
-
-    res = await Runner.run(agent_obj, input=user_text, max_turns=10)
-    await _dispatch(task_id, user_id, agent_key, res)
+    payload = build_payload(task_id, user_id,
+                            result.agent_type or "manager",
+                            msg, cause, trace)
+    await send_webhook(payload)
     return {"ok": True}
