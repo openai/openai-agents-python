@@ -46,17 +46,17 @@ STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")
 # -------------------------------------------------------------------- tools --
 class ToolDict(dict):
     """
-    Subclass of dict that also exposes .name so Runner.run can access it.
-    Works with any SDK version because it's still a plain dict at JSON time.
+    A dict (for OpenAI API) that ALSO has `.name` (for Runner.run).
+    Works on every Agents SDK version.
     """
-    def __init__(self, name: str, desc: str):
+    def __init__(self, name: str, description: str):
         schema = {
             "type": "object",
             "properties": {"reason": {"type": "string"}},
             "required": ["reason"],
         }
-        super().__init__(name=name, description=desc, parameters=schema)
-        self.name = name  # Runner needs this attribute
+        super().__init__(name=name, description=description, parameters=schema)
+        self.name = name        # <-- Runner looks for this
 
 TOOLS = [
     ToolDict("route_to_strategy",  "Send task to StrategyAgent"),
@@ -72,8 +72,9 @@ manager_agent = Agent(
         "If you need more info ask a question (requires_user_input).\n"
         "Otherwise call exactly ONE of the route_to_* tools with a reason."
     ),
-    tools=TOOLS,  # each element is both dict-like and has .name
+    tools=TOOLS,          # ← list contains ToolDict objects
 )
+
 
 strategy_agent  = Agent("StrategyAgent",  instructions="You create 7-day social media strategies. Respond ONLY in structured JSON.")
 content_agent   = Agent("ContentAgent",   instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.")
