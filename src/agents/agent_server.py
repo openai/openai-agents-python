@@ -60,35 +60,38 @@ async def dispatch_webhook(url: str, payload: dict):
 CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # clarification webhooks
 STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
 
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------- 
 # 2. Agent definitions (instructions untouched)
 # -----------------------------------------------------------------------------
-class RouteCall(BaseModel):
-    reason: str
+from types import SimpleNamespace
 
-from agents import Tool  # Tool dataclass from Agents SDK
-
-_JSON_PARAM = {
-    "type": "object",
-    "properties": {"reason": {"type": "string"}},
-    "required": ["reason"],
-}
+def make_tool(name: str, desc: str):
+    schema = {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    }
+    obj = SimpleNamespace(
+        name=name,
+        description=desc,
+        parameters=schema,
+    )
+    obj.as_dict = {"name": name, "description": desc, "parameters": schema}
+    return obj
 
 TOOLS = [
-    Tool(name="route_to_strategy",  description="Send task to StrategyAgent",  parameters=_JSON_PARAM),
-    Tool(name="route_to_content",   description="Send task to ContentAgent",   parameters=_JSON_PARAM),
-    Tool(name="route_to_repurpose", description="Send task to RepurposeAgent", parameters=_JSON_PARAM),
-    Tool(name="route_to_feedback",  description="Send task to FeedbackAgent",  parameters=_JSON_PARAM),
+    make_tool("route_to_strategy",  "Send task to StrategyAgent"),
+    make_tool("route_to_content",   "Send task to ContentAgent"),
+    make_tool("route_to_repurpose", "Send task to RepurposeAgent"),
+    make_tool("route_to_feedback",  "Send task to FeedbackAgent"),
 ]
 
 manager_agent = Agent(
     name="Manager",
     instructions=(
-        "You are an intelligent router for user requests.\n"
-        "First decide if you need clarification. If so, set requires_user_input.\n"
-        "Otherwise, call exactly ONE of the route_to_* tools with a reason."
+        "You are an intelligent router … call ONE of the route_to_* tools with a reason."
     ),
-    tools=TOOLS,
+    tools=[t.as_dict for t in TOOLS],  # list of dicts for the API
 )
 
 strategy_agent  = Agent("StrategyAgent",  instructions="You create 7‑day social media strategies. Respond ONLY in structured JSON.")
