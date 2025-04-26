@@ -63,21 +63,23 @@ STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
 # ----------------------------------------------------------------------------- 
 # 2. Agent definitions (instructions untouched)
 # -----------------------------------------------------------------------------
+# ------------------------------------------------------------------ helpers --
 from types import SimpleNamespace
 
-def make_tool(name: str, desc: str):
-    schema = {
-        "type": "object",
-        "properties": {"reason": {"type": "string"}},
-        "required": ["reason"],
-    }
-    obj = SimpleNamespace(
-        name=name,
-        description=desc,
-        parameters=schema,
-    )
-    obj.as_dict = {"name": name, "description": desc, "parameters": schema}
-    return obj
+class ToolDict(dict):
+    """Behaves like a dict (for the OpenAI API) and has .name (for Runner)."""
+    def __init__(self, name: str, desc: str, schema: dict):
+        super().__init__(name=name, description=desc, parameters=schema)
+        self.name = name  # Runner.run needs this attribute
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {"reason": {"type": "string"}},
+    "required": ["reason"],
+}
+
+def make_tool(name: str, desc: str) -> ToolDict:
+    return ToolDict(name, desc, _SCHEMA)
 
 TOOLS = [
     make_tool("route_to_strategy",  "Send task to StrategyAgent"),
@@ -86,6 +88,13 @@ TOOLS = [
     make_tool("route_to_feedback",  "Send task to FeedbackAgent"),
 ]
 
+manager_agent = Agent(
+    name="Manager",
+    instructions=(
+        "You are an intelligent router … call ONE of the route_to_* tools with a reason."
+    ),
+    tools=TOOLS,  # list of ToolDict objects – satisfies both Runner & API
+)
 manager_agent = Agent(
     name="Manager",
     instructions=(
