@@ -117,25 +117,47 @@ async def endpoint(req: Request):
     if not user_text:
         raise HTTPException(422, "Missing user_prompt or message")
 
-    # Determine which agent handles this turn
-    agent_key = data.get("agent_session_id") if action == "new_message" else "manager"
-    if not agent_key or (agent_key not in AGENT_MAP and agent_key != "manager"):
+    # 1) NEW TASK  → start with manager
+    if action == "new_task":
+        mgr_res = await Runner.run(manager_agent, input=user_text, max_turns=1)
+
+        # a) manager asks question
+        if getattr(mgr_res, "requires_user_input", None):
+            await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
+                                             mgr_res.requires_user_input,
+                                             "Manager requested clarification"))
+            return {"ok": True}
+
+        # b) manager hands off
+        try:
+            handoff_info = json.loads(mgr_res.final_output)
+            route_to = handoff_info.get("handoff")
+        except Exception:
+            route_to = None
+
+        if route_to in AGENT_MAP:
+            # send routing decision webhook
+            await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
+                                             json.dumps({"route_to": route_to,
+                                                         "reason": handoff_info.get("reason", "")}),
+                                             "Manager routing decision"))
+
+            # run downstream agent
+            ds_res = await Runner.run(AGENT_MAP[route_to], input=user_text, max_turns=10)
+            await _dispatch(task_id, user_id, route_to, ds_res)
+            return {"ok": True}
+
+        # c) manager returned plain text
+        await _dispatch(task_id, user_id, "manager", mgr_res)
+        return {"ok": True}
+
+    # 2) NEW MESSAGE  → continue with given agent or manager
+    agent_key = data.get("agent_session_id") or "manager"
+    if agent_key not in AGENT_MAP and agent_key != "manager":
         agent_key = "manager"
     agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP[agent_key]
 
-    # Allow up to 10 turns so Manager + downstream can complete.
-    result = await Runner.run(agent_obj, input=user_text, max_turns=10)
-
-    # If Manager handed off, Runner returned the downstream result but we need
-    # the routing-decision webhook first.
-    if agent_key == "manager" and result.turns and result.turns[0].role == "assistant" and "handoff" in result.turns[0].content:
-        handoff_info = json.loads(result.turns[0].content)  # {'handoff': 'strategy', ...}
-        route_to = handoff_info.get("handoff")
-        await dispatch(CHAT_URL, clarify(task_id, user_id, "manager",
-                                         json.dumps({"route_to": route_to, "reason": handoff_info.get("reason", "")}),
-                                         "Manager routing decision"))
-        agent_key = route_to  # downstream agent for webhook labeling
-
-    # Send downstream agent output / clarifications
-    await _dispatch(task_id, user_id, agent_key, result)
+    res = await Runner.run(agent_obj, input=user_text, max_turns=10)
+    await _dispatch(task_id, user_id, agent_key, res)
     return {"ok": True}
+
