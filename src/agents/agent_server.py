@@ -30,6 +30,8 @@ from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 _now = lambda: datetime.utcnow().isoformat()
 
 def clarify(task, user, agent, text, reason):
+    if agent is None:
+        agent = "manager"
     return {
         "task_id": task, "user_id": user, "agent_type": agent,
         "message": {"type": "text", "content": text},
@@ -38,6 +40,8 @@ def clarify(task, user, agent, text, reason):
     }
 
 def structured(task, user, agent, obj):
+    if agent is None:
+        agent = "manager"
     return {
         "task_id": task, "user_id": user, "agent_type": agent,
         "message": obj, "created_at": _now(),
@@ -123,11 +127,13 @@ async def endpoint(req: Request):
         raise HTTPException(422, "Missing user_prompt or message")
 
     # Determine which agent handles this turn
-    agent_key = "manager" if action == "new_task" else data.get("agent_session_id", "manager")
+    agent_key = data.get("agent_session_id") if action == "new_message" else "manager"
+    if agent_key is None:
+        agent_key = "manager"
     agent_obj = manager_agent if agent_key == "manager" else AGENT_MAP.get(agent_key, manager_agent)
 
-    # Run exactly **one** turn (max_turns=1) so we stay in control of webhooks
-    result = await Runner.run(agent_obj, input=user_text, max_turns=5)  # plenty for manager + 1 downstream
+    # Allow up to 5 turns so Manager + downstream can complete.
+    result = await Runner.run(agent_obj, input=user_text, max_turns=10)
 
     # If Manager handed off, Runner returned the *downstream* result but we need
     # the routing‑decision webhook first. We can check result.turns[0].role.
