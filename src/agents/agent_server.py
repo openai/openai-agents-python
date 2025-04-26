@@ -221,4 +221,4 @@ async def agent_endpoint(req: Request):
     agent = AGENT_MAP.get(downstream_type, manager_agent)
     result = await Runner.run(agent, input=user_input)
     await _send_result(task_id, user_id, downstream_type, result)
-    return {"ok": True"}
+    return {"ok": True}
