@@ -5,7 +5,7 @@ from typing_extensions import TypeVar
 from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
-from .tool import Tool
+from .tool import Action, Tool
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
 
@@ -59,8 +59,8 @@ class RunHooksBase(Generic[TContext, TAgent]):
     async def on_tool_start(
         self,
         context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
+        agent: Agent[TContext],
+        action: Action,
     ) -> None:
         """Called concurrently with tool invocation."""
         pass
@@ -110,8 +110,8 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     async def on_tool_start(
         self,
         context: RunContextWrapper[TContext],
-        agent: TAgent,
-        tool: Tool,
+        agent: Agent[TContext],
+        action: Action,
     ) -> None:
         """Called concurrently with tool invocation."""
         pass

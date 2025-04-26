@@ -23,6 +23,7 @@ from openai.types.responses.response_computer_tool_call import (
 )
 
 from agents import (
+    Action,
     Agent,
     AgentHooks,
     AsyncComputer,
@@ -32,9 +33,9 @@ from agents import (
     RunContextWrapper,
     RunHooks,
 )
-from agents._run_impl import ComputerAction, RunImpl, ToolRunComputerAction
+from agents._run_impl import ComputerAction, RunImpl
 from agents.items import ToolCallOutputItem
-from agents.tool import ComputerToolSafetyCheckData
+from agents.tool import ComputerToolSafetyCheckData, ToolRunComputerAction
 
 
 class LoggingComputer(Computer):
@@ -224,9 +225,9 @@ class LoggingRunHooks(RunHooks[Any]):
         self.ended: list[tuple[Agent[Any], Any, str]] = []
 
     async def on_tool_start(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        self, context: RunContextWrapper[Any], agent: Agent[Any], action: Action,
     ) -> None:
-        self.started.append((agent, tool))
+        self.started.append((agent, action.computer_tool))
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str
@@ -243,9 +244,9 @@ class LoggingAgentHooks(AgentHooks[Any]):
         self.ended: list[tuple[Agent[Any], Any, str]] = []
 
     async def on_tool_start(
-        self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
+        self, context: RunContextWrapper[Any], agent: Agent[Any], action: Action,
     ) -> None:
-        self.started.append((agent, tool))
+        self.started.append((agent, action.computer_tool))
 
     async def on_tool_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any, result: str

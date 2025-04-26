@@ -78,6 +78,8 @@ from .tool import (
     LocalShellTool,
     MCPToolApprovalRequest,
     Tool,
+    ToolRunComputerAction,
+    ToolRunFunction,
 )
 from .tool_context import ToolContext
 from .tracing import (
@@ -125,19 +127,6 @@ class AgentToolUseTracker:
 class ToolRunHandoff:
     handoff: Handoff
     tool_call: ResponseFunctionToolCall
-
-
-@dataclass
-class ToolRunFunction:
-    tool_call: ResponseFunctionToolCall
-    function_tool: FunctionTool
-
-
-@dataclass
-class ToolRunComputerAction:
-    tool_call: ResponseComputerToolCall
-    computer_tool: ComputerTool
-
 
 @dataclass
 class ToolRunMCPApprovalRequest:
@@ -557,9 +546,9 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> list[FunctionToolResult]:
-        async def run_single_tool(
-            func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
-        ) -> Any:
+        async def run_single_tool(action: ToolRunFunction) -> Any:
+            func_tool = action.function_tool
+            tool_call = action.tool_call
             with function_span(func_tool.name) as span_fn:
                 tool_context = ToolContext.from_agent_context(
                     context_wrapper,
@@ -570,9 +559,9 @@ class RunImpl:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(tool_context, agent, func_tool),
+                        hooks.on_tool_start(tool_context, agent, action),
                         (
-                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                            agent.hooks.on_tool_start(tool_context, agent, action)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
@@ -604,8 +593,7 @@ class RunImpl:
 
         tasks = []
         for tool_run in tool_runs:
-            function_tool = tool_run.function_tool
-            tasks.append(run_single_tool(function_tool, tool_run.tool_call))
+            tasks.append(run_single_tool(tool_run))
 
         results = await asyncio.gather(*tasks)
 
@@ -1066,9 +1054,9 @@ class ComputerAction:
         )
 
         _, _, output = await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+            hooks.on_tool_start(context_wrapper, agent, action),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                agent.hooks.on_tool_start(context_wrapper, agent, action)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),

@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agents import Agent, AgentHooks, RunContextWrapper, Runner, Tool, function_tool
+from agents import Action, Agent, AgentHooks, RunContextWrapper, Runner, Tool, function_tool
 
 
 class CustomAgentHooks(AgentHooks):
@@ -28,10 +28,10 @@ class CustomAgentHooks(AgentHooks):
             f"### ({self.display_name}) {self.event_counter}: Agent {source.name} handed off to {agent.name}"
         )
 
-    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, action: Action) -> None:
         self.event_counter += 1
         print(
-            f"### ({self.display_name}) {self.event_counter}: Agent {agent.name} started tool {tool.name}"
+            f"### ({self.display_name}) {self.event_counter}: Agent {agent.name} started tool {action.function_tool.name} with arguments {action.tool_call.arguments}"
         )
 
     async def on_tool_end(
