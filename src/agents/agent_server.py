@@ -62,24 +62,24 @@ STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # structured‑output webhooks
 
 # ----------------------------------------------------------------------------- 
 # 2. Agent definitions (instructions untouched)
-# -----------------------------------------------------------------------------
-# ------------------------------------------------------------------ helpers --
+# -------------------------------------------------------------------- tools --
 from types import SimpleNamespace
 
-class ToolDict(dict):
-    """Behaves like a dict (for the OpenAI API) and has .name (for Runner)."""
-    def __init__(self, name: str, desc: str, schema: dict):
-        super().__init__(name=name, description=desc, parameters=schema)
-        self.name = name  # Runner.run needs this attribute
-
-_SCHEMA = {
-    "type": "object",
-    "properties": {"reason": {"type": "string"}},
-    "required": ["reason"],
-}
-
-def make_tool(name: str, desc: str) -> ToolDict:
-    return ToolDict(name, desc, _SCHEMA)
+def make_tool(name: str, desc: str):
+    """
+    Returns an object that:
+      • behaves like a dict (so Agent.serialise works)
+      • has .name  (so Runner.run can list tool names)
+    """
+    schema = {
+        "type": "object",
+        "properties": {"reason": {"type": "string"}},
+        "required": ["reason"],
+    }
+    # dict part (for the OpenAI HTTP payload)
+    tool_dict = {"name": name, "description": desc, "parameters": schema}
+    # add attributes so Runner is happy
+    return SimpleNamespace(**tool_dict)
 
 TOOLS = [
     make_tool("route_to_strategy",  "Send task to StrategyAgent"),
@@ -87,6 +87,16 @@ TOOLS = [
     make_tool("route_to_repurpose", "Send task to RepurposeAgent"),
     make_tool("route_to_feedback",  "Send task to FeedbackAgent"),
 ]
+
+manager_agent = Agent(
+    name="Manager",
+    instructions=(
+        "You are an intelligent router for user requests.\n"
+        "First decide if you need clarification. If so, set requires_user_input.\n"
+        "Otherwise, call exactly ONE of the route_to_* tools with a reason."
+    ),
+    tools=[dict(t.__dict__) for t in TOOLS],   # pure dicts for the API
+)
 
 manager_agent = Agent(
     name="Manager",
