@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import sys
 import json
-import re
 import httpx
 from datetime import datetime
 from dotenv import load_dotenv
@@ -15,7 +14,7 @@ from pydantic import BaseModel
 # ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from agents import Agent, Runner, handoff
+from agents import Agent, Runner, handoff, RunContextWrapper
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 # ── Environment variable for Bubble webhook URL
@@ -56,26 +55,32 @@ class HandoffData(BaseModel):
 
 # ── Manager agent ──────────────────────────────────────────────────────────
 MANAGER_TXT = """
-You are the Manager. ALWAYS call exactly one `transfer_to_<agent>` handoff tool,
-with arguments matching the HandoffData schema:
+You are the Manager. When routing, you MUST call exactly one of these tools:
+  • transfer_to_strategy
+  • transfer_to_content
+  • transfer_to_repurpose
+  • transfer_to_feedback
 
-  {
-    "clarify": "<optional follow-up question or empty string>",
-    "prompt":  "<text to send to the specialist>"
-  }
+Each call must pass a JSON object matching this schema (HandoffData):
+{
+  "clarify": "<optional follow-up question or empty string>",
+  "prompt":  "<the text to send next>"
+}
 
-Do NOT output any other text or JSON. The SDK will enforce validity.
+Do NOT output any other JSON or wrap in Markdown. The SDK will handle the rest.
 """
 
-async def on_handoff(ctx, input_data: HandoffData):
+async def on_handoff(ctx: RunContextWrapper[HandoffData], input_data: HandoffData):
     # Send manager clarification webhook
+    task_id = ctx.context['task_id']
+    user_id = ctx.context['user_id']
     payload = build_payload(
-        task_id=ctx.input['task_id'],
-        user_id=ctx.input['user_id'],
+        task_id=task_id,
+        user_id=user_id,
         agent_type='manager',
         message={'type':'text','content': input_data.clarify},
         reason='handoff',
-        trace=ctx.trace if hasattr(ctx, 'trace') else []
+        trace=ctx.usage.to_debug_dict() if hasattr(ctx.usage, 'to_debug_dict') else []
     )
     await send_webhook(flatten_payload(payload))
 
@@ -142,23 +147,24 @@ async def run_agent(req: Request):
     if not task_id or not user_id:
         raise HTTPException(422, "Missing 'task_id' or 'user_id'")
 
-    # 1) Always invoke the manager (it will hand off internally)
+    # 1) Always invoke the manager; pass context for on_handoff
     result = await Runner.run(
         manager,
         input=prompt,
+        context={"task_id": task_id, "user_id": user_id},
         max_turns=12,
     )
 
     # 2) Final output comes from the last agent in the chain
     raw    = result.final_output.strip()
-    # determine reason
     try:
         json.loads(raw)
         reason = "Agent returned structured JSON"
     except json.JSONDecodeError:
         reason = "Agent returned unstructured output"
-    # safe trace
-    trace = getattr(result, 'to_debug_dict', lambda: [])()
+    trace = []
+    if hasattr(result, 'to_debug_dict'):
+        trace = result.to_debug_dict()
 
     # 3) Send the final specialist webhook
     out_payload = build_payload(
