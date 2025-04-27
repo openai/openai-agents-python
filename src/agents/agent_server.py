@@ -1,19 +1,21 @@
-# agents/agent_server.py — single webhook with full trace
+# agents/agent_server.py — deterministic handoffs via SDK `handoff()`
 
 from __future__ import annotations
 import os
 import sys
 import json
+import re
 import httpx
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from agents import Agent, Runner
+from agents import Agent, Runner, handoff
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 # ── Environment variable for Bubble webhook URL
@@ -27,35 +29,67 @@ async def send_webhook(payload: dict):
         print("========================")
 
 # ── Specialist agents ──────────────────────────────────────────────────────
-strategy  = Agent("StrategyAgent",  instructions="You create 7-day social strategies. Respond ONLY in structured JSON.")
-content   = Agent("ContentAgent",   instructions="You write brand-aligned social posts. Respond ONLY in structured JSON.")
-repurpose = Agent("RepurposeAgent", instructions="You repurpose content. Respond ONLY in structured JSON.")
-feedback  = Agent("FeedbackAgent",  instructions="You critique content. Respond ONLY in structured JSON.")
+strategy  = Agent(
+    name="strategy",
+    instructions="You create 7-day social strategies. Respond ONLY in structured JSON."
+)
+content   = Agent(
+    name="content",
+    instructions="You write brand-aligned social posts. Respond ONLY in structured JSON."
+)
+repurpose = Agent(
+    name="repurpose",
+    instructions="You repurpose content. Respond ONLY in structured JSON."
+)
+feedback  = Agent(
+    name="feedback",
+    instructions="You critique content. Respond ONLY in structured JSON."
+)
 
-AGENTS = {
-    "strategy":  strategy,
-    "content":   content,
-    "repurpose": repurpose,
-    "feedback":  feedback,
-}
+AGENTS = {"strategy": strategy, "content": content,
+          "repurpose": repurpose, "feedback": feedback}
+
+# ── Pydantic model for Manager handoff payload ────────────────────────────
+class HandoffData(BaseModel):
+    clarify: str
+    prompt: str
 
 # ── Manager agent ──────────────────────────────────────────────────────────
 MANAGER_TXT = """
-You are the Manager. Look at the user's request and either:
-  1) return JSON: {
-         "handoff_to": "<one of: strategy, content, repurpose, feedback>",
-         "clarify":    "...optional follow-up question…",
-         "payload":    { /* any override or trimmed inputs */ }
-     }
-  2) or return plain-text if you need general clarification.
+You are the Manager. ALWAYS call exactly one `transfer_to_<agent>` handoff tool,
+with arguments matching the HandoffData schema:
+
+  {
+    "clarify": "<optional follow-up question or empty string>",
+    "prompt":  "<text to send to the specialist>"
+  }
+
+Do NOT output any other text or JSON. The SDK will enforce validity.
 """
+
+async def on_handoff(ctx, input_data: HandoffData):
+    # Send manager clarification webhook
+    payload = build_payload(
+        task_id=ctx.input['task_id'],
+        user_id=ctx.input['user_id'],
+        agent_type='manager',
+        message={'type':'text','content': input_data.clarify},
+        reason='handoff',
+        trace=ctx.trace if hasattr(ctx, 'trace') else []
+    )
+    await send_webhook(flatten_payload(payload))
+
 manager = Agent(
-    "Manager",
+    name="manager",
     instructions=prompt_with_handoff_instructions(MANAGER_TXT),
-    handoffs=list(AGENTS.values()),
+    handoffs=[
+        handoff(agent=strategy,  on_handoff=on_handoff, input_type=HandoffData),
+        handoff(agent=content,   on_handoff=on_handoff, input_type=HandoffData),
+        handoff(agent=repurpose, on_handoff=on_handoff, input_type=HandoffData),
+        handoff(agent=feedback,  on_handoff=on_handoff, input_type=HandoffData),
+    ]
 )
 
-# ── All agents map ───────────────────────────────────────────────────────────
 ALL_AGENTS = {"manager": manager, **AGENTS}
 
 # ── Payload builders ─────────────────────────────────────────────────────────
@@ -72,8 +106,7 @@ def build_payload(task_id, user_id, agent_type, message, reason, trace):
 
 def flatten_payload(p: dict) -> dict:
     """
-    Take one level of nested message & metadata fields
-    and promote to top-level keys for Bubble.
+    Flatten one level of nested message/metadata for Bubble.
     """
     return {
         "task_id":         p["task_id"],
@@ -89,104 +122,53 @@ def flatten_payload(p: dict) -> dict:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
 @app.post("/agent")
 async def run_agent(req: Request):
-    data     = await req.json()
-    incoming = data.get("agent_type", "manager")
-    agent    = ALL_AGENTS.get(incoming, manager)
-
-    # ensure we have a prompt (accept new or legacy fields)
+    data    = await req.json()
+    # normalize prompt
     prompt = (
-        data.get("prompt")
-        or data.get("user_prompt")
-        or data.get("message")
+        data.get("prompt") or data.get("user_prompt") or data.get("message")
     )
     if not prompt:
         raise HTTPException(422, "Missing 'prompt' field")
 
-    # 1) run the selected agent
-    result = await Runner.run(agent, input=prompt, max_turns=12)
+    # mandatory IDs
+    task_id = data.get("task_id")
+    user_id = data.get("user_id")
+    if not task_id or not user_id:
+        raise HTTPException(422, "Missing 'task_id' or 'user_id'")
 
-    # compute raw output and reason
-    if hasattr(result, "requires_user_input") and result.requires_user_input:
-        raw    = result.requires_user_input
-        reason = "Agent requested clarification"
-    else:
-        raw = result.final_output.strip()
-        # detect structured JSON vs plain text
-        try:
-            json.loads(raw)
-            reason = "Agent returned structured JSON"
-        except json.JSONDecodeError:
-            reason = "Agent returned unstructured output"
+    # 1) Always invoke the manager (it will hand off internally)
+    result = await Runner.run(
+        manager,
+        input={"task_id": task_id, "user_id": user_id, "prompt": prompt},
+        max_turns=12,
+    )
 
-    # safe trace
+    # 2) Final output comes from the last agent in the chain
+    raw    = result.final_output.strip()
+    # determine reason
     try:
-        trace = result.to_debug_dict()
-    except Exception:
-        trace = []
+        json.loads(raw)
+        reason = "Agent returned structured JSON"
+    except json.JSONDecodeError:
+        reason = "Agent returned unstructured output"
+    # safe trace
+    trace = getattr(result, 'to_debug_dict', lambda: [])()
 
-    # helper to send a flattened webhook
-    async def send_flat(key: str, msg: str, why: str):
-        payload = build_payload(
-            data["task_id"],
-            data["user_id"],
-            key,
-            {"type": "text", "content": msg},
-            why,
-            trace,
-        )
-        await send_webhook(flatten_payload(payload))
+    # 3) Send the final specialist webhook
+    out_payload = build_payload(
+        task_id=task_id,
+        user_id=user_id,
+        agent_type=result.agent_name,
+        message={"type":"text","content": raw},
+        reason=reason,
+        trace=trace
+    )
+    await send_webhook(flatten_payload(out_payload))
 
-    # 2) Manager path: try JSON envelope
-    if incoming == "manager":
-        try:
-            # strip markdown fences if present
-            clean = raw.strip()
-            if clean.startswith("```"):
-                parts   = clean.splitlines()
-                json_str = "\n".join(parts[1:-1])
-            else:
-                json_str = clean
-
-            env     = json.loads(json_str)
-            clarify = env.get("clarify", "")
-            target  = env["handoff_to"]
-            payload = env.get("payload", data)
-
-            # manager’s clarify webhook
-            await send_flat("manager", clarify, "handoff")
-
-            # then immediately invoke the specialist
-            if target in AGENTS:
-                spec_prompt = payload.get("prompt", prompt)
-                spec_res    = await Runner.run(
-                    AGENTS[target],
-                    input=spec_prompt,
-                    max_turns=12
-                )
-                # … build spec_raw, spec_reason, spec_trace …
-                await send_webhook(flatten_payload(spec_payload))
-
-            return {"ok": True}
-
-        except (json.JSONDecodeError, KeyError):
-            # fallback: pure manager clarification
-            await send_flat("manager", raw, reason)
-            return {"ok": True}
-
-
-        except (json.JSONDecodeError, KeyError):
-            # pure manager clarification
-            await send_flat("manager", raw, reason)
-            return {"ok": True}
-
-    # 3) Specialist path: single webhook
-    await send_flat(incoming, raw, reason)
     return {"ok": True}
