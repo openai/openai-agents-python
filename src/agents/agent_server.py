@@ -77,7 +77,7 @@ async def on_handoff(ctx: RunContextWrapper[HandoffData], input_data: HandoffDat
     payload = build_payload(
         task_id=task_id,
         user_id=user_id,
-        agent_type='manager',
+        agent_type=(result.agent.name if hasattr(result, 'agent') and result.agent else 'manager'),
         message={'type':'text','content': input_data.clarify},
         reason='handoff',
         trace=ctx.usage.to_debug_dict() if hasattr(ctx.usage, 'to_debug_dict') else []
