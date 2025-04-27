@@ -1,4 +1,4 @@
-# agents/agent_server.py — deterministic handoffs via SDK `handoff()`
+# agents/agent_server.py — deterministic handoffs via SDK `handoff()` with robust error handling
 
 from __future__ import annotations
 import os
@@ -147,34 +147,46 @@ async def run_agent(req: Request):
     if not task_id or not user_id:
         raise HTTPException(422, "Missing 'task_id' or 'user_id'")
 
-    # 1) Always invoke the manager; pass context for on_handoff
-    result = await Runner.run(
-        manager,
-        input=prompt,
-        context={"task_id": task_id, "user_id": user_id},
-        max_turns=12,
-    )
+    # 1) Run Manager with error catch for handoff parsing issues
+    try:
+        result = await Runner.run(
+            manager,
+            input=prompt,
+            context={"task_id": task_id, "user_id": user_id},
+            max_turns=12,
+        )
+    except json.JSONDecodeError as e:
+        # Handoff JSON malformed: send fallback clarification
+        fallback = build_payload(
+            task_id=task_id,
+            user_id=user_id,
+            agent_type="manager",
+            message={"type":"text","content":
+                     "Sorry, I couldn’t process your request—could you rephrase?"},
+            reason="handoff_parse_error",
+            trace=[]
+        )
+        await send_webhook(flatten_payload(fallback))
+        return {"ok": True}
 
     # 2) Final output comes from the last agent in the chain
-    raw    = result.final_output.strip()
+    raw = result.final_output.strip()
+    print(f"Raw LLM output: {raw}")
     try:
         json.loads(raw)
         reason = "Agent returned structured JSON"
-    except json.JSONDecodeError:
+    except Exception:
         reason = "Agent returned unstructured output"
-    trace = []
-    if hasattr(result, 'to_debug_dict'):
-        trace = result.to_debug_dict()
+    trace = result.to_debug_dict() if hasattr(result, 'to_debug_dict') else []
 
     # 3) Send the final specialist webhook
+    final_type = (result.agent.name
+                  if hasattr(result, "agent") and result.agent
+                  else "manager")
     out_payload = build_payload(
         task_id=task_id,
         user_id=user_id,
-        agent_type = (
-            result.agent.name
-            if hasattr(result, "agent") and result.agent
-            else "manager"
-        ),
+        agent_type=final_type,
         message={"type":"text","content": raw},
         reason=reason,
         trace=trace
