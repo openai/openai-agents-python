@@ -113,7 +113,11 @@ async def run_agent(req: Request):
     # 1) run the selected agent
     result = await Runner.run(agent, input=prompt, max_turns=12)
     raw    = result.final_output.strip()
-    trace  = result.to_debug_dict()
+    # handle trace existence in older/newer SDKs
+    try:
+        trace = result.to_debug_dict()
+    except AttributeError:
+        trace = []
     reason = result.metadata.get("reason", "")
 
     async def send_flat(key: str, msg: str, why: str):
@@ -138,12 +142,15 @@ async def run_agent(req: Request):
             # 2a) manager’s clarification or routing message
             await send_flat("manager", clarify, "handoff")
 
-            # 2b) immediately run specialist
+            # 2b) immediately run specialist if valid
             if target in AGENTS:
                 spec_prompt = payload.get("prompt", prompt)
                 spec_res    = await Runner.run(AGENTS[target], input=spec_prompt, max_turns=12)
                 spec_raw    = spec_res.final_output.strip()
-                spec_trace  = spec_res.to_debug_dict()
+                try:
+                    spec_trace = spec_res.to_debug_dict()
+                except AttributeError:
+                    spec_trace = []
                 spec_reason = spec_res.metadata.get("reason", "")
                 spec_payload = build_payload(
                     data["task_id"],
