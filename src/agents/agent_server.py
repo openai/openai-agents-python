@@ -101,8 +101,12 @@ async def run_agent(req: Request):
     incoming = data.get("agent_type", "manager")
     agent    = ALL_AGENTS.get(incoming, manager)
 
-    # ensure we have a prompt
-    prompt = data.get("prompt")
+    # ensure we have a prompt (accept new or legacy fields)
+    prompt = (
+        data.get("prompt")
+        or data.get("user_prompt")
+        or data.get("message")
+    )
     if not prompt:
         raise HTTPException(422, "Missing 'prompt' field")
 
