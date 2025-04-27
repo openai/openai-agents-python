@@ -170,7 +170,7 @@ async def run_agent(req: Request):
     out_payload = build_payload(
         task_id=task_id,
         user_id=user_id,
-        agent_type=result.agent_name,
+        agent_type=(result.agent.name if hasattr(result, 'agent') else 'unknown'),
         message={"type":"text","content": raw},
         reason=reason,
         trace=trace
