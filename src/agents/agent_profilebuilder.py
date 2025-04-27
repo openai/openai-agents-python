@@ -1,100 +1,140 @@
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+"""
+Conversational Profile Builder router
+• Asks tailored questions until all required keys are filled
+• Emits structured_profile JSON
+"""
 
-from fastapi import APIRouter, Request
-from agents import Agent, Runner
-from agents.tool import WebSearchTool
+from __future__ import annotations
+import os, sys, json, httpx
 from datetime import datetime
-import json
-import httpx
+from dotenv import load_dotenv
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # for local tests
 
+# ── SDK --------------------------------------------------------------------
+load_dotenv()
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from agents import Agent, Runner
+
+# ── router -----------------------------------------------------------------
 router = APIRouter()
 
-# Predefined Bubble webhook URL
-WEBHOOK_URL = "https://helpmeaiai.bubbleapps.io/version-test/api/1.1/wf/openai_profilebuilder_return"
+# ── webhooks ---------------------------------------------------------------
+CHAT_URL   = os.getenv("BUBBLE_CHAT_URL")   # questions / clarifications
+STRUCT_URL = os.getenv("BUBBLE_STRUCTURED_URL")  # final profile JSON
 
-# ProfileBuilder agent skeleton; tools will be set per-request for dynamic locale/fallback
-profile_builder_agent = Agent(
-    name="ProfileBuilderAgent",
-    instructions="""
-You are a profile builder assistant with web search capability.
+# ── helper -----------------------------------------------------------------
+def _now() -> str:
+    from datetime import datetime
+    return datetime.utcnow().isoformat()
 
-You will receive a set of key-value inputs (e.g., profile_uuid, handle URL, etc.).
-Your job:
-1. Use the provided fields (including fallback follower count if given).
-2. If a locale is provided, use it to tailor the web search tool's user_location.
-3. Perform web searches and reasoning to determine follower_count, posting_style, industry, engagement_rate, and any notable public context.
-4. Summarize this into JSON as follows:
-{
+async def _dispatch(url: str, payload: dict):
+    async with httpx.AsyncClient() as c:
+        print("=== PB Webhook ===\n", json.dumps(payload, indent=2))
+        await c.post(url, json=payload)
+        print("==================")
+
+def clarify(task, user, text, reason="Agent requested clarification"):
+    return {
+        "task_id": task,
+        "user_id": user,
+        "agent_type": "profilebuilder",
+        "message": {"type": "text", "content": text},
+        "metadata": {"reason": reason},
+        "created_at": _now(),
+    }
+
+def structured(task, user, obj):
+    return {
+        "task_id": task,
+        "user_id": user,
+        "agent_type": "profilebuilder",
+        "message": obj,
+        "created_at": _now(),
+    }
+
+# ── ProfileBuilderAgent ----------------------------------------------------
+REQUIRED_KEYS = [
+    "primary_SNSchannel", "profile_type", "core_topic", "sub_angle",
+    "primary_objective", "content_strength", "time_budget_weekly",
+    "inspiration_accounts", "provided_follower_count", "locale",
+    "motivation_note"
+]
+
+PB_PROMPT = f"""
+You are ProfileBuilderAgent.
+
+Goal: collect each of these keys once: {", ".join(REQUIRED_KEYS)}.
+
+Rules:
+1. Ask ONE question at a time, tailored to previous answers.
+2. After each user reply, decide which required key is still missing and
+   ask the next most relevant question.
+3. Reflect back occasionally so the user feels understood.
+4. When ALL keys are collected, respond ONLY with:
+
+{{
   "output_type": "structured_profile",
   "contains_image": false,
-  "details": {
-    "profile_uuid": "...",
-    "summary": "Concise profile summary...",
-    "prompt_snippet": { "tone": "...", "goal": "...", "platform": "..." },
-    "follower_count": 12345,
-    "posting_style": "...",
-    "industry": "...",
-    "engagement_rate": "...",
-    "additional_context": "..."
-  }
-}
-Only return JSON with exactly these fields—no markdown or commentary.
-""",
-    tools=[]
+  "details": {{  ...all keys filled ... }}
+}}
+
+5. If you still need information, respond ONLY with:
+{{ "requires_user_input": "your next question" }}
+
+Do NOT wrap responses in markdown fences.
+"""
+
+profile_builder_agent = Agent(
+    name="ProfileBuilderAgent",
+    instructions=PB_PROMPT,
+    tools=[],
 )
 
+# ── API endpoint -----------------------------------------------------------
 @router.post("/profilebuilder")
-async def build_profile(request: Request):
-    data = await request.json()
-    # Extract core identifiers and optional fallbacks
-    profile_uuid = data.pop("profile_uuid", None)
-    provided_fc = data.pop("provided_follower_count", None)
-    locale_text = data.pop("locale", None)
+async def profile_builder_endpoint(req: Request):
+    """
+    Expects:
+    {
+      "action": "new_task" | "new_message",
+      "task_id": "...",
+      "user_id": "...",
+      "user_prompt": "...",          # for new_task
+      "message": "...",              # for new_message
+      "agent_session_id": "profilebuilder"   # for new_message
+    }
+    """
+    data = await req.json()
+    action = data.get("action")
+    if action not in ("new_task", "new_message"):
+        raise HTTPException(400, "Unknown action")
 
-    # Build tool list dynamically based on locale
-    user_loc = {"type": "approximate", "region": locale_text} if locale_text else None
-    tools = [WebSearchTool(user_location=user_loc, search_context_size="low")]
-    profile_builder_agent.tools = tools
+    task_id, user_id = data["task_id"], data["user_id"]
+    user_text = data.get("user_prompt") or data.get("message")
+    if not user_text:
+        raise HTTPException(422, "Missing user_prompt or message")
 
-    # Flatten remaining inputs into prompt lines
-    prompt_lines = []
-    for key, val in data.items():
-        if val not in (None, "", "null"):
-            prompt_lines.append(f"{key}: {val}")
-    if provided_fc is not None:
-        prompt_lines.append(f"Provided follower count: {provided_fc}")
+    # run the agent
+    result = await Runner.run(profile_builder_agent, input=user_text, max_turns=1)
 
-    # Construct the agent prompt
-    agent_input = f"Profile UUID: {profile_uuid}\n" + "\n".join(prompt_lines)
+    # clarification?
+    if getattr(result, "requires_user_input", None):
+        await _dispatch(CHAT_URL,
+                        clarify(task_id, user_id, result.requires_user_input))
+        return {"ok": True}
 
-    # Invoke the agent
-    result = await Runner.run(profile_builder_agent, input=agent_input)
-
-    # Clean markdown fences
-    output = result.final_output.strip()
-    if output.startswith("```") and output.endswith("```"):
-        output = output.split("\n", 1)[-1].rsplit("\n", 1)[0]
-
-    # Parse agent JSON response
+    # final structured?
     try:
-        parsed = json.loads(output)
-        details = parsed.get("details", {})
+        parsed = json.loads(result.final_output.strip())
+        if parsed.get("output_type") == "structured_profile":
+            await _dispatch(STRUCT_URL, structured(task_id, user_id, parsed))
+            return {"ok": True}
     except Exception:
-        details = {}
+        pass
 
-    # Build profile_data payload dynamically
-    profile_data = {"profile_uuid": profile_uuid}
-    for k, v in details.items():
-        profile_data[k] = v
-    profile_data["created_at"] = datetime.utcnow().isoformat()
-
-    # Post to Bubble webhook
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(WEBHOOK_URL, json=profile_data)
-        except Exception as e:
-            profile_data["webhook_error"] = str(e)
-
-    return profile_data
+    # fallback: return raw text as chat
+    await _dispatch(CHAT_URL,
+                    clarify(task_id, user_id, result.final_output.strip(),
+                            reason="Agent returned unstructured output"))
+    return {"ok": True"}
