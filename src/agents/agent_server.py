@@ -174,7 +174,7 @@ async def run_agent(req: Request):
             result.agent.name
             if hasattr(result, "agent") and result.agent
             else "manager"
-        )
+        ),
         message={"type":"text","content": raw},
         reason=reason,
         trace=trace
