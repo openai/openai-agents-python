@@ -47,6 +47,15 @@ feedback  = Agent("FeedbackAgent",  instructions="You critique content. Respond 
 
 AGENTS = { "strategy": strategy, "content": content, "repurpose": repurpose, "feedback": feedback }
 
+# canonical name for every Agent object we own
+AGENT_TO_KEY = {
+    manager:     "manager",
+    strategy:    "strategy",
+    content:     "content",
+    repurpose:   "repurpose",
+    feedback:    "feedback",
+}
+
 # ── Manager with native handoffs ───────────────────────────────────────────
 MANAGER_TXT = """
 You are an intelligent router for user requests.
@@ -88,7 +97,7 @@ async def run_agent(req: Request):
     # who produced the final_output / clarification?
     speaker     = getattr(result, "agent", None)  # Agent object or None
     agent_name  = speaker.name if speaker else session_key
-    agent_key = canon(agent_name)
+    agent_key = AGENT_TO_KEY.get(speaker, "manager")
     if not agent_key:
         agent_key = "manager"
         
