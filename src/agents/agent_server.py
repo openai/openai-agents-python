@@ -55,9 +55,8 @@ manager = Agent(
     handoffs=list(AGENTS.values()),
 )
 
-# ── Mappings ────────────────────────────────────────────────────────────────
-ALL_AGENTS   = {"manager": manager, **AGENTS}
-AGENT_TO_KEY = {agent: key for key, agent in ALL_AGENTS.items()}
+# ── All agents map ───────────────────────────────────────────────────────────
+ALL_AGENTS = {"manager": manager, **AGENTS}
 
 # ── Payload builders ─────────────────────────────────────────────────────────
 def build_payload(task_id, user_id, agent_type, message, reason, trace):
