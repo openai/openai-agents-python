@@ -145,7 +145,7 @@ async def run_agent(req: Request):
     # 1) Always invoke the manager (it will hand off internally)
     result = await Runner.run(
         manager,
-        input={"task_id": task_id, "user_id": user_id, "prompt": prompt},
+        input=prompt,
         max_turns=12,
     )
 
