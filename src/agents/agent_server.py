@@ -112,14 +112,27 @@ async def run_agent(req: Request):
 
     # 1) run the selected agent
     result = await Runner.run(agent, input=prompt, max_turns=12)
-    raw    = result.final_output.strip()
-    # handle trace existence in older/newer SDKs
+
+    # compute raw output and reason
+    if hasattr(result, "requires_user_input") and result.requires_user_input:
+        raw    = result.requires_user_input
+        reason = "Agent requested clarification"
+    else:
+        raw = result.final_output.strip()
+        # detect structured JSON vs plain text
+        try:
+            json.loads(raw)
+            reason = "Agent returned structured JSON"
+        except json.JSONDecodeError:
+            reason = "Agent returned unstructured output"
+
+    # safe trace
     try:
         trace = result.to_debug_dict()
-    except AttributeError:
+    except Exception:
         trace = []
-    reason = result.metadata.get("reason", "")
 
+    # helper to send a flattened webhook
     async def send_flat(key: str, msg: str, why: str):
         payload = build_payload(
             data["task_id"],
@@ -139,19 +152,33 @@ async def run_agent(req: Request):
             target  = env["handoff_to"]
             payload = env.get("payload", data)
 
-            # 2a) manager’s clarification or routing message
+            # manager’s clarification or routing question
             await send_flat("manager", clarify, "handoff")
 
-            # 2b) immediately run specialist if valid
+            # immediately run specialist if valid
             if target in AGENTS:
                 spec_prompt = payload.get("prompt", prompt)
                 spec_res    = await Runner.run(AGENTS[target], input=spec_prompt, max_turns=12)
-                spec_raw    = spec_res.final_output.strip()
+
+                # spec raw & reason
+                if hasattr(spec_res, "requires_user_input") and spec_res.requires_user_input:
+                    spec_raw    = spec_res.requires_user_input
+                    spec_reason = "Agent requested clarification"
+                else:
+                    spec_raw = spec_res.final_output.strip()
+                    try:
+                        json.loads(spec_raw)
+                        spec_reason = "Agent returned structured JSON"
+                    except json.JSONDecodeError:
+                        spec_reason = "Agent returned unstructured output"
+
+                # spec trace
                 try:
                     spec_trace = spec_res.to_debug_dict()
-                except AttributeError:
+                except Exception:
                     spec_trace = []
-                spec_reason = spec_res.metadata.get("reason", "")
+
+                # send specialist webhook
                 spec_payload = build_payload(
                     data["task_id"],
                     data["user_id"],
