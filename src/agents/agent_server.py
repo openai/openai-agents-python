@@ -18,15 +18,7 @@ from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 CHAT_URL = os.getenv("BUBBLE_CHAT_URL")          # one endpoint is enough
 _now     = lambda: datetime.utcnow().isoformat()
 
-def canon(name: str | None) -> str:
-    """
-    Normalize any agent name:
-    'ContentAgent' → 'content'
-    'strategyagent' → 'strategy'
-    'manager'       → 'manager'
-    """
-    if not name:
-        return ""
+def canon(name: str) -> str:
     name = name.lower().replace(" ", "").replace("_", "")
     return name[:-5] if name.endswith("agent") else name
 
@@ -96,7 +88,7 @@ async def run_agent(req: Request):
     # who produced the final_output / clarification?
     speaker     = getattr(result, "agent", None)  # Agent object or None
     agent_name  = speaker.name if speaker else session_key
-    agent_key   = canon(agent_name)
+    agent_key = canon(agent_name)
     if not agent_key:
         agent_key = "manager"
         
