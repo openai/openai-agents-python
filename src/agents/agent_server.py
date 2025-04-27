@@ -147,49 +147,40 @@ async def run_agent(req: Request):
     # 2) Manager path: try JSON envelope
     if incoming == "manager":
         try:
-            env     = json.loads(raw)
+            # strip markdown fences if present
+            clean = raw.strip()
+            if clean.startswith("```"):
+                parts   = clean.splitlines()
+                json_str = "\n".join(parts[1:-1])
+            else:
+                json_str = clean
+
+            env     = json.loads(json_str)
             clarify = env.get("clarify", "")
             target  = env["handoff_to"]
             payload = env.get("payload", data)
 
-            # manager’s clarification or routing question
+            # manager’s clarify webhook
             await send_flat("manager", clarify, "handoff")
 
-            # immediately run specialist if valid
+            # then immediately invoke the specialist
             if target in AGENTS:
                 spec_prompt = payload.get("prompt", prompt)
-                spec_res    = await Runner.run(AGENTS[target], input=spec_prompt, max_turns=12)
-
-                # spec raw & reason
-                if hasattr(spec_res, "requires_user_input") and spec_res.requires_user_input:
-                    spec_raw    = spec_res.requires_user_input
-                    spec_reason = "Agent requested clarification"
-                else:
-                    spec_raw = spec_res.final_output.strip()
-                    try:
-                        json.loads(spec_raw)
-                        spec_reason = "Agent returned structured JSON"
-                    except json.JSONDecodeError:
-                        spec_reason = "Agent returned unstructured output"
-
-                # spec trace
-                try:
-                    spec_trace = spec_res.to_debug_dict()
-                except Exception:
-                    spec_trace = []
-
-                # send specialist webhook
-                spec_payload = build_payload(
-                    data["task_id"],
-                    data["user_id"],
-                    target,
-                    {"type": "text", "content": spec_raw},
-                    spec_reason,
-                    spec_trace,
+                spec_res    = await Runner.run(
+                    AGENTS[target],
+                    input=spec_prompt,
+                    max_turns=12
                 )
+                # … build spec_raw, spec_reason, spec_trace …
                 await send_webhook(flatten_payload(spec_payload))
 
             return {"ok": True}
+
+        except (json.JSONDecodeError, KeyError):
+            # fallback: pure manager clarification
+            await send_flat("manager", raw, reason)
+            return {"ok": True}
+
 
         except (json.JSONDecodeError, KeyError):
             # pure manager clarification
