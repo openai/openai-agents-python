@@ -1,7 +1,7 @@
 # src/agents/profilebuilder.py
 
 from fastapi import APIRouter, Request, HTTPException
-from agents.utils.webhook import send_webhook
+from agents.util.webhook import send_webhook
 import os
 import json
 from datetime import datetime
