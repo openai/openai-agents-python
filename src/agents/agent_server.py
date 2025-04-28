@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from agents.profilebuilder import router as profilebuilder_router
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
@@ -130,6 +131,8 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+# ── Mount your profilebuilder routes ───────────────────────────────────────
+app.include_router(profilebuilder_router)
 
 @app.post("/agent")
 async def run_agent(req: Request):
