@@ -1,3 +1,7 @@
+# src/agents/profilebuilder_agent.py
+
+from agents import Agent
+
 profilebuilder_agent = Agent(
     name="profilebuilder",
     instructions="""
