@@ -38,7 +38,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
+          git add docs/
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Update all translated document pages"
             git push
