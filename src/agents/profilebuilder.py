@@ -2,7 +2,7 @@
 
 from agents.profilebuilder_agent import profilebuilder_agent
 from agents.util.webhook import send_webhook
-from agents.run import Runner
+from agents.run import Runner    # <-- Correct import!
 from fastapi import APIRouter, Request, HTTPException
 import os
 import json
@@ -10,9 +10,8 @@ from datetime import datetime
 
 router = APIRouter()
 
-# URLs pulled from environment variables
 PROFILE_WEBHOOK_URL = os.getenv("PROFILE_WEBHOOK_URL")
-CHAT_WEBHOOK_URL = os.getenv("CLARIFICATION_WEBHOOK_URL")  # This is the chat bubble webhook you already have
+CHAT_WEBHOOK_URL = os.getenv("CLARIFICATION_WEBHOOK_URL")
 
 @router.post("/profilebuilder")
 async def profilebuilder_handler(req: Request):
@@ -37,11 +36,16 @@ async def profilebuilder_handler(req: Request):
 
     raw_output = result.final_output.strip()
 
-    # 2. Parse partial profile field from agent output
+    # 2. Defensive parsing: agent must return JSON
     try:
+        if not raw_output or not raw_output.startswith("{"):
+            raise ValueError("Agent output is not JSON or is empty")
+
         field_update = json.loads(raw_output)
+
         if not isinstance(field_update, dict) or len(field_update) != 1:
             raise ValueError("Agent must output a single-field JSON object")
+        
         reason = "profile_partial"
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(500, f"Agent output invalid: {e}")
@@ -56,13 +60,13 @@ async def profilebuilder_handler(req: Request):
         "metadata_reason": reason,
         "created_at": datetime.utcnow().isoformat(),
     }
+
     if not PROFILE_WEBHOOK_URL:
         raise RuntimeError("Missing PROFILE_WEBHOOK_URL")
 
     await send_webhook(PROFILE_WEBHOOK_URL, profile_payload)
 
-    # 4. Send webhook to update Chat (agent's next question)
-    # Get the next outgoing prompt (already included in agent output after profile field is collected)
+    # 4. Send webhook to Chat (agent's next question)
     next_prompt = result.next_prompt if hasattr(result, "next_prompt") else None
 
     if next_prompt:
