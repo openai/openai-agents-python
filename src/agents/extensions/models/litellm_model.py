@@ -78,7 +78,7 @@ class LitellmModel(Model):
             | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
             disabled=tracing.is_disabled(),
         ) as span_generation:
-            response = await self._fetch_response(
+            response, stream = await self._fetch_response(
                 system_instructions,
                 input,
                 model_settings,
@@ -87,16 +87,20 @@ class LitellmModel(Model):
                 handoffs,
                 span_generation,
                 tracing,
-                stream=False,
+                stream=True,
             )
 
-            assert isinstance(response.choices[0], litellm.types.utils.Choices)
+            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+                if chunk.type == "response.completed":
+                    response = chunk.response
+
+            message = Converter.output_items_to_message(response.output)
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
                 logger.debug(
-                    f"LLM resp:\n{json.dumps(response.choices[0].message.model_dump(), indent=2)}\n"
+                    f"LLM resp:\n{json.dumps(message.model_dump(), indent=2)}\n"
                 )
 
             if hasattr(response, "usage"):
@@ -104,9 +108,9 @@ class LitellmModel(Model):
                 usage = (
                     Usage(
                         requests=1,
-                        input_tokens=response_usage.prompt_tokens,
-                        output_tokens=response_usage.completion_tokens,
-                        total_tokens=response_usage.total_tokens,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        total_tokens=response.usage.total_tokens,
                     )
                     if response.usage
                     else Usage()
@@ -116,18 +120,14 @@ class LitellmModel(Model):
                 logger.warning("No usage information returned from Litellm")
 
             if tracing.include_data():
-                span_generation.span_data.output = [response.choices[0].message.model_dump()]
+                span_generation.span_data.output = [message.model_dump()]
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(
-                LitellmConverter.convert_message_to_openai(response.choices[0].message)
-            )
-
             return ModelResponse(
-                output=items,
+                output=response.output,
                 usage=usage,
                 response_id=None,
             )

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
 from openai.types import ChatModel
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.responses import Response
 
 from .. import _debug
@@ -58,7 +58,7 @@ class OpenAIChatCompletionsModel(Model):
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
         ) as span_generation:
-            response = await self._fetch_response(
+            response, stream = await self._fetch_response(
                 system_instructions,
                 input,
                 model_settings,
@@ -67,37 +67,41 @@ class OpenAIChatCompletionsModel(Model):
                 handoffs,
                 span_generation,
                 tracing,
-                stream=False,
+                stream=True,
             )
+
+            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+                if chunk.type == "response.completed":
+                    response = chunk.response
+
+            message = Converter.output_items_to_message(response.output)
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
                 logger.debug(
-                    f"LLM resp:\n{json.dumps(response.choices[0].message.model_dump(), indent=2)}\n"
+                    f"LLM resp:\n{json.dumps(message.model_dump(), indent=2)}\n"
                 )
 
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
                     total_tokens=response.usage.total_tokens,
                 )
                 if response.usage
                 else Usage()
             )
             if tracing.include_data():
-                span_generation.span_data.output = [response.choices[0].message.model_dump()]
+                span_generation.span_data.output = [message.model_dump()]
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(response.choices[0].message)
-
             return ModelResponse(
-                output=items,
+                output=response.output,
                 usage=usage,
                 response_id=None,
             )
