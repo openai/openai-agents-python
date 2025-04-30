@@ -113,13 +113,16 @@ class MCPUtil:
 
         # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
         # string. We'll try to convert.
-        if len(result.content) == 1:
-            tool_output = result.content[0].model_dump_json()
-        elif len(result.content) > 1:
-            tool_output = json.dumps([item.model_dump() for item in result.content])
+        if type(result) == list:
+            tool_output = json.dumps([item.model_dump() for item in result])
         else:
-            logger.error(f"Errored MCP tool result: {result}")
-            tool_output = "Error running tool."
+            if len(result.content) == 1:
+                tool_output = result.content[0].model_dump_json()
+            elif len(result.content) > 1:
+                tool_output = json.dumps([item.model_dump() for item in result.content])
+            else:
+                logger.error(f"Errored MCP tool result: {result}")
+                tool_output = "Error running tool."
 
         current_span = get_current_span()
         if current_span:

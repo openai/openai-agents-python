@@ -1,9 +1,10 @@
 import logging
 from typing import Any
+import json
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.types import Tool as MCPTool
+from mcp.types import Tool as MCPTool, CallToolResult, TextContent
 from pydantic import BaseModel, TypeAdapter
 
 from agents import Agent, FunctionTool, RunContextWrapper
@@ -86,6 +87,19 @@ async def test_invoke_mcp_tool():
 
     await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
     # Just making sure it doesn't crash
+    
+
+@pytest.mark.asyncio
+async def test_invoke_mcp_tool():
+    """Test that the invoke_mcp_tool function invokes an MCP tool and returns the result."""
+    server = FakeMCPServer()
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    # Just making sure it doesn't crash
 
 
 @pytest.mark.asyncio
@@ -125,6 +139,35 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+    
+class ResultTestingServer(FakeMCPServer):
+    def __init__(self):
+        super().__init__()
+        self.return_empty = False
+        self.return_multiple = False
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+        if self.return_empty:
+            return CallToolResult(content=[])
+        elif self.return_multiple:
+            return CallToolResult(content=[
+                TextContent(text="result1", type="text"),
+                TextContent(text="result2", type="text")
+            ])
+        return CallToolResult(content=[TextContent(text=f"result_{tool_name}", type="text")])
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_result_conversion():
+    """Test that MCP tool results with empty content return error message."""
+    server = ResultTestingServer()
+    server.return_empty = True
+    server.add_tool("test_tool", {})
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool", inputSchema={})
+
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
+    assert result == "Error running tool."
 
 
 @pytest.mark.asyncio
