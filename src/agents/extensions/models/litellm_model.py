@@ -228,6 +228,10 @@ class LitellmModel(Model):
                     "role": "system",
                 },
             )
+
+        if model_settings.patch_json_mode:
+            Converter.patch_messages_json_mode(converted_messages, output_schema)
+
         if tracing.include_data():
             span.span_data.input = converted_messages
 
@@ -239,7 +243,7 @@ class LitellmModel(Model):
             else None
         )
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
-        response_format = Converter.convert_response_format(output_schema)
+        response_format = Converter.convert_response_format(output_schema, model_settings.patch_json_mode)
 
         converted_tools = [Converter.tool_to_openai(tool) for tool in tools] if tools else []
 

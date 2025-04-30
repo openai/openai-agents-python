@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from textwrap import dedent
 from typing import Any, Literal, cast
 
 from openai import NOT_GIVEN, NotGiven
@@ -67,10 +68,13 @@ class Converter:
 
     @classmethod
     def convert_response_format(
-        cls, final_output_schema: AgentOutputSchemaBase | None
+        cls, final_output_schema: AgentOutputSchemaBase | None, patch_json_mode: bool = False,
     ) -> ResponseFormat | NotGiven:
         if not final_output_schema or final_output_schema.is_plain_text():
             return NOT_GIVEN
+
+        if patch_json_mode:
+            return {"type": "json_object"}
 
         return {
             "type": "json_schema",
@@ -436,6 +440,38 @@ class Converter:
 
         flush_assistant_message()
         return result
+
+    @classmethod
+    def patch_messages_json_mode(
+        cls,
+        items: list[ChatCompletionMessageParam],
+        output_schema: AgentOutputSchemaBase | None,
+    ):
+        """
+        In json-mode, add json_schema to the system message.
+        """
+        if output_schema is None or output_schema.is_plain_text():
+            return
+
+        message = dedent(f"""
+        As a genius expert, your task is to understand the content and provide
+        the parsed objects in json that match the following json_schema:\n
+
+        {json.dumps(output_schema.json_schema(), indent=2, ensure_ascii=False)}
+
+        Make sure to return an instance of the JSON, not the schema itself
+        """)
+
+        if items[0]["role"] != "system":
+            items.insert(0, ChatCompletionSystemMessageParam(content=message, role="system"))
+        elif isinstance(items[0]["content"], str):
+            items[0]["content"] += f"\n\n{message}"
+        elif isinstance(items[0]["content"], list):
+            items[0]["content"][0]["text"] += f"\n\n{message}"
+        else:
+            raise ValueError(
+                "Invalid message format, must be a string or a list of messages"
+            )
 
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
