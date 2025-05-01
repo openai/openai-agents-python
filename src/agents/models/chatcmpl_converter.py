@@ -20,6 +20,7 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall, Function
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.responses import (
     EasyInputMessageParam,
@@ -80,6 +81,34 @@ class Converter:
                 "schema": final_output_schema.json_schema(),
             },
         }
+
+    @classmethod
+    def output_items_to_message(cls, items: list[TResponseOutputItem] ) -> ChatCompletionMessage:
+        tool_calls: list[ChatCompletionMessageToolCall] | None = None
+        message = ChatCompletionMessage(role="assistant")
+
+        for item in items:
+            if isinstance(item, ResponseOutputMessage):
+                if isinstance(item.content, ResponseOutputText):
+                    message.content = item.content.text
+                elif isinstance(item.content, ResponseOutputRefusal):
+                    message.refusal = item.content.refusal
+            elif isinstance(item, ResponseFunctionToolCall):
+                if tool_calls is None:
+                    tool_calls = []
+                tool_calls.append(
+                    ChatCompletionMessageToolCall(
+                        id=item.call_id,
+                        type="function",
+                        function=Function(
+                            name=item.name,
+                            arguments=item.arguments,
+                        ),
+                    )
+                )
+
+        message.tool_calls = tool_calls
+        return message
 
     @classmethod
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
