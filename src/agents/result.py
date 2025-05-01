@@ -4,7 +4,7 @@ import abc
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from typing_extensions import TypeVar
 
@@ -13,12 +13,14 @@ from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import InputGuardrailTripwireTriggered, MaxTurnsExceeded
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
-from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
+from .items import (ItemHelpers, ModelResponse, RunItem, ToolCallOutputItem,
+                    TResponseInputItem)
 from .logger import logger
 from .run_context import RunContextWrapper
 from .stream_events import StreamEvent
 from .tracing import Trace
-from .util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
+from .util._pretty_print import (pretty_print_result,
+                                 pretty_print_run_result_streaming)
 
 if TYPE_CHECKING:
     from ._run_impl import QueueCompleteSentinel
@@ -83,6 +85,43 @@ class RunResultBase(abc.ABC):
         new_items = [item.to_input_item() for item in self.new_items]
 
         return original_items + new_items
+    
+    def get_tool_call_output(self, tool_name: str) -> Optional[ToolCallOutputItem]:
+        """
+        Get the tool call output for a specific tool from the agent result.
+        
+        Args:
+            tool_name: The name of the tool to find
+            
+        Returns:
+            The tool call output item if found, None otherwise
+
+        Examples:
+            >>> result = RunResult(...)
+            >>> output = result.get_tool_call_output("calculator")
+            >>> if output:
+            ...     print(output.raw_item)
+        """
+        try:
+            # Find the tool call item
+            tool_call_item = next(
+                (item for item in self.new_items 
+                 if item.type == "tool_call_item" and item.raw_item.name == tool_name),
+                None
+            )
+
+            # Find matching tool call output item with same call_id
+            if tool_call_item:
+                return next(
+                    (item for item in self.new_items 
+                     if item.type == "tool_call_output_item" 
+                     and item.raw_item.get('call_id', None) == tool_call_item.raw_item.call_id),
+                    None
+                )
+            return None
+        except Exception as e:
+            logger.error(f"Error getting tool call output for {tool_name}: {str(e)}")
+            return None
 
     @property
     def last_response_id(self) -> str | None:

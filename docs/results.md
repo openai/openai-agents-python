@@ -37,6 +37,20 @@ The [`new_items`][agents.result.RunResultBase.new_items] property contains the n
 -   [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] indicates that a tool was called. The raw item is the tool response. You can also access the tool output from the item.
 -   [`ReasoningItem`][agents.items.ReasoningItem] indicates a reasoning item from the LLM. The raw item is the reasoning generated.
 
+### Getting Tool Call Outputs
+
+You can use the [`get_tool_call_output(tool_name)`][agents.result.RunResultBase.get_tool_call_output] method to retrieve the output of a specific tool call by its name. This is useful when you need to access the result of a particular tool execution:
+
+```python
+result = await Runner.run(agent, "input")
+tool_output = result.get_tool_call_output("my_tool_name")
+if tool_output:
+    # Process tool output
+    pass
+```
+
+The method returns `None` if the tool wasn't called or if there was an error retrieving the output.
+
 ## Other information
 
 ### Guardrail results
