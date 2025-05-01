@@ -269,6 +269,8 @@ class LitellmModel(Model):
             extra_kwargs["extra_query"] = model_settings.extra_query
         if model_settings.metadata:
             extra_kwargs["metadata"] = model_settings.metadata
+        if model_settings.extra_body and isinstance(model_settings.extra_body, dict):
+            extra_kwargs.update(model_settings.extra_body)
 
         ret = await litellm.acompletion(
             model=self.model,
