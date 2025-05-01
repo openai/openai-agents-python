@@ -73,6 +73,8 @@ class ModelSettings:
     """Additional headers to provide with the request.
     Defaults to None if not provided."""
 
+    patch_json_mode: bool = False
+
     def resolve(self, override: ModelSettings | None) -> ModelSettings:
         """Produce a new ModelSettings by overlaying any non-None values from the
         override on top of this instance."""
