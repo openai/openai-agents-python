@@ -1,19 +1,16 @@
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, List
 
 import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
-from agents import (
-    Agent,
-    AgentOutputSchema,
-    AgentOutputSchemaBase,
-    ModelBehaviorError,
-    Runner,
-    UserError,
-)
+from agents import (Agent, AgentOutputSchema, AgentOutputSchemaBase,
+                    ModelBehaviorError, Runner, UserError)
 from agents.agent_output import _WRAPPER_DICT_KEY
+from agents.items import RunItem, ToolCallItem, ToolCallOutputItem
+from agents.result import RunResultBase
 from agents.util import _json
 
 
@@ -166,3 +163,99 @@ def test_custom_output_schema():
     json_str = json.dumps({"foo": "bar"})
     validated = output_schema.validate_json(json_str)
     assert validated == ["some", "output"]
+
+
+@dataclass
+class MockRunResult(RunResultBase):
+    """Mock implementation of RunResultBase for testing"""
+    input: str
+    new_items: List[RunItem]
+    raw_responses: List[Any]
+    final_output: Any
+    input_guardrail_results: List[Any]
+    output_guardrail_results: List[Any]
+    context_wrapper: Any
+    
+    @property
+    def last_agent(self):
+        return None
+
+def test_get_tool_call_output():
+    # Create a mock agent
+    agent = Agent(name="test")
+
+    # Create mock tool call and output items
+    tool_call = ToolCallItem(
+        type="tool_call_item",
+        raw_item=type("ToolCall", (), {
+            "name": "test_tool",
+            "call_id": "123",
+        }),
+        agent=agent
+    )
+    
+    tool_output = ToolCallOutputItem(
+        type="tool_call_output_item",
+        raw_item={
+            "call_id": "123",
+            "content": "tool output"
+        },
+        agent=agent,
+        output="tool output"
+    )
+
+    # Test successful tool call output retrieval
+    result = MockRunResult(
+        input="test input",
+        new_items=[tool_call, tool_output],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        context_wrapper=None
+    )
+    
+    output = result.get_tool_call_output("test_tool")
+    assert output is not None
+    assert output.type == "tool_call_output_item"
+    assert output.raw_item["content"] == "tool output"
+
+    # Test non-existent tool
+    output = result.get_tool_call_output("non_existent_tool")
+    assert output is None
+
+    # Test with empty items list
+    empty_result = MockRunResult(
+        input="test input",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        context_wrapper=None
+    )
+    output = empty_result.get_tool_call_output("test_tool")
+    assert output is None
+
+    # Test with mismatched call_id
+    mismatched_output = ToolCallOutputItem(
+        type="tool_call_output_item",
+        raw_item={
+            "call_id": "456",  # Different call_id
+            "content": "tool output"
+        },
+        agent=agent,
+        output="tool output"
+    )
+    
+    mismatched_result = MockRunResult(
+        input="test input",
+        new_items=[tool_call, mismatched_output],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        context_wrapper=None
+    )
+    output = mismatched_result.get_tool_call_output("test_tool")
+    assert output is None
