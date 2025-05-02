@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.profilebuilder import router as profilebuilder_router
-from openai.tools.websearch import WebSearchTool
+from .tool import WebSearchTool
 from agents.tool import MarkdownBlock  # Assumes this helper renders markdown properly
 
 
