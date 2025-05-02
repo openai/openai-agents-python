@@ -153,8 +153,6 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
-# ── Mount your profilebuilder routes ───────────────────────────────────────
-app.include_router(profilebuilder_agent)
 
 @app.post("/agent")
 async def run_agent(req: Request):
