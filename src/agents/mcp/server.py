@@ -336,7 +336,7 @@ class MCPServerStreamableHttpParams(TypedDict):
     sse_read_timeout: NotRequired[float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
-    terminate_on_close: bool
+    terminate_on_close: NotRequired[bool]
     """Terminate on close"""
 
 
