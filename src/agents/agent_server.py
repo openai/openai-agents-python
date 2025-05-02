@@ -13,7 +13,6 @@ from pydantic import BaseModel
 from agents.profilebuilder_agent import profilebuilder_agent
 from .tool import WebSearchTool
 
-
 # ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -219,4 +218,49 @@ async def run_agent(req: Request):
     )
     await send_webhook(flatten_payload(out_payload))
 
+    return {"ok": True}
+
+@app.post("/agent_direct")
+async def run_agent_direct(req: Request):
+    data = await req.json()
+
+    agent_type = data.get("agent_type")
+    agent = AGENTS.get(agent_type)
+    if not agent:
+        raise HTTPException(422, f"Unknown agent_type: {agent_type}")
+
+    task_id = data.get("task_id")
+    user_id = data.get("user_id")
+    if not task_id or not user_id:
+        raise HTTPException(422, "Missing 'task_id' or 'user_id'")
+
+    prompt = data.get("prompt") or data.get("message") or ""
+    context = {
+        "task_id": task_id,
+        "user_id": user_id,
+        "profile_data": data.get("profile_data")
+    }
+
+    result = await Runner.run(agent, input=prompt, context=context, max_turns=12)
+    raw = result.final_output.strip()
+
+    try:
+        content = json.loads(raw)
+        reason = "Agent returned structured JSON"
+        msg = {"type": "structured", "content": content}
+    except json.JSONDecodeError:
+        reason = "Agent returned unstructured output"
+        msg = {"type": "text", "content": raw}
+
+    trace = result.to_debug_dict() if hasattr(result, "to_debug_dict") else []
+
+    payload = build_payload(
+        task_id=task_id,
+        user_id=user_id,
+        agent_type=agent.name,
+        message=msg,
+        reason=reason,
+        trace=trace
+    )
+    await send_webhook(flatten_payload(payload))
     return {"ok": True}
