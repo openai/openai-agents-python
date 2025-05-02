@@ -12,7 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.profilebuilder import router as profilebuilder_router
 from .tool import WebSearchTool
-from agents.tool import MarkdownBlock  # Assumes this helper renders markdown properly
 
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
