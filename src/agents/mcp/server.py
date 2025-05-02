@@ -375,7 +375,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         super().__init__(cache_tools_list, client_session_timeout_seconds)
 
         self.params = params
-        self._name = name or f"sse: {self.params['url']}"
+        self._name = name or f"streamable_http: {self.params['url']}"
 
     def create_streams(
         self,
