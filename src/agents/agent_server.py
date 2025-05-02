@@ -11,6 +11,9 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.profilebuilder import router as profilebuilder_router
+from openai.tools.websearch import WebSearchTool
+from agents.tool import MarkdownBlock  # Assumes this helper renders markdown properly
+
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
 load_dotenv()
@@ -45,9 +48,24 @@ feedback  = Agent(
     name="feedback",
     instructions="You critique content. Respond ONLY in structured JSON."
 )
+profile_analyzer = Agent(
+    name="profile_analyzer",
+    instructions="""
+You are an expert in analyzing aspiring influencer profiles.
+
+Your goal is to deeply understand a user's motivations, niche, audience, and goals based on their collected profile data. Then, generate a highly personalized report that:
+- Recognizes their unique strengths and values
+- Suggests viable directions based on their niche and goals
+- Offers caution or tradeoff considerations
+- Is written in clear, supportive, actionable tone
+
+Use WebSearchTool if needed to briefly validate niche demand or market trends. Output a single MarkdownBlock with the report. Do NOT output JSON or code. Respond only with a single full markdown block.
+""",
+    tools=[WebSearchTool()],
+)
 
 AGENTS = {"strategy": strategy, "content": content,
-          "repurpose": repurpose, "feedback": feedback}
+          "repurpose": repurpose, "feedback": feedback,"profile_analyzer": profile_analyzer,}
 
 # ── Pydantic model for Manager handoff payload ────────────────────────────
 class HandoffData(BaseModel):
