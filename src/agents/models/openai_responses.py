@@ -89,11 +89,11 @@ class OpenAIResponsesModel(Model):
                 else:
                     logger.debug(
                         "LLM resp:\n"
-                        f"{json.dumps(
+                        f"""{json.dumps(
                             [x.model_dump() for x in response.output],
                             indent=2,
                             ensure_ascii=False
-                        )}\n"
+                        )}\n"""
                     )
 
                 usage = (

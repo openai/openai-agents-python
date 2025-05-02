@@ -75,11 +75,11 @@ class OpenAIChatCompletionsModel(Model):
             else:
                 logger.debug(
                     "LLM resp:\n",
-                    f"{json.dumps(
+                    f"""{json.dumps(
                         response.choices[0].message.model_dump(),
                         indent=2,
                         ensure_ascii=False
-                    )}\n"
+                    )}\n"""
                 )
 
             usage = (
