@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from agents.profilebuilder import router as profilebuilder_router
+from agents.profilebuilder_agent import profilebuilder_agent
 from .tool import WebSearchTool
 
 
@@ -63,8 +63,14 @@ Use WebSearchTool if needed to briefly validate niche demand or market trends. O
     tools=[WebSearchTool()],
 )
 
-AGENTS = {"strategy": strategy, "content": content,
-          "repurpose": repurpose, "feedback": feedback,"profile_analyzer": profile_analyzer,}
+AGENTS = {
+    "strategy": strategy,
+    "content": content,
+    "repurpose": repurpose,
+    "feedback": feedback,
+    "profile_analyzer": profile_analyzer,
+    "profilebuilder": profilebuilder_agent
+}
 
 # ── Pydantic model for Manager handoff payload ────────────────────────────
 class HandoffData(BaseModel):
