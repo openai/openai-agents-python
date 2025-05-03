@@ -106,6 +106,7 @@ class LitellmModel(Model):
                     Usage(
                         requests=1,
                         input_tokens=response_usage.prompt_tokens,
+                        cached_tokens=response.usage.prompt_tokens_details.cached_tokens,
                         output_tokens=response_usage.completion_tokens,
                         total_tokens=response_usage.total_tokens,
                     )
