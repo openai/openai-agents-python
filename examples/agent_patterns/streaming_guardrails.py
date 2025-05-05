@@ -77,6 +77,7 @@ async def main():
         # Every iteration of the loop, check if the guardrail has been triggered
         if guardrail_task and guardrail_task.done():
             guardrail_result = guardrail_task.result()
+            guardrail_task = None
             if not guardrail_result.is_readable_by_ten_year_old:
                 print("\n\n================\n\n")
                 print(f"Guardrail triggered. Reasoning:\n{guardrail_result.reasoning}")
