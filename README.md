@@ -27,7 +27,7 @@ source env/bin/activate
 ```
 pip install openai-agents
 ```
-
+For LiteLLM support, install with the optional `litellm` group: `pip install 'openai-agents[litellm]`
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
 
 ## Hello world example
