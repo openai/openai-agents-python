@@ -84,4 +84,4 @@ async def profilebuilder_handler(req: Request):
 
         await send_webhook(CHAT_WEBHOOK_URL, chat_payload)
 
-    return {"ok": True"}
+    return {"ok": True}
