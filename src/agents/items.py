@@ -57,7 +57,7 @@ class RunItemBase(Generic[T], abc.ABC):
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
-        if isinstance(self.raw_item, dict):
+        if isinstance(self.raw_item, dict) or isinstance(self.raw_item, list):
             # We know that input items are dicts, so we can ignore the type error
             return self.raw_item  # type: ignore
         elif isinstance(self.raw_item, BaseModel):
@@ -248,3 +248,25 @@ class ItemHelpers:
             "output": output,
             "type": "function_call_output",
         }
+
+    @classmethod
+    def image_function_tool_call_output_item(
+        cls, tool_call: ResponseFunctionToolCall, output: str
+    ) -> FunctionCallOutput:
+        """Creates a tool call output item from a tool call and its output."""
+        return [
+            {
+                "call_id": tool_call.call_id,
+                "output": "Image generating tool is called.",
+                "type": "function_call_output",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": output,
+                    }
+                ],
+            },
+        ]

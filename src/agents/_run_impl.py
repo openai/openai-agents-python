@@ -52,7 +52,14 @@ from .model_settings import ModelSettings
 from .models.interface import ModelTracing
 from .run_context import RunContextWrapper, TContext
 from .stream_events import RunItemStreamEvent, StreamEvent
-from .tool import ComputerTool, FunctionTool, FunctionToolResult, Tool
+from .tool import (
+    ComputerTool,
+    FunctionTool,
+    FunctionToolResult,
+    ImageFunctionTool,
+    ImageFunctionToolResult,
+    Tool,
+)
 from .tracing import (
     SpanError,
     Trace,
@@ -107,6 +114,12 @@ class ToolRunFunction:
 
 
 @dataclass
+class ToolRunImageFunction:
+    tool_call: ResponseFunctionToolCall
+    image_function_tool: ImageFunctionTool
+
+
+@dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
     computer_tool: ComputerTool
@@ -117,6 +130,7 @@ class ProcessedResponse:
     new_items: list[RunItem]
     handoffs: list[ToolRunHandoff]
     functions: list[ToolRunFunction]
+    image_functions: list[ToolRunImageFunction]
     computer_actions: list[ToolRunComputerAction]
     tools_used: list[str]  # Names of all tools used, including hosted tools
 
@@ -127,6 +141,7 @@ class ProcessedResponse:
             [
                 self.handoffs,
                 self.functions,
+                self.image_functions,
                 self.computer_actions,
             ]
         )
@@ -207,10 +222,17 @@ class RunImpl:
         new_step_items.extend(processed_response.new_items)
 
         # First, lets run the tool calls - function tools and computer actions
-        function_results, computer_results = await asyncio.gather(
+        function_results, image_function_results, computer_results = await asyncio.gather(
             cls.execute_function_tool_calls(
                 agent=agent,
                 tool_runs=processed_response.functions,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            cls.execute_image_function_tool_calls(
+                agent=agent,
+                tool_runs=processed_response.image_functions,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
@@ -224,6 +246,7 @@ class RunImpl:
             ),
         )
         new_step_items.extend([result.run_item for result in function_results])
+        new_step_items.extend([result.run_item for result in image_function_results])
         new_step_items.extend(computer_results)
 
         # Second, check if there are any handoffs
@@ -342,10 +365,14 @@ class RunImpl:
 
         run_handoffs = []
         functions = []
+        image_functions = []
         computer_actions = []
         tools_used: list[str] = []
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
         function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
+        image_function_map = {
+            tool.name: tool for tool in all_tools if isinstance(tool, ImageFunctionTool)
+        }
         computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
 
         for output in response.output:
@@ -393,6 +420,15 @@ class RunImpl:
                     handoff=handoff_map[output.name],
                 )
                 run_handoffs.append(handoff)
+
+            elif output.name in image_function_map:
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                image_functions.append(
+                    ToolRunImageFunction(
+                        tool_call=output,
+                        image_function_tool=image_function_map[output.name],
+                    )
+                )
             # Regular function tool call
             else:
                 if output.name not in function_map:
@@ -415,6 +451,7 @@ class RunImpl:
             new_items=items,
             handoffs=run_handoffs,
             functions=functions,
+            image_functions=image_functions,
             computer_actions=computer_actions,
             tools_used=tools_used,
         )
@@ -483,6 +520,78 @@ class RunImpl:
                 run_item=ToolCallOutputItem(
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, str(result)),
+                    agent=agent,
+                ),
+            )
+            for tool_run, result in zip(tool_runs, results)
+        ]
+
+    @classmethod
+    async def execute_image_function_tool_calls(
+        cls,
+        *,
+        agent: Agent[TContext],
+        tool_runs: list[ToolRunImageFunction],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        config: RunConfig,
+    ) -> list[ImageFunctionToolResult]:
+        async def run_single_tool(
+            func_tool: ImageFunctionTool, tool_call: ResponseFunctionToolCall
+        ) -> Any:
+            with function_span(func_tool.name) as span_fn:
+                if config.trace_include_sensitive_data:
+                    span_fn.span_data.input = tool_call.arguments
+                try:
+                    _, _, result = await asyncio.gather(
+                        hooks.on_tool_start(context_wrapper, agent, func_tool),
+                        (
+                            agent.hooks.on_tool_start(context_wrapper, agent, func_tool)
+                            if agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                        func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
+                    )
+
+                    await asyncio.gather(
+                        hooks.on_tool_end(context_wrapper, agent, func_tool, result),
+                        (
+                            agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
+                            if agent.hooks
+                            else _coro.noop_coroutine()
+                        ),
+                    )
+                except Exception as e:
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Error running tool",
+                            data={"tool_name": func_tool.name, "error": str(e)},
+                        )
+                    )
+                    if isinstance(e, AgentsException):
+                        raise e
+                    raise UserError(f"Error running tool {func_tool.name}: {e}") from e
+
+                if config.trace_include_sensitive_data:
+                    span_fn.span_data.output = result
+            return result
+
+        tasks = []
+        for tool_run in tool_runs:
+            image_function_tool = tool_run.image_function_tool
+            tasks.append(run_single_tool(image_function_tool, tool_run.tool_call))
+
+        results = await asyncio.gather(*tasks)
+
+        return [
+            ImageFunctionToolResult(
+                tool=tool_run.image_function_tool,
+                output=result,
+                run_item=ToolCallOutputItem(
+                    output=result,
+                    raw_item=ItemHelpers.image_function_tool_call_output_item(
+                        tool_run.tool_call, result
+                    ),
                     agent=agent,
                 ),
             )

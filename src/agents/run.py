@@ -755,7 +755,14 @@ class Runner:
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
         input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+
+        # input.extend([generated_item.to_input_item() for generated_item in generated_items])
+        for generated_item in generated_items:
+            input_item_from_generated_item = generated_item.to_input_item()
+            if isinstance(input_item_from_generated_item, list):
+                input.extend(input_item_from_generated_item)
+            else:
+                input.append(input_item_from_generated_item)
 
         new_response = await cls._get_new_response(
             agent,

@@ -23,7 +23,14 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
-from ..tool import ComputerTool, FileSearchTool, FunctionTool, Tool, WebSearchTool
+from ..tool import (
+    ComputerTool,
+    FileSearchTool,
+    FunctionTool,
+    ImageFunctionTool,
+    Tool,
+    WebSearchTool,
+)
 from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..version import __version__
@@ -350,6 +357,15 @@ class Converter:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
+            converted_tool: ToolParam = {
+                "name": tool.name,
+                "parameters": tool.params_json_schema,
+                "strict": tool.strict_json_schema,
+                "type": "function",
+                "description": tool.description,
+            }
+            includes: IncludeLiteral | None = None
+        elif isinstance(tool, ImageFunctionTool):
             converted_tool: ToolParam = {
                 "name": tool.name,
                 "parameters": tool.params_json_schema,
