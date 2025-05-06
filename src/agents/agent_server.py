@@ -11,6 +11,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.profilebuilder_agent import profilebuilder_agent
+from agents.profilebuilder import router as profilebuilder_router
+
 from .tool import WebSearchTool
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
@@ -153,6 +155,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+app.include_router(profilebuilder_router)
 
 @app.post("/agent")
 async def run_agent(req: Request):
