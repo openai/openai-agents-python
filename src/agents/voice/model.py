@@ -17,9 +17,11 @@ DEFAULT_TTS_BUFFER_SIZE = 120
 TTSVoice = Literal["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"]
 """Exportable type for the TTSModelSettings voice enum"""
 
+
 @dataclass
 class TTSModelSettings:
     """Settings for a TTS model."""
+
     voice: TTSVoice | None = None
     """
     The voice to use for the TTS model. If not provided, the default voice for the respective model
