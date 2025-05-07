@@ -393,8 +393,7 @@ class Converter:
                             {
                                 "queries": file_search.get("queries", []),
                                 "status": file_search.get("status"),
-                            },
-                            ensure_ascii=False
+                            }
                         ),
                     },
                 )

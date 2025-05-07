@@ -116,10 +116,7 @@ class MCPUtil:
         if len(result.content) == 1:
             tool_output = result.content[0].model_dump_json()
         elif len(result.content) > 1:
-            tool_output = json.dumps(
-                [item.model_dump() for item in result.content],
-                ensure_ascii=False
-            )
+            tool_output = json.dumps([item.model_dump() for item in result.content])
         else:
             logger.error(f"Errored MCP tool result: {result}")
             tool_output = "Error running tool."
