@@ -65,3 +65,46 @@ def _remove_tool_types_from_input(
             continue
         filtered_items.append(item)
     return tuple(filtered_items)
+
+
+def keep_last_n_items(
+    handoff_input_data: HandoffInputData, 
+    n: int, 
+    keep_tool_messages: bool = True
+) -> HandoffInputData:
+    """
+    Keep only the last n items in the input history.
+    If keep_tool_messages is False, remove tool messages first.
+    
+    Args:
+        handoff_input_data: The input data to filter
+        n: Number of items to keep from the end. Must be a positive integer.
+        If n is 1, only the last item is kept.
+        If n is greater than the number of items, all items are kept.
+        If n is less than or equal to 0, it raises a ValueError.
+        keep_tool_messages: If False, removes tool messages before filtering
+        
+    Raises:
+        ValueError: If n is not a positive integer
+    """
+    if not isinstance(n, int):
+        raise ValueError(f"n must be an integer, got {type(n).__name__}")
+    if n <= 0:
+        raise ValueError(f"n must be a positive integer, got {n}")
+        
+    data = handoff_input_data
+    if not keep_tool_messages:
+        data = remove_all_tools(data)
+
+    # Always ensure input_history and new_items are tuples for consistent slicing and return
+    history = (
+        tuple(data.input_history)[-n:]
+        if isinstance(data.input_history, tuple)
+        else data.input_history
+    )
+
+    return HandoffInputData(
+        input_history=history,
+        pre_handoff_items=tuple(data.pre_handoff_items),
+        new_items=tuple(data.new_items),
+    )
