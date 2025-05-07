@@ -158,7 +158,14 @@ class ClarificationOut(BaseModel):
     """Prompt asking the user for missing info."""
     prompt: str
 
-__all__ += [
+# Ensure __all__ exists, then extend it
+try:
+    __all__
+except NameError:
+    __all__ = []
+
+__all__.extend([
     "ProfileFieldOut",
     "ClarificationOut",
-]
+])
+
