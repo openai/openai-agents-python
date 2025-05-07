@@ -1,3 +1,7 @@
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../openai-agents-python")))
+
+
 from openai_agents import Agent, output_guardrail, GuardrailFunctionOutput
 from .agent_output import ProfileFieldOut, ClarificationOut
 
