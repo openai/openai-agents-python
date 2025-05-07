@@ -142,3 +142,23 @@ def _type_to_str(t: type[Any]) -> str:
         return f"{origin.__name__}[{args_str}]"
     else:
         return str(t)
+
+# ─────────────────────────────────────────────────────────────
+# Additional output schemas (Phase α)
+# ─────────────────────────────────────────────────────────────
+from typing import List, Union
+from pydantic import BaseModel
+
+class ProfileFieldOut(BaseModel):
+    """One field‑value pair collected by Profile‑builder."""
+    field_name: str
+    value: Union[str, List[str]]
+
+class ClarificationOut(BaseModel):
+    """Prompt asking the user for missing info."""
+    prompt: str
+
+__all__ += [
+    "ProfileFieldOut",
+    "ClarificationOut",
+]
