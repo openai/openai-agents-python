@@ -138,3 +138,6 @@ markers = [
 
 [tool.inline-snapshot]
 format-command = "ruff format --stdin-filename {filename}"
+
+[tool.hatch.metadata]
+allow-direct-references = true
