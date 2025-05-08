@@ -149,10 +149,11 @@ def _type_to_str(t: type[Any]) -> str:
 from typing import List, Union
 from pydantic import BaseModel
 
-class ProfileFieldOut(BaseModel):         # ← keep this exact name
-    field_name:  str                      # e.g. "niche"
-    field_value: str | list[str] | int | bool
-
+class ProfileFieldOut(BaseModel):
+    field_name:            str
+    field_value:           str | list[str] | int | bool
+    clarification_prompt:  str | None = None   # ← NEW, optional
+    
 class ClarificationOut(BaseModel):
     """Prompt asking the user for missing info."""
     prompt: str
