@@ -2,10 +2,7 @@
 # ----------------------------------
 
 from agents import Agent
-from agents.guardrails import (
-    output_guardrail,
-    GuardrailFunctionOutput,
-)
+from agents import output_guardrail, GuardrailFunctionOutput
 
 from .agent_output import ProfileFieldOut, ClarificationOut
 
