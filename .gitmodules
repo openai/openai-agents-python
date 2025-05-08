@@ -1,6 +1,3 @@
-[submodule "openai_agents"]
-	path = openai_agents
-	url = https://github.com/openai/openai-agents-python.git
 [submodule "vendor/openai-agents-python"]
 	path = vendor/openai-agents-python
 	url = https://github.com/openai/openai-agents-python.git
