@@ -142,3 +142,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypircopenai_agents/
+openai_agents/
