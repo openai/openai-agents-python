@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from agents.profilebuilder_agent import profilebuilder_agent
-from agents.profilebuilder import router as profilebuilder_router
+from app.profilebuilder_agent import profilebuilder_agent
+from app.profilebuilder import router as profilebuilder_router
 
 from .tool import WebSearchTool
 

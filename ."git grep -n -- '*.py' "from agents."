@@ -1,0 +1,127 @@
+[35mdocs/handoffs.md[m[36m:[m[32m88[m[36m:[m[1;31mfrom agents.[mextensions import handoff_filters
+[35mdocs/handoffs.md[m[36m:[m[32m106[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+[35mdocs/ja/handoffs.md[m[36m:[m[32m88[m[36m:[m[1;31mfrom agents.[mextensions import handoff_filters
+[35mdocs/ja/handoffs.md[m[36m:[m[32m106[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+[35mdocs/ja/visualization.md[m[36m:[m[32m25[m[36m:[m[1;31mfrom agents.[mextensions.visualization import draw_graph
+[35mdocs/ja/voice/quickstart.md[m[36m:[m[32m57[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mdocs/ja/voice/quickstart.md[m[36m:[m[32m94[m[36m:[m[1;31mfrom agents.[mvoice import SingleAgentVoiceWorkflow, VoicePipeline
+[35mdocs/ja/voice/quickstart.md[m[36m:[m[32m103[m[36m:[m[1;31mfrom agents.[mvoice import AudioInput
+[35mdocs/ja/voice/quickstart.md[m[36m:[m[32m137[m[36m:[m[1;31mfrom agents.[mvoice import (
+[35mdocs/ja/voice/quickstart.md[m[36m:[m[32m142[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mdocs/visualization.md[m[36m:[m[32m25[m[36m:[m[1;31mfrom agents.[mextensions.visualization import draw_graph
+[35mdocs/voice/quickstart.md[m[36m:[m[32m57[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mdocs/voice/quickstart.md[m[36m:[m[32m94[m[36m:[m[1;31mfrom agents.[mvoice import SingleAgentVoiceWorkflow, VoicePipeline
+[35mdocs/voice/quickstart.md[m[36m:[m[32m103[m[36m:[m[1;31mfrom agents.[mvoice import AudioInput
+[35mdocs/voice/quickstart.md[m[36m:[m[32m137[m[36m:[m[1;31mfrom agents.[mvoice import (
+[35mdocs/voice/quickstart.md[m[36m:[m[32m142[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mexamples/customer_service/main.py[m[36m:[m[32m23[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+[35mexamples/financial_research_agent/agents/search_agent.py[m[36m:[m[32m2[m[36m:[m[1;31mfrom agents.[mmodel_settings import ModelSettings
+[35mexamples/handoffs/message_filter.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mextensions import handoff_filters
+[35mexamples/handoffs/message_filter_streaming.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mextensions import handoff_filters
+[35mexamples/mcp/filesystem_example/main.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmcp import MCPServer, MCPServerStdio
+[35mexamples/mcp/git_example/main.py[m[36m:[m[32m5[m[36m:[m[1;31mfrom agents.[mmcp import MCPServer, MCPServerStdio
+[35mexamples/mcp/sse_example/main.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mmcp import MCPServer, MCPServerSse
+[35mexamples/mcp/sse_example/main.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[mmodel_settings import ModelSettings
+[35mexamples/research_bot/agents/search_agent.py[m[36m:[m[32m2[m[36m:[m[1;31mfrom agents.[mmodel_settings import ModelSettings
+[35mexamples/voice/static/main.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mexamples/voice/static/main.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[mvoice import (
+[35mexamples/voice/streamed/main.py[m[36m:[m[32m15[m[36m:[m[1;31mfrom agents.[mvoice import StreamedAudioInput, VoicePipeline
+[35mexamples/voice/streamed/my_workflow.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mextensions.handoff_prompt import prompt_with_handoff_instructions
+[35mexamples/voice/streamed/my_workflow.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mvoice import VoiceWorkflowBase, VoiceWorkflowHelper
+[35msrc/app/agent_server.py[m[36m:[m[32m13[m[36m:[m[1;31mfrom agents.[mprofilebuilder_agent import profilebuilder_agent
+[35msrc/app/agent_server.py[m[36m:[m[32m14[m[36m:[m[1;31mfrom agents.[mprofilebuilder import router as profilebuilder_router
+[35msrc/app/profilebuilder.py[m[36m:[m[32m3[m[36m:[m[1;31mfrom agents.[mprofilebuilder_agent import profilebuilder_agent
+[35mtests/conftest.py[m[36m:[m[32m5[m[36m:[m[1;31mfrom agents.[mmodels import _openai_shared
+[35mtests/conftest.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import OpenAIChatCompletionsModel
+[35mtests/conftest.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mmodels.openai_responses import OpenAIResponsesModel
+[35mtests/conftest.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[mtracing import set_trace_processors
+[35mtests/conftest.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mtracing.setup import GLOBAL_TRACE_PROVIDER
+[35mtests/fake_model.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[magent_output import AgentOutputSchema
+[35mtests/fake_model.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mhandoffs import Handoff
+[35mtests/fake_model.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[mitems import (
+[35mtests/fake_model.py[m[36m:[m[32m16[m[36m:[m[1;31mfrom agents.[mmodel_settings import ModelSettings
+[35mtests/fake_model.py[m[36m:[m[32m17[m[36m:[m[1;31mfrom agents.[mmodels.interface import Model, ModelTracing
+[35mtests/fake_model.py[m[36m:[m[32m18[m[36m:[m[1;31mfrom agents.[mtool import Tool
+[35mtests/fake_model.py[m[36m:[m[32m19[m[36m:[m[1;31mfrom agents.[mtracing import SpanError, generation_span
+[35mtests/fake_model.py[m[36m:[m[32m20[m[36m:[m[1;31mfrom agents.[musage import Usage
+[35mtests/mcp/helpers.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[mmcp import MCPServer
+[35mtests/mcp/test_caching.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmcp import MCPServerStdio
+[35mtests/mcp/test_connect_disconnect.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmcp import MCPServerStdio
+[35mtests/mcp/test_mcp_util.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[mexceptions import AgentsException, ModelBehaviorError
+[35mtests/mcp/test_mcp_util.py[m[36m:[m[32m11[m[36m:[m[1;31mfrom agents.[mmcp import MCPServer, MCPUtil
+[35mtests/mcp/test_server_errors.py[m[36m:[m[32m3[m[36m:[m[1;31mfrom agents.[mexceptions import UserError
+[35mtests/mcp/test_server_errors.py[m[36m:[m[32m4[m[36m:[m[1;31mfrom agents.[mmcp.server import _MCPServerWithClientSession
+[35mtests/test_agent_hooks.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[magent import Agent
+[35mtests/test_agent_hooks.py[m[36m:[m[32m11[m[36m:[m[1;31mfrom agents.[mlifecycle import AgentHooks
+[35mtests/test_agent_hooks.py[m[36m:[m[32m12[m[36m:[m[1;31mfrom agents.[mrun import Runner
+[35mtests/test_agent_hooks.py[m[36m:[m[32m13[m[36m:[m[1;31mfrom agents.[mrun_context import RunContextWrapper, TContext
+[35mtests/test_agent_hooks.py[m[36m:[m[32m14[m[36m:[m[1;31mfrom agents.[mtool import Tool
+[35mtests/test_agent_runner.py[m[36m:[m[32m26[m[36m:[m[1;31mfrom agents.[magent import ToolsToFinalOutputResult
+[35mtests/test_agent_runner.py[m[36m:[m[32m27[m[36m:[m[1;31mfrom agents.[mtool import FunctionToolResult, function_tool
+[35mtests/test_agent_runner_streamed.py[m[36m:[m[32m23[m[36m:[m[1;31mfrom agents.[mitems import RunItem
+[35mtests/test_agent_runner_streamed.py[m[36m:[m[32m24[m[36m:[m[1;31mfrom agents.[mrun import RunConfig
+[35mtests/test_agent_runner_streamed.py[m[36m:[m[32m25[m[36m:[m[1;31mfrom agents.[mstream_events import AgentUpdatedStreamEvent
+[35mtests/test_computer_action.py[m[36m:[m[32m34[m[36m:[m[1;31mfrom agents.[m_run_impl import ComputerAction, ToolRunComputerAction
+[35mtests/test_computer_action.py[m[36m:[m[32m35[m[36m:[m[1;31mfrom agents.[mitems import ToolCallOutputItem
+[35mtests/test_config.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import OpenAIChatCompletionsModel
+[35mtests/test_config.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[mmodels.openai_provider import OpenAIProvider
+[35mtests/test_config.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mmodels.openai_responses import OpenAIResponsesModel
+[35mtests/test_doc_parsing.py[m[36m:[m[32m1[m[36m:[m[1;31mfrom agents.[mfunction_schema import generate_func_documentation
+[35mtests/test_extension_filters.py[m[36m:[m[32m4[m[36m:[m[1;31mfrom agents.[mextensions.handoff_filters import remove_all_tools
+[35mtests/test_extension_filters.py[m[36m:[m[32m5[m[36m:[m[1;31mfrom agents.[mitems import (
+[35mtests/test_function_schema.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[mexceptions import UserError
+[35mtests/test_function_schema.py[m[36m:[m[32m11[m[36m:[m[1;31mfrom agents.[mfunction_schema import function_schema
+[35mtests/test_function_tool.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mtool import default_tool_error_function
+[35mtests/test_function_tool_decorator.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mrun_context import RunContextWrapper
+[35mtests/test_guardrails.py[m[36m:[m[32m16[m[36m:[m[1;31mfrom agents.[mguardrail import input_guardrail, output_guardrail
+[35mtests/test_openai_chatcompletions.py[m[36m:[m[32m33[m[36m:[m[1;31mfrom agents.[mmodels.fake_id import FAKE_RESPONSES_ID
+[35mtests/test_openai_chatcompletions.py[m[36m:[m[32m34[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import _Converter
+[35mtests/test_openai_chatcompletions_converter.py[m[36m:[m[32m41[m[36m:[m[1;31mfrom agents.[magent_output import AgentOutputSchema
+[35mtests/test_openai_chatcompletions_converter.py[m[36m:[m[32m42[m[36m:[m[1;31mfrom agents.[mexceptions import UserError
+[35mtests/test_openai_chatcompletions_converter.py[m[36m:[m[32m43[m[36m:[m[1;31mfrom agents.[mitems import TResponseInputItem
+[35mtests/test_openai_chatcompletions_converter.py[m[36m:[m[32m44[m[36m:[m[1;31mfrom agents.[mmodels.fake_id import FAKE_RESPONSES_ID
+[35mtests/test_openai_chatcompletions_converter.py[m[36m:[m[32m45[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import _Converter
+[35mtests/test_openai_chatcompletions_stream.py[m[36m:[m[32m20[m[36m:[m[1;31mfrom agents.[mmodel_settings import ModelSettings
+[35mtests/test_openai_chatcompletions_stream.py[m[36m:[m[32m21[m[36m:[m[1;31mfrom agents.[mmodels.interface import ModelTracing
+[35mtests/test_openai_chatcompletions_stream.py[m[36m:[m[32m22[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import OpenAIChatCompletionsModel
+[35mtests/test_openai_chatcompletions_stream.py[m[36m:[m[32m23[m[36m:[m[1;31mfrom agents.[mmodels.openai_provider import OpenAIProvider
+[35mtests/test_openai_responses_converter.py[m[36m:[m[32m43[m[36m:[m[1;31mfrom agents.[mmodels.openai_responses import Converter
+[35mtests/test_output_tool.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[magent_output import _WRAPPER_DICT_KEY
+[35mtests/test_output_tool.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mutil import _json
+[35mtests/test_pretty_print.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[magent_output import _WRAPPER_DICT_KEY
+[35mtests/test_pretty_print.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mutil._pretty_print import pretty_print_result, pretty_print_run_result_streaming
+[35mtests/test_responses_tracing.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mtracing.span_data import ResponseSpanData
+[35mtests/test_run_config.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmodels.interface import Model, ModelProvider
+[35mtests/test_run_step_execution.py[m[36m:[m[32m22[m[36m:[m[1;31mfrom agents.[m_run_impl import (
+[35mtests/test_run_step_processing.py[m[36m:[m[32m26[m[36m:[m[1;31mfrom agents.[m_run_impl import RunImpl
+[35mtests/test_strict_schema.py[m[36m:[m[32m3[m[36m:[m[1;31mfrom agents.[mexceptions import UserError
+[35mtests/test_strict_schema.py[m[36m:[m[32m4[m[36m:[m[1;31mfrom agents.[mstrict_schema import ensure_strict_json_schema
+[35mtests/test_tool_choice_reset.py[m[36m:[m[32m4[m[36m:[m[1;31mfrom agents.[m_run_impl import AgentToolUseTracker, RunImpl
+[35mtests/test_tool_converter.py[m[36m:[m[32m5[m[36m:[m[1;31mfrom agents.[mexceptions import UserError
+[35mtests/test_tool_converter.py[m[36m:[m[32m6[m[36m:[m[1;31mfrom agents.[mmodels.openai_chatcompletions import ToolConverter
+[35mtests/test_tool_converter.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mtool import FileSearchTool, WebSearchTool
+[35mtests/test_tool_use_behavior.py[m[36m:[m[32m19[m[36m:[m[1;31mfrom agents.[m_run_impl import RunImpl
+[35mtests/test_trace_processor.py[m[36m:[m[32m8[m[36m:[m[1;31mfrom agents.[mtracing.processor_interface import TracingProcessor
+[35mtests/test_trace_processor.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mtracing.processors import BackendSpanExporter, BatchTraceProcessor
+[35mtests/test_trace_processor.py[m[36m:[m[32m10[m[36m:[m[1;31mfrom agents.[mtracing.span_data import AgentSpanData
+[35mtests/test_trace_processor.py[m[36m:[m[32m11[m[36m:[m[1;31mfrom agents.[mtracing.spans import SpanImpl
+[35mtests/test_trace_processor.py[m[36m:[m[32m12[m[36m:[m[1;31mfrom agents.[mtracing.traces import TraceImpl
+[35mtests/test_tracing.py[m[36m:[m[32m9[m[36m:[m[1;31mfrom agents.[mtracing import (
+[35mtests/test_tracing.py[m[36m:[m[32m19[m[36m:[m[1;31mfrom agents.[mtracing.spans import SpanError
+[35mtests/test_visualization.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mextensions.visualization import (
+[35mtests/test_visualization.py[m[36m:[m[32m13[m[36m:[m[1;31mfrom agents.[mhandoffs import Handoff
+[35mtests/testing_processor.py[m[36m:[m[32m7[m[36m:[m[1;31mfrom agents.[mtracing import Span, Trace, TracingProcessor
+[35mtests/tracing/test_processor_api_key.py[m[36m:[m[32m3[m[36m:[m[1;31mfrom agents.[mtracing.processors import BackendSpanExporter
+[35mtests/voice/fake_models.py[m[36m:[m[32m10[m[36m:[m    [1;31mfrom agents.[mvoice import (
+[35mtests/voice/helpers.py[m[36m:[m[32m2[m[36m:[m    [1;31mfrom agents.[mvoice import StreamedAudioResult
+[35mtests/voice/test_input.py[m[36m:[m[32m9[m[36m:[m    [1;31mfrom agents.[mvoice import AudioInput, StreamedAudioInput
+[35mtests/voice/test_input.py[m[36m:[m[32m10[m[36m:[m    [1;31mfrom agents.[mvoice.input import DEFAULT_SAMPLE_RATE, _buffer_to_audio_file
+[35mtests/voice/test_openai_stt.py[m[36m:[m[32m12[m[36m:[m    [1;31mfrom agents.[mvoice import OpenAISTTTranscriptionSession, StreamedAudioInput, STTModelSettings
+[35mtests/voice/test_openai_stt.py[m[36m:[m[32m13[m[36m:[m    [1;31mfrom agents.[mvoice.exceptions import STTWebsocketConnectionError
+[35mtests/voice/test_openai_stt.py[m[36m:[m[32m14[m[36m:[m    [1;31mfrom agents.[mvoice.models.openai_stt import EVENT_INACTIVITY_TIMEOUT
+[35mtests/voice/test_openai_tts.py[m[36m:[m[32m9[m[36m:[m    [1;31mfrom agents.[mvoice import OpenAITTSModel, TTSModelSettings
+[35mtests/voice/test_pipeline.py[m[36m:[m[32m8[m[36m:[m    [1;31mfrom agents.[mvoice import AudioInput, TTSModelSettings, VoicePipeline, VoicePipelineConfig
+[35mtests/voice/test_workflow.py[m[36m:[m[32m12[m[36m:[m[1;31mfrom agents.[magent_output import AgentOutputSchema
+[35mtests/voice/test_workflow.py[m[36m:[m[32m13[m[36m:[m[1;31mfrom agents.[mhandoffs import Handoff
+[35mtests/voice/test_workflow.py[m[36m:[m[32m14[m[36m:[m[1;31mfrom agents.[mitems import (
+[35mtests/voice/test_workflow.py[m[36m:[m[32m22[m[36m:[m    [1;31mfrom agents.[mvoice import SingleAgentVoiceWorkflow
