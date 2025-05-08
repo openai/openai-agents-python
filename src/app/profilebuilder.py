@@ -43,7 +43,7 @@ async def profilebuilder_handler(req: Request):
         raise HTTPException(422, "Missing task_id, user_id, or prompt")
 
     # 1. ── Run the agent ────────────────────────────────────────────
-    agent_raw  = await profilebuilder_agent.run(prompt)
+    agent_raw = await profilebuilder_agent.invoke(prompt)
     try:
         agent_out = to_dict(agent_raw)
     except Exception as e:
