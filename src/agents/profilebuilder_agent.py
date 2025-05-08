@@ -1,10 +1,13 @@
 # src/agents/profilebuilder_agent.py
 # ----------------------------------
-from agents import Agent
-from agents.guardrails import output_guardrail, GuardrailFunctionOutput
+
+from agents import Agent                       # stays as-is
+from openai_agents.guardrails import (         # ← change this line
+    output_guardrail,
+    GuardrailFunctionOutput,
+)
 
 from .agent_output import ProfileFieldOut, ClarificationOut
-
 
 profile_builder = Agent(
     name="Profile‑builder",
