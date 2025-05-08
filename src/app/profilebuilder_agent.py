@@ -13,7 +13,7 @@ profile_builder = Agent(
         "Return ONLY a JSON object matching ProfileFieldOut OR ClarificationOut."
     ),
     output_type=ProfileFieldOut,
-    alternate_output_types=[ClarificationOut],
+    alternate_output_schemas=[ClarificationOut],
 )
 
 @output_guardrail
