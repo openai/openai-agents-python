@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from app.profilebuilder_agent import profilebuilder_agent
 from app.profilebuilder import router as profilebuilder_router
 
-from .tool import WebSearchTool
+from agents.tool import WebSearchTool
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
 from agents import Agent, Runner, handoff, RunContextWrapper
