@@ -16,10 +16,8 @@ from agents.profilebuilder import router as profilebuilder_router
 from .tool import WebSearchTool
 
 # ── SDK setup ───────────────────────────────────────────────────────────────
-load_dotenv()
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../openai-agents-python")))
-from agents import Agent, Runner, handoff, RunContextWrapper
-from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
+from openai_agents.agent import Agent, Runner, handoff, RunContextWrapper
+from openai_agents.agent.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 # ── Environment variable for Bubble webhook URL
 CHAT_URL = os.getenv("BUBBLE_CHAT_URL")
