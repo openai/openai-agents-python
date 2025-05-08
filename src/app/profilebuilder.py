@@ -1,87 +1,86 @@
-# src/agents/profilebuilder.py
+# ──────────────────────────────────────────────────────────────
+# src/app/profilebuilder.py   (← keep the same path as before)
+# ──────────────────────────────────────────────────────────────
 
-from app.profilebuilder_agent import profilebuilder_agent
-from .util.webhook import send_webhook
-from agents.run import Runner
 from fastapi import APIRouter, Request, HTTPException
-import os
-import json
+from pydantic import BaseModel
 from datetime import datetime
+import json
+import os
+
+from app.profilebuilder_agent import profilebuilder_agent         # the Agent
+from app.util.webhook import send_webhook                         # Bubble helper
 
 router = APIRouter()
 
 PROFILE_WEBHOOK_URL = os.getenv("PROFILE_WEBHOOK_URL")
-CHAT_WEBHOOK_URL = os.getenv("CLARIFICATION_WEBHOOK_URL")
+CHAT_WEBHOOK_URL    = os.getenv("CLARIFICATION_WEBHOOK_URL")
+
 
 @router.post("/profilebuilder")
 async def profilebuilder_handler(req: Request):
-    data = await req.json()
-
+    # ------------------------------------------------------------------ #
+    # 1. Validate inbound payload from Bubble                            #
+    # ------------------------------------------------------------------ #
+    data   = await req.json()
     task_id = data.get("task_id")
     user_id = data.get("user_id")
-    prompt = data.get("prompt") or data.get("user_prompt") or data.get("message")
+    prompt  = data.get("prompt") or data.get("user_prompt") or data.get("message")
 
     if not (task_id and user_id and prompt):
         raise HTTPException(422, "Missing task_id, user_id, or prompt")
 
-    # 1. Run the ProfileBuilder agent
-    result = await Runner.run(
-        profilebuilder_agent,
-        input=prompt,
-        context={"task_id": task_id, "user_id": user_id},
-        max_turns=3,
-    )
+    # ------------------------------------------------------------------ #
+    # 2. Run the agent and normalise its output                          #
+    # ------------------------------------------------------------------ #
+    result = await profilebuilder_agent.run(prompt)
 
-    raw_output = result.final_output.strip()
+    # `result` can be a Pydantic model (ProfileFieldOut / ClarificationOut)
+    # or – if something odd happens – a raw string.  Convert to dict ↓
+    if isinstance(result, BaseModel):
+        result_dict = result.model_dump()
+    else:
+        try:
+            result_dict = json.loads(result.strip())
+        except Exception:
+            raise HTTPException(500, "Agent returned unparsable output")
 
-    # 2. Parse JSON output from agent
-    try:
-        if not raw_output or not raw_output.startswith("{"):
-            raise ValueError("Agent output is not valid JSON or is empty")
+    # ------------------------------------------------------------------ #
+    # 3. Decide what kind of message it is                               #
+    # ------------------------------------------------------------------ #
+    is_clarification = "clarification_prompt" in result_dict
+    created_at       = datetime.utcnow().isoformat()
 
-        field_update = json.loads(raw_output)
-
-        if not isinstance(field_update, dict) or len(field_update) != 1:
-            raise ValueError("Agent must output a single-field JSON object")
-
-        reason = "profile_partial"
-    except (json.JSONDecodeError, ValueError) as e:
-        raise HTTPException(500, f"Agent output invalid: {e}")
-
-    # 3. Webhook to Profile DB only if not a clarification prompt
-    if "clarification_prompt" not in field_update:
-        profile_payload = {
-            "task_id": task_id,
-            "user_id": user_id,
-            "agent_type": "profilebuilder",
-            "message_type": "profile_partial",
-            "message_content": field_update,
-            "metadata_reason": reason,
-            "created_at": datetime.utcnow().isoformat(),
-        }
-
-        if not PROFILE_WEBHOOK_URL:
-            raise RuntimeError("Missing PROFILE_WEBHOOK_URL")
-
-        await send_webhook(PROFILE_WEBHOOK_URL, profile_payload)
-
-    # 4. Webhook to Chat UI for the next clarification prompt
-    next_prompt = result.next_prompt if hasattr(result, "next_prompt") else None
-
-    if next_prompt:
-        chat_payload = {
-            "task_id": task_id,
-            "user_id": user_id,
-            "agent_type": "profilebuilder",
-            "message_type": "text",
-            "message_content": next_prompt,
-            "metadata_reason": "follow_up",
-            "created_at": datetime.utcnow().isoformat(),
-        }
-
+    if is_clarification:
+        # ----- send follow-up prompt to chat UI ----------------------- #
         if not CHAT_WEBHOOK_URL:
-            raise RuntimeError("Missing CLARIFICATION_WEBHOOK_URL")
+            raise RuntimeError("Missing CLARIFICATION_WEBHOOK_URL env var")
 
+        chat_payload = {
+            "task_id":         task_id,
+            "user_id":         user_id,
+            "agent_type":      "profilebuilder",
+            "message_type":    "text",
+            "message_content": result_dict["clarification_prompt"],
+            "metadata_reason": "follow_up",
+            "created_at":      created_at,
+        }
         await send_webhook(CHAT_WEBHOOK_URL, chat_payload)
+
+    else:
+        # ----- send partial profile field to DB ----------------------- #
+        if not PROFILE_WEBHOOK_URL:
+            raise RuntimeError("Missing PROFILE_WEBHOOK_URL env var")
+
+        profile_payload = {
+            "task_id":         task_id,
+            "user_id":         user_id,
+            "agent_type":      "profilebuilder",
+            "message_type":    "profile_partial",
+            "message_content": result_dict,          # the single-field dict
+            "metadata_reason": "profile_partial",
+            "created_at":      created_at,
+        }
+        await send_webhook(PROFILE_WEBHOOK_URL, profile_payload)
 
     return {"ok": True}
