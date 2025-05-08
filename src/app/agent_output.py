@@ -6,8 +6,8 @@ from typing_extensions import TypedDict, get_args, get_origin
 
 from .exceptions import ModelBehaviorError, UserError
 from agents.strict_schema import ensure_strict_json_schema
-from .tracing import SpanError
-from .util import _error_tracing, _json
+from agents.tracing import SpanError
+from agents.util import _error_tracing, _json
 
 _WRAPPER_DICT_KEY = "response"
 
