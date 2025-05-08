@@ -2,7 +2,7 @@
 
 from agents.profilebuilder_agent import profilebuilder_agent
 from app.util.webhook import send_webhook
-from openai_agents.run import Runner
+from agents.run import Runner
 from fastapi import APIRouter, Request, HTTPException
 import os
 import json
