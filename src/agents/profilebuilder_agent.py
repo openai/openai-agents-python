@@ -1,8 +1,8 @@
 # src/agents/profilebuilder_agent.py
 # ----------------------------------
 
-from agents import Agent                       # stays as-is
-from openai_agents.guardrails import (         # ← change this line
+from openai_agents import Agent
+from openai_agents.guardrails import (
     output_guardrail,
     GuardrailFunctionOutput,
 )
