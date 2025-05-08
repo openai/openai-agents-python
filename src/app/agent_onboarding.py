@@ -3,7 +3,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import APIRouter, Request
-from openai_agents.agent import Agent, Runner
+from openai_agents import Agent, Runner
 from datetime import datetime
 import json
 import httpx
