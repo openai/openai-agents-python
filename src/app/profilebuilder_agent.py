@@ -1,8 +1,7 @@
 # src/app/profilebuilder_agent.py
 # -------------------------------
 
-from agents import Agent                                   # ← correct package name
-from agents.guardrails import output_guardrail, GuardrailFunctionOutput
+from agents import Agent, output_guardrail, GuardrailFunctionOutput  # ← single import line
 
 from .agent_output import ProfileFieldOut
 
