@@ -5,7 +5,7 @@ from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict, get_args, get_origin
 
 from .exceptions import ModelBehaviorError, UserError
-from .strict_schema import ensure_strict_json_schema
+from agents.strict_schema import ensure_strict_json_schema
 from .tracing import SpanError
 from .util import _error_tracing, _json
 
