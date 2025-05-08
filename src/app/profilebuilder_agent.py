@@ -10,7 +10,7 @@ profilebuilder_agent = Agent(                              # exported under this
     name="Profile-builder",
     instructions=(
         "Collect ONE profile field at a time from the user.\n"
-        "Return ONLY a JSON object matching the ProfileFieldOut schema."
+        "After each answer, respond **only** with valid JSON matching the ProfileFieldOut schema above."
     ),
     output_type=ProfileFieldOut,
 )
