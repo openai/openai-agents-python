@@ -1,7 +1,7 @@
 # src/agents/profilebuilder.py
 
 from app.profilebuilder_agent import profilebuilder_agent
-from app.util.webhook import send_webhook
+from .util.webhook import send_webhook
 from agents.run import Runner
 from fastapi import APIRouter, Request, HTTPException
 import os
