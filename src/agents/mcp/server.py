@@ -389,7 +389,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         return streamablehttp_client(
             url=self.params["url"],
             headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 5),
+            timeout=self.params.get("timeout", 30),
             sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
             terminate_on_close=self.params.get("terminate_on_close", True)
         )
