@@ -106,7 +106,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Connect to the server."""
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
-            read, write = transport
+            # Handle different transport return values
+            if len(transport) == 3:
+                # streamablehttp_client returns (read, write, get_session_id)
+                read, write, _ = transport
+            else:
+                # sse_client returns (read, write)
+                read, write = transport
+                
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
                     read,
@@ -330,10 +337,10 @@ class MCPServerStreamableHttpParams(TypedDict):
     headers: NotRequired[dict[str, str]]
     """The headers to send to the server."""
 
-    timeout: NotRequired[float]
+    timeout: NotRequired[timedelta]
     """The timeout for the HTTP request. Defaults to 5 seconds."""
 
-    sse_read_timeout: NotRequired[float]
+    sse_read_timeout: NotRequired[timedelta]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
     terminate_on_close: NotRequired[bool]
@@ -389,8 +396,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         return streamablehttp_client(
             url=self.params["url"],
             headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 30),
-            sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+            timeout=self.params.get("timeout", timedelta(seconds=30)),
+            sse_read_timeout=self.params.get("sse_read_timeout", timedelta(seconds=60 * 5)),
             terminate_on_close=self.params.get("terminate_on_close", True)
         )
 
