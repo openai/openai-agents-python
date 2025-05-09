@@ -48,6 +48,7 @@ class BubbleStorage(StorageBackend):
         await send_webhook(self.chat_url, payload)
 
 # src/app/storage.py (continued, supabase section)
+from datetime import datetime
 from supabase import create_client
 
 class SupabaseStorage(StorageBackend):
@@ -57,21 +58,25 @@ class SupabaseStorage(StorageBackend):
         self.sb = create_client(url, key)
 
     async def save_profile_field(self, task_id, user_id, field_name, field_value, created_at):
-        await self.sb.table("profiles").upsert({
+        # Build base payload
+        payload = {
             "task_id": task_id,
             "user_id": user_id,
-            field_name: field_value,
             "updated_at": created_at,
-        }).execute()
+            field_name: field_value
+        }
+        # Upsert into profiles table
+        await self.sb.table("profiles").upsert(payload).execute()
 
     async def send_chat_message(self, task_id, user_id, message, created_at):
-        # If you want to store chat messages too:
+        # (optional) if you want to log chat messages
         await self.sb.table("chat_messages").insert({
             "task_id": task_id,
             "user_id": user_id,
             "content": message,
             "created_at": created_at,
         }).execute()
+
 
 # src/app/storage.py (continued)
 if STORAGE_BACKEND == "supabase":
