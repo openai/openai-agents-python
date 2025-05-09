@@ -1540,7 +1540,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
-    { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
+    { name = "websockets", marker = "extra == 'voice'", specifier = ">=11.0,<16" },
 ]
 provides-extras = ["voice", "viz", "litellm"]
 
