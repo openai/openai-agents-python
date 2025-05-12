@@ -15,7 +15,7 @@ class Usage:
     total_tokens: int = 0
     """Total tokens sent and received, across all requests."""
 
-    cost: float = 0.0
+    response_cost: float = 0.0
     """Total cost incurred, across all requests."""
 
     def add(self, other: "Usage") -> None:
@@ -23,4 +23,4 @@ class Usage:
         self.input_tokens += other.input_tokens if other.input_tokens else 0
         self.output_tokens += other.output_tokens if other.output_tokens else 0
         self.total_tokens += other.total_tokens if other.total_tokens else 0
-        self.cost += other.cost if other.cost else 0
+        self.response_cost += other.response_cost if other.response_cost else 0

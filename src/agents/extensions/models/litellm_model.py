@@ -107,7 +107,7 @@ class LitellmModel(Model):
                         input_tokens=response_usage.prompt_tokens,
                         output_tokens=response_usage.completion_tokens,
                         total_tokens=response_usage.total_tokens,
-                        cost=response._hidden_params.get("response_cost", 0.0)
+                        response_cost=response._hidden_params.get("response_cost", 0.0)
                     )
                     if response.usage
                     else Usage()
