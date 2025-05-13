@@ -5,9 +5,7 @@ This project provides a FastAPI application that exposes OpenAI agents through a
 ## Features
 
 - FastAPI-based RESTful API for OpenAI agents
-- Weather agent with mock data (extensible to real weather APIs)
 - Development server with hot-reloading
-- Example client for API consumption
 
 ## Requirements
 
@@ -16,13 +14,7 @@ This project provides a FastAPI application that exposes OpenAI agents through a
 
 ## Setup
 
-1. Install the required packages:
-
-```bash
-pip install -r requirements.txt
-```
-
-2. Run the development server:
+1. Run the development server:
 
 ```bash
 ./dev_appserver.py --reload
@@ -34,12 +26,19 @@ This will start the server at http://127.0.0.1:8000
 
 ### Weather Agent
 
-- `POST /api/v1/weather/ask`: Ask the weather agent a question
-  - Request body: `{"query": "What's the weather in Tokyo?", "stream": false, "city": "Tokyo"}`
-  - Returns: `{"response": "...", "weather_data": {...}, "trace_id": "..."}`
+- `GET /weather/cities`: Get a list of available cities
+  - Returns: `{"NEW_YORK": "New York", "LONDON": "London", "TOKYO": "Tokyo", "SYDNEY": "Sydney"}`
 
-- `POST /api/v1/weather/stream`: Stream a response from the weather agent (placeholder)
-  - Request body: `{"query": "What's the weather in Tokyo?", "stream": true, "city": "Tokyo"}`
+- `GET /weather/{city}`: Get weather data for a specific city
+  - Example: `GET /weather/NEW_YORK`
+  - Returns: `{"city": "New York", "temperature_range": "15-25°C", "conditions": "Partly cloudy"}`
+
+- `POST /weather/ask`: Ask the weather agent a question
+  - Request body: `{"query": "What's the weather in Tokyo?", "city": "TOKYO"}`
+  - Returns: `{"response": "The weather in Tokyo is currently sunny, with a temperature range of 20-30°C.", "weather_data": {...}, "trace_id": "..."}`
+
+- `POST /weather/stream`: Stream a response from the weather agent
+  - Request body: `{"query": "What's the weather in Tokyo?", "stream": true, "city": "TOKYO"}`
 
 ### Other Endpoints
 
@@ -48,22 +47,28 @@ This will start the server at http://127.0.0.1:8000
 
 ## Example Usage
 
-Run the example client:
+### Using curl
 
 ```bash
-./examples/api_client_example.py --query "What's the weather in London?"
+# Get a list of cities
+curl http://localhost:8000/weather/cities
+
+# Get weather for a specific city
+curl http://localhost:8000/weather/NEW_YORK
+
+# Ask the weather agent a question
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "What is the weather like in Tokyo?"}' \
+  http://localhost:8000/weather/ask
+
+# Stream a response from the weather agent
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query": "Tell me about London weather", "stream": true}' \
+  http://localhost:8000/weather/stream
 ```
-
-## Development Options
-
-The development server supports the following options:
-
-- `--host`: Host to bind the server to (default: 127.0.0.1)
-- `--port`: Port to bind the server to (default: 8000)
-- `--reload`: Enable auto-reload on code changes
-- `--debug`: Enable debug mode
-- `--workers`: Number of worker processes (default: 1)
 
 ## Extending
 
-To add more agents, create new router files in the `app/routers` directory and include them in `app/main.py`.
+### Adding More Agents
+
+To add more agents, create new router files in the `app/routers` directory and include them in `app/__init__.py`.
