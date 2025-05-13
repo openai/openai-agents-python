@@ -1,0 +1,4 @@
+openai-agents==0.0.14
+fastapi>=0.103.1
+uvicorn>=0.23.2
+strenum>=0.4.15
