@@ -6,7 +6,7 @@ try:
         MCPServerStdio,
         MCPServerStdioParams,
         MCPServerStreamableHttp,
-        MCPServerStreamableHttpParams
+        MCPServerStreamableHttpParams,
     )
 except ImportError:
     pass

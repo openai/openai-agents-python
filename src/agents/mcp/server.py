@@ -10,8 +10,9 @@ from typing import Any, Literal
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.sse import sse_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import CallToolResult, JSONRPCMessage
+from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.shared.message import SessionMessage
+from mcp.types import CallToolResult
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -84,8 +85,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
     ) -> AbstractAsyncContextManager[
         tuple[
-            MemoryObjectReceiveStream[JSONRPCMessage | Exception],
-            MemoryObjectSendStream[JSONRPCMessage],
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[SessionMessage],
+            GetSessionIdCallback | None
         ]
     ]:
         """Create the streams for the server."""
@@ -110,7 +112,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # sse_client returns (read, write)
 
             read, write, *_ = transport
-                
+
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
                     read,
@@ -237,8 +239,9 @@ class MCPServerStdio(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[
         tuple[
-            MemoryObjectReceiveStream[JSONRPCMessage | Exception],
-            MemoryObjectSendStream[JSONRPCMessage],
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[SessionMessage],
+            GetSessionIdCallback | None
         ]
     ]:
         """Create the streams for the server."""
@@ -307,8 +310,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[
         tuple[
-            MemoryObjectReceiveStream[JSONRPCMessage | Exception],
-            MemoryObjectSendStream[JSONRPCMessage],
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[SessionMessage],
+            GetSessionIdCallback | None
         ]
     ]:
         """Create the streams for the server."""
@@ -362,7 +366,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         Args:
             params: The params that configure the server. This includes the URL of the server,
                 the headers to send to the server, the timeout for the HTTP request, and the
-                timeout for the Streamable HTTP connection and whether we need to terminate on close.
+                timeout for the Streamable HTTP connection and whether we need to
+                terminate on close.
 
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
                 cached and only fetched from the server once. If `False`, the tools list will be
@@ -385,8 +390,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         self,
     ) -> AbstractAsyncContextManager[
         tuple[
-            MemoryObjectReceiveStream[JSONRPCMessage | Exception],
-            MemoryObjectSendStream[JSONRPCMessage],
+            MemoryObjectReceiveStream[SessionMessage | Exception],
+            MemoryObjectSendStream[SessionMessage],
+            GetSessionIdCallback | None
         ]
     ]:
         """Create the streams for the server."""
