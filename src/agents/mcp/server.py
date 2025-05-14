@@ -106,13 +106,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Connect to the server."""
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
-            # Handle different transport return values
-            if len(transport) == 3:
-                # streamablehttp_client returns (read, write, get_session_id)
-                read, write, _ = transport
-            else:
-                # sse_client returns (read, write)
-                read, write = transport
+            # streamablehttp_client returns (read, write, get_session_id)
+            # sse_client returns (read, write)
+
+            read, write, *_ = transport
                 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
