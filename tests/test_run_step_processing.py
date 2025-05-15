@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -24,6 +26,8 @@ from agents import (
     Usage,
 )
 from agents._run_impl import RunImpl
+from agents.run import RunConfig
+from agents.tracing.create import agent_span
 
 from .test_responses import (
     get_final_output_message,
@@ -476,3 +480,215 @@ async def test_tool_and_handoff_parsed_correctly():
     assert handoff.handoff.tool_name == Handoff.default_tool_name(agent_1)
     assert handoff.handoff.tool_description == Handoff.default_tool_description(agent_1)
     assert handoff.handoff.agent_name == agent_1.name
+
+
+@pytest.fixture
+def response_input_items():
+    return [
+        {  # Message
+            "role": "system",
+            "status": "completed",
+            "type": "message",
+            "content": "Message 1",
+        },
+        {  # Message
+            "role": "user",
+            "status": "completed",
+            "type": "message",
+            "content": "Message 2",
+        },
+        {  # ComputerCallOutput
+            "call_id": "call_1",
+            "output": {  # ResponseComputerToolCallOutputScreenshotParam
+                "id": "screenshot_1",
+                "type": "screenshot",
+                "url": "http://example.com/screenshot.png",
+            },
+            "type": "computer_call_output",
+            "id": "output_1",
+            "acknowledged_safety_checks": [
+                {  # ComputerCallOutputAcknowledgedSafetyCheck
+                    "id": "check_1",
+                    "code": "code_1",
+                    "message": "message_1",
+                }
+            ],
+        },
+        {  # FunctionCallOutput
+            "call_id": "call_2",
+            "output": {  # ResponseFunctionWebSearch
+                "id": "web_search_1",
+                "type": "web_search_call",
+                "status": "completed",
+            },
+            "type": "function_call_output",
+            "id": "output_2",
+        },
+        {  # Message
+            "role": "user",
+            "status": "completed",
+            "type": "message",
+            "content": "Message 3",
+        },
+        {  # Message
+            "role": "system",
+            "status": "completed",
+            "type": "message",
+            "content": "Message 4",
+        },
+    ]
+
+
+@pytest.fixture
+def run_config():
+    return RunConfig()
+
+
+@pytest.fixture
+def span():
+    return agent_span(name="test_span")
+
+
+@pytest.mark.asyncio
+async def test_run_input_step_filter_not_callable(response_input_items, run_config, span):
+    input_filter = "This is not callable"
+    run_config.run_step_input_filter = input_filter
+
+    # returns input by default
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert result == response_input_items
+
+    # raises error if run_step_input_filter_raise_error is True
+    run_config.run_step_input_filter_raise_error = True
+    with pytest.raises(ModelBehaviorError):
+        await Runner._run_step_input_filter(
+            original_input=response_input_items,
+            run_config=run_config,
+            span=span,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_input_step_filter_not_set(response_input_items, run_config, span):
+    # returns input by default
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert result == response_input_items
+
+
+@pytest.mark.asyncio
+async def test_run_input_step_filter_output(response_input_items, run_config, span):
+    # invalid output type
+    def input_filter(*args, **kwargs):
+        return 5
+
+    run_config.run_step_input_filter = input_filter
+
+    # returns input by default
+    response = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert response == response_input_items
+
+    # raises error if run_step_input_filter_raise_error is True
+    run_config.run_step_input_filter_raise_error = True
+    with pytest.raises(ModelBehaviorError):
+        await Runner._run_step_input_filter(
+            original_input=response_input_items,
+            run_config=run_config,
+            span=span,
+        )
+
+    # string output is okay
+    def input_filter_str_output(*args, **kwargs):
+        return "This is a string output"
+
+    run_config.run_step_input_filter = input_filter_str_output
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert result == "This is a string output"
+
+    # list of dicts with "type"
+    def input_filter_dict_output(*args, **kwargs):
+        return [
+            {"type": "message", "role": "user", "content": "This is a user message"},
+            {"type": "message", "role": "system", "content": "This is a system message"},
+        ]
+
+    run_config.run_step_input_filter = input_filter_dict_output
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert len(result) == 2
+    assert result == input_filter_dict_output()
+
+
+@pytest.mark.asyncio
+async def test_run_input_step_filter_error(response_input_items, run_config, span):
+    def input_filter(*args, **kwargs):
+        raise Exception("This is an error")
+
+    run_config.run_step_input_filter = input_filter
+
+    # returns input by default
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert result == response_input_items
+
+    # raises error if run_step_input_filter_raise_error is True
+    run_config.run_step_input_filter_raise_error = True
+    with pytest.raises(ModelBehaviorError):
+        await Runner._run_step_input_filter(
+            original_input=response_input_items,
+            run_config=run_config,
+            span=span,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_input_step_filter(response_input_items, run_config, span):
+    # test sync function
+    def input_filter(input_items):
+        return [item for item in input_items if item.get("role", "") == "user"]
+
+    run_config.run_step_input_filter = input_filter
+
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert all(item["role"] == "user" for item in result)
+    assert len(result) == 2
+
+    # test async function
+    async def input_filter_async(input_items):
+        return await asyncio.to_thread(
+            lambda: [item for item in input_items if item.get("role", "") == "user"]
+        )
+
+    run_config.run_step_input_filter = input_filter_async
+    result = await Runner._run_step_input_filter(
+        original_input=response_input_items,
+        run_config=run_config,
+        span=span,
+    )
+    assert all(item["role"] == "user" for item in result)
+    assert len(result) == 2

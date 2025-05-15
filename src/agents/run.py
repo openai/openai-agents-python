@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from inspect import iscoroutinefunction
 from typing import Any, cast
 
 from openai.types.responses import ResponseCompletedEvent
@@ -69,6 +71,19 @@ class RunConfig:
     will take precedence. The input filter allows you to edit the inputs that are sent to the new
     agent. See the documentation in `Handoff.input_filter` for more details.
     """
+
+    run_step_input_filter: (
+        callable[str | list[TResponseInputItem], str | list[TResponseInputItem]] | None
+    ) = None
+    """A global input filter to apply between agent steps. If set, the input to the agent will be
+    passed through this function before being sent to the model. This is useful for modifying the
+    input to the model, for example, to manage the context window size."""
+
+    run_step_input_filter_raise_error: bool = False
+    """What to do if the input filter raises an exception. If False (the default), we'll continue
+    with the original input. If True, we'll raise the exception. This is useful for debugging, but
+    generally you want to set this to False so that the agent can continue running even if
+    the input filter fails."""
 
     input_guardrails: list[InputGuardrail[Any]] | None = None
     """A list of input guardrails to run on the initial run input."""
@@ -212,6 +227,12 @@ class Runner:
 
                     logger.debug(
                         f"Running agent {current_agent.name} (turn {current_turn})",
+                    )
+
+                    original_input = await cls._run_step_input_filter(
+                        original_input=original_input,
+                        run_config=run_config,
+                        span=current_span,
                     )
 
                     if current_turn == 1:
@@ -545,6 +566,10 @@ class Runner:
                     )
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     break
+
+                streamed_result.input = await cls._run_step_input_filter(
+                    original_input=streamed_result.input, run_config=run_config, span=current_span
+                )
 
                 if current_turn == 1:
                     # Run the input guardrails in the background and put the results on the queue
@@ -966,3 +991,72 @@ class Runner:
             return agent.model
 
         return run_config.model_provider.get_model(agent.model)
+
+    @classmethod
+    async def _run_step_input_filter(
+        cls,
+        original_input: str | list[TResponseInputItem],
+        run_config: RunConfig,
+        span: Span[AgentSpanData],
+    ) -> str | list[TResponseInputItem]:
+        filter = run_config.run_step_input_filter
+        _raise = run_config.run_step_input_filter_raise_error
+
+        def is_acceptable_response(response: object) -> bool:
+            return isinstance(response, str) or (
+                isinstance(response, Iterable)
+                and all(
+                    "type" in item
+                    for item in response  # minimal check for ResponseInputItem
+                )
+            )
+
+        if not filter:
+            return original_input
+
+        if not callable(filter):
+            _error_tracing.attach_error_to_span(
+                span,
+                SpanError(
+                    message="Input step filter is not callable",
+                    data={"input_step_filter": filter},
+                ),
+            )
+            if _raise:
+                raise ModelBehaviorError("Input step filter is not callable")
+            return original_input
+        try:
+            if iscoroutinefunction(filter):
+                input_filter_response = await filter(original_input)
+            else:
+                input_filter_response = filter(original_input)
+        except Exception as e:
+            _error_tracing.attach_error_to_span(
+                span,
+                SpanError(
+                    message="Input step filter raised an exception",
+                    data={
+                        "input_step_filter": filter,
+                        "exception": str(e),
+                    },
+                ),
+            )
+            if _raise:
+                raise ModelBehaviorError("Input step filter raised an exception") from e
+            return original_input
+
+        if not is_acceptable_response(input_filter_response):
+            _error_tracing.attach_error_to_span(
+                span,
+                SpanError(
+                    message=(
+                        "Input step filter did not return a string or list of ResponseInputItems"
+                    ),
+                    data={"input_step_filter": filter, "response": input_filter_response},
+                ),
+            )
+            if _raise:
+                raise ModelBehaviorError("Input step filter did not return a string or list")
+            return original_input
+
+        return input_filter_response
