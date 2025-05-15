@@ -38,7 +38,7 @@ class UserInfo:  # (1)!
 
 @function_tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
-    return f"User {wrapper.context.name} is 47 years old"
+    return f"User {wrapper.context.name} (ID: {wrapper.context.uid}) is 47 years old"
 
 async def main():
     user_info = UserInfo(name="John", uid=123)
@@ -55,7 +55,7 @@ async def main():
     )
 
     print(result.final_output)  # (5)!
-    # The user John is 47 years old.
+    # User John (ID: 123) is 47 years old
 
 if __name__ == "__main__":
     asyncio.run(main())
