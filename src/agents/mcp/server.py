@@ -73,6 +73,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
+        self.instructions: str | None = None
 
         self.client_session_timeout_seconds = client_session_timeout_seconds
 
@@ -122,7 +123,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     else None,
                 )
             )
-            await session.initialize()
+            server_result = await session.initialize()
+            self.instructions = server_result.instructions or None
             self.session = session
         except Exception as e:
             logger.error(f"Error initializing MCP server: {e}")
