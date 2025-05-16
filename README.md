@@ -176,3 +176,29 @@ We'd like to acknowledge the excellent work of the open-source community, especi
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
 
 We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
+
+## Tauri Desktop App
+
+A new Tauri project has been added in the `tauri-app` directory to create a desktop application for creating and handling AI agents in the OpenAI Agent SDK. The UI is built using Lynx and is designed to be user-friendly.
+
+### Setup and Run
+
+1. Install Tauri and set up a new Tauri project in the `tauri-app` directory. Refer to the Tauri documentation for detailed instructions.
+
+2. Install Lynx in the Tauri project by adding it as a dependency in the `Cargo.toml` file.
+
+3. Create a new Rust file in the Tauri project to handle the Lynx integration.
+
+4. In your Tauri `src-tauri/src/main.rs` file, import the Lynx library and the new Rust file you created for the Lynx integration.
+
+5. Modify the Tauri `src-tauri/src/main.rs` file to initialize and run the Lynx UI components when the Tauri application starts.
+
+6. Update your Tauri frontend code to communicate with the Lynx UI components using Tauri's IPC (Inter-Process Communication) to send messages between the frontend and the Lynx components.
+
+7. Implement features for creating, configuring, and managing agents, including instructions, models, tools, context, output types, handoffs, guardrails, and cloning.
+
+8. Implement features for managing context, tracing, function tools, models, and debug logging as per the OpenAI Agent SDK.
+
+9. Implement custom hooks for agent lifecycle events by subclassing the `AgentHooks` class and integrating them into the Tauri application.
+
+10. Ensure the frontend code handles messages sent via IPC and updates the UI accordingly.
