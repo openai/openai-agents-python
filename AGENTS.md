@@ -45,8 +45,11 @@ make snapshots-create   # create new snapshots
 ```
 
 Run `make tests` again after updating snapshots to ensure they pass.
+
 ## Style notes
+
 - Write comments as full sentences and end them with a period.
+
 ## Pull request expectations
 
 PRs should use the template located at `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`. Provide a summary, test plan and issue number if applicable, then check that:
