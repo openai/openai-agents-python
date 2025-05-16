@@ -143,3 +143,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .aider*
+
+# AI Assistant Ignores
+CLAUDE.md
+.codex/
