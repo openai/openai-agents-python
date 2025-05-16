@@ -124,7 +124,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 )
             )
             server_result = await session.initialize()
-            self.instructions = server_result.instructions if hasattr(server_result, "instructions") else None
+            self.instructions = getattr(server_result, "instructions", None)
             self.session = session
         except Exception as e:
             logger.error(f"Error initializing MCP server: {e}")
