@@ -27,14 +27,19 @@ from .exceptions import (
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
 )
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import (
+    InputGuardrail,
+    InputGuardrailResult,
+    OutputGuardrail,
+    OutputGuardrailResult,
+)
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
-from .models.multi_provider import MultiProvider
+from .models.openai_provider import OpenAIProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
@@ -56,7 +61,7 @@ class RunConfig:
     agent. The model_provider passed in below must be able to resolve this model name.
     """
 
-    model_provider: ModelProvider = field(default_factory=MultiProvider)
+    model_provider: ModelProvider = field(default_factory=OpenAIProvider)
     """The model provider to use when looking up string model names. Defaults to OpenAI."""
 
     model_settings: ModelSettings | None = None
