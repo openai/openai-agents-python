@@ -1,0 +1,16 @@
+mkdir my_agent_project
+cd my_agent_project
+python -m venv .venv
+source .venv/bin/activate
+
+pip install openai-agents
+
+export OPENAI_API_KEY=your-api-key
+
+from agents import Agent
+
+agent = Agent(
+    name="MyCustomAgent",
+    instructions="Provide detailed explanations for complex topics.",
+)
+
