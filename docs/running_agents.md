@@ -83,7 +83,9 @@ async def main():
         print(result.final_output)
         # California
 ```
-
+## Agent loop deep diagram
+![image](https://github.com/user-attachments/assets/3b085816-6173-4fee-a936-5016e1c81755)
+[Download PDF](https://github.com/panaversity/learn-agentic-ai/blob/main/01_ai_agents_first/15_run_lifecycle/Agent_loop.pdf)
 ## Exceptions
 
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
