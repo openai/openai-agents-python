@@ -73,7 +73,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
-        self.server_initialize_result: InitializeResult = None
+        self.server_initialize_result: InitializeResult | None = None
 
         self.client_session_timeout_seconds = client_session_timeout_seconds
 
