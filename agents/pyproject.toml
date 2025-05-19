@@ -1,0 +1,7 @@
+[project]
+name = "custom-agents"
+version = "0.0.0"
+requires-python = ">=3.9"
+
+[tool.hatch.build.targets.wheel]
+packages = ["executive_assistant"]
