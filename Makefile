@@ -16,8 +16,11 @@ mypy:
 	uv run mypy .
 
 .PHONY: tests
-tests: 
-	uv run pytest 
+tests:
+	uv run pytest
+
+.PHONY: verify
+verify: format lint mypy tests
 
 .PHONY: coverage
 coverage:
