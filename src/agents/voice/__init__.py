@@ -10,6 +10,9 @@ from .model import (
     TTSVoice,
     VoiceModelProvider,
 )
+from .models.deepgram_model_provider import DeepgramVoiceModelProvider
+from .models.deepgram_stt import DeepgramSTTModel
+from .models.deepgram_tts import DeepgramTTSModel
 from .models.openai_model_provider import OpenAIVoiceModelProvider
 from .models.openai_stt import OpenAISTTModel, OpenAISTTTranscriptionSession
 from .models.openai_tts import OpenAITTSModel
@@ -38,6 +41,9 @@ __all__ = [
     "OpenAIVoiceModelProvider",
     "OpenAISTTModel",
     "OpenAITTSModel",
+    "DeepgramVoiceModelProvider",
+    "DeepgramSTTModel",
+    "DeepgramTTSModel",
     "VoiceStreamEventAudio",
     "VoiceStreamEventLifecycle",
     "VoiceStreamEvent",
