@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
@@ -75,6 +76,18 @@ class QueueCompleteSentinel:
 QUEUE_COMPLETE_SENTINEL = QueueCompleteSentinel()
 
 _NOT_FINAL_OUTPUT = ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
+# Screenshots are cached so identical images are not resent each step.
+_SCREENSHOT_CACHE: dict[str, str] = {}
+
+
+def _cache_screenshot(data: str) -> tuple[str, bool]:
+    """Return an ID for the screenshot and whether it was newly cached."""
+    image_id = hashlib.sha1(data.encode()).hexdigest()
+    if image_id not in _SCREENSHOT_CACHE:
+        _SCREENSHOT_CACHE[image_id] = data
+        return image_id, True
+    return image_id, False
 
 
 @dataclass
@@ -849,17 +862,28 @@ class ComputerAction:
             ),
         )
 
-        # TODO: don't send a screenshot every single time, use references
-        image_url = f"data:image/png;base64,{output}"
+        # Cache screenshots to avoid resending duplicate images.
+        image_id, is_new = _cache_screenshot(output)
+        if is_new:
+            image_url = f"data:image/png;base64,{output}"
+            raw_output = {
+                "type": "computer_screenshot",
+                "image_url": image_url,
+                "image_id": image_id,
+            }
+            final_output = image_url
+        else:
+            raw_output = {
+                "type": "computer_screenshot_ref",
+                "image_id": image_id,
+            }
+            final_output = image_id
         return ToolCallOutputItem(
             agent=agent,
-            output=image_url,
+            output=final_output,
             raw_item=ComputerCallOutput(
                 call_id=action.tool_call.call_id,
-                output={
-                    "type": "computer_screenshot",
-                    "image_url": image_url,
-                },
+                output=raw_output,
                 type="computer_call_output",
             ),
         )
