@@ -54,9 +54,9 @@ class StreamedAudioResult:
         self._tasks: list[asyncio.Task[Any]] = []
         self._ordered_tasks: list[
             asyncio.Queue[VoiceStreamEvent | None]
-        ] = []  # New: list to hold local queues for each text segment
+        ] = []  # New: list to hold local queues for each text segment.
         self._dispatcher_task: asyncio.Task[Any] | None = (
-            None  # Task to dispatch audio chunks in order
+            None  # Task to dispatch audio chunks in order.
         )
 
         self._done_processing = False
@@ -133,13 +133,13 @@ class StreamedAudioResult:
                                 audio_np = self.tts_settings.transform_data(audio_np)
                             await local_queue.put(
                                 VoiceStreamEventAudio(data=audio_np)
-                            )  # Use local queue
+                            )  # Use local queue.
                             buffer = []
                 if buffer:
                     audio_np = self._transform_audio_buffer(buffer, self.tts_settings.dtype)
                     if self.tts_settings.transform_data:
                         audio_np = self.tts_settings.transform_data(audio_np)
-                    await local_queue.put(VoiceStreamEventAudio(data=audio_np))  # Use local queue
+                    await local_queue.put(VoiceStreamEventAudio(data=audio_np))  # Use local queue.
 
                 if self._voice_pipeline_config.trace_include_sensitive_audio_data:
                     tts_span.span_data.output = _audio_to_base64(full_audio_data)
@@ -149,7 +149,7 @@ class StreamedAudioResult:
                 if finish_turn:
                     await local_queue.put(VoiceStreamEventLifecycle(event="turn_ended"))
                 else:
-                    await local_queue.put(None)  # Signal completion for this segment
+                    await local_queue.put(None)  # Signal completion for this segment.
             except Exception as e:
                 tts_span.set_error(
                     {
@@ -163,7 +163,7 @@ class StreamedAudioResult:
                 )
                 logger.error(f"Error streaming audio: {e}")
 
-                # Signal completion for whole session because of error
+                # Signal completion for the whole session because of an error.
                 await local_queue.put(VoiceStreamEventLifecycle(event="session_ended"))
                 raise e
 
@@ -188,7 +188,7 @@ class StreamedAudioResult:
     async def _turn_done(self):
         if self._text_buffer:
             local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
-            self._ordered_tasks.append(local_queue)  # Append the local queue for the final segment
+            self._ordered_tasks.append(local_queue)  # Append the local queue for the final segment.
             self._tasks.append(
                 asyncio.create_task(
                     self._stream_audio(self._text_buffer, local_queue, finish_turn=True)
@@ -217,7 +217,7 @@ class StreamedAudioResult:
         await self._wait_for_completion()
 
     async def _dispatch_audio(self):
-        # Dispatch audio chunks from each segment in the order they were added
+        # Dispatch audio chunks from each segment in the order they were added.
         while True:
             if len(self._ordered_tasks) == 0:
                 if self._completed_session:

@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
 
-# From the Responses API
+# From the Responses API.
 IncludeLiteral = Literal[
     "file_search_call.results",
     "message.input_image.image_url",

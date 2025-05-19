@@ -1,4 +1,4 @@
-# Holds the current active span
+# Holds the current active span.
 import contextvars
 from typing import TYPE_CHECKING, Any
 

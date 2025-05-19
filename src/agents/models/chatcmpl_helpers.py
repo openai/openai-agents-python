@@ -16,7 +16,7 @@ class ChatCmplHelpers:
 
     @classmethod
     def get_store_param(cls, client: AsyncOpenAI, model_settings: ModelSettings) -> bool | None:
-        # Match the behavior of Responses where store is True when not given
+        # Match the behavior of Responses where store is True when not given.
         default_store = True if cls.is_openai(client) else None
         return model_settings.store if model_settings.store is not None else default_store
 

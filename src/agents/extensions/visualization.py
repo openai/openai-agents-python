@@ -43,14 +43,14 @@ def get_all_nodes(agent: Agent, parent: Optional[Agent] = None) -> str:
     """
     parts = []
 
-    # Start and end the graph
+    # Start and end the graph.
     parts.append(
         '"__start__" [label="__start__", shape=ellipse, style=filled, '
         "fillcolor=lightblue, width=0.5, height=0.3];"
         '"__end__" [label="__end__", shape=ellipse, style=filled, '
         "fillcolor=lightblue, width=0.5, height=0.3];"
     )
-    # Ensure parent agent node is colored
+    # Ensure the parent agent node is colored.
     if not parent:
         parts.append(
             f'"{agent.name}" [label="{agent.name}", shape=box, style=filled, '

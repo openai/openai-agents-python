@@ -126,7 +126,7 @@ class Converter:
             return None
 
         keys = item.keys()
-        # EasyInputMessageParam only has these two keys
+        # EasyInputMessageParam only has these two keys.
         if keys != {"content", "role"}:
             return None
 
@@ -184,7 +184,7 @@ class Converter:
 
     @classmethod
     def maybe_response_output_message(cls, item: Any) -> ResponseOutputMessageParam | None:
-        # ResponseOutputMessage is only used for messages with role assistant
+        # ResponseOutputMessage is only used for messages with the assistant role.
         if (
             isinstance(item, dict)
             and item.get("type") == "message"
@@ -276,7 +276,7 @@ class Converter:
         def flush_assistant_message() -> None:
             nonlocal current_assistant_msg
             if current_assistant_msg is not None:
-                # The API doesn't support empty arrays for tool_calls
+                # The API does not support empty arrays for tool_calls.
                 if not current_assistant_msg.get("tool_calls"):
                     del current_assistant_msg["tool_calls"]
                 result.append(current_assistant_msg)
@@ -290,7 +290,7 @@ class Converter:
             return current_assistant_msg
 
         for item in items:
-            # 1) Check easy input message
+            # Check for an easy input message.
             if easy_msg := cls.maybe_easy_input_message(item):
                 role = easy_msg["role"]
                 content = easy_msg["content"]
@@ -326,7 +326,7 @@ class Converter:
                 else:
                     raise UserError(f"Unexpected role in easy_input_message: {role}")
 
-            # 2) Check input message
+            # Check the input message.
             elif in_msg := cls.maybe_input_message(item):
                 role = in_msg["role"]
                 content = in_msg["content"]
@@ -353,7 +353,7 @@ class Converter:
                 else:
                     raise UserError(f"Unexpected role in input_message: {role}")
 
-            # 3) response output message => assistant
+            # Handle a response output message by converting it to an assistant message.
             elif resp_msg := cls.maybe_response_output_message(item):
                 flush_assistant_message()
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
@@ -366,7 +366,7 @@ class Converter:
                     elif c["type"] == "refusal":
                         new_asst["refusal"] = c["refusal"]
                     elif c["type"] == "output_audio":
-                        # Can't handle this, b/c chat completions expects an ID which we dont have
+                        # Cannot handle this because chat completions expect an ID that we do not have.
                         raise UserError(
                             f"Only audio IDs are supported for chat completions, but got: {c}"
                         )
@@ -380,7 +380,7 @@ class Converter:
                 new_asst["tool_calls"] = []
                 current_assistant_msg = new_asst
 
-            # 4) function/file-search calls => attach to assistant
+            # Attach function or file-search calls to the assistant message.
             elif file_search := cls.maybe_file_search_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
@@ -414,7 +414,7 @@ class Converter:
                 )
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
-            # 5) function call output => tool message
+            # Convert a function call output to a tool message.
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
                 msg: ChatCompletionToolMessageParam = {
@@ -424,13 +424,13 @@ class Converter:
                 }
                 result.append(msg)
 
-            # 6) item reference => handle or raise
+            # Handle the item reference or raise an error.
             elif item_ref := cls.maybe_item_reference(item):
                 raise UserError(
                     f"Encountered an item_reference, which is not supported: {item_ref}"
                 )
 
-            # 7) If we haven't recognized it => fail or ignore
+            # Fail or ignore if we have not recognized the item.
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 

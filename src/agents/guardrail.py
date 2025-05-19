@@ -181,7 +181,7 @@ class OutputGuardrail(Generic[TContext]):
 
 TContext_co = TypeVar("TContext_co", bound=Any, covariant=True)
 
-# For InputGuardrail
+# For InputGuardrail.
 _InputGuardrailFuncSync = Callable[
     [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, list[TResponseInputItem]]],
     GuardrailFunctionOutput,
@@ -244,10 +244,10 @@ def input_guardrail(
         return InputGuardrail(guardrail_function=f, name=name)
 
     if func is not None:
-        # Decorator was used without parentheses
+        # Decorator was used without parentheses.
         return decorator(func)
 
-    # Decorator used with keyword arguments
+    # Decorator used with keyword arguments.
     return decorator
 
 
@@ -313,8 +313,8 @@ def output_guardrail(
         return OutputGuardrail(guardrail_function=f, name=name)
 
     if func is not None:
-        # Decorator was used without parentheses
+        # Decorator was used without parentheses.
         return decorator(func)
 
-    # Decorator used with keyword arguments
+    # Decorator used with keyword arguments.
     return decorator

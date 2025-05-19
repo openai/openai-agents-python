@@ -92,8 +92,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
             self._output_schema = self._type_adapter.json_schema()
             return
 
-        # We should wrap for things that are not plain text, and for things that would definitely
-        # not be a JSON Schema object.
+        # We should wrap for things that are not plain text and for things that would definitely not be a JSON Schema object.
         self._is_wrapped = not _is_subclass_of_base_model_or_dict(output_type)
 
         if self._is_wrapped:
@@ -172,11 +171,11 @@ def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
     if not isinstance(t, type):
         return False
 
-    # If it's a generic alias, 'origin' will be the actual type, e.g. 'list'
+    # If it is a generic alias, 'origin' will be the actual type, e.g. 'list'.
     origin = get_origin(t)
 
     allowed_types = (BaseModel, dict)
-    # If it's a generic alias e.g. list[str], then we should check the origin type i.e. list
+    # If it is a generic alias, e.g. list[str], then we should check the origin type, i.e. list.
     return issubclass(origin or t, allowed_types)
 
 

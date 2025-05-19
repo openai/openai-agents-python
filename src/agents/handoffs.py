@@ -222,8 +222,8 @@ def handoff(
     tool_name = tool_name_override or Handoff.default_tool_name(agent)
     tool_description = tool_description_override or Handoff.default_tool_description(agent)
 
-    # Always ensure the input JSON schema is in strict mode
-    # If there is a need, we can make this configurable in the future
+    # Always ensure the input JSON schema is in strict mode.
+    # If there is a need, we can make this configurable in the future.
     input_json_schema = ensure_strict_json_schema(input_json_schema)
 
     return Handoff(

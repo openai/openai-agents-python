@@ -59,7 +59,7 @@ class BackendSpanExporter(TracingExporter):
         self.base_delay = base_delay
         self.max_delay = max_delay
 
-        # Keep a client open for connection pooling across multiple export calls
+        # Keep a client open for connection pooling across multiple export calls.
         self._client = httpx.Client(timeout=httpx.Timeout(timeout=60, connect=5.0))
 
     def set_api_key(self, api_key: str):
@@ -69,7 +69,7 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
-        # We're specifically setting the underlying cached property as well
+        # We are specifically setting the underlying cached property as well.
         self._api_key = api_key
         self.api_key = api_key
 
@@ -108,7 +108,7 @@ class BackendSpanExporter(TracingExporter):
         if self.project:
             headers["OpenAI-Project"] = self.project
 
-        # Exponential backoff loop
+        # Exponential backoff loop.
         attempt = 0
         delay = self.base_delay
         while True:
@@ -116,32 +116,32 @@ class BackendSpanExporter(TracingExporter):
             try:
                 response = self._client.post(url=self.endpoint, headers=headers, json=payload)
 
-                # If the response is successful, break out of the loop
+                # If the response is successful, break out of the loop.
                 if response.status_code < 300:
                     logger.debug(f"Exported {len(items)} items")
                     return
 
-                # If the response is a client error (4xx), we wont retry
+                # If the response is a client error (4xx), we will not retry.
                 if 400 <= response.status_code < 500:
                     logger.error(
                         f"[non-fatal] Tracing client error {response.status_code}: {response.text}"
                     )
                     return
 
-                # For 5xx or other unexpected codes, treat it as transient and retry
+                # For 5xx or other unexpected codes, treat it as transient and retry.
                 logger.warning(
                     f"[non-fatal] Tracing: server error {response.status_code}, retrying."
                 )
             except httpx.RequestError as exc:
-                # Network or other I/O error, we'll retry
+                # Network or other I/O error; we will retry.
                 logger.warning(f"[non-fatal] Tracing: request failed: {exc}")
 
-            # If we reach here, we need to retry or give up
+            # If we reach here, we need to retry or give up.
             if attempt >= self.max_retries:
                 logger.error("[non-fatal] Tracing: max retries reached, giving up on this batch.")
                 return
 
-            # Exponential backoff + jitter
+            # Exponential backoff plus jitter.
             sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
             time.sleep(sleep_time)
             delay = min(delay * 2, self.max_delay)
@@ -185,7 +185,7 @@ class BatchTraceProcessor(TracingProcessor):
         # The queue size threshold at which we export immediately.
         self._export_trigger_size = int(max_queue_size * export_trigger_ratio)
 
-        # Track when we next *must* perform a scheduled export
+        # Track when we next must perform a scheduled export.
         self._next_export_time = time.time() + self._schedule_delay
 
         self._worker_thread = threading.Thread(target=self._run, daemon=True)
@@ -198,11 +198,11 @@ class BatchTraceProcessor(TracingProcessor):
             logger.warning("Queue is full, dropping trace.")
 
     def on_trace_end(self, trace: Trace) -> None:
-        # We send traces via on_trace_start, so we don't need to do anything here.
+        # We send traces via on_trace_start, so we do not need to do anything here.
         pass
 
     def on_span_start(self, span: Span[Any]) -> None:
-        # We send spans via on_span_end, so we don't need to do anything here.
+        # We send spans via on_span_end, so we do not need to do anything here.
         pass
 
     def on_span_end(self, span: Span[Any]) -> None:
@@ -229,16 +229,16 @@ class BatchTraceProcessor(TracingProcessor):
             current_time = time.time()
             queue_size = self._queue.qsize()
 
-            # If it's time for a scheduled flush or queue is above the trigger threshold
+            # If it is time for a scheduled flush or the queue is above the trigger threshold.
             if current_time >= self._next_export_time or queue_size >= self._export_trigger_size:
                 self._export_batches(force=False)
-                # Reset the next scheduled flush time
+                # Reset the next scheduled flush time.
                 self._next_export_time = time.time() + self._schedule_delay
             else:
-                # Sleep a short interval so we don't busy-wait.
+                # Sleep a short interval so we do not busy-wait.
                 time.sleep(0.2)
 
-        # Final drain after shutdown
+        # Final drain after shutdown.
         self._export_batches(force=True)
 
     def _export_batches(self, force: bool = False):
@@ -249,25 +249,25 @@ class BatchTraceProcessor(TracingProcessor):
         while True:
             items_to_export: list[Span[Any] | Trace] = []
 
-            # Gather a batch of spans up to max_batch_size
+            # Gather a batch of spans up to max_batch_size.
             while not self._queue.empty() and (
                 force or len(items_to_export) < self._max_batch_size
             ):
                 try:
                     items_to_export.append(self._queue.get_nowait())
                 except queue.Empty:
-                    # Another thread might have emptied the queue between checks
+                    # Another thread might have emptied the queue between checks.
                     break
 
-            # If we collected nothing, we're done
+            # If we collected nothing, we are done.
             if not items_to_export:
                 break
 
-            # Export the batch
+            # Export the batch.
             self._exporter.export(items_to_export)
 
 
-# Create a shared global instance:
+# Create a shared global instance.
 _global_exporter = BackendSpanExporter()
 _global_processor = BatchTraceProcessor(_global_exporter)
 

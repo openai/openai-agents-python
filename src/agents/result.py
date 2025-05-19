@@ -135,7 +135,7 @@ class RunResultStreaming(RunResultBase):
     is_complete: bool = False
     """Whether the agent has finished running."""
 
-    # Queues that the background run_loop writes to
+    # Queues that the background run_loop writes to.
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
         default_factory=asyncio.Queue, repr=False
     )
@@ -143,7 +143,7 @@ class RunResultStreaming(RunResultBase):
         default_factory=asyncio.Queue, repr=False
     )
 
-    # Store the asyncio tasks that we're waiting on
+    # Store the asyncio tasks that we are waiting on.
     _run_impl_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
@@ -159,10 +159,10 @@ class RunResultStreaming(RunResultBase):
     def cancel(self) -> None:
         """Cancels the streaming run, stopping all background tasks and marking the run as
         complete."""
-        self._cleanup_tasks()  # Cancel all running tasks
-        self.is_complete = True  # Mark the run as complete to stop event streaming
+        self._cleanup_tasks()  # Cancel all running tasks.
+        self.is_complete = True  # Mark the run as complete to stop event streaming.
 
-        # Optionally, clear the event queue to prevent processing stale events
+        # Optionally, clear the event queue to prevent processing stale events.
         while not self._event_queue.empty():
             self._event_queue.get_nowait()
         while not self._input_guardrail_queue.empty():
@@ -194,7 +194,7 @@ class RunResultStreaming(RunResultBase):
 
             if isinstance(item, QueueCompleteSentinel):
                 self._event_queue.task_done()
-                # Check for errors, in case the queue was completed due to an exception
+                # Check for errors in case the queue was completed due to an exception.
                 self._check_errors()
                 break
 
@@ -210,13 +210,13 @@ class RunResultStreaming(RunResultBase):
         if self.current_turn > self.max_turns:
             self._stored_exception = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
 
-        # Fetch all the completed guardrail results from the queue and raise if needed
+        # Fetch all the completed guardrail results from the queue and raise if needed.
         while not self._input_guardrail_queue.empty():
             guardrail_result = self._input_guardrail_queue.get_nowait()
             if guardrail_result.output.tripwire_triggered:
                 self._stored_exception = InputGuardrailTripwireTriggered(guardrail_result)
 
-        # Check the tasks for any exceptions
+        # Check the tasks for any exceptions.
         if self._run_impl_task and self._run_impl_task.done():
             exc = self._run_impl_task.exception()
             if exc and isinstance(exc, Exception):

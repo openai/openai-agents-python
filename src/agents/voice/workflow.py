@@ -73,7 +73,7 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
         if self._callbacks:
             self._callbacks.on_run(self, transcription)
 
-        # Add the transcription to the input history
+        # Add the transcription to the input history.
         self._input_history.append(
             {
                 "role": "user",
@@ -81,13 +81,13 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
             }
         )
 
-        # Run the agent
+        # Run the agent.
         result = Runner.run_streamed(self._current_agent, self._input_history)
 
-        # Stream the text from the result
+        # Stream the text from the result.
         async for chunk in VoiceWorkflowHelper.stream_text_from(result):
             yield chunk
 
-        # Update the input history and current agent
+        # Update the input history and current agent.
         self._input_history = result.to_input_list()
         self._current_agent = result.last_agent

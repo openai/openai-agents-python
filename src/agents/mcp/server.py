@@ -77,7 +77,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         self.client_session_timeout_seconds = client_session_timeout_seconds
 
-        # The cache is always dirty at startup, so that we fetch tools at least once
+        # The cache is always dirty at startup so that we fetch tools at least once.
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
 
@@ -109,8 +109,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Connect to the server."""
         try:
             transport = await self.exit_stack.enter_async_context(self.create_streams())
-            # streamablehttp_client returns (read, write, get_session_id)
-            # sse_client returns (read, write)
+            # streamablehttp_client returns (read, write, get_session_id).
+            # sse_client returns (read, write).
 
             read, write, *_ = transport
 
@@ -136,14 +136,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
-        # Return from cache if caching is enabled, we have tools, and the cache is not dirty
+        # Return from cache if caching is enabled, we have tools, and the cache is not dirty.
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
             return self._tools_list
 
-        # Reset the cache dirty to False
+        # Reset the cache dirty flag to False.
         self._cache_dirty = False
 
-        # Fetch the tools from the server
+        # Fetch the tools from the server.
         self._tools_list = (await self.session.list_tools()).tools
         return self._tools_list
 

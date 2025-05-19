@@ -11,8 +11,8 @@ from .openai_tts import OpenAITTSModel
 _http_client: httpx.AsyncClient | None = None
 
 
-# If we create a new httpx client for each request, that would mean no sharing of connection pools,
-# which would mean worse latency and resource usage. So, we share the client across requests.
+# If we create a new HTTPX client for each request, we would not share connection pools.
+# This would result in worse latency and resource usage, so we share the client across requests.
 def shared_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
@@ -60,8 +60,8 @@ class OpenAIVoiceModelProvider(VoiceModelProvider):
             self._stored_organization = organization
             self._stored_project = project
 
-    # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
-    # AsyncOpenAI() raises an error if you don't have an API key set.
+    # We lazy load the client in case you never actually use OpenAIProvider().
+    # Otherwise, AsyncOpenAI() raises an error if you do not have an API key set.
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             self._client = _openai_shared.get_default_openai_client() or AsyncOpenAI(
