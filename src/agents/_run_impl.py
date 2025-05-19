@@ -379,10 +379,6 @@ class RunImpl:
                 logger.warning(f"Unexpected output type, ignoring: {type(output)}")
                 continue
 
-            # At this point we know it's a function tool call
-            if not isinstance(output, ResponseFunctionToolCall):
-                continue
-
             tools_used.append(output.name)
 
             # Handoffs
