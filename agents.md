@@ -26,7 +26,7 @@ In addition, ensure *git*, *curl* and *GNU Make* are on your `PATH`.
     ├── src/                ← Application code
     ├── tests/              ← Pytest suite
     ├── setup.sh            ← Environment bootstrap (run once)
-    ├── requirements.lock   ← Pinned dependency hashes (uv‑generated)
+    ├── uv.lock             ← Pinned dependency hashes (uv‑generated)
     └── agents.md           ← **You are here**
 
 ---
@@ -35,7 +35,7 @@ In addition, ensure *git*, *curl* and *GNU Make* are on your `PATH`.
 
 1.   `./setup.sh` – installs Python 3.12.10 with *pyenv*, creates `.venv`, installs uv, OpenAI Agents SDK 0.0.15, pre‑commit hooks, and Node 22.15.1.  
 2.   `source .venv/bin/activate` – activate the virtual‑env.  
-3.   `make verify` – run formatters, linters, type‑check and tests.
+3.   `make verify` – runs `format`, `lint`, `mypy` and `tests`.
 
 ---
 
@@ -90,7 +90,7 @@ Workflow file: `.github/workflows/agents.yml`
           - uses: actions/setup-python@v5
             with:
               python-version: '3.12'
-          - run: pip install uv==0.7.5 && uv pip install --system -r requirements.lock
+          - run: pip install uv==0.7.5 && uv pip install --system -r uv.lock
           - run: make verify
 
 A separate `deploy.yml` promotes passing revisions to your chosen runtime (e.g. Netlify Functions or AWS Lambda).

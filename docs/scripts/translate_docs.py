@@ -13,11 +13,9 @@ ENABLE_CODE_SNIPPET_EXCLUSION = True
 # gpt-4.5 needed this for better quality
 ENABLE_SMALL_CHUNK_TRANSLATION = False
 
-SEARCH_EXCLUSION = """---
-search:
-  exclude: true
----
-"""
+
+def search_front_matter(lang_code: str) -> str:
+    return f"---\nsearch:\n  lang: {lang_code}\n---\n"
 
 
 # Define the source and target directories
@@ -239,8 +237,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     for idx, code_block in enumerate(code_blocks):
         translated_text = translated_text.replace(f"CODE_BLOCK_{idx:02}", code_block)
 
-    # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
-    translated_text = SEARCH_EXCLUSION + translated_text
+    translated_text = search_front_matter(lang_code) + translated_text
     # Save the combined translated content
     with open(target_path, "w", encoding="utf-8") as f:
         f.write(translated_text)
