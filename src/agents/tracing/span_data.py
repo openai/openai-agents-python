@@ -150,8 +150,7 @@ class ResponseSpanData(SpanData):
         input: str | list[ResponseInputItemParam] | None = None,
     ) -> None:
         self.response = response
-        # This is not used by the OpenAI trace processors, but is useful for other tracing
-        # processor implementations
+        # This is not used by the OpenAI trace processors, but it is useful for other tracing processor implementations.
         self.input = input
 
     @property

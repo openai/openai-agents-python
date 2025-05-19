@@ -19,7 +19,7 @@ def _buffer_to_audio_file(
     channels: int = 1,
 ) -> tuple[str, io.BytesIO, str]:
     if buffer.dtype == np.float32:
-        # convert to int16
+        # Convert to int16.
         buffer = np.clip(buffer, -1.0, 1.0)
         buffer = (buffer * 32767).astype(np.int16)
     elif buffer.dtype != np.int16:
@@ -33,7 +33,7 @@ def _buffer_to_audio_file(
         wav_file.writeframes(buffer.tobytes())
         audio_file.seek(0)
 
-    # (filename, bytes, content_type)
+    # (filename, bytes, content_type).
     return ("audio.wav", audio_file, "audio/wav")
 
 
@@ -62,7 +62,7 @@ class AudioInput:
     def to_base64(self) -> str:
         """Returns the audio data as a base64 encoded string."""
         if self.buffer.dtype == np.float32:
-            # convert to int16
+            # Convert to int16.
             self.buffer = np.clip(self.buffer, -1.0, 1.0)
             self.buffer = (self.buffer * 32767).astype(np.int16)
         elif self.buffer.dtype != np.int16:

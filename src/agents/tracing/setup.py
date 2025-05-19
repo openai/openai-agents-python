@@ -18,7 +18,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
     """
 
     def __init__(self):
-        # Using a tuple to avoid race conditions when iterating over processors
+        # Use a tuple to avoid race conditions when iterating over processors.
         self._processors: tuple[TracingProcessor, ...] = ()
         self._lock = threading.Lock()
 

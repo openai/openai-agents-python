@@ -92,14 +92,13 @@ DocstringStyle = Literal["google", "numpy", "sphinx"]
 def _detect_docstring_style(doc: str) -> DocstringStyle:
     scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
 
-    # Sphinx style detection: look for :param, :type, :return:, and :rtype:
+    # Sphinx style detection: look for :param, :type, :return:, and :rtype:.
     sphinx_patterns = [r"^:param\s", r"^:type\s", r"^:return:", r"^:rtype:"]
     for pattern in sphinx_patterns:
         if re.search(pattern, doc, re.MULTILINE):
             scores["sphinx"] += 1
 
-    # Numpy style detection: look for headers like 'Parameters', 'Returns', or 'Yields' followed by
-    # a dashed underline
+    # Numpy style detection looks for headers like 'Parameters', 'Returns', or 'Yields' followed by a dashed underline.
     numpy_patterns = [
         r"^Parameters\s*\n\s*-{3,}",
         r"^Returns\s*\n\s*-{3,}",
@@ -109,7 +108,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
         if re.search(pattern, doc, re.MULTILINE):
             scores["numpy"] += 1
 
-    # Google style detection: look for section headers with a trailing colon
+    # Google style detection: look for section headers with a trailing colon.
     google_patterns = [r"^(Args|Arguments):", r"^(Returns):", r"^(Raises):"]
     for pattern in google_patterns:
         if re.search(pattern, doc, re.MULTILINE):
@@ -119,7 +118,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
     if max_score == 0:
         return "google"
 
-    # Priority order: sphinx > numpy > google in case of tie
+    # Priority order: sphinx > numpy > google in case of tie.
     styles: list[DocstringStyle] = ["sphinx", "numpy", "google"]
 
     for style in styles:
@@ -131,7 +130,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
-    # Suppresses warnings about missing annotations for params
+    # Suppresses warnings about missing annotations for params.
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
     logger.setLevel(logging.ERROR)
@@ -233,7 +232,7 @@ def function_schema(
 
     if params:
         first_name, first_param = params[0]
-        # Prefer the evaluated type hint if available
+        # Prefer the evaluated type hint if available.
         ann = type_hints.get(first_name, first_param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
@@ -244,7 +243,7 @@ def function_schema(
         else:
             filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper.
+    # For parameters other than the first, raise an error if any use RunContextWrapper.
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
@@ -256,7 +255,7 @@ def function_schema(
                 )
         filtered_params.append((name, param))
 
-    # We will collect field definitions for create_model as a dict:
+    # We will collect field definitions for create_model as a dict.
     #   field_name -> (type_annotation, default_value_or_Field(...))
     fields: dict[str, Any] = {}
 
@@ -264,44 +263,44 @@ def function_schema(
         ann = type_hints.get(name, param.annotation)
         default = param.default
 
-        # If there's no type hint, assume `Any`
+        # If there is no type hint, assume `Any`.
         if ann == inspect._empty:
             ann = Any
 
-        # If a docstring param description exists, use it
+        # If a docstring parameter description exists, use it.
         field_description = param_descs.get(name, None)
 
-        # Handle different parameter kinds
+        # Handle different parameter kinds.
         if param.kind == param.VAR_POSITIONAL:
-            # e.g. *args: extend positional args
+            # For example, *args extends positional args.
             if get_origin(ann) is tuple:
-                # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
+                # For example, def foo(*args: tuple[int, ...]) -> treat as List[int].
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
                     ann = list[args_of_tuple[0]]  # type: ignore
                 else:
                     ann = list[Any]
             else:
-                # If user wrote *args: int, treat as List[int]
+                # If the user wrote *args: int, treat as List[int].
                 ann = list[ann]  # type: ignore
 
-            # Default factory to empty list
+            # Default factory to an empty list.
             fields[name] = (
                 ann,
                 Field(default_factory=list, description=field_description),  # type: ignore
             )
 
         elif param.kind == param.VAR_KEYWORD:
-            # **kwargs handling
+            # **kwargs handling.
             if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
+                # For example, def foo(**kwargs: dict[str, int]).
                 dict_args = get_args(ann)
                 if len(dict_args) == 2:
                     ann = dict[dict_args[0], dict_args[1]]  # type: ignore
                 else:
                     ann = dict[str, Any]
             else:
-                # e.g. def foo(**kwargs: int) -> Dict[str, int]
+                # For example, def foo(**kwargs: int) -> Dict[str, int].
                 ann = dict[str, ann]  # type: ignore
 
             fields[name] = (
@@ -310,15 +309,15 @@ def function_schema(
             )
 
         else:
-            # Normal parameter
+            # Normal parameter.
             if default == inspect._empty:
-                # Required field
+                # Required field.
                 fields[name] = (
                     ann,
                     Field(..., description=field_description),
                 )
             else:
-                # Parameter with a default value
+                # Parameter with a default value.
                 fields[name] = (
                     ann,
                     Field(default=default, description=field_description),

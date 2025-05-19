@@ -180,8 +180,8 @@ class Runner:
 
             try:
                 while True:
-                    # Start an agent span if we don't have one. This span is ended if the current
-                    # agent changes, or if the agent loop ends.
+                    # Start an agent span if we do not have one. This span ends when the current
+                    # agent changes or when the agent loop ends.
                     if current_span is None:
                         handoff_names = [h.agent_name for h in cls._get_handoffs(current_agent)]
                         if output_schema := cls._get_output_schema(current_agent):
@@ -391,9 +391,8 @@ class Runner:
         if run_config is None:
             run_config = RunConfig()
 
-        # If there's already a trace, we don't create a new one. In addition, we can't end the
-        # trace here, because the actual work is done in `stream_events` and this method ends
-        # before that.
+        # If there is already a trace, we do not create a new one. In addition, we cannot end the
+        # trace here because the actual work is done in `stream_events` and this method ends before that.
         new_trace = (
             None
             if get_current_trace()
@@ -454,7 +453,7 @@ class Runner:
     ):
         queue = streamed_result._input_guardrail_queue
 
-        # We'll run the guardrails and push them onto the queue as they complete
+        # We run the guardrails and push them onto the queue as they complete.
         guardrail_tasks = [
             asyncio.create_task(
                 RunImpl.run_single_input_guardrail(agent, guardrail, input, context)
@@ -513,8 +512,8 @@ class Runner:
                 if streamed_result.is_complete:
                     break
 
-                # Start an agent span if we don't have one. This span is ended if the current
-                # agent changes, or if the agent loop ends.
+                # Start an agent span if we do not have one. This span ends when the current
+                # agent changes or when the agent loop ends.
                 if current_span is None:
                     handoff_names = [h.agent_name for h in cls._get_handoffs(current_agent)]
                     if output_schema := cls._get_output_schema(current_agent):
@@ -547,7 +546,7 @@ class Runner:
                     break
 
                 if current_turn == 1:
-                    # Run the input guardrails in the background and put the results on the queue
+                    # Run the input guardrails in the background and put the results on the queue.
                     streamed_result._input_guardrails_task = asyncio.create_task(
                         cls._run_input_guardrails_with_queue(
                             starting_agent,
@@ -600,7 +599,7 @@ class Runner:
                         try:
                             output_guardrail_results = await streamed_result._output_guardrails_task
                         except Exception:
-                            # Exceptions will be checked in the stream_events loop
+                            # Exceptions will be checked in the stream_events loop.
                             output_guardrail_results = []
 
                         streamed_result.output_guardrail_results = output_guardrail_results
@@ -669,7 +668,7 @@ class Runner:
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
         input.extend([item.to_input_item() for item in streamed_result.new_items])
 
-        # 1. Stream the output events
+        # 1. Stream the output events.
         async for event in model.stream_response(
             system_prompt,
             input,
@@ -706,7 +705,7 @@ class Runner:
         if not final_response:
             raise ModelBehaviorError("Model did not produce a final response!")
 
-        # 3. Now, we can process the turn as we do in the non-streaming case
+        # 3. Now we can process the turn as we do in the non-streaming case.
         single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
             original_input=streamed_result.input,
@@ -739,7 +738,7 @@ class Runner:
         tool_use_tracker: AgentToolUseTracker,
         previous_response_id: str | None,
     ) -> SingleStepResult:
-        # Ensure we run the hooks before anything else
+        # Ensure we run the hooks before anything else.
         if should_run_agent_start_hooks:
             await asyncio.gather(
                 hooks.on_agent_start(context_wrapper, agent),

@@ -111,8 +111,8 @@ class MCPUtil:
         else:
             logger.debug(f"MCP tool {tool.name} returned {result}")
 
-        # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
-        # string. We'll try to convert.
+        # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single string.
+        # We will try to convert.
         if len(result.content) == 1:
             tool_output = result.content[0].model_dump_json()
         elif len(result.content) > 1:

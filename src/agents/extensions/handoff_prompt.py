@@ -1,5 +1,5 @@
-# A recommended prompt prefix for agents that use handoffs. We recommend including this or
-# similar instructions in any agents that use handoffs.
+# A recommended prompt prefix for agents that use handoffs.
+# We recommend including this or similar instructions in any agents that use handoffs.
 RECOMMENDED_PROMPT_PREFIX = (
     "# System context\n"
     "You are part of a multi-agent system called the Agents SDK, designed to make agent "

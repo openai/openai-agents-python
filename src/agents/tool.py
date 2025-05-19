@@ -299,11 +299,11 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-    # If func is actually a callable, we were used as @function_tool with no parentheses
+    # If func is actually a callable, we were used as @function_tool with no parentheses.
     if callable(func):
         return _create_function_tool(func)
 
-    # Otherwise, we were used as @function_tool(...), so return a decorator
+    # Otherwise, we were used as @function_tool(...), so return a decorator.
     def decorator(real_func: ToolFunction[...]) -> FunctionTool:
         return _create_function_tool(real_func)
 

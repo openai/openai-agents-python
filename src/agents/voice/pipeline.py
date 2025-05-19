@@ -84,8 +84,7 @@ class VoicePipeline:
         )
 
     async def _run_single_turn(self, audio_input: AudioInput) -> StreamedAudioResult:
-        # Since this is single turn, we can use the TraceCtxManager to manage starting/ending the
-        # trace
+        # Since this is single turn, we can use the TraceCtxManager to manage starting and ending the trace.
         with TraceCtxManager(
             workflow_name=self.config.workflow_name or "Voice Agent",
             trace_id=None,  # Automatically generated

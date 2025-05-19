@@ -56,7 +56,7 @@ class ChatCmplStreamHandler:
                     type="response.created",
                 )
 
-            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
+            # This is always set by the OpenAI API, but not by others such as LiteLLM.
             usage = chunk.usage if hasattr(chunk, "usage") else None
 
             if not chunk.choices or not chunk.choices[0].delta:
@@ -64,10 +64,10 @@ class ChatCmplStreamHandler:
 
             delta = chunk.choices[0].delta
 
-            # Handle text
+            # Handle text.
             if delta.content:
                 if not state.text_content_index_and_output:
-                    # Initialize a content tracker for streaming text
+                    # Initialize a content tracker for streaming text.
                     state.text_content_index_and_output = (
                         0 if not state.refusal_content_index_and_output else 1,
                         ResponseOutputText(
@@ -76,7 +76,7 @@ class ChatCmplStreamHandler:
                             annotations=[],
                         ),
                     )
-                    # Start a new assistant message stream
+                    # Start a new assistant message stream.
                     assistant_item = ResponseOutputMessage(
                         id=FAKE_RESPONSES_ID,
                         content=[],
@@ -84,7 +84,7 @@ class ChatCmplStreamHandler:
                         type="message",
                         status="in_progress",
                     )
-                    # Notify consumers of the start of a new output message + first content part
+                    # Notify consumers of the start of a new output message and the first content part.
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
                         output_index=0,
@@ -101,7 +101,7 @@ class ChatCmplStreamHandler:
                         ),
                         type="response.content_part.added",
                     )
-                # Emit the delta for this segment of content
+                # Emit the delta for this segment of content.
                 yield ResponseTextDeltaEvent(
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
@@ -109,19 +109,19 @@ class ChatCmplStreamHandler:
                     output_index=0,
                     type="response.output_text.delta",
                 )
-                # Accumulate the text into the response part
+                # Accumulate the text into the response part.
                 state.text_content_index_and_output[1].text += delta.content
 
-            # Handle refusals (model declines to answer)
-            # This is always set by the OpenAI API, but not by others e.g. LiteLLM
+            # Handle refusals (model declines to answer).
+            # This is always set by the OpenAI API, but not by others such as LiteLLM.
             if hasattr(delta, "refusal") and delta.refusal:
                 if not state.refusal_content_index_and_output:
-                    # Initialize a content tracker for streaming refusal text
+                    # Initialize a content tracker for streaming refusal text.
                     state.refusal_content_index_and_output = (
                         0 if not state.text_content_index_and_output else 1,
                         ResponseOutputRefusal(refusal="", type="refusal"),
                     )
-                    # Start a new assistant message if one doesn't exist yet (in-progress)
+                    # Start a new assistant message if one does not exist yet (in-progress).
                     assistant_item = ResponseOutputMessage(
                         id=FAKE_RESPONSES_ID,
                         content=[],
@@ -129,7 +129,7 @@ class ChatCmplStreamHandler:
                         type="message",
                         status="in_progress",
                     )
-                    # Notify downstream that assistant message + first content part are starting
+                    # Notify downstream that the assistant message and first content part are starting.
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
                         output_index=0,
@@ -146,7 +146,7 @@ class ChatCmplStreamHandler:
                         ),
                         type="response.content_part.added",
                     )
-                # Emit the delta for this segment of refusal
+                # Emit the delta for this segment of refusal.
                 yield ResponseRefusalDeltaEvent(
                     content_index=state.refusal_content_index_and_output[0],
                     delta=delta.refusal,
@@ -154,12 +154,11 @@ class ChatCmplStreamHandler:
                     output_index=0,
                     type="response.refusal.delta",
                 )
-                # Accumulate the refusal string in the output part
+                # Accumulate the refusal string in the output part.
                 state.refusal_content_index_and_output[1].refusal += delta.refusal
 
-            # Handle tool calls
-            # Because we don't know the name of the function until the end of the stream, we'll
-            # save everything and yield events at the end
+            # Handle tool calls.
+            # Because we do not know the name of the function until the end of the stream, we save everything and yield events at the end.
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     if tc_delta.index not in state.function_calls:
@@ -183,7 +182,7 @@ class ChatCmplStreamHandler:
         function_call_starting_index = 0
         if state.text_content_index_and_output:
             function_call_starting_index += 1
-            # Send end event for this content part
+            # Send an end event for this content part.
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
@@ -194,7 +193,7 @@ class ChatCmplStreamHandler:
 
         if state.refusal_content_index_and_output:
             function_call_starting_index += 1
-            # Send end event for this content part
+            # Send an end event for this content part.
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
@@ -203,9 +202,9 @@ class ChatCmplStreamHandler:
                 type="response.content_part.done",
             )
 
-        # Actually send events for the function calls
+        # Actually send events for the function calls.
         for function_call in state.function_calls.values():
-            # First, a ResponseOutputItemAdded for the function call
+            # First, emit a ResponseOutputItemAdded for the function call.
             yield ResponseOutputItemAddedEvent(
                 item=ResponseFunctionToolCall(
                     id=FAKE_RESPONSES_ID,
@@ -217,14 +216,14 @@ class ChatCmplStreamHandler:
                 output_index=function_call_starting_index,
                 type="response.output_item.added",
             )
-            # Then, yield the args
+            # Then, yield the args.
             yield ResponseFunctionCallArgumentsDeltaEvent(
                 delta=function_call.arguments,
                 item_id=FAKE_RESPONSES_ID,
                 output_index=function_call_starting_index,
                 type="response.function_call_arguments.delta",
             )
-            # Finally, the ResponseOutputItemDone
+            # Finally, emit the ResponseOutputItemDone.
             yield ResponseOutputItemDoneEvent(
                 item=ResponseFunctionToolCall(
                     id=FAKE_RESPONSES_ID,
@@ -237,7 +236,7 @@ class ChatCmplStreamHandler:
                 type="response.output_item.done",
             )
 
-        # Finally, send the Response completed event
+        # Finally, send the Response completed event.
         outputs: list[ResponseOutputItem] = []
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
@@ -253,7 +252,7 @@ class ChatCmplStreamHandler:
                 assistant_msg.content.append(state.refusal_content_index_and_output[1])
             outputs.append(assistant_msg)
 
-            # send a ResponseOutputItemDone for the assistant message
+            # Send a ResponseOutputItemDone for the assistant message.
             yield ResponseOutputItemDoneEvent(
                 item=assistant_msg,
                 output_index=0,

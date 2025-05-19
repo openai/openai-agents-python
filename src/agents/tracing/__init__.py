@@ -104,10 +104,10 @@ def set_tracing_export_api_key(api_key: str) -> None:
     default_exporter().set_api_key(api_key)
 
 
-# Add the default processor, which exports traces and spans to the backend in batches. You can
-# change the default behavior by either:
-# 1. calling add_trace_processor(), which adds additional processors, or
-# 2. calling set_trace_processors(), which replaces the default processor.
+# Add the default processor, which exports traces and spans to the backend in batches.
+# Change the default behavior by either of the following.
+# 1. Calling add_trace_processor(), which adds additional processors.
+# 2. Calling set_trace_processors(), which replaces the default processor.
 add_trace_processor(default_processor())
 
 atexit.register(GLOBAL_TRACE_PROVIDER.shutdown)

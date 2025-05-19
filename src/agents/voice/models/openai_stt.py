@@ -42,7 +42,7 @@ class WebsocketDoneSentinel:
 def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> str:
     concatenated_audio = np.concatenate(audio_data)
     if concatenated_audio.dtype == np.float32:
-        # convert to int16
+        # Convert to int16.
         concatenated_audio = np.clip(concatenated_audio, -1.0, 1.0)
         concatenated_audio = (concatenated_audio * 32767).astype(np.int16)
     audio_bytes = concatenated_audio.tobytes()
@@ -98,7 +98,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
 
-        # tasks
+        # Tasks.
         self._listener_task: asyncio.Task[Any] | None = None
         self._process_events_task: asyncio.Task[Any] | None = None
         self._stream_audio_task: asyncio.Task[Any] | None = None
@@ -222,7 +222,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     self._event_queue.get(), timeout=EVENT_INACTIVITY_TIMEOUT
                 )
                 if isinstance(event, WebsocketDoneSentinel):
-                    # processed all events and websocket is done
+                    # Processed all events and the WebSocket is done.
                     break
 
                 event_type = event.get("type", "unknown")

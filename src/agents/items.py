@@ -58,7 +58,7 @@ class RunItemBase(Generic[T], abc.ABC):
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
         if isinstance(self.raw_item, dict):
-            # We know that input items are dicts, so we can ignore the type error
+            # We know that input items are dicts, so we can ignore the type error.
             return self.raw_item  # type: ignore
         elif isinstance(self.raw_item, BaseModel):
             # All output items are Pydantic models that can be converted to input items.
@@ -175,8 +175,7 @@ class ModelResponse:
 
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
-        # We happen to know that the shape of the Pydantic output items are the same as the
-        # equivalent TypedDict input items, so we can just convert each one.
+        # We happen to know that the shape of the Pydantic output items is the same as the equivalent TypedDict input items, so we can just convert each one.
         # This is also tested via unit tests.
         return [it.model_dump(exclude_unset=True) for it in self.output]  # type: ignore
 
