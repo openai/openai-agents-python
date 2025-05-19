@@ -5,6 +5,7 @@ that screenshots are taken and wrapped appropriately, and that the execute funct
 hooks and returns the expected ToolCallOutputItem."""
 
 from typing import Any
+import hashlib
 
 import pytest
 from openai.types.responses.response_computer_tool_call import (
@@ -307,5 +308,48 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert isinstance(raw, dict)
     assert raw["type"] == "computer_call_output"
     assert raw["output"]["type"] == "computer_screenshot"
-    assert "image_url" in raw["output"]
     assert raw["output"]["image_url"].endswith("xyz")
+    assert "image_id" in raw["output"]
+
+
+@pytest.mark.asyncio
+async def test_execute_reuses_cached_screenshot() -> None:
+    """A repeated screenshot should return a cached reference instead of data."""
+    computer = LoggingComputer(screenshot_return="abc")
+    comptool = ComputerTool(computer=computer)
+    action = ActionClick(type="click", x=0, y=0, button="left")
+    tool_call = ResponseComputerToolCall(
+        id="tool1",
+        type="computer_call",
+        action=action,
+        call_id="tool1",
+        pending_safety_checks=[],
+        status="completed",
+    )
+    tool_call.call_id = "tool1"
+    tool_run = ToolRunComputerAction(tool_call=tool_call, computer_tool=comptool)
+    agent = Agent(name="agent", tools=[comptool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+    run_hooks = LoggingRunHooks()
+    # First call caches the screenshot data.
+    first = await ComputerAction.execute(
+        agent=agent,
+        action=tool_run,
+        hooks=run_hooks,
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+    # Second call should send only a reference.
+    second = await ComputerAction.execute(
+        agent=agent,
+        action=tool_run,
+        hooks=run_hooks,
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+    digest = hashlib.sha1("abc".encode()).hexdigest()
+    assert first.output == "data:image/png;base64,abc"
+    assert second.output == digest
+    raw_second = second.raw_item
+    assert raw_second["output"]["type"] == "computer_screenshot_ref"
+    assert raw_second["output"]["image_id"] == digest
