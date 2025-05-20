@@ -9,6 +9,7 @@ from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.responses import Response
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
@@ -83,6 +84,18 @@ class OpenAIChatCompletionsModel(Model):
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
                     total_tokens=response.usage.total_tokens,
+                    input_tokens_details=InputTokensDetails(
+                        cached_tokens=getattr(
+                            response.usage.prompt_tokens_details, "cached_tokens", 0
+                        )
+                        or 0,
+                    ),
+                    output_tokens_details=OutputTokensDetails(
+                        reasoning_tokens=getattr(
+                            response.usage.completion_tokens_details, "reasoning_tokens", 0
+                        )
+                        or 0,
+                    ),
                 )
                 if response.usage
                 else Usage()
@@ -252,7 +265,7 @@ class OpenAIChatCompletionsModel(Model):
             stream_options=self._non_null_or_not_given(stream_options),
             store=self._non_null_or_not_given(store),
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
-            extra_headers={ **HEADERS, **(model_settings.extra_headers or {}) },
+            extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),

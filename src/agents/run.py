@@ -689,6 +689,8 @@ class Runner:
                         input_tokens=event.response.usage.input_tokens,
                         output_tokens=event.response.usage.output_tokens,
                         total_tokens=event.response.usage.total_tokens,
+                        input_tokens_details=event.response.usage.input_tokens_details,
+                        output_tokens_details=event.response.usage.output_tokens_details,
                     )
                     if event.response.usage
                     else Usage()
