@@ -22,14 +22,12 @@ async def test_extra_body_is_forwarded(monkeypatch):
         captured.update(kwargs)
         msg = Message(role="assistant", content="ok")
         choice = Choices(index=0, message=msg)
-        return ModelResponse(
-            choices=[choice],
-            usage=Usage(0, 0, 0),
-        )
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     settings = ModelSettings(
-        temperature=0.1, extra_body={"cached_content": "some_cache", "foo": 123}
+        temperature=0.1,
+        extra_body={"cached_content": "some_cache", "foo": 123}
     )
     model = LitellmModel(model="test-model")
 
