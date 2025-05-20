@@ -13,7 +13,10 @@ from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
     Function,
 )
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import (
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -51,7 +54,13 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         model="fake",
         object="chat.completion",
         choices=[choice],
-        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            # completion_tokens_details left blank to test default
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=3),
+        ),
     )
 
     async def patched_fetch_response(self, *args, **kwargs):
@@ -81,6 +90,8 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens == 7
     assert resp.usage.output_tokens == 5
     assert resp.usage.total_tokens == 12
+    assert resp.usage.input_tokens_details.cached_tokens == 3
+    assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
 
 
@@ -127,6 +138,8 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
     assert resp.usage.requests == 0
     assert resp.usage.input_tokens == 0
     assert resp.usage.output_tokens == 0
+    assert resp.usage.input_tokens_details.cached_tokens == 0
+    assert resp.usage.output_tokens_details.reasoning_tokens == 0
 
 
 @pytest.mark.allow_call_model_methods
