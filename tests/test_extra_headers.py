@@ -1,6 +1,7 @@
 import pytest
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents import ModelSettings, ModelTracing, OpenAIChatCompletionsModel, OpenAIResponsesModel
 
@@ -17,21 +18,29 @@ async def test_extra_headers_passed_to_openai_responses_model():
         async def create(self, **kwargs):
             nonlocal called_kwargs
             called_kwargs = kwargs
+
             class DummyResponse:
                 id = "dummy"
                 output = []
                 usage = type(
-                    "Usage", (), {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                    "Usage",
+                    (),
+                    {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "input_tokens_details": InputTokensDetails(cached_tokens=0),
+                        "output_tokens_details": OutputTokensDetails(reasoning_tokens=0),
+                    },
                 )()
+
             return DummyResponse()
 
     class DummyClient:
         def __init__(self):
             self.responses = DummyResponses()
 
-
-
-    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyClient()) # type: ignore
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyClient())  # type: ignore
     extra_headers = {"X-Test-Header": "test-value"}
     await model.get_response(
         system_instructions=None,
@@ -45,7 +54,6 @@ async def test_extra_headers_passed_to_openai_responses_model():
     )
     assert "extra_headers" in called_kwargs
     assert called_kwargs["extra_headers"]["X-Test-Header"] == "test-value"
-
 
 
 @pytest.mark.allow_call_model_methods
@@ -76,7 +84,7 @@ async def test_extra_headers_passed_to_openai_client():
             self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
             self.base_url = "https://api.openai.com"
 
-    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyClient()) # type: ignore
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyClient())  # type: ignore
     extra_headers = {"X-Test-Header": "test-value"}
     await model.get_response(
         system_instructions=None,

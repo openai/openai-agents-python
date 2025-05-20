@@ -8,7 +8,11 @@ from openai.types.chat.chat_completion_chunk import (
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
 )
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -46,7 +50,13 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         model="fake",
         object="chat.completion.chunk",
         choices=[Choice(index=0, delta=ChoiceDelta(content="llo"))],
-        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=5),
+        ),
     )
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:

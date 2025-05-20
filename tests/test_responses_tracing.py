@@ -2,6 +2,7 @@ import pytest
 from inline_snapshot import snapshot
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseCompletedEvent
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents import ModelSettings, ModelTracing, OpenAIResponsesModel, trace
 from agents.tracing.span_data import ResponseSpanData
@@ -16,10 +17,25 @@ class DummyTracing:
 
 
 class DummyUsage:
-    def __init__(self, input_tokens=1, output_tokens=1, total_tokens=2):
+    def __init__(
+        self,
+        input_tokens: int = 1,
+        input_tokens_details: InputTokensDetails | None = None,
+        output_tokens: int = 1,
+        output_tokens_details: OutputTokensDetails | None = None,
+        total_tokens: int = 2,
+    ):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.total_tokens = total_tokens
+        self.input_tokens_details = (
+            input_tokens_details if input_tokens_details else InputTokensDetails(cached_tokens=0)
+        )
+        self.output_tokens_details = (
+            output_tokens_details
+            if output_tokens_details
+            else OutputTokensDetails(reasoning_tokens=0)
+        )
 
 
 class DummyResponse:
