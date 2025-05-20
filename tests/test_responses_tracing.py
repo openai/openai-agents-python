@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 from inline_snapshot import snapshot
 from openai import AsyncOpenAI
@@ -20,9 +22,9 @@ class DummyUsage:
     def __init__(
         self,
         input_tokens: int = 1,
-        input_tokens_details: InputTokensDetails | None = None,
+        input_tokens_details: Optional[InputTokensDetails] = None,
         output_tokens: int = 1,
-        output_tokens_details: OutputTokensDetails | None = None,
+        output_tokens_details: Optional[OutputTokensDetails] = None,
         total_tokens: int = 2,
     ):
         self.input_tokens = input_tokens
