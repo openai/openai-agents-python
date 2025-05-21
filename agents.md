@@ -25,7 +25,7 @@ In addition, ensure *git*, *curl* and *GNU Make* are on your `PATH`.
     ├── agents/             ← Your custom agents live here
     ├── src/                ← Application code
     ├── tests/              ← Pytest suite
-    ├── setup.sh            ← Environment bootstrap (run once)
+    ├── setup.sh            ← Environment bootstrap (run when bootstrapping a new environment)
     ├── uv.lock             ← Pinned dependency hashes (uv‑generated)
     └── agents.md           ← **You are here**
 
