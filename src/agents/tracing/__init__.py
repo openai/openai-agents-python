@@ -18,7 +18,7 @@ from .create import (
 )
 from .processor_interface import TracingProcessor
 from .processors import default_exporter, default_processor
-from .setup import GLOBAL_TRACE_PROVIDER
+from .setup import GLOBAL_TRACE_PROVIDER, set_trace_provider
 from .span_data import (
     AgentSpanData,
     CustomSpanData,
@@ -49,6 +49,7 @@ __all__ = [
     "handoff_span",
     "response_span",
     "set_trace_processors",
+    "set_trace_provider",
     "set_tracing_disabled",
     "trace",
     "Trace",

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import threading
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from ..logger import logger
@@ -118,6 +120,22 @@ class TraceProvider:
         """
         self._disabled = disabled
 
+    def time_iso(self) -> str:
+        """Return the current time in ISO 8601 format."""
+        return datetime.now(timezone.utc).isoformat()
+
+    def gen_trace_id(self) -> str:
+        """Generate a new trace ID."""
+        return f"trace_{uuid.uuid4().hex}"
+
+    def gen_span_id(self) -> str:
+        """Generate a new span ID."""
+        return f"span_{uuid.uuid4().hex[:24]}"
+
+    def gen_group_id(self) -> str:
+        """Generate a new group ID."""
+        return f"group_{uuid.uuid4().hex[:24]}"
+
     def create_trace(
         self,
         name: str,
@@ -212,3 +230,9 @@ class TraceProvider:
 
 
 GLOBAL_TRACE_PROVIDER = TraceProvider()
+
+
+def set_trace_provider(provider: TraceProvider) -> None:
+    """Set the global trace provider used by tracing utilities."""
+    global GLOBAL_TRACE_PROVIDER
+    GLOBAL_TRACE_PROVIDER = provider
