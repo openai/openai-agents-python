@@ -253,3 +253,10 @@ class ItemHelpers:
     def get_tool_call_name(cls, tool_call: ToolCallItem) -> str:
         """Returns the tool name from a ToolCallItem."""
         return tool_call.raw_item.name
+    
+    @classmethod
+    def tool_response_output(
+        cls, tool_call: ToolCallOutputItem
+    ):
+        """Extracts and returns the output from a ToolCallOutputItem."""
+        return tool_call.output
