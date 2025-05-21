@@ -878,21 +878,21 @@ else:
         "image_id": image_id,
     }
     final_output = image_id
-        return ToolCallOutputItem(
-            agent=agent,
-            output=final_output,
-            raw_item=ComputerCallOutput(
-                call_id=action.tool_call.call_id,
-                output=raw_output,
-                type="computer_call_output",
-            ),
-        )
+return ToolCallOutputItem(
+    agent=agent,
+    output=final_output,
+    raw_item=ComputerCallOutput(
+        call_id=action.tool_call.call_id,
+        output=raw_output,
+        type="computer_call_output",
+    ),
+)
 
-    @classmethod
-    async def _get_screenshot_sync(
-        cls,
-        computer: Computer,
-        tool_call: ResponseComputerToolCall,
+@classmethod
+async def _get_screenshot_sync(
+    cls,
+    computer: Computer,
+    tool_call: ResponseComputerToolCall,
     ) -> str:
         action = tool_call.action
         if isinstance(action, ActionClick):
