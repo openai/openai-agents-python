@@ -88,7 +88,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None
+            GetSessionIdCallback | None,
         ]
     ]:
         """Create the streams for the server."""
@@ -243,7 +243,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None
+            GetSessionIdCallback | None,
         ]
     ]:
         """Create the streams for the server."""
@@ -314,7 +314,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None
+            GetSessionIdCallback | None,
         ]
     ]:
         """Create the streams for the server."""
@@ -394,7 +394,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
-            GetSessionIdCallback | None
+            GetSessionIdCallback | None,
         ]
     ]:
         """Create the streams for the server."""
@@ -403,7 +403,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             headers=self.params.get("headers", None),
             timeout=self.params.get("timeout", timedelta(seconds=30)),
             sse_read_timeout=self.params.get("sse_read_timeout", timedelta(seconds=60 * 5)),
-            terminate_on_close=self.params.get("terminate_on_close", True)
+            terminate_on_close=self.params.get("terminate_on_close", True),
         )
 
     @property
