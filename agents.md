@@ -124,3 +124,8 @@ _Style guideline_: write comments as full sentences and end them with a period.
 * Explore `examples/` shipped with the SDK.  
 * Extend `setup.sh` to install GPU‑dependent libraries if required.  
 * Optional: enable *OpenTelemetry* tracing via `export AGENTS_TRACE=1`.
+
+
+## 10 Future Steps
+* Always ensure dependencies for features are added to ./setup.sh when an error occurs, or is predicted to be required
+* Make recommendations for advanced functionality, adding a UI / UX using Next.js 15.3, Tailwind CSS 4.1.3, Shadcn/ui 2.5.0, React 19.1
