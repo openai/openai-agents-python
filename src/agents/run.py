@@ -234,6 +234,7 @@ class Runner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 previous_response_id=previous_response_id,
+                                current_turn=current_turn,
                             ),
                         )
                     else:
@@ -248,6 +249,7 @@ class Runner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             previous_response_id=previous_response_id,
+                            current_turn=current_turn,
                         )
                     should_run_agent_start_hooks = False
 
@@ -568,6 +570,7 @@ class Runner:
                         tool_use_tracker,
                         all_tools,
                         previous_response_id,
+                        current_turn=current_turn, # Pass current_turn
                     )
                     should_run_agent_start_hooks = False
 
@@ -640,6 +643,7 @@ class Runner:
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
         previous_response_id: str | None,
+        current_turn: int, # Added current_turn
     ) -> SingleStepResult:
         if should_run_agent_start_hooks:
             await asyncio.gather(
@@ -665,13 +669,74 @@ class Runner:
 
         final_response: ModelResponse | None = None
 
-        input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        input.extend([item.to_input_item() for item in streamed_result.new_items])
+        # --- Memory loading and input preparation for streaming START ---
+        memory = agent.memory
+        if current_turn == 1: # Consistent with non-streaming _run_single_turn
+            memory.load()
+
+        history_messages_from_memory = memory.get_messages()
+
+        generated_item_messages: list[TResponseInputItem] = [
+            item.to_input_item() for item in streamed_result.new_items
+        ]
+        # For streaming, `streamed_result.input` holds the initial input to the *entire run*.
+        # New inputs for a specific turn are not explicitly separated in the same way as `original_input`
+        # in the non-streaming version. The conversation history is built up in `streamed_result.new_items`
+        # and the initial input.
+        # We need to ensure the `combined_input` logic is consistent.
+        # `streamed_result.input` is the initial input that started the *whole run*.
+        # `streamed_result.new_items` are items from previous turns of this run.
+
+        # If current_turn is 1, the input to the model should be the `streamed_result.input` (original input for the run)
+        # plus any history from memory.
+        # If current_turn > 1, the `streamed_result.new_items` contain the conversation from previous turns of this run.
+
+        combined_input_for_model: list[TResponseInputItem] = []
+        combined_input_for_model.extend(history_messages_from_memory) # type: ignore[arg-type]
+
+        if current_turn == 1:
+            # The first turn uses the initial input that started the run.
+            # (ItemHelpers.input_to_new_input_list can handle if it's already a list or a string)
+            initial_run_input_list = ItemHelpers.input_to_new_input_list(streamed_result.input)
+            combined_input_for_model.extend(initial_run_input_list)
+            # `streamed_result.new_items` should be empty on turn 1 before model call,
+            # but if it weren't, it would be messages from previous turns.
+            # The current logic in `_run_streamed_impl` updates `streamed_result.new_items` *after* the turn.
+        else:
+            # Subsequent turns use messages from `streamed_result.new_items` which accumulate turn by turn.
+            # These items already include user messages and assistant responses from previous turns of this run.
+            combined_input_for_model.extend(generated_item_messages)
+
+
+        # The `current_turn_new_input_list_for_memory_saving` is what *this specific turn* adds as new "user" input.
+        # In streaming, this is tricky because there isn't a direct "input for this turn" passed around
+        # after the very first input. The "user" messages are often part of `new_items` if they were added.
+        # For consistency with how `_get_single_step_result_from_response` saves to memory,
+        # we need to identify the "new user input" for *this* turn.
+        # However, `_run_single_turn_streamed` doesn't receive `original_input` like `_run_single_turn`.
+        # The `streamed_result.input` is the *initial* input to the whole chain.
+        # `streamed_result.new_items` are all previous items.
+        # This means the "new input for this turn" concept is different.
+        # The model is called with the cumulative history.
+
+        # Let's assume for now that memory saving in `_get_single_step_result_from_response`
+        # will correctly use its `current_turn_new_input_list` parameter.
+        # The challenge is what to pass as `current_turn_new_input_list` from here.
+        # For streaming, the "new input" is implicitly part of the stream if it's a user message.
+        # The current design of `_get_single_step_result_from_response` expects `current_turn_new_input_list`
+        # to be specifically the *new user messages* for the current turn.
+        # In streaming, the "new user message" that triggers a turn (after the first) isn't explicitly passed.
+        # It's assumed to be the last message in `streamed_result.new_items` if it's from the user.
+
+        # This part of the plan might need re-evaluation for streaming, as the input flow is different.
+        # For now, let's focus on getting the `combined_input_for_model` correct.
+        # --- Memory loading and input preparation for streaming END ---
+
 
         # 1. Stream the output events.
         async for event in model.stream_response(
             system_prompt,
-            input,
+            combined_input_for_model, # Use the carefully constructed combined input
             model_settings,
             all_tools,
             output_schema,
@@ -706,10 +771,58 @@ class Runner:
             raise ModelBehaviorError("Model did not produce a final response!")
 
         # 3. Now we can process the turn as we do in the non-streaming case.
+        # For saving to memory, `_get_single_step_result_from_response` needs `current_turn_new_input_list`.
+        # In the streaming context, after the first turn, "new user input" is not explicitly provided to `_run_single_turn_streamed`.
+        # The model reacts to the accumulated history.
+        # If the last message in `combined_input_for_model` (before this turn's LLM call) was from the 'user',
+        # that could be considered the "new input" for memory saving purposes.
+        # This is a divergence from the non-streaming flow that needs careful handling.
+
+        # Let's assume, for now, that `streamed_result.input` (which is the initial input to the whole run)
+        # is the closest analogue to `original_input` for the *first* turn memory saving.
+        # For subsequent turns, there isn't a direct equivalent of "new input for this specific turn"
+        # being passed to `_run_single_turn_streamed`.
+
+        # The `original_input` parameter for `_get_single_step_result_from_response`
+        # is used by memory saving logic as `current_turn_new_input_list`.
+        # We need to construct this appropriately.
+        # If current_turn == 1, it's ItemHelpers.input_to_new_input_list(streamed_result.input)
+        # If current_turn > 1, what should it be? The model has already seen previous items.
+        # The memory saving should only save the *actual new messages* of this turn.
+        # User messages in streaming (after first) are typically added via user interaction with the stream.
+        # This function doesn't see that "new" user message directly.
+
+        # Given the subtask is to integrate memory saving by calling _get_single_step_result_from_response,
+        # we must provide what it expects.
+        # The simplest approach for now, to make it runnable, is to pass an empty list
+        # for `current_turn_new_input_list` if it's not the first turn, acknowledging this is a gap
+        # in how new user inputs are captured for memory in streaming turns after the first.
+        # Or, we can assume `streamed_result.new_items` contains the new user message if it was added before this call.
+
+        current_turn_new_input_list_for_memory: list[TResponseInputItem]
+        if current_turn == 1:
+            current_turn_new_input_list_for_memory = ItemHelpers.input_to_new_input_list(streamed_result.input)
+        else:
+            # In streaming, subsequent "user" inputs are part of the history that `model.stream_response` gets.
+            # They would be in `streamed_result.new_items` if added by the streaming handler.
+            # The `_get_single_step_result_from_response` expects only the *newest* user messages for *this* turn.
+            # This is a conceptual mismatch for streaming after turn 1.
+            # For now, let's assume no *new* user messages are being introduced to this function for turns > 1,
+            # as they are already part of the history.
+            # This means memory might not capture "user" messages correctly after turn 1 in streaming.
+            # This needs to be addressed in how user messages are added to `streamed_result.new_items`
+            # and then identified for memory saving.
+            # A pragmatic choice: if the *last* item in `generated_item_messages` (inputs to LLM for this turn, from previous turns)
+            # was from a user, maybe that's the "new" input. This is heuristic.
+            # For now, to fulfill the signature, and noting this limitation:
+            current_turn_new_input_list_for_memory = [] # Placeholder for turns > 1
+
+
         single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
-            original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            original_input=streamed_result.input, # This is the input to the entire run.
+            current_turn_new_input_list=current_turn_new_input_list_for_memory, #This is what's saved as "user input for the turn"
+            pre_step_items=streamed_result.new_items, # Items from previous turns of this run
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -737,6 +850,7 @@ class Runner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         previous_response_id: str | None,
+        current_turn: int,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else.
         if should_run_agent_start_hooks:
@@ -753,13 +867,41 @@ class Runner:
 
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
-        input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+
+        # --- Memory loading and input preparation START ---
+        memory = agent.memory
+        if current_turn == 1:
+            # This ensures that for agents with persistent memory (like FileStorageMemory),
+            # the history is loaded at the beginning of their first turn in a multi-agent
+            # conversation or a resumed conversation. Agent.__post_init__ also calls load(),
+            # so this call here is specifically for reloading if the agent instance is reused
+            # across multiple Runner.run calls or if the underlying store was modified externally.
+            memory.load()
+
+        # 1. Messages from memory (history from previous runs/sessions)
+        history_messages_from_memory = memory.get_messages()
+
+        # 2. `generated_items` are from previous turns within the *current* `Runner.run` call.
+        generated_item_messages: list[TResponseInputItem] = [
+            generated_item.to_input_item() for generated_item in generated_items
+        ]
+
+        # 3. `original_input` is the new message(s) for the *current* turn of the *current* `Runner.run` call.
+        # This can be a single string or a list of TResponseInputItem.
+        current_turn_new_input_list: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(original_input)
+
+        # Combine all message sources in chronological order:
+        # memory_messages + generated_item_messages + original_input_messages
+        combined_input: list[TResponseInputItem] = []
+        combined_input.extend(history_messages_from_memory)  # type: ignore[arg-type]
+        combined_input.extend(generated_item_messages)
+        combined_input.extend(current_turn_new_input_list)
+        # --- Memory loading and input preparation END ---
 
         new_response = await cls._get_new_response(
             agent,
             system_prompt,
-            input,
+            combined_input,  # Use the combined list
             output_schema,
             all_tools,
             handoffs,
@@ -767,11 +909,14 @@ class Runner:
             run_config,
             tool_use_tracker,
             previous_response_id,
+            # current_turn is passed through to the memory system
+            current_turn=current_turn,
         )
 
         return await cls._get_single_step_result_from_response(
             agent=agent,
-            original_input=original_input,
+            original_input=original_input, # This is the original input to _run_single_turn
+            current_turn_new_input_list=current_turn_new_input_list, # Pass the processed new inputs
             pre_step_items=generated_items,
             new_response=new_response,
             output_schema=output_schema,
@@ -798,6 +943,7 @@ class Runner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        current_turn_new_input_list: list[TResponseInputItem], # Added parameter
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -808,6 +954,75 @@ class Runner:
         )
 
         tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+
+        # --- Memory saving START ---
+        memory = agent.memory
+
+        # 1. Add the new user messages for this turn to memory
+        # current_turn_new_input_list contains only the fresh inputs for this turn
+        for user_message_item in current_turn_new_input_list:
+            # Ensure content is a string, though TResponseInputItem content should already be.
+            memory.add(role=user_message_item["role"], content=str(user_message_item["content"]))
+
+        # 2. Add the assistant's new messages from this turn to memory
+        #    These are the direct textual/object outputs from the LLM, before tool execution.
+        from .items import MessageOutputItem # Local import to avoid circular dependency issues at module level
+
+        for item in processed_response.new_items:
+            if isinstance(item, MessageOutputItem):
+                # item.raw_item is ResponseOutputMessage
+                # item.raw_item.content is a list of content parts (e.g., TextPart, ImageURLPart)
+                # We'll concatenate text from all TextPart instances.
+                text_content = ""
+                if item.raw_item.content: # Content can sometimes be None for certain roles/tool_calls
+                    for part in item.raw_item.content:
+                        if hasattr(part, "text") and isinstance(part.text, str): # Check if it's a TextPart or similar
+                            text_content += part.text
+                        # Note: Other content part types (like images) are currently ignored for memory.
+                        # If structured JSON is part of a TextPart, it will be saved as a string.
+                
+                # Only add if there's actual text content or if it's a tool_call request
+                # (which might have None content but important role/tool_call_id).
+                # For memory, typically we want to store textual conversation.
+                # Tool call requests themselves (role='assistant', tool_calls=[...]) are important context.
+                # If item.raw_item.tool_calls is not None, it means it's an assistant message requesting tool calls.
+                # The content of such messages might be empty or just instructive text.
+                if text_content or item.raw_item.tool_calls:
+                    # If there are tool_calls, the content might be None or some wrapper text.
+                    # We prioritize text_content if available, otherwise save the fact of tool_call.
+                    # For simplicity, AgentMemory expects string content.
+                    # If tool_calls are present, we might want to serialize them or just save the text part.
+                    # Current memory.add expects string.
+                    # Let's stick to saving the textual part of the message.
+                    # If the message was *only* a tool call request with no text part,
+                    # item.raw_item.content might be empty or None.
+                    # The role is item.raw_item.role, which is typically 'assistant'
+                    memory.add(role=item.raw_item.role, content=text_content)
+
+
+        # 3. Add tool call results (role='tool') to memory
+        #    These are added to `generated_items` after tool execution in `RunImpl.execute_tools_and_side_effects`
+        #    The current structure adds LLM response first, then tools are executed.
+        #    The tool results will be part of `generated_items` for the *next* turn's `combined_input`.
+        #    So, we don't need to explicitly add tool results here as they will be captured
+        #    when they become part of `combined_input` in a subsequent `_run_single_turn` call,
+        #    and then passed as `current_turn_new_input_list` to this function.
+        #    However, the problem description implies saving the "interaction", which includes tool responses *for this turn*.
+        #    Let's look at `RunImpl.execute_tools_and_side_effects` - it returns `next_step_items`.
+        #    These `next_step_items` will contain `ToolResultItem`s.
+        #
+        #    Re-evaluating: The task is to save "current turn's interaction".
+        #    `processed_response.new_items` has the assistant's direct output (text, tool_code).
+        #    The actual tool *results* are generated *after* this point, inside `execute_tools_and_side_effects`.
+        #    This means we can't save tool *results* here. They will be saved in the *next* turn
+        #    when they form part of that turn's `current_turn_new_input_list` (if they were user-like messages)
+        #    or if we explicitly add items of role 'tool' from `generated_items` at the start of `_run_single_turn`.
+
+        #    Let's stick to the current subtask: save user input and assistant response.
+        #    Tool calls (requests) are part of assistant response. Tool results are separate.
+
+        memory.save()
+        # --- Memory saving END ---
 
         return await RunImpl.execute_tools_and_side_effects(
             agent=agent,

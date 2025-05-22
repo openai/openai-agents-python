@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>View Trace: {{ trace_name }}</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        .container { max-width: 1200px; margin: auto; }
+        .trace-info { margin-bottom: 20px; padding: 10px; background-color: #f0f0f0; border-radius: 5px;}
+        .graph-container { width: 100%; overflow-x: auto; border: 1px solid #ccc;}
+        svg { display: block; margin: auto; } /* Center SVG if it has a fixed width */
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Trace: {{ trace_name }} (ID: {{ trace_id }})</h1>
+        <div class="trace-info">
+            <p>Number of spans: {{ num_spans }}</p>
+        </div>
+        <h2>Execution Graph</h2>
+        <div class="graph-container">
+            {{ graph_svg|safe }}
+        </div>
+    </div>
+</body>
+</html>

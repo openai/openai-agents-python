@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from .agent_output import AgentOutputSchemaBase
+from .memory import AgentMemory, InMemoryMemory
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from .lifecycle import AgentHooks
     from .mcp import MCPServer
     from .result import RunResult
+
 
 
 @dataclass
@@ -177,6 +179,18 @@ class Agent(Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+
+    memory: AgentMemory | None = field(default=None, kw_only=True)
+    """The memory system for the agent. If None, an InMemoryMemory instance will be used.
+    The memory instance is responsible for loading itself (e.g. from a file).
+    """
+
+    def __post_init__(self):
+        if self.memory is None:
+            self.memory = InMemoryMemory()
+        # Ensure memory is loaded. For InMemoryMemory, this is a no-op.
+        # For FileStorageMemory, this would load from file if it exists.
+        self.memory.load()
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:

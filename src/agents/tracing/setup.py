@@ -9,7 +9,8 @@ from . import util
 from .processor_interface import TracingProcessor
 from .scope import Scope
 from .spans import NoOpSpan, Span, SpanImpl, TSpanData
-from .traces import NoOpTrace, Trace, TraceImpl
+from .traces import NoOpTrace, Trace, TraceImpl # Trace already imported
+from typing import Dict # Added for Dict type hint
 
 
 class SynchronousMultiTracingProcessor(TracingProcessor):
@@ -83,6 +84,8 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
 class TraceProvider:
     def __init__(self):
         self._multi_processor = SynchronousMultiTracingProcessor()
+        self.memory_collector = MemoryTraceCollector()
+        self._multi_processor.add_tracing_processor(self.memory_collector)
         self._disabled = os.environ.get("OPENAI_AGENTS_DISABLE_TRACING", "false").lower() in (
             "true",
             "1",
@@ -90,11 +93,26 @@ class TraceProvider:
 
     def register_processor(self, processor: TracingProcessor):
         """
-        Add a processor to the list of processors. Each processor will receive all traces/spans.
+        Add a user-defined processor to the list of processors.
+        The internal MemoryTraceCollector will always remain active.
         """
+        # The MemoryTraceCollector is already added and will receive all events.
+        # This method is for external processors.
         self._multi_processor.add_tracing_processor(processor)
 
     def set_processors(self, processors: list[TracingProcessor]):
+        """
+        Set the list of user-defined processors. This will replace the current list of
+        user-defined processors. The internal MemoryTraceCollector will remain active.
+        """
+        # Ensure memory_collector is always present
+        all_processors = [self.memory_collector] + processors
+        self._multi_processor.set_processors(all_processors)
+
+    def get_collected_traces(self) -> Dict[str, Trace]:
+        return self.memory_collector.traces
+
+    def get_current_trace(self) -> Trace | None:
         """
         Set the list of processors. This will replace the current list of processors.
         """
@@ -209,6 +227,46 @@ class TraceProvider:
             self._multi_processor.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down trace provider: {e}")
+
+
+# Define MemoryTraceCollector class here
+class MemoryTraceCollector(TracingProcessor):
+    """Collects completed traces in memory."""
+
+    def __init__(self):
+        self.traces: Dict[str, Trace] = {}
+        logger.debug("MemoryTraceCollector initialized.")
+
+    def on_trace_start(self, trace: Trace) -> None:
+        """Called when a trace is started."""
+        # logger.debug(f"MemoryTraceCollector: Trace started - {trace.trace_id}")
+        pass  # No-op, we only care about completed traces
+
+    def on_trace_end(self, trace: Trace) -> None:
+        """Called when a trace is finished."""
+        logger.debug(f"MemoryTraceCollector: Trace ended - {trace.trace_id}. Storing trace.")
+        self.traces[trace.trace_id] = trace
+
+    def on_span_start(self, span: Span[Any]) -> None:
+        """Called when a span is started."""
+        # logger.debug(f"MemoryTraceCollector: Span started - {span.span_id} in trace {span.trace_id}")
+        pass  # No-op, span data is part of the Trace object
+
+    def on_span_end(self, span: Span[Any]) -> None:
+        """Called when a span is finished."""
+        # logger.debug(f"MemoryTraceCollector: Span ended - {span.span_id} in trace {span.trace_id}")
+        pass  # No-op, span data is part of the Trace object
+
+    def shutdown(self) -> None:
+        """Called when the application stops."""
+        logger.debug(f"MemoryTraceCollector: Shutdown called. {len(self.traces)} traces collected.")
+        # Optionally clear traces on shutdown if desired, or they remain in memory
+        # self.traces.clear()
+
+    def force_flush(self) -> None:
+        """Force the processor to flush its buffers."""
+        # logger.debug("MemoryTraceCollector: Force flush called.")
+        pass # No-op, as storage is synchronous in on_trace_end
 
 
 GLOBAL_TRACE_PROVIDER = TraceProvider()
