@@ -73,6 +73,7 @@ class LitellmModel(Model):
         previous_response_id: str | None,
     ) -> ModelResponse:
         with generation_span(
+            input=input if tracing.include_data() else None,
             model=str(self.model),
             model_config=model_settings.to_json_dict()
             | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},
@@ -145,6 +146,7 @@ class LitellmModel(Model):
         previous_response_id: str | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
+            input=input if tracing.include_data() else None,
             model=str(self.model),
             model_config=model_settings.to_json_dict()
             | {"base_url": str(self.base_url or ""), "model_impl": "litellm"},

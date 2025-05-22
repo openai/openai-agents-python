@@ -54,6 +54,7 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None,
     ) -> ModelResponse:
         with generation_span(
+            input=input if tracing.include_data() else None,
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
@@ -118,6 +119,7 @@ class OpenAIChatCompletionsModel(Model):
         Yields a partial message as it is generated, as well as the usage information.
         """
         with generation_span(
+            input=input if tracing.include_data() else None,
             model=str(self.model),
             model_config=model_settings.to_json_dict() | {"base_url": str(self._client.base_url)},
             disabled=tracing.is_disabled(),
