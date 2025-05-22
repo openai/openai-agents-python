@@ -18,7 +18,11 @@ from .logger import logger
 from .run_context import RunContextWrapper
 from .stream_events import StreamEvent
 from .tracing import Trace
-from .util._pretty_print import pretty_print_result, pretty_print_run_result_streaming
+from .util._pretty_print import (
+    pretty_print_result,
+    pretty_print_run_error_details,
+    pretty_print_run_result_streaming,
+)
 
 if TYPE_CHECKING:
     from ._run_impl import QueueCompleteSentinel
@@ -244,3 +248,15 @@ class RunResultStreaming(RunResultBase):
 
     def __str__(self) -> str:
         return pretty_print_run_result_streaming(self)
+
+@dataclass
+class RunErrorDetails(RunResultBase):
+    _last_agent: Agent[Any]
+
+    @property
+    def last_agent(self) -> Agent[Any]:
+        """The last agent that was run."""
+        return self._last_agent
+
+    def __str__(self) -> str:
+        return pretty_print_run_error_details(self)

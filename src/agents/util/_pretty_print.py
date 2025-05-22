@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from ..result import RunResult, RunResultBase, RunResultStreaming
+    from ..result import RunErrorDetails, RunResult, RunResultBase, RunResultStreaming
 
 
 def _indent(text: str, indent_level: int) -> str:
@@ -37,6 +37,15 @@ def pretty_print_result(result: "RunResult") -> str:
 
     return output
 
+def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
+    output = "RunErrorDetails:"
+    output += f'\n- Last agent: Agent(name="{result.last_agent.name}", ...)'
+    output += f"\n- {len(result.new_items)} new item(s)"
+    output += f"\n- {len(result.raw_responses)} raw response(s)"
+    output += f"\n- {len(result.input_guardrail_results)} input guardrail result(s)"
+    output += "\n(See `RunErrorDetails` for more details)"
+
+    return output
 
 def pretty_print_run_result_streaming(result: "RunResultStreaming") -> str:
     output = "RunResultStreaming:"

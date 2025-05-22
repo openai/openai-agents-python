@@ -35,7 +35,7 @@ from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
-from .result import RunResult, RunResultStreaming
+from .result import RunErrorDetails, RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from .tool import Tool
@@ -208,7 +208,20 @@ class Runner:
                                 data={"max_turns": max_turns},
                             ),
                         )
-                        raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+                        run_error_details = RunErrorDetails(
+                            input=original_input,
+                            new_items=generated_items,
+                            raw_responses=model_responses,
+                            final_output=None,
+                            input_guardrail_results=input_guardrail_results,
+                            output_guardrail_results=[],
+                            context_wrapper=context_wrapper,
+                            _last_agent=current_agent
+                        )
+                        raise MaxTurnsExceeded(
+                            f"Max turns ({max_turns}) exceeded",
+                            run_error_details
+                        )
 
                     logger.debug(
                         f"Running agent {current_agent.name} (turn {current_turn})",

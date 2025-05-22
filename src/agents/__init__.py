@@ -44,7 +44,7 @@ from .models.interface import Model, ModelProvider, ModelTracing
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
-from .result import RunResult, RunResultStreaming
+from .result import RunErrorDetails, RunResult, RunResultStreaming
 from .run import RunConfig, Runner
 from .run_context import RunContextWrapper, TContext
 from .stream_events import (
@@ -204,6 +204,7 @@ __all__ = [
     "AgentHooks",
     "RunContextWrapper",
     "TContext",
+    "RunErrorDetails",
     "RunResult",
     "RunResultStreaming",
     "RunConfig",

@@ -1,7 +1,8 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
+    from .result import RunErrorDetails
 
 
 class AgentsException(Exception):
@@ -12,9 +13,11 @@ class MaxTurnsExceeded(AgentsException):
     """Exception raised when the maximum number of turns is exceeded."""
 
     message: str
+    run_error_details: Optional["RunErrorDetails"]
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, run_error_details: Optional["RunErrorDetails"] = None):
         self.message = message
+        self.run_error_details = run_error_details
 
 
 class ModelBehaviorError(AgentsException):
