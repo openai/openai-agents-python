@@ -191,6 +191,40 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     assert fn_call_item.arguments == "{'x':1}"
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_no_message(monkeypatch) -> None:
+    """If the model returns no message, get_response should return an empty output."""
+    msg = ChatCompletionMessage(role="assistant", content="ignored")
+    choice = Choice(index=0, finish_reason="content_filter", message=msg)
+    choice.message = None  # type: ignore[assignment]
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+    assert resp.output == []
+
+
 @pytest.mark.asyncio
 async def test_fetch_response_non_stream(monkeypatch) -> None:
     """
