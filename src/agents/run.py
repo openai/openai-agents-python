@@ -22,6 +22,7 @@ from .agent import Agent
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .exceptions import (
     AgentsException,
+    ErrorRunData,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
@@ -283,6 +284,17 @@ class Runner:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
                         )
+            except AgentsException as exc:
+                exc.run_data = ErrorRunData(
+                    input=original_input,
+                    new_items=generated_items,
+                    raw_responses=model_responses,
+                    last_agent=current_agent,
+                    context_wrapper=context_wrapper,
+                    input_guardrail_results=input_guardrail_results,
+                    output_guardrail_results=[],
+                )
+                raise
             finally:
                 if current_span:
                     current_span.finish(reset_current=True)
@@ -609,6 +621,19 @@ class Runner:
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
                         pass
+                except AgentsException as exc:
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    exc.run_data = ErrorRunData(
+                        input=streamed_result.input,
+                        new_items=streamed_result.new_items,
+                        raw_responses=streamed_result.raw_responses,
+                        last_agent=current_agent,
+                        context_wrapper=context_wrapper,
+                        input_guardrail_results=streamed_result.input_guardrail_results,
+                        output_guardrail_results=streamed_result.output_guardrail_results,
+                    )
+                    raise
                 except Exception as e:
                     if current_span:
                         _error_tracing.attach_error_to_span(

@@ -11,7 +11,12 @@ from typing_extensions import TypeVar
 from ._run_impl import QueueCompleteSentinel
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
-from .exceptions import InputGuardrailTripwireTriggered, MaxTurnsExceeded
+from .exceptions import (
+    AgentsException,
+    ErrorRunData,
+    InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
+)
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .logger import logger
@@ -208,28 +213,78 @@ class RunResultStreaming(RunResultBase):
 
     def _check_errors(self):
         if self.current_turn > self.max_turns:
-            self._stored_exception = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
+            exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
+            exc.run_data = ErrorRunData(
+                input=self.input,
+                new_items=self.new_items,
+                raw_responses=self.raw_responses,
+                last_agent=self.current_agent,
+                context_wrapper=self.context_wrapper,
+                input_guardrail_results=self.input_guardrail_results,
+                output_guardrail_results=self.output_guardrail_results,
+            )
+            self._stored_exception = exc
 
         # Fetch all the completed guardrail results from the queue and raise if needed
         while not self._input_guardrail_queue.empty():
             guardrail_result = self._input_guardrail_queue.get_nowait()
             if guardrail_result.output.tripwire_triggered:
-                self._stored_exception = InputGuardrailTripwireTriggered(guardrail_result)
+                exc = InputGuardrailTripwireTriggered(guardrail_result)
+                exc.run_data = ErrorRunData(
+                    input=self.input,
+                    new_items=self.new_items,
+                    raw_responses=self.raw_responses,
+                    last_agent=self.current_agent,
+                    context_wrapper=self.context_wrapper,
+                    input_guardrail_results=self.input_guardrail_results,
+                    output_guardrail_results=self.output_guardrail_results,
+                )
+                self._stored_exception = exc
 
         # Check the tasks for any exceptions
         if self._run_impl_task and self._run_impl_task.done():
             exc = self._run_impl_task.exception()
             if exc and isinstance(exc, Exception):
+                if isinstance(exc, AgentsException) and exc.run_data is None:
+                    exc.run_data = ErrorRunData(
+                        input=self.input,
+                        new_items=self.new_items,
+                        raw_responses=self.raw_responses,
+                        last_agent=self.current_agent,
+                        context_wrapper=self.context_wrapper,
+                        input_guardrail_results=self.input_guardrail_results,
+                        output_guardrail_results=self.output_guardrail_results,
+                    )
                 self._stored_exception = exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
             exc = self._input_guardrails_task.exception()
             if exc and isinstance(exc, Exception):
+                if isinstance(exc, AgentsException) and exc.run_data is None:
+                    exc.run_data = ErrorRunData(
+                        input=self.input,
+                        new_items=self.new_items,
+                        raw_responses=self.raw_responses,
+                        last_agent=self.current_agent,
+                        context_wrapper=self.context_wrapper,
+                        input_guardrail_results=self.input_guardrail_results,
+                        output_guardrail_results=self.output_guardrail_results,
+                    )
                 self._stored_exception = exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
             exc = self._output_guardrails_task.exception()
             if exc and isinstance(exc, Exception):
+                if isinstance(exc, AgentsException) and exc.run_data is None:
+                    exc.run_data = ErrorRunData(
+                        input=self.input,
+                        new_items=self.new_items,
+                        raw_responses=self.raw_responses,
+                        last_agent=self.current_agent,
+                        context_wrapper=self.context_wrapper,
+                        input_guardrail_results=self.input_guardrail_results,
+                        output_guardrail_results=self.output_guardrail_results,
+                    )
                 self._stored_exception = exc
 
     def _cleanup_tasks(self):

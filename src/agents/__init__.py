@@ -10,6 +10,7 @@ from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .computer import AsyncComputer, Button, Computer, Environment
 from .exceptions import (
     AgentsException,
+    ErrorRunData,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
@@ -173,6 +174,7 @@ __all__ = [
     "Environment",
     "Button",
     "AgentsException",
+    "ErrorRunData",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
     "MaxTurnsExceeded",
