@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -208,19 +209,8 @@ class Runner:
                                 data={"max_turns": max_turns},
                             ),
                         )
-                        run_error_details = RunErrorDetails(
-                            input=original_input,
-                            new_items=generated_items,
-                            raw_responses=model_responses,
-                            final_output=None,
-                            input_guardrail_results=input_guardrail_results,
-                            output_guardrail_results=[],
-                            context_wrapper=context_wrapper,
-                            _last_agent=current_agent
-                        )
                         raise MaxTurnsExceeded(
-                            f"Max turns ({max_turns}) exceeded",
-                            run_error_details
+                            f"Max turns ({max_turns}) exceeded"
                         )
 
                     logger.debug(
@@ -296,6 +286,23 @@ class Runner:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
                         )
+            except Exception as e:
+                run_error_details = RunErrorDetails(
+                    input=original_input,
+                    new_items=generated_items,
+                    raw_responses=model_responses,
+                    input_guardrail_results=input_guardrail_results,
+                    context_wrapper=context_wrapper,
+                    _last_agent=current_agent
+                )
+                # Re-raise with the error details
+                if isinstance(e, MaxTurnsExceeded):
+                    raise MaxTurnsExceeded(
+                        f"Max turns ({max_turns}) exceeded",
+                        run_error_details
+                    ) from e
+                else:
+                    raise
             finally:
                 if current_span:
                     current_span.finish(reset_current=True)

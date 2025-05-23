@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
@@ -13,9 +15,9 @@ class MaxTurnsExceeded(AgentsException):
     """Exception raised when the maximum number of turns is exceeded."""
 
     message: str
-    run_error_details: Optional["RunErrorDetails"]
+    run_error_details: RunErrorDetails | None
 
-    def __init__(self, message: str, run_error_details: Optional["RunErrorDetails"] = None):
+    def __init__(self, message: str, run_error_details: RunErrorDetails | None = None):
         self.message = message
         self.run_error_details = run_error_details
 
@@ -43,10 +45,10 @@ class UserError(AgentsException):
 class InputGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a guardrail tripwire is triggered."""
 
-    guardrail_result: "InputGuardrailResult"
+    guardrail_result: InputGuardrailResult
     """The result data of the guardrail that was triggered."""
 
-    def __init__(self, guardrail_result: "InputGuardrailResult"):
+    def __init__(self, guardrail_result: InputGuardrailResult):
         self.guardrail_result = guardrail_result
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
@@ -56,10 +58,10 @@ class InputGuardrailTripwireTriggered(AgentsException):
 class OutputGuardrailTripwireTriggered(AgentsException):
     """Exception raised when a guardrail tripwire is triggered."""
 
-    guardrail_result: "OutputGuardrailResult"
+    guardrail_result: OutputGuardrailResult
     """The result data of the guardrail that was triggered."""
 
-    def __init__(self, guardrail_result: "OutputGuardrailResult"):
+    def __init__(self, guardrail_result: OutputGuardrailResult):
         self.guardrail_result = guardrail_result
         super().__init__(
             f"Guardrail {guardrail_result.guardrail.__class__.__name__} triggered tripwire"
