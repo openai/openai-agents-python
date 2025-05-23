@@ -17,19 +17,19 @@ Input guardrails run in 3 steps:
 
 !!! Note
 
-    Input guardrails are intended to run on user input, so an agent's guardrails only run if the agent is the *first* agent. You might wonder, why is the `guardrails` property on the agent instead of passed to `Runner.run`? It's because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
+    Input guardrails are intended to run on user input, so an agent's guardrails only run if the agent is the *first* agent. **In a sequence or chain of agents, the 'first agent' is the entry point – the agent that directly receives the initial user's input. Therefore, input guardrails only check this agent’s input.** You might wonder, why is the `guardrails` property on the agent instead of passed to `Runner.run`? It's because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
 
 ## Output guardrails
 
 Output guardrails run in 3 steps:
 
-1. First, the guardrail receives the same input passed to the agent.
+1. First, the guardrail receives the same output passed to the agent.
 2. Next, the guardrail function runs to produce a [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput], which is then wrapped in an [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]
 3. Finally, we check if [`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] is true. If true, an [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] exception is raised, so you can appropriately respond to the user or handle the exception.
 
 !!! Note
 
-    Output guardrails are intended to run on the final agent output, so an agent's guardrails only run if the agent is the *last* agent. Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
+    Output guardrails are intended to run on the final agent output, so an agent's guardrails only run if the agent is the *last* agent. **In a sequence or chain of agents, the 'last agent' is the one that produces the final output returned to the user. Therefore, output guardrails only check this agent’s output.** Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
 
 ## Tripwires
 
