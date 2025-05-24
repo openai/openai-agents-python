@@ -14,6 +14,7 @@ from .exceptions import (
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
+    RunErrorDetails,
     UserError,
 )
 from .guardrail import (
@@ -44,7 +45,7 @@ from .models.interface import Model, ModelProvider, ModelTracing
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
-from .result import RunErrorDetails, RunResult, RunResultStreaming
+from .result import RunResult, RunResultStreaming
 from .run import RunConfig, Runner
 from .run_context import RunContextWrapper, TContext
 from .stream_events import (

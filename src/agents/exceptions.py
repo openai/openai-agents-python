@@ -1,25 +1,49 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
-    from .result import RunErrorDetails
+    from .items import ModelResponse, RunItem, TResponseInputItem
+    from .run_context import RunContextWrapper
+
+from .util._pretty_print import pretty_print_run_error_details
+
+
+@dataclass
+class RunErrorDetails:
+    """Data collected from an agent run when an exception occurs."""
+    input: str | list[TResponseInputItem]
+    new_items: list[RunItem]
+    raw_responses: list[ModelResponse]
+    last_agent: Agent[Any]
+    context_wrapper: RunContextWrapper[Any]
+    input_guardrail_results: list[InputGuardrailResult]
+    output_guardrail_results: list[OutputGuardrailResult]
+
+    def __str__(self) -> str:
+        return pretty_print_run_error_details(self)
 
 
 class AgentsException(Exception):
     """Base class for all exceptions in the Agents SDK."""
+    run_data: RunErrorDetails | None
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self.run_data = None
 
 
 class MaxTurnsExceeded(AgentsException):
     """Exception raised when the maximum number of turns is exceeded."""
 
     message: str
-    run_error_details: RunErrorDetails | None
 
-    def __init__(self, message: str, run_error_details: RunErrorDetails | None = None):
+    def __init__(self, message: str):
         self.message = message
-        self.run_error_details = run_error_details
+        super().__init__(message)
 
 
 class ModelBehaviorError(AgentsException):
@@ -31,6 +55,7 @@ class ModelBehaviorError(AgentsException):
 
     def __init__(self, message: str):
         self.message = message
+        super().__init__(message)
 
 
 class UserError(AgentsException):
@@ -40,6 +65,7 @@ class UserError(AgentsException):
 
     def __init__(self, message: str):
         self.message = message
+        super().__init__(message)
 
 
 class InputGuardrailTripwireTriggered(AgentsException):
