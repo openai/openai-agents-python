@@ -27,11 +27,17 @@ from .exceptions import (
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
 )
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import (
+    InputGuardrail,
+    InputGuardrailResult,
+    OutputGuardrail,
+    OutputGuardrailResult,
+)
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
+from .memory import Session
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -118,6 +124,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        session: Session | None = None,
     ) -> RunResult:
         """Run a workflow starting at the given agent. The agent will run in a loop until a final
         output is generated. The loop runs like so:
@@ -144,6 +151,8 @@ class Runner:
             run_config: Global settings for the entire agent run.
             previous_response_id: The ID of the previous response, if using OpenAI models via the
                 Responses API, this allows you to skip passing in input from the previous turn.
+            session: Session instance for conversation history persistence.
+                If None, no conversation history will be maintained.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of the last
@@ -153,6 +162,9 @@ class Runner:
             hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
+
+        # Prepare input with session if enabled
+        prepared_input = await cls._prepare_input_with_session(input, session)
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -164,7 +176,9 @@ class Runner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(input)
+            original_input: str | list[TResponseInputItem] = copy.deepcopy(
+                prepared_input
+            )
             generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
@@ -183,7 +197,9 @@ class Runner:
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
                     if current_span is None:
-                        handoff_names = [h.agent_name for h in cls._get_handoffs(current_agent)]
+                        handoff_names = [
+                            h.agent_name for h in cls._get_handoffs(current_agent)
+                        ]
                         if output_schema := cls._get_output_schema(current_agent):
                             output_type_name = output_schema.name()
                         else:
@@ -220,7 +236,7 @@ class Runner:
                                 starting_agent,
                                 starting_agent.input_guardrails
                                 + (run_config.input_guardrails or []),
-                                copy.deepcopy(input),
+                                copy.deepcopy(prepared_input),
                                 context_wrapper,
                             ),
                             cls._run_single_turn(
@@ -257,12 +273,13 @@ class Runner:
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
                         output_guardrail_results = await cls._run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
+                            current_agent.output_guardrails
+                            + (run_config.output_guardrails or []),
                             current_agent,
                             turn_result.next_step.output,
                             context_wrapper,
                         )
-                        return RunResult(
+                        result = RunResult(
                             input=original_input,
                             new_items=generated_items,
                             raw_responses=model_responses,
@@ -272,8 +289,15 @@ class Runner:
                             output_guardrail_results=output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
+
+                        # Save the conversation to session if enabled
+                        await cls._save_result_to_session(session, input, result)
+
+                        return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                        current_agent = cast(
+                            Agent[TContext], turn_result.next_step.new_agent
+                        )
                         current_span.finish(reset_current=True)
                         current_span = None
                         should_run_agent_start_hooks = True
@@ -298,6 +322,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        session: Session | None = None,
     ) -> RunResult:
         """Run a workflow synchronously, starting at the given agent. Note that this just wraps the
         `run` method, so it will not work if there's already an event loop (e.g. inside an async
@@ -328,6 +353,8 @@ class Runner:
             run_config: Global settings for the entire agent run.
             previous_response_id: The ID of the previous response, if using OpenAI models via the
                 Responses API, this allows you to skip passing in input from the previous turn.
+            session: Session instance for conversation history persistence.
+                If None, no conversation history will be maintained.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of the last
@@ -342,6 +369,7 @@ class Runner:
                 hooks=hooks,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                session=session,
             )
         )
 
@@ -355,6 +383,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        session: Session | None = None,
     ) -> RunResultStreaming:
         """Run a workflow starting at the given agent in streaming mode. The returned result object
         contains a method you can use to stream semantic events as they are generated.
@@ -383,6 +412,8 @@ class Runner:
             run_config: Global settings for the entire agent run.
             previous_response_id: The ID of the previous response, if using OpenAI models via the
                 Responses API, this allows you to skip passing in input from the previous turn.
+            session: Session instance for conversation history persistence.
+                If None, no conversation history will be maintained.
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
@@ -438,6 +469,7 @@ class Runner:
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                session=session,
             )
         )
         return streamed_result
@@ -496,138 +528,188 @@ class Runner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         previous_response_id: str | None,
+        session: Session | None,
     ):
-        if streamed_result.trace:
-            streamed_result.trace.start(mark_as_current=True)
-
         current_span: Span[AgentSpanData] | None = None
-        current_agent = starting_agent
-        current_turn = 0
-        should_run_agent_start_hooks = True
-        tool_use_tracker = AgentToolUseTracker()
-
-        streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
-            while True:
-                if streamed_result.is_complete:
-                    break
+            if streamed_result.trace:
+                streamed_result.trace.start(mark_as_current=True)
 
-                # Start an agent span if we don't have one. This span is ended if the current
-                # agent changes, or if the agent loop ends.
-                if current_span is None:
-                    handoff_names = [h.agent_name for h in cls._get_handoffs(current_agent)]
-                    if output_schema := cls._get_output_schema(current_agent):
-                        output_type_name = output_schema.name()
-                    else:
-                        output_type_name = "str"
+            # Prepare input with session if enabled
+            prepared_input = await cls._prepare_input_with_session(
+                starting_input, session
+            )
 
-                    current_span = agent_span(
-                        name=current_agent.name,
-                        handoffs=handoff_names,
-                        output_type=output_type_name,
-                    )
-                    current_span.start(mark_as_current=True)
+            # Update the streamed result with the prepared input
+            streamed_result.input = prepared_input
 
-                    all_tools = await cls._get_all_tools(current_agent)
-                    tool_names = [t.name for t in all_tools]
-                    current_span.span_data.tools = tool_names
-                current_turn += 1
-                streamed_result.current_turn = current_turn
+            current_agent = starting_agent
+            current_turn = 0
+            should_run_agent_start_hooks = True
+            tool_use_tracker = AgentToolUseTracker()
 
-                if current_turn > max_turns:
-                    _error_tracing.attach_error_to_span(
-                        current_span,
-                        SpanError(
-                            message="Max turns exceeded",
-                            data={"max_turns": max_turns},
-                        ),
-                    )
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    break
+            streamed_result._event_queue.put_nowait(
+                AgentUpdatedStreamEvent(new_agent=current_agent)
+            )
 
-                if current_turn == 1:
-                    # Run the input guardrails in the background and put the results on the queue
-                    streamed_result._input_guardrails_task = asyncio.create_task(
-                        cls._run_input_guardrails_with_queue(
-                            starting_agent,
-                            starting_agent.input_guardrails + (run_config.input_guardrails or []),
-                            copy.deepcopy(ItemHelpers.input_to_new_input_list(starting_input)),
-                            context_wrapper,
-                            streamed_result,
-                            current_span,
+            try:
+                while True:
+                    if streamed_result.is_complete:
+                        break
+
+                    # Start an agent span if we don't have one. This span is ended if the current
+                    # agent changes, or if the agent loop ends.
+                    if current_span is None:
+                        handoff_names = [
+                            h.agent_name for h in cls._get_handoffs(current_agent)
+                        ]
+                        if output_schema := cls._get_output_schema(current_agent):
+                            output_type_name = output_schema.name()
+                        else:
+                            output_type_name = "str"
+
+                        current_span = agent_span(
+                            name=current_agent.name,
+                            handoffs=handoff_names,
+                            output_type=output_type_name,
                         )
-                    )
-                try:
-                    turn_result = await cls._run_single_turn_streamed(
-                        streamed_result,
-                        current_agent,
-                        hooks,
-                        context_wrapper,
-                        run_config,
-                        should_run_agent_start_hooks,
-                        tool_use_tracker,
-                        all_tools,
-                        previous_response_id,
-                    )
-                    should_run_agent_start_hooks = False
+                        current_span.start(mark_as_current=True)
 
-                    streamed_result.raw_responses = streamed_result.raw_responses + [
-                        turn_result.model_response
-                    ]
-                    streamed_result.input = turn_result.original_input
-                    streamed_result.new_items = turn_result.generated_items
+                        all_tools = await cls._get_all_tools(current_agent)
+                        tool_names = [t.name for t in all_tools]
+                        current_span.span_data.tools = tool_names
+                    current_turn += 1
+                    streamed_result.current_turn = current_turn
 
-                    if isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = turn_result.next_step.new_agent
-                        current_span.finish(reset_current=True)
-                        current_span = None
-                        should_run_agent_start_hooks = True
-                        streamed_result._event_queue.put_nowait(
-                            AgentUpdatedStreamEvent(new_agent=current_agent)
-                        )
-                    elif isinstance(turn_result.next_step, NextStepFinalOutput):
-                        streamed_result._output_guardrails_task = asyncio.create_task(
-                            cls._run_output_guardrails(
-                                current_agent.output_guardrails
-                                + (run_config.output_guardrails or []),
-                                current_agent,
-                                turn_result.next_step.output,
-                                context_wrapper,
-                            )
-                        )
-
-                        try:
-                            output_guardrail_results = await streamed_result._output_guardrails_task
-                        except Exception:
-                            # Exceptions will be checked in the stream_events loop
-                            output_guardrail_results = []
-
-                        streamed_result.output_guardrail_results = output_guardrail_results
-                        streamed_result.final_output = turn_result.next_step.output
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
-                except Exception as e:
-                    if current_span:
+                    if current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
                             SpanError(
-                                message="Error in agent run",
-                                data={"error": str(e)},
+                                message="Max turns exceeded",
+                                data={"max_turns": max_turns},
                             ),
                         )
-                    streamed_result.is_complete = True
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    raise
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        break
 
+                    if current_turn == 1:
+                        # Run the input guardrails in the background and put the results on the queue
+                        streamed_result._input_guardrails_task = asyncio.create_task(
+                            cls._run_input_guardrails_with_queue(
+                                starting_agent,
+                                starting_agent.input_guardrails
+                                + (run_config.input_guardrails or []),
+                                copy.deepcopy(
+                                    ItemHelpers.input_to_new_input_list(prepared_input)
+                                ),
+                                context_wrapper,
+                                streamed_result,
+                                current_span,
+                            )
+                        )
+                    try:
+                        turn_result = await cls._run_single_turn_streamed(
+                            streamed_result,
+                            current_agent,
+                            hooks,
+                            context_wrapper,
+                            run_config,
+                            should_run_agent_start_hooks,
+                            tool_use_tracker,
+                            all_tools,
+                            previous_response_id,
+                        )
+                        should_run_agent_start_hooks = False
+
+                        streamed_result.raw_responses = (
+                            streamed_result.raw_responses + [turn_result.model_response]
+                        )
+                        streamed_result.input = turn_result.original_input
+                        streamed_result.new_items = turn_result.generated_items
+
+                        if isinstance(turn_result.next_step, NextStepHandoff):
+                            current_agent = turn_result.next_step.new_agent
+                            current_span.finish(reset_current=True)
+                            current_span = None
+                            should_run_agent_start_hooks = True
+                            streamed_result._event_queue.put_nowait(
+                                AgentUpdatedStreamEvent(new_agent=current_agent)
+                            )
+                        elif isinstance(turn_result.next_step, NextStepFinalOutput):
+                            streamed_result._output_guardrails_task = (
+                                asyncio.create_task(
+                                    cls._run_output_guardrails(
+                                        current_agent.output_guardrails
+                                        + (run_config.output_guardrails or []),
+                                        current_agent,
+                                        turn_result.next_step.output,
+                                        context_wrapper,
+                                    )
+                                )
+                            )
+
+                            try:
+                                output_guardrail_results = (
+                                    await streamed_result._output_guardrails_task
+                                )
+                            except Exception:
+                                # Exceptions will be checked in the stream_events loop
+                                output_guardrail_results = []
+
+                            streamed_result.output_guardrail_results = (
+                                output_guardrail_results
+                            )
+                            streamed_result.final_output = turn_result.next_step.output
+                            streamed_result.is_complete = True
+
+                            # Save the conversation to session if enabled
+                            # Create a temporary RunResult for session saving
+                            temp_result = RunResult(
+                                input=streamed_result.input,
+                                new_items=streamed_result.new_items,
+                                raw_responses=streamed_result.raw_responses,
+                                final_output=streamed_result.final_output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=streamed_result.input_guardrail_results,
+                                output_guardrail_results=streamed_result.output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                            )
+                            await cls._save_result_to_session(
+                                session, starting_input, temp_result
+                            )
+
+                            streamed_result._event_queue.put_nowait(
+                                QueueCompleteSentinel()
+                            )
+                        elif isinstance(turn_result.next_step, NextStepRunAgain):
+                            pass
+                    except Exception as e:
+                        if current_span:
+                            _error_tracing.attach_error_to_span(
+                                current_span,
+                                SpanError(
+                                    message="Error in agent run",
+                                    data={"error": str(e)},
+                                ),
+                            )
+                        streamed_result.is_complete = True
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                        raise
+
+                streamed_result.is_complete = True
+            finally:
+                if current_span:
+                    current_span.finish(reset_current=True)
+                if streamed_result.trace:
+                    streamed_result.trace.finish(reset_current=True)
+
+        except Exception:
+            # Ensure that any exception (including those during setup) results in a completion sentinel
+            # being put in the queue so that stream_events() doesn't hang
             streamed_result.is_complete = True
-        finally:
-            if current_span:
-                current_span.finish(reset_current=True)
-            if streamed_result.trace:
-                streamed_result.trace.finish(reset_current=True)
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            raise
 
     @classmethod
     async def _run_single_turn_streamed(
@@ -662,7 +744,9 @@ class Runner:
         handoffs = cls._get_handoffs(agent)
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
-        model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+        model_settings = RunImpl.maybe_reset_tool_choice(
+            agent, tool_use_tracker, model_settings
+        )
 
         final_response: ModelResponse | None = None
 
@@ -723,7 +807,9 @@ class Runner:
             tool_use_tracker=tool_use_tracker,
         )
 
-        RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        RunImpl.stream_step_result_to_queue(
+            single_step_result, streamed_result._event_queue
+        )
         return single_step_result
 
     @classmethod
@@ -757,7 +843,9 @@ class Runner:
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
         input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+        input.extend(
+            [generated_item.to_input_item() for generated_item in generated_items]
+        )
 
         new_response = await cls._get_new_response(
             agent,
@@ -875,7 +963,9 @@ class Runner:
 
         guardrail_tasks = [
             asyncio.create_task(
-                RunImpl.run_single_output_guardrail(guardrail, agent, agent_output, context)
+                RunImpl.run_single_output_guardrail(
+                    guardrail, agent, agent_output, context
+                )
             )
             for guardrail in guardrails
         ]
@@ -916,7 +1006,9 @@ class Runner:
     ) -> ModelResponse:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
-        model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+        model_settings = RunImpl.maybe_reset_tool_choice(
+            agent, tool_use_tracker, model_settings
+        )
 
         new_response = await model.get_response(
             system_instructions=system_prompt,
@@ -968,3 +1060,45 @@ class Runner:
             return agent.model
 
         return run_config.model_provider.get_model(agent.model)
+
+    @classmethod
+    async def _prepare_input_with_session(
+        cls,
+        input: str | list[TResponseInputItem],
+        session: Session | None,
+    ) -> str | list[TResponseInputItem]:
+        """Prepare input by combining it with session history if enabled."""
+        if session is None:
+            return input
+
+        # Get previous conversation history
+        history = await session.get_messages()
+
+        # Convert input to list format
+        new_input_list = ItemHelpers.input_to_new_input_list(input)
+
+        # Combine history with new input
+        combined_input = history + new_input_list
+
+        return combined_input
+
+    @classmethod
+    async def _save_result_to_session(
+        cls,
+        session: Session | None,
+        original_input: str | list[TResponseInputItem],
+        result: RunResult,
+    ) -> None:
+        """Save the conversation turn to session."""
+        if session is None:
+            return
+
+        # Convert original input to list format if needed
+        input_list = ItemHelpers.input_to_new_input_list(original_input)
+
+        # Convert new items to input format
+        new_items_as_input = [item.to_input_item() for item in result.new_items]
+
+        # Save all messages from this turn
+        messages_to_save = input_list + new_items_as_input
+        await session.add_messages(messages_to_save)
