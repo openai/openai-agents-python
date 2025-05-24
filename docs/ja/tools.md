@@ -17,6 +17,10 @@ OpenAI は [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIRespons
 -   [`WebSearchTool`][agents.tool.WebSearchTool] はエージェントに Web 検索を行わせます。
 -   [`FileSearchTool`][agents.tool.FileSearchTool] は OpenAI ベクトルストアから情報を取得します。
 -   [`ComputerTool`][agents.tool.ComputerTool] はコンピュータ操作タスクを自動化します。
+-   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] はサンドボックス環境でコードを実行します。
+-   [`HostedMCPTool`][agents.tool.HostedMCPTool] はリモート MCP サーバーのツールをモデルから直接利用できるようにします。
+-   [`ImageGenerationTool`][agents.tool.ImageGenerationTool] はプロンプトから画像を生成します。
+-   [`LocalShellTool`][agents.tool.LocalShellTool] はローカルマシンでシェルコマンドを実行します。
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool

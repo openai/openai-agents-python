@@ -71,12 +71,22 @@ class OpenAIChatCompletionsModel(Model):
                 stream=False,
             )
 
+            first_choice = response.choices[0]
+            message = first_choice.message
+
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
-                logger.debug(
-                    f"LLM resp:\n{json.dumps(response.choices[0].message.model_dump(), indent=2)}\n"
-                )
+                if message is not None:
+                    logger.debug(
+                        "LLM resp:\n%s\n",
+                        json.dumps(message.model_dump(), indent=2),
+                    )
+                else:
+                    logger.debug(
+                        "LLM resp had no message. finish_reason: %s",
+                        first_choice.finish_reason,
+                    )
 
             usage = (
                 Usage(
@@ -101,13 +111,15 @@ class OpenAIChatCompletionsModel(Model):
                 else Usage()
             )
             if tracing.include_data():
-                span_generation.span_data.output = [response.choices[0].message.model_dump()]
+                span_generation.span_data.output = (
+                    [message.model_dump()] if message is not None else []
+                )
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(response.choices[0].message)
+            items = Converter.message_to_output_items(message) if message is not None else []
 
             return ModelResponse(
                 output=items,

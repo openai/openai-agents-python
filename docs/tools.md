@@ -13,6 +13,10 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 -   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
 -   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
 -   The [`ComputerTool`][agents.tool.ComputerTool] allows automating computer use tasks.
+-   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
+-   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
+-   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
+-   The [`LocalShellTool`][agents.tool.LocalShellTool] runs shell commands on your machine.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
