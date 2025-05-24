@@ -20,3 +20,19 @@ class Usage:
         self.input_tokens += other.input_tokens if other.input_tokens else 0
         self.output_tokens += other.output_tokens if other.output_tokens else 0
         self.total_tokens += other.total_tokens if other.total_tokens else 0
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }

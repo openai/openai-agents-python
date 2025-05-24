@@ -79,7 +79,7 @@ class Span(abc.ABC, Generic[TSpanData]):
         pass
 
     @abc.abstractmethod
-    def export(self) -> dict[str, Any] | None:
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
         pass
 
     @property
@@ -144,7 +144,7 @@ class NoOpSpan(Span[TSpanData]):
     def error(self) -> SpanError | None:
         return None
 
-    def export(self) -> dict[str, Any] | None:
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
         return None
 
     @property
@@ -251,14 +251,20 @@ class SpanImpl(Span[TSpanData]):
     def ended_at(self) -> str | None:
         return self._ended_at
 
-    def export(self) -> dict[str, Any] | None:
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
+        status = "OK"
+        error_details = None
+        if self._error:
+            status = "ERROR"
+            error_details = self._error # self._error is already a SpanError TypedDict
+
         return {
-            "object": "trace.span",
-            "id": self.span_id,
             "trace_id": self.trace_id,
-            "parent_id": self._parent_id,
-            "started_at": self._started_at,
-            "ended_at": self._ended_at,
-            "span_data": self.span_data.export(),
-            "error": self._error,
+            "span_id": self.span_id,
+            "parent_id": self.parent_id,
+            "start_time": self.started_at, # Already ISO string or None
+            "end_time": self.ended_at,     # Already ISO string or None
+            "status": status,
+            "error": error_details, # Include the error details if present
+            "span_data": self.span_data.to_dict() # Call to_dict on the SpanData object
         }

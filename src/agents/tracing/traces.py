@@ -60,10 +60,37 @@ class Trace:
         pass
 
     @abc.abstractmethod
-    def export(self) -> dict[str, Any] | None:
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
         """
         Export the trace as a dictionary.
         """
+        pass
+
+    # Add properties that are expected by to_dict, assuming they'll be populated
+    # by the tracing system before to_dict() is called on a completed trace.
+    @property
+    @abc.abstractmethod
+    def start_time(self) -> Any: # Should be datetime, but TraceImpl doesn't have it yet
+        pass
+
+    @property
+    @abc.abstractmethod
+    def end_time(self) -> Any: # Should be datetime
+        pass
+
+    @property
+    @abc.abstractmethod
+    def status(self) -> Any: # Should be an Enum-like object with a .value
+        pass
+
+    @property
+    @abc.abstractmethod
+    def spans(self) -> list[Any]: # Should be list[Span]
+        pass
+
+    @property
+    @abc.abstractmethod
+    def usage(self) -> Any: # Should be an instance of Usage
         pass
 
 
@@ -107,8 +134,19 @@ class NoOpTrace(Trace):
     def name(self) -> str:
         return "no-op"
 
-    def export(self) -> dict[str, Any] | None:
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
         return None
+
+    @property
+    def start_time(self) -> Any: return None
+    @property
+    def end_time(self) -> Any: return None
+    @property
+    def status(self) -> Any: return None # Or a default status object
+    @property
+    def spans(self) -> list[Any]: return []
+    @property
+    def usage(self) -> Any: return None
 
 
 NO_OP_TRACE = NoOpTrace()
@@ -185,11 +223,84 @@ class TraceImpl(Trace):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.finish(reset_current=exc_type is not GeneratorExit)
 
-    def export(self) -> dict[str, Any] | None:
+    # These attributes will need to be set by the tracing system upon trace completion.
+    # Initialize them to None or default values.
+    _start_time_val: Any = None
+    _end_time_val: Any = None
+    _status_val: Any = None # e.g., an enum or string
+    _spans_val: list[Any] = []
+    _usage_val: Any = None
+
+
+    @property
+    def start_time(self) -> Any: return self._start_time_val
+    @start_time.setter
+    def start_time(self, value: Any): self._start_time_val = value
+
+    @property
+    def end_time(self) -> Any: return self._end_time_val
+    @end_time.setter
+    def end_time(self, value: Any): self._end_time_val = value
+
+    @property
+    def status(self) -> Any: return self._status_val
+    @status.setter
+    def status(self, value: Any): self._status_val = value
+    
+    @property
+    def spans(self) -> list[Any]: return self._spans_val
+    @spans.setter
+    def spans(self, value: list[Any]): self._spans_val = value
+
+    @property
+    def usage(self) -> Any: return self._usage_val
+    @usage.setter
+    def usage(self, value: Any): self._usage_val = value
+
+
+    def to_dict(self) -> dict[str, Any] | None: # Renamed from export
+        # Ensure datetime objects are converted to ISO format strings
+        start_time_iso = None
+        if hasattr(self.start_time, 'isoformat'):
+            start_time_iso = self.start_time.isoformat()
+        elif isinstance(self.start_time, str): # If already a string
+            start_time_iso = self.start_time
+
+        end_time_iso = None
+        if hasattr(self.end_time, 'isoformat'):
+            end_time_iso = self.end_time.isoformat()
+        elif isinstance(self.end_time, str): # If already a string
+            end_time_iso = self.end_time
+            
+        status_value = None
+        if hasattr(self.status, 'value'): # For enums
+            status_value = self.status.value
+        elif self.status is not None: # For strings or other direct values
+            status_value = self.status
+
+        spans_dict_list = []
+        if self.spans: # self.spans should be a list of SpanImpl objects
+            spans_dict_list = [span.to_dict() for span in self.spans if hasattr(span, 'to_dict')]
+
+
+        usage_data = None
+        if hasattr(self.usage, 'to_dict'):
+            usage_data = self.usage.to_dict()
+        elif self.usage: # Fallback for simple dataclasses or dicts
+            try:
+                usage_data = vars(self.usage)
+            except TypeError: # vars() argument must have __dict__ attribute
+                 usage_data = str(self.usage) # Or some other representation
+
+
         return {
-            "object": "trace",
-            "id": self.trace_id,
-            "workflow_name": self.name,
+            "name": self.name,
+            "trace_id": self.trace_id,
             "group_id": self.group_id,
+            "start_time": start_time_iso,
+            "end_time": end_time_iso,
+            "status": status_value,
             "metadata": self.metadata,
+            "spans": spans_dict_list,
+            "usage": usage_data
         }

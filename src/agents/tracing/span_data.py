@@ -14,7 +14,7 @@ class SpanData(abc.ABC):
     """
 
     @abc.abstractmethod
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         """Export the span data as a dictionary."""
         pass
 
@@ -49,7 +49,7 @@ class AgentSpanData(SpanData):
     def type(self) -> str:
         return "agent"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "name": self.name,
@@ -83,12 +83,12 @@ class FunctionSpanData(SpanData):
     def type(self) -> str:
         return "function"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "name": self.name,
             "input": self.input,
-            "output": str(self.output) if self.output else None,
+            "output": str(self.output) if self.output and not isinstance(self.output, (dict, list, tuple, str, int, float, bool)) else self.output, # Improved serialization for output
             "mcp_data": self.mcp_data,
         }
 
@@ -125,7 +125,7 @@ class GenerationSpanData(SpanData):
     def type(self) -> str:
         return "generation"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "input": self.input,
@@ -157,10 +157,14 @@ class ResponseSpanData(SpanData):
     def type(self) -> str:
         return "response"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
+        # Ensure response is serializable, for now we just take ID.
+        # If self.response is complex and needs full serialization, that would go here.
+        # Assuming self.input is already serializable (str or list of dicts)
         return {
             "type": self.type,
             "response_id": self.response.id if self.response else None,
+            "input": self.input # Added input to the dictionary
         }
 
 
@@ -180,7 +184,7 @@ class HandoffSpanData(SpanData):
     def type(self) -> str:
         return "handoff"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "from_agent": self.from_agent,
@@ -204,7 +208,7 @@ class CustomSpanData(SpanData):
     def type(self) -> str:
         return "custom"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "name": self.name,
@@ -228,7 +232,7 @@ class GuardrailSpanData(SpanData):
     def type(self) -> str:
         return "guardrail"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "name": self.name,
@@ -267,7 +271,7 @@ class TranscriptionSpanData(SpanData):
     def type(self) -> str:
         return "transcription"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "input": {
@@ -308,7 +312,7 @@ class SpeechSpanData(SpanData):
     def type(self) -> str:
         return "speech"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "input": self.input,
@@ -339,7 +343,7 @@ class SpeechGroupSpanData(SpanData):
     def type(self) -> str:
         return "speech_group"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "input": self.input,
@@ -365,7 +369,7 @@ class MCPListToolsSpanData(SpanData):
     def type(self) -> str:
         return "mcp_tools"
 
-    def export(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]: # Renamed from export
         return {
             "type": self.type,
             "server": self.server,
