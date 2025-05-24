@@ -9,6 +9,10 @@ The most common properties of an agent you'll configure are:
 -   `instructions`: also known as a developer message or system prompt.
 -   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
 -   `tools`: Tools that the agent can use to achieve its tasks.
+-   `memory`: Enables conversation memory for the agent. Can be `bool | SessionMemory | None`.
+    -   `True`: Uses the default `SQLiteSessionMemory` (in-memory by default, suitable for single-process applications).
+    -   `SessionMemory instance`: Uses the provided custom memory implementation (e.g., for persistent storage or custom logic).
+    -   `None` (default): No memory is used. The agent will not remember previous turns, and conversation history must be managed manually by passing all previous messages in the `input` to `Runner.run()`.
 
 ```python
 from agents import Agent, ModelSettings, function_tool
@@ -130,6 +134,150 @@ robot_agent = pirate_agent.clone(
     instructions="Write like a robot",
 )
 ```
+
+## Agent Memory
+
+The `memory` parameter on the `Agent` class allows you to easily enable conversation memory, so the agent can remember previous turns of a conversation.
+
+When `memory` is enabled, the agent automatically loads history before calling the LLM and saves the new turn's interactions (input and output) after the LLM responds.
+
+### Default Memory
+
+Setting `memory=True` uses the default `SQLiteSessionMemory`, which stores the conversation in an in-memory SQLite database. This is convenient for quick setups and single-process applications.
+
+```python
+from agents import Agent, Runner # Ensure Runner is imported
+import asyncio # For running async code
+
+# Example for docs
+async def run_conversation_with_default_memory():
+    agent = Agent(
+        name="ConversationalAgent",
+        instructions="Remember our previous conversation. Be friendly!",
+        model="o3-mini", # Assuming o3-mini is a valid model for your setup
+        memory=True # Enable default SQLite memory
+    )
+
+    # Let's mock the LLM responses for predictable behavior in docs
+    # In a real scenario, the LLM would generate these
+    # For this example, we'll assume the LLM just acknowledges or uses memory.
+
+    # First turn
+    # Mocking LLM to just acknowledge.
+    # In a real scenario, Runner.run would call the LLM.
+    # For documentation, we often show illustrative interaction patterns.
+    # Here, we'll simulate the interaction conceptually.
+    
+    print("Simulating conversation with default memory:")
+    
+    # Turn 1
+    user_input_1 = "My favorite color is blue."
+    print(f"User: {user_input_1}")
+    # In a real run: result1 = await Runner.run(agent, user_input_1)
+    # Simulated agent response:
+    agent_response_1 = "Okay, I'll remember that your favorite color is blue."
+    print(f"Agent: {agent_response_1}")
+    # Manually add to memory for simulation continuity if not running real LLM
+    if agent.memory: # Check if memory is enabled
+        await agent.memory.add_items([
+            {"role": "user", "content": user_input_1},
+            {"role": "assistant", "content": agent_response_1} # Or the structured output
+        ])
+
+
+    # Turn 2
+    user_input_2 = "What did I say my favorite color was?"
+    print(f"User: {user_input_2}")
+    # In a real run: result2 = await Runner.run(agent, user_input_2)
+    # Simulated agent response (assuming LLM uses memory):
+    # The LLM would have access to the history: [user: "My fav color is blue", assistant: "Okay..."]
+    agent_response_2 = "You said your favorite color is blue."
+    print(f"Agent: {agent_response_2}")
+
+    # To actually run this example, you would need a configured model
+    # and uncomment the Runner.run calls, e.g.:
+    # agent_llm_mock = ... # setup a mock model for testing if needed
+    # agent.model = agent_llm_mock 
+    # result1 = await Runner.run(agent, user_input_1)
+    # print(f"Agent: {result1.final_output}")
+    # result2 = await Runner.run(agent, user_input_2)
+    # print(f"Agent: {result2.final_output}")
+
+
+# Example of how you might run it (if it were a fully runnable example):
+# if __name__ == "__main__":
+# asyncio.run(run_conversation_with_default_memory())
+```
+
+### Custom Memory
+
+For more control, such as using persistent storage (e.g., a different database, file system) or implementing custom history management logic (e.g., summarization, windowing), you can provide your own session memory implementation. 
+
+The [`SessionMemory`][agents.memory.SessionMemory] type is a `typing.Protocol` (specifically, a `@runtime_checkable` protocol). This means your custom memory class must define all the methods specified by the protocol (like `get_history`, `add_items`, `add_message`, and `clear`) with matching signatures. While explicit inheritance from `SessionMemory` is not strictly required by the protocol mechanism for runtime checks (thanks to `@runtime_checkable`), inheriting is still good practice for clarity and to help with static type checking.
+
+The example below demonstrates creating a custom memory class by inheriting from `SessionMemory`:
+
+```python
+from agents.memory import SessionMemory, TResponseInputItem # Adjust imports as necessary
+
+class MyCustomMemory(SessionMemory):
+    def __init__(self):
+        self.history: list[TResponseInputItem] = []
+
+    async def get_history(self) -> list[TResponseInputItem]:
+        # In a real implementation, this might fetch from a DB
+        print(f"CustomMemory: Getting history (current length {len(self.history)})")
+        return list(self.history) # Return a copy
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        # In a real implementation, this might save to a DB
+        print(f"CustomMemory: Adding {len(items)} items.")
+        self.history.extend(items)
+
+    async def add_message(self, item: TResponseInputItem) -> None:
+        # Helper, could be part of add_items
+        print(f"CustomMemory: Adding 1 message.")
+        self.history.append(item)
+
+    async def clear(self) -> None:
+        print("CustomMemory: Clearing history.")
+        self.history.clear()
+
+# How to use the custom memory:
+custom_memory_instance = MyCustomMemory()
+custom_agent = Agent(
+    name="CustomMemoryAgent",
+    instructions="I have a special memory.",
+    model="o3-mini", # Example model
+    memory=custom_memory_instance
+)
+
+# Example usage (conceptual)
+async def run_with_custom_memory():
+    print("\nSimulating conversation with custom memory:")
+    user_q1 = "My name is Bob."
+    print(f"User: {user_q1}")
+    # await Runner.run(custom_agent, user_q1) # Actual run
+    # Simulated interaction:
+    await custom_agent.memory.add_items([{"role": "user", "content": user_q1}, {"role": "assistant", "content": "Nice to meet you, Bob!"}])
+    print(f"Agent: Nice to meet you, Bob!")
+
+
+    user_q2 = "What's my name?"
+    print(f"User: {user_q2}")
+    # history_for_llm = await custom_agent.memory.get_history()
+    # print(f"History provided to LLM for 2nd turn: {history_for_llm}")
+    # await Runner.run(custom_agent, user_q2) # Actual run
+    # Simulated interaction:
+    print(f"Agent: Your name is Bob.") # Assuming LLM uses memory
+
+# if __name__ == "__main__":
+# asyncio.run(run_conversation_with_default_memory())
+# asyncio.run(run_with_custom_memory())
+
+```
+As mentioned, the `SessionMemory` protocol defines `get_history`, `add_items`, `add_message`, and `clear` methods that your custom class must implement.
+
 
 ## Forcing tool use
 

@@ -84,6 +84,39 @@ async def main():
         # California
 ```
 
+!!! note "Simplified Conversations with Agent Memory"
+
+    The above example demonstrates manual conversation management. If the agent is configured with memory (e.g., `Agent(..., memory=True)`), the history is automatically managed. The same conversation would look like this:
+
+    ```python
+    async def main_with_memory():
+        # Note: Agent is initialized with memory=True
+        agent_with_memory = Agent(
+            name="Assistant", 
+            instructions="Reply very concisely. Remember our conversation.", 
+            memory=True # Enables automatic memory management
+        )
+
+        with trace(workflow_name="ConversationWithMemory", group_id=thread_id): # Assuming thread_id is defined
+            # First turn
+            # The agent's memory is empty initially.
+            result1 = await Runner.run(agent_with_memory, "What city is the Golden Gate Bridge in?")
+            print(result1.final_output)
+            # Expected: San Francisco
+            # The agent's memory now contains:
+            # - User: "What city is the Golden Gate Bridge in?"
+            # - Assistant: "San Francisco" (or its structured representation)
+
+            # Second turn
+            # Runner.run will automatically use the history from agent_with_memory.memory
+            result2 = await Runner.run(agent_with_memory, "What state is it in?")
+            print(result2.final_output)
+            # Expected: California
+            # The agent's memory now contains the full conversation.
+    ```
+    Refer to the [Agent Memory documentation in `agents.md`](agents.md#agent-memory) for more details on configuring memory.
+
+
 ## Exceptions
 
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:

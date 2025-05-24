@@ -78,7 +78,24 @@ class RunResultBase(abc.ABC):
         return cast(T, self.final_output)
 
     def to_input_list(self) -> list[TResponseInputItem]:
-        """Creates a new input list, merging the original input with all the new items generated."""
+        """
+        Creates a new list of input items, representing the sequence of interactions
+        for the specific agent run that produced this result. It merges the
+        `self.input` (the input items that initiated this particular run) with
+        all `self.new_items` (items generated during this run, like messages,
+        tool calls, and tool results).
+
+        This method is useful for:
+        - Manually continuing a conversation if the agent is run without session memory.
+        - Inspecting the specific inputs and outputs of a single `Runner.run()` call,
+          even if that run was part of a larger conversation managed by built-in agent memory.
+        - Extracting a specific segment of a conversation for logging or debugging.
+
+        Note: If the agent has active session memory, this list does NOT include
+        items from turns prior to this specific `RunResult`'s generating run.
+        To get the complete history from an agent with memory, you would typically
+        access the memory object directly if needed for other purposes.
+        """
         original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
         new_items = [item.to_input_item() for item in self.new_items]
 

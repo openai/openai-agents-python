@@ -13,6 +13,7 @@ from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
 from .logger import logger
+from .memory import SessionMemory, SQLiteSessionMemory
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
 from .models.interface import Model
@@ -37,6 +38,12 @@ class ToolsToFinalOutputResult:
     final_output: Any | None = None
     """The final output. Can be None if `is_final_output` is False, otherwise must match the
     `output_type` of the agent.
+    """
+
+    memory: bool | SessionMemory | None = field(default=None, repr=False)
+    """If True, a default SQLiteSessionMemory will be used. If a SessionMemory instance is
+    provided, it will be used directly. If None or False, no memory will be used.
+    Set to `repr=False` because it can be a complex object.
     """
 
 
@@ -177,6 +184,14 @@ class Agent(Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+
+    def __post_init__(self):
+        if self.memory is True:
+            # Defaulting to an in-memory SQLite database for now.
+            # This could be made configurable later if needed (e.g., via Agent constructor or a global config).
+            self.memory = SQLiteSessionMemory()
+        elif self.memory is False: # Explicitly setting memory to False
+            self.memory = None
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:

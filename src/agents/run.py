@@ -32,6 +32,7 @@ from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
+from .memory import SessionMemory # Added for session memory
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -666,13 +667,23 @@ class Runner:
 
         final_response: ModelResponse | None = None
 
-        input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        input.extend([item.to_input_item() for item in streamed_result.new_items])
+        # Start: Memory integration - Input Preparation for _run_single_turn_streamed
+        current_turn_input_items_for_llm_non_history: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(streamed_result.input)
+        # streamed_result.new_items are items from previous turns in the streaming context
+        current_turn_input_items_for_llm_non_history.extend([item.to_input_item() for item in streamed_result.new_items])
+
+        complete_input_for_model: list[TResponseInputItem] = []
+        if agent.memory and isinstance(agent.memory, SessionMemory):
+            history_items = await agent.memory.get_history()
+            complete_input_for_model.extend(history_items)
+        
+        complete_input_for_model.extend(current_turn_input_items_for_llm_non_history)
+        # End: Memory integration - Input Preparation
 
         # 1. Stream the output events
         async for event in model.stream_response(
             system_prompt,
-            input,
+            complete_input_for_model, # Use the potentially history-augmented input
             model_settings,
             all_tools,
             output_schema,
@@ -723,6 +734,20 @@ class Runner:
             tool_use_tracker=tool_use_tracker,
         )
 
+        # Start: Memory integration - History Update for _run_single_turn_streamed
+        if agent.memory and isinstance(agent.memory, SessionMemory):
+            items_to_save_to_memory: list[TResponseInputItem] = []
+            # Add the inputs that were new for this turn (excluding prior history from memory)
+            items_to_save_to_memory.extend(current_turn_input_items_for_llm_non_history)
+            
+            # Add all items newly generated in this turn (LLM response, tool calls, tool results)
+            # single_step_result.generated_items are RunItem objects.
+            for run_item in single_step_result.generated_items: # These are new items from *this* turn's execution
+                items_to_save_to_memory.append(run_item.to_input_item())
+            
+            await agent.memory.add_items(items_to_save_to_memory)
+        # End: Memory integration - History Update
+        
         RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
         return single_step_result
 
@@ -756,13 +781,24 @@ class Runner:
 
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
-        input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+
+        # Start: Memory integration - Input Preparation for _run_single_turn
+        current_turn_input_items_for_llm_non_history: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(original_input)
+        # The 'generated_items' passed into this function are from *previous* turns.
+        current_turn_input_items_for_llm_non_history.extend([generated_item.to_input_item() for generated_item in generated_items])
+
+        complete_input_for_model: list[TResponseInputItem] = []
+        if agent.memory and isinstance(agent.memory, SessionMemory):
+            history_items = await agent.memory.get_history()
+            complete_input_for_model.extend(history_items)
+        
+        complete_input_for_model.extend(current_turn_input_items_for_llm_non_history)
+        # End: Memory integration - Input Preparation
 
         new_response = await cls._get_new_response(
             agent,
             system_prompt,
-            input,
+            complete_input_for_model, # Use the potentially history-augmented input
             output_schema,
             all_tools,
             handoffs,
@@ -785,6 +821,22 @@ class Runner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
         )
+
+        # Start: Memory integration - History Update for _run_single_turn
+        if agent.memory and isinstance(agent.memory, SessionMemory):
+            items_to_save_to_memory: list[TResponseInputItem] = []
+            # Add the inputs that were new for this turn (excluding prior history from memory)
+            items_to_save_to_memory.extend(current_turn_input_items_for_llm_non_history)
+            
+            # Add all items newly generated in this turn (LLM response, tool calls, tool results)
+            # single_step_result.generated_items are RunItem objects.
+            for run_item in single_step_result.generated_items: # These are new items from *this* turn's execution
+                items_to_save_to_memory.append(run_item.to_input_item())
+            
+            await agent.memory.add_items(items_to_save_to_memory)
+        # End: Memory integration - History Update
+        
+        return single_step_result
 
     @classmethod
     async def _get_single_step_result_from_response(
