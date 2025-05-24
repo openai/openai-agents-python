@@ -270,7 +270,7 @@ The `agent.as_tool` function is a convenience method to make it easy to turn an 
 ```python
 @function_tool
 async def run_my_agent() -> str:
-  """A tool that runs the agent with custom configs".
+    """A tool that runs the agent with custom configs"""
 
     agent = Agent(name="My agent", instructions="...")
 
