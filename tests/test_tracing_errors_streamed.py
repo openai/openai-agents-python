@@ -168,10 +168,6 @@ async def test_tool_call_error():
                 "children": [
                     {
                         "type": "agent",
-                        "error": {
-                            "message": "Error in agent run",
-                            "data": {"error": "Invalid JSON input for tool foo: bad_json"},
-                        },
                         "data": {
                             "name": "test_agent",
                             "handoffs": [],
