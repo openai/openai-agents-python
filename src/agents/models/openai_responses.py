@@ -10,6 +10,7 @@ from openai.types import ChatModel
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseIncludable,
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
@@ -23,7 +24,17 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
-from ..tool import ComputerTool, FileSearchTool, FunctionTool, Tool, WebSearchTool
+from ..tool import (
+    CodeInterpreterTool,
+    ComputerTool,
+    FileSearchTool,
+    FunctionTool,
+    HostedMCPTool,
+    ImageGenerationTool,
+    LocalShellTool,
+    Tool,
+    WebSearchTool,
+)
 from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..version import __version__
@@ -35,13 +46,6 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
-
-# From the Responses API
-IncludeLiteral = Literal[
-    "file_search_call.results",
-    "message.input_image.image_url",
-    "computer_call_output.output.image_url",
-]
 
 
 class OpenAIResponsesModel(Model):
@@ -102,6 +106,8 @@ class OpenAIResponsesModel(Model):
                         input_tokens=response.usage.input_tokens,
                         output_tokens=response.usage.output_tokens,
                         total_tokens=response.usage.total_tokens,
+                        input_tokens_details=response.usage.input_tokens_details,
+                        output_tokens_details=response.usage.output_tokens_details,
                     )
                     if response.usage
                     else Usage()
@@ -275,7 +281,7 @@ class OpenAIResponsesModel(Model):
 @dataclass
 class ConvertedTools:
     tools: list[ToolParam]
-    includes: list[IncludeLiteral]
+    includes: list[ResponseIncludable]
 
 
 class Converter:
@@ -302,6 +308,18 @@ class Converter:
         elif tool_choice == "computer_use_preview":
             return {
                 "type": "computer_use_preview",
+            }
+        elif tool_choice == "image_generation":
+            return {
+                "type": "image_generation",
+            }
+        elif tool_choice == "code_interpreter":
+            return {
+                "type": "code_interpreter",
+            }
+        elif tool_choice == "mcp":
+            return {
+                "type": "mcp",
             }
         else:
             return {
@@ -332,7 +350,7 @@ class Converter:
         handoffs: list[Handoff[Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
-        includes: list[IncludeLiteral] = []
+        includes: list[ResponseIncludable] = []
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
@@ -350,7 +368,7 @@ class Converter:
         return ConvertedTools(tools=converted_tools, includes=includes)
 
     @classmethod
-    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, IncludeLiteral | None]:
+    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
@@ -361,7 +379,7 @@ class Converter:
                 "type": "function",
                 "description": tool.description,
             }
-            includes: IncludeLiteral | None = None
+            includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
             ws: WebSearchToolParam = {
                 "type": "web_search_preview",
@@ -391,7 +409,20 @@ class Converter:
                 "display_height": tool.computer.dimensions[1],
             }
             includes = None
-
+        elif isinstance(tool, HostedMCPTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, ImageGenerationTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, CodeInterpreterTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, LocalShellTool):
+            converted_tool = {
+                "type": "local_shell",
+            }
+            includes = None
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")
 

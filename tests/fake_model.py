@@ -129,6 +129,7 @@ class FakeModel(Model):
             yield ResponseCompletedEvent(
                 type="response.completed",
                 response=get_response_obj(output, usage=self.hardcoded_usage),
+                sequence_number=0,
             )
 
 

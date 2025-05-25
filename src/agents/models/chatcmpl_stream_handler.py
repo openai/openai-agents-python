@@ -38,6 +38,16 @@ class StreamingState:
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
 
 
+class SequenceNumber:
+    def __init__(self):
+        self._sequence_number = 0
+
+    def get_and_increment(self) -> int:
+        num = self._sequence_number
+        self._sequence_number += 1
+        return num
+
+
 class ChatCmplStreamHandler:
     @classmethod
     async def handle_stream(
@@ -47,13 +57,14 @@ class ChatCmplStreamHandler:
     ) -> AsyncIterator[TResponseStreamEvent]:
         usage: CompletionUsage | None = None
         state = StreamingState()
-
+        sequence_number = SequenceNumber()
         async for chunk in stream:
             if not state.started:
                 state.started = True
                 yield ResponseCreatedEvent(
                     response=response,
                     type="response.created",
+                    sequence_number=sequence_number.get_and_increment(),
                 )
 
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
@@ -89,6 +100,7 @@ class ChatCmplStreamHandler:
                         item=assistant_item,
                         output_index=0,
                         type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
@@ -100,6 +112,7 @@ class ChatCmplStreamHandler:
                             annotations=[],
                         ),
                         type="response.content_part.added",
+                        sequence_number=sequence_number.get_and_increment(),
                     )
                 # Emit the delta for this segment of content
                 yield ResponseTextDeltaEvent(
@@ -108,6 +121,7 @@ class ChatCmplStreamHandler:
                     item_id=FAKE_RESPONSES_ID,
                     output_index=0,
                     type="response.output_text.delta",
+                    sequence_number=sequence_number.get_and_increment(),
                 )
                 # Accumulate the text into the response part
                 state.text_content_index_and_output[1].text += delta.content
@@ -134,6 +148,7 @@ class ChatCmplStreamHandler:
                         item=assistant_item,
                         output_index=0,
                         type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
@@ -145,6 +160,7 @@ class ChatCmplStreamHandler:
                             annotations=[],
                         ),
                         type="response.content_part.added",
+                        sequence_number=sequence_number.get_and_increment(),
                     )
                 # Emit the delta for this segment of refusal
                 yield ResponseRefusalDeltaEvent(
@@ -153,6 +169,7 @@ class ChatCmplStreamHandler:
                     item_id=FAKE_RESPONSES_ID,
                     output_index=0,
                     type="response.refusal.delta",
+                    sequence_number=sequence_number.get_and_increment(),
                 )
                 # Accumulate the refusal string in the output part
                 state.refusal_content_index_and_output[1].refusal += delta.refusal
@@ -190,6 +207,7 @@ class ChatCmplStreamHandler:
                 output_index=0,
                 part=state.text_content_index_and_output[1],
                 type="response.content_part.done",
+                sequence_number=sequence_number.get_and_increment(),
             )
 
         if state.refusal_content_index_and_output:
@@ -201,6 +219,7 @@ class ChatCmplStreamHandler:
                 output_index=0,
                 part=state.refusal_content_index_and_output[1],
                 type="response.content_part.done",
+                sequence_number=sequence_number.get_and_increment(),
             )
 
         # Actually send events for the function calls
@@ -216,6 +235,7 @@ class ChatCmplStreamHandler:
                 ),
                 output_index=function_call_starting_index,
                 type="response.output_item.added",
+                sequence_number=sequence_number.get_and_increment(),
             )
             # Then, yield the args
             yield ResponseFunctionCallArgumentsDeltaEvent(
@@ -223,6 +243,7 @@ class ChatCmplStreamHandler:
                 item_id=FAKE_RESPONSES_ID,
                 output_index=function_call_starting_index,
                 type="response.function_call_arguments.delta",
+                sequence_number=sequence_number.get_and_increment(),
             )
             # Finally, the ResponseOutputItemDone
             yield ResponseOutputItemDoneEvent(
@@ -235,6 +256,7 @@ class ChatCmplStreamHandler:
                 ),
                 output_index=function_call_starting_index,
                 type="response.output_item.done",
+                sequence_number=sequence_number.get_and_increment(),
             )
 
         # Finally, send the Response completed event
@@ -258,6 +280,7 @@ class ChatCmplStreamHandler:
                 item=assistant_msg,
                 output_index=0,
                 type="response.output_item.done",
+                sequence_number=sequence_number.get_and_increment(),
             )
 
         for function_call in state.function_calls.values():
@@ -289,4 +312,5 @@ class ChatCmplStreamHandler:
         yield ResponseCompletedEvent(
             response=final_response,
             type="response.completed",
+            sequence_number=sequence_number.get_and_increment(),
         )
