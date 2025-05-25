@@ -8,7 +8,7 @@ The Agents SDK has support for MCP. This enables you to use a wide range of MCP 
 
 ## MCP servers
 
-Currently, the MCP spec defines two kinds of servers, based on the transport mechanism they use:
+Currently, the MCP spec defines three kinds of servers, based on the transport mechanism they use:
 
 1. **stdio** servers run as a subprocess of your application. You can think of them as running "locally".
 2. **HTTP over SSE** servers run remotely. You connect to them via a URL.
