@@ -234,7 +234,7 @@ class Converter:
                         type="image_url",
                         image_url={
                             "url": casted_image_param["image_url"],
-                            "detail": casted_image_param["detail"],
+                            "detail": casted_image_param.get("detail", "auto"),
                         },
                     )
                 )

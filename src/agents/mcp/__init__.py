@@ -5,6 +5,8 @@ try:
         MCPServerSseParams,
         MCPServerStdio,
         MCPServerStdioParams,
+        MCPServerStreamableHttp,
+        MCPServerStreamableHttpParams,
     )
 except ImportError:
     pass
@@ -17,5 +19,7 @@ __all__ = [
     "MCPServerSseParams",
     "MCPServerStdio",
     "MCPServerStdioParams",
+    "MCPServerStreamableHttp",
+    "MCPServerStreamableHttpParams",
     "MCPUtil",
 ]
