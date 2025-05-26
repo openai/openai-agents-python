@@ -149,7 +149,7 @@ history_tutor_agent = Agent(
 
 
 async def homework_guardrail(ctx, agent, input_data):
-    result = await Runner.run(guardrail_agent, input_data, context=ctx.context)
+    result = await Runner.run(agent, input_data, context=ctx.context)
     final_output = result.final_output_as(HomeworkOutput)
     return GuardrailFunctionOutput(
         output_info=final_output,
