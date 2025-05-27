@@ -24,3 +24,6 @@ class RunContextWrapper(Generic[TContext]):
     """The usage of the agent run so far. For streamed responses, the usage will be stale until the
     last chunk of the stream is processed.
     """
+
+    tool_call_id: str | None = None
+    """The ID of the tool call for the current tool execution."""
