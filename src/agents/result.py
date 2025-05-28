@@ -214,18 +214,22 @@ class RunResultStreaming(RunResultBase):
         if self._stored_exception:
             raise self._stored_exception
 
+    def _create_error_details(self) -> RunErrorDetails:
+        """Return a `RunErrorDetails` object considering the current attributes of the class."""
+        return RunErrorDetails(
+            input=self.input,
+            new_items=self.new_items,
+            raw_responses=self.raw_responses,
+            last_agent=self.current_agent,
+            context_wrapper=self.context_wrapper,
+            input_guardrail_results=self.input_guardrail_results,
+            output_guardrail_results=self.output_guardrail_results,
+        )
+
     def _check_errors(self):
         if self.current_turn > self.max_turns:
             max_turns_exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
-            max_turns_exc.run_data = RunErrorDetails(
-                input=self.input,
-                new_items=self.new_items,
-                raw_responses=self.raw_responses,
-                last_agent=self.current_agent,
-                context_wrapper=self.context_wrapper,
-                input_guardrail_results=self.input_guardrail_results,
-                output_guardrail_results=self.output_guardrail_results,
-            )
+            max_turns_exc.run_data = self._create_error_details()
             self._stored_exception = max_turns_exc
 
         # Fetch all the completed guardrail results from the queue and raise if needed
@@ -233,15 +237,7 @@ class RunResultStreaming(RunResultBase):
             guardrail_result = self._input_guardrail_queue.get_nowait()
             if guardrail_result.output.tripwire_triggered:
                 tripwire_exc = InputGuardrailTripwireTriggered(guardrail_result)
-                tripwire_exc.run_data = RunErrorDetails(
-                    input=self.input,
-                    new_items=self.new_items,
-                    raw_responses=self.raw_responses,
-                    last_agent=self.current_agent,
-                    context_wrapper=self.context_wrapper,
-                    input_guardrail_results=self.input_guardrail_results,
-                    output_guardrail_results=self.output_guardrail_results,
-                )
+                tripwire_exc.run_data = self._create_error_details()
                 self._stored_exception = tripwire_exc
 
         # Check the tasks for any exceptions
@@ -249,45 +245,21 @@ class RunResultStreaming(RunResultBase):
             run_impl_exc = self._run_impl_task.exception()
             if run_impl_exc and isinstance(run_impl_exc, Exception):
                 if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
-                    run_impl_exc.run_data = RunErrorDetails(
-                        input=self.input,
-                        new_items=self.new_items,
-                        raw_responses=self.raw_responses,
-                        last_agent=self.current_agent,
-                        context_wrapper=self.context_wrapper,
-                        input_guardrail_results=self.input_guardrail_results,
-                        output_guardrail_results=self.output_guardrail_results,
-                    )
+                    run_impl_exc.run_data = self._create_error_details()
                 self._stored_exception = run_impl_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
             in_guard_exc = self._input_guardrails_task.exception()
             if in_guard_exc and isinstance(in_guard_exc, Exception):
                 if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
-                    in_guard_exc.run_data = RunErrorDetails(
-                        input=self.input,
-                        new_items=self.new_items,
-                        raw_responses=self.raw_responses,
-                        last_agent=self.current_agent,
-                        context_wrapper=self.context_wrapper,
-                        input_guardrail_results=self.input_guardrail_results,
-                        output_guardrail_results=self.output_guardrail_results,
-                    )
+                    in_guard_exc.run_data = self._create_error_details()
                 self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
             out_guard_exc = self._output_guardrails_task.exception()
             if out_guard_exc and isinstance(out_guard_exc, Exception):
                 if isinstance(out_guard_exc, AgentsException) and out_guard_exc.run_data is None:
-                    out_guard_exc.run_data = RunErrorDetails(
-                        input=self.input,
-                        new_items=self.new_items,
-                        raw_responses=self.raw_responses,
-                        last_agent=self.current_agent,
-                        context_wrapper=self.context_wrapper,
-                        input_guardrail_results=self.input_guardrail_results,
-                        output_guardrail_results=self.output_guardrail_results,
-                    )
+                    out_guard_exc.run_data = self._create_error_details()
                 self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):
