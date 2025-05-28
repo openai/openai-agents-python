@@ -38,7 +38,7 @@ class AgentOutputSchemaBase(abc.ABC):
     @abc.abstractmethod
     def is_strict_json_schema(self) -> bool:
         """Whether the JSON schema is in strict mode. Strict mode constrains the JSON schema
-        features, but guarantees valis JSON. See here for details:
+        features, but guarantees valid JSON. See here for details:
         https://platform.openai.com/docs/guides/structured-outputs#supported-schemas
         """
         pass
