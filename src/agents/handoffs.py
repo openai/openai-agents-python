@@ -168,7 +168,7 @@ def handoff(
         input_filter: a function that filters the inputs that are passed to the next agent.
     """
     assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_input and input_type, or neither"
+        "You must provide either both on_handoff and input_type, or neither"
     )
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
