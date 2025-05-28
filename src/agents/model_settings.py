@@ -37,7 +37,7 @@ class ModelSettings:
 
     parallel_tool_calls: bool | None = None
     """Whether to use parallel tool calls when calling the model.
-    Defaults to False if not provided."""
+    Defaults to True if not provided."""
 
     truncation: Literal["auto", "disabled"] | None = None
     """The truncation strategy to use when calling the model."""
