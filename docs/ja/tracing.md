@@ -120,3 +120,4 @@ async def main():
 -   [Langfuse](https://langfuse.com/docs/integrations/openaiagentssdk/openai-agents)
 -   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
 -   [Okahu‑Monocle](https://github.com/monocle2ai/monocle)
+-   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)

@@ -116,3 +116,4 @@ To customize this default setup, to send traces to alternative or additional bac
 -   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
 -   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
 -   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agent-integration)
+-   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
