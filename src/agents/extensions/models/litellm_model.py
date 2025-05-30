@@ -5,7 +5,6 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any, Literal, cast, overload
 
-import litellm.types
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents.exceptions import ModelBehaviorError
