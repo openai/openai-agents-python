@@ -10,7 +10,7 @@ Context is an overloaded term. There are two main classes of context you might c
 This is represented via the [`RunContextWrapper`][agents.run_context.RunContextWrapper] class and the [`context`][agents.run_context.RunContextWrapper.context] property within it. The way this works is:
 
 1. You create any Python object you want. A common pattern is to use a dataclass or a Pydantic object.
-2. You pass that object to the various run methods (e.g. `Runner.run(..., **context=whatever**))`.
+2. You pass that object to the various run methods (e.g., `Runner.run(..., context=your_context_object)`).
 3. All your tool calls, lifecycle hooks etc will be passed a wrapper object, `RunContextWrapper[T]`, where `T` represents your context object type which you can access via `wrapper.context`.
 
 The **most important** thing to be aware of: every agent, tool function, lifecycle etc for a given agent run must use the same _type_ of context.
@@ -38,7 +38,7 @@ class UserInfo:  # (1)!
 
 @function_tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
-    return f"User {wrapper.context.name} is 47 years old"
+    return f"User {wrapper.context.name} (ID: {wrapper.context.uid}) is 47 years old"
 
 async def main():
     user_info = UserInfo(name="John", uid=123)
@@ -55,7 +55,7 @@ async def main():
     )
 
     print(result.final_output)  # (5)!
-    # The user John is 47 years old.
+    # User John (ID: 123) is 47 years old
 
 if __name__ == "__main__":
     asyncio.run(main())
