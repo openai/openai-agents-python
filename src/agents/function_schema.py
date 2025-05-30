@@ -45,6 +45,9 @@ class FuncSchema:
         positional_args: list[Any] = []
         keyword_args: dict[str, Any] = {}
         seen_var_positional = False
+        
+        # Get excluded parameter defaults if they exist
+        excluded_param_defaults = getattr(self.params_pydantic_model, "__excluded_param_defaults__", {})
 
         # Use enumerate() so we can skip the first parameter if it's context.
         for idx, (name, param) in enumerate(self.signature.parameters.items()):
@@ -52,7 +55,12 @@ class FuncSchema:
             if self.takes_context and idx == 0:
                 continue
 
-            value = getattr(data, name, None)
+            # For excluded parameters, use their default value
+            if name in excluded_param_defaults:
+                value = excluded_param_defaults[name]
+            else:
+                value = getattr(data, name, None)
+                
             if param.kind == param.VAR_POSITIONAL:
                 # e.g. *args: extend positional args and mark that *args is now seen
                 positional_args.extend(value or [])
@@ -190,6 +198,7 @@ def function_schema(
     description_override: str | None = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
+    exclude_params: list[str] | None = None,
 ) -> FuncSchema:
     """
     Given a python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -208,6 +217,9 @@ def function_schema(
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
             recommend setting this to True, as it increases the likelihood of the LLM providing
             correct JSON input.
+        exclude_params: If provided, these parameters will be excluded from the JSON schema
+            presented to the LLM. The parameters will still be available to the function with
+            their default values. All excluded parameters must have default values.
 
     Returns:
         A `FuncSchema` object containing the function's name, description, parameter descriptions,
@@ -231,11 +243,24 @@ def function_schema(
     takes_context = False
     filtered_params = []
 
+    # Store default values for excluded parameters
+    excluded_param_defaults = {}
+
     if params:
         first_name, first_param = params[0]
         # Prefer the evaluated type hint if available
         ann = type_hints.get(first_name, first_param.annotation)
-        if ann != inspect._empty:
+        
+        # Check if this parameter should be excluded
+        if exclude_params and first_name in exclude_params:
+            # Ensure the parameter has a default value
+            if first_param.default is inspect._empty:
+                raise UserError(
+                    f"Parameter '{first_name}' specified in exclude_params must have a default value"
+                )
+            # Store default value
+            excluded_param_defaults[first_name] = first_param.default
+        elif ann != inspect._empty:
             origin = get_origin(ann) or ann
             if origin is RunContextWrapper:
                 takes_context = True  # Mark that the function takes context
@@ -246,6 +271,17 @@ def function_schema(
 
     # For parameters other than the first, raise error if any use RunContextWrapper.
     for name, param in params[1:]:
+        # Check if this parameter should be excluded
+        if exclude_params and name in exclude_params:
+            # Ensure the parameter has a default value
+            if param.default is inspect._empty:
+                raise UserError(
+                    f"Parameter '{name}' specified in exclude_params must have a default value"
+                )
+            # Store default value
+            excluded_param_defaults[name] = param.default
+            continue
+            
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
@@ -326,6 +362,9 @@ def function_schema(
 
     # 3. Dynamically build a Pydantic model
     dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+    
+    # Store excluded parameter defaults in the model for later use
+    setattr(dynamic_model, "__excluded_param_defaults__", excluded_param_defaults)
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()

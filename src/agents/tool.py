@@ -262,6 +262,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
+    exclude_params: list[str] | None = None,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -276,6 +277,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
+    exclude_params: list[str] | None = None,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -290,6 +292,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
+    exclude_params: list[str] | None = None,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -318,9 +321,26 @@ def function_tool(
             If False, it allows non-strict JSON schemas. For example, if a parameter has a default
             value, it will be optional, additional properties are allowed, etc. See here for more:
             https://platform.openai.com/docs/guides/structured-outputs?api-mode=responses#supported-schemas
+        exclude_params: If provided, these parameters will be excluded from the JSON schema
+            presented to the LLM. The parameters will still be available to the function with
+            their default values. All excluded parameters must have default values.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+        # Check that all excluded parameters have default values
+        if exclude_params:
+            sig = inspect.signature(the_func)
+            for param_name in exclude_params:
+                if param_name not in sig.parameters:
+                    raise UserError(
+                        f"Parameter '{param_name}' specified in exclude_params doesn't exist in function {the_func.__name__}"
+                    )
+                param = sig.parameters[param_name]
+                if param.default is inspect._empty:
+                    raise UserError(
+                        f"Parameter '{param_name}' specified in exclude_params must have a default value"
+                    )
+
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -328,6 +348,7 @@ def function_tool(
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
             strict_json_schema=strict_mode,
+            exclude_params=exclude_params,
         )
 
         async def _on_invoke_tool_impl(ctx: RunContextWrapper[Any], input: str) -> Any:
