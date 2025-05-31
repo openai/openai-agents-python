@@ -20,7 +20,7 @@ Here are the main features of the SDK:
 -   Agent loop: Built-in agent loop that handles calling tools, sending results to the LLM, and looping until the LLM is done.
 -   Python-first: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
 -   Handoffs: A powerful feature to coordinate and delegate between multiple agents.
--   Guardrails: Run input validations and checks in parallel to your agents, breaking early if the checks fail.
+-   Guardrails: Run input and output validations and checks in parallel to your agents, breaking early if the checks fail.
 -   Function tools: Turn any Python function into a tool, with automatic schema generation and Pydantic-powered validation.
 -   Tracing: Built-in tracing that lets you visualize, debug and monitor your workflows, as well as use the OpenAI suite of evaluation, fine-tuning and distillation tools.
 
