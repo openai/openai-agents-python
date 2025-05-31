@@ -57,6 +57,7 @@ plugins:
             - Documentation:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
                 - tools.md
@@ -80,6 +81,7 @@ plugins:
                     - ref/index.md
                     - ref/agent.md
                     - ref/run.md
+                    - ref/memory.md
                     - ref/tool.md
                     - ref/result.md
                     - ref/stream_events.md
@@ -137,6 +139,7 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
                 - tools.md
