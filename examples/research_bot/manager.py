@@ -7,9 +7,9 @@ from rich.console import Console
 
 from agents import Runner, custom_span, gen_trace_id, trace
 
-from .agents.planner_agent import WebSearchItem, WebSearchPlan, planner_agent
+from .agents.planner_agent import LegalSearchItem, LegalSearchPlan, planner_agent
 from .agents.search_agent import search_agent
-from .agents.writer_agent import ReportData, writer_agent
+from .agents.writer_agent import LegalReportData, writer_agent
 from .printer import Printer
 
 
@@ -30,7 +30,7 @@ class ResearchManager:
 
             self.printer.update_item(
                 "starting",
-                "Starting research...",
+                "Starting legal research...",
                 is_done=True,
                 hide_checkmark=True,
             )
@@ -49,22 +49,22 @@ class ResearchManager:
         follow_up_questions = "\n".join(report.follow_up_questions)
         print(f"Follow up questions: {follow_up_questions}")
 
-    async def _plan_searches(self, query: str) -> WebSearchPlan:
-        self.printer.update_item("planning", "Planning searches...")
+    async def _plan_searches(self, query: str) -> LegalSearchPlan:
+        self.printer.update_item("planning", "Planning legal searches...")
         result = await Runner.run(
-            planner_agent,
-            f"Query: {query}",
+            planner_agent,  # Now LegalPlannerAgent
+            f"Legal Query: {query}",
         )
         self.printer.update_item(
             "planning",
-            f"Will perform {len(result.final_output.searches)} searches",
+            f"Will perform {len(result.final_output.searches)} legal searches",
             is_done=True,
         )
-        return result.final_output_as(WebSearchPlan)
+        return result.final_output_as(LegalSearchPlan)
 
-    async def _perform_searches(self, search_plan: WebSearchPlan) -> list[str]:
-        with custom_span("Search the web"):
-            self.printer.update_item("searching", "Searching...")
+    async def _perform_searches(self, search_plan: LegalSearchPlan) -> list[str]:
+        with custom_span("Search the web for legal information"):
+            self.printer.update_item("searching", "Searching for legal information...")
             num_completed = 0
             tasks = [asyncio.create_task(self._search(item)) for item in search_plan.searches]
             results = []
@@ -79,32 +79,32 @@ class ResearchManager:
             self.printer.mark_item_done("searching")
             return results
 
-    async def _search(self, item: WebSearchItem) -> str | None:
-        input = f"Search term: {item.query}\nReason for searching: {item.reason}"
+    async def _search(self, item: LegalSearchItem) -> str | None:
+        input = f"Legal Search term: {item.query}\\nReason for searching: {item.reason}"
         try:
             result = await Runner.run(
-                search_agent,
+                search_agent,  # Now LegalSearchAgent
                 input,
             )
             return str(result.final_output)
         except Exception:
             return None
 
-    async def _write_report(self, query: str, search_results: list[str]) -> ReportData:
-        self.printer.update_item("writing", "Thinking about report...")
-        input = f"Original query: {query}\nSummarized search results: {search_results}"
+    async def _write_report(self, query: str, search_results: list[str]) -> LegalReportData:
+        self.printer.update_item("writing", "Thinking about legal report...")
+        input = f"Original legal query: {query}\\nSummarized legal search results: {search_results}"
         result = Runner.run_streamed(
-            writer_agent,
+            writer_agent,  # Now LegalWriterAgent
             input,
         )
         update_messages = [
-            "Thinking about report...",
-            "Planning report structure...",
-            "Writing outline...",
-            "Creating sections...",
-            "Cleaning up formatting...",
-            "Finalizing report...",
-            "Finishing report...",
+            "Thinking about legal report...",
+            "Planning legal document structure...",
+            "Writing outline for legal brief/memo...",
+            "Drafting sections (Facts, Issues, Analysis, Conclusion)...",
+            "Reviewing and formatting legal citations...",
+            "Finalizing legal document...",
+            "Finishing legal report...",
         ]
 
         last_update = time.time()
@@ -116,4 +116,4 @@ class ResearchManager:
                 last_update = time.time()
 
         self.printer.mark_item_done("writing")
-        return result.final_output_as(ReportData)
+        return result.final_output_as(LegalReportData)
