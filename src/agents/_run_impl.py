@@ -33,6 +33,7 @@ from openai.types.responses.response_output_item import (
     ImageGenerationCall,
     LocalShellCall,
     McpApprovalRequest,
+    McpCall,
     McpListTools,
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
@@ -456,6 +457,9 @@ class RunImpl:
                         )
             elif isinstance(output, McpListTools):
                 items.append(MCPListToolsItem(raw_item=output, agent=agent))
+            elif isinstance(output, McpCall):
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                tools_used.append("mcp")
             elif isinstance(output, ImageGenerationCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 tools_used.append("image_generation")

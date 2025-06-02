@@ -48,7 +48,7 @@ async def main(verbose: bool, stream: bool):
         print(res.final_output)
 
     if verbose:
-        for item in result.new_items:
+        for item in res.new_items:
             print(item)
 
 

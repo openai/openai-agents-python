@@ -34,7 +34,7 @@ async def main(verbose: bool, stream: bool):
         # The repository is primarily written in multiple languages, including Rust and TypeScript...
 
     if verbose:
-        for item in result.new_items:
+        for item in res.new_items:
             print(item)
 
 
