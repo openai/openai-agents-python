@@ -28,6 +28,7 @@ from agents._run_impl import (
     SingleStepResult,
 )
 from agents.tool import function_tool
+from agents.tool_context import ToolContext
 
 from .test_responses import (
     get_final_output_message,
@@ -162,8 +163,8 @@ async def test_multiple_tool_calls():
 
 @pytest.mark.asyncio
 async def test_multiple_tool_calls_with_tool_context():
-    async def _fake_tool(agent_context: RunContextWrapper[str], value: str) -> str:
-        return f"{value}-{agent_context.tool_call_id}"
+    async def _fake_tool(context: ToolContext[str], value: str) -> str:
+        return f"{value}-{context.tool_call_id}"
 
     tool = function_tool(_fake_tool, name_override="fake_tool", failure_error_function=None)
 
