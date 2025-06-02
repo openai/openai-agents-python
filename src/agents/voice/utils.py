@@ -1,10 +1,12 @@
+import typing
+
 import re
 from typing import Callable
 
 
 def get_sentence_based_splitter(
     min_sentence_length: int = 20,
-) -> Callable[[str], tuple[str, str]]:
+) -> Callable[[str], typing.Tuple[str, str]]:
     """Returns a function that splits text into chunks based on sentence boundaries.
 
     Args:
@@ -14,7 +16,7 @@ def get_sentence_based_splitter(
         A function that splits text into chunks based on sentence boundaries.
     """
 
-    def sentence_based_text_splitter(text_buffer: str) -> tuple[str, str]:
+    def sentence_based_text_splitter(text_buffer: str) -> typing.Tuple[str, str]:
         """
         A function to split the text into chunks. This is useful if you want to split the text into
         chunks before sending it to the TTS model rather than waiting for the whole text to be

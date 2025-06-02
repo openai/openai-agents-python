@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from openai import AsyncOpenAI
 
@@ -11,17 +12,17 @@ class MultiProviderMap:
     """A map of model name prefixes to ModelProviders."""
 
     def __init__(self):
-        self._mapping: dict[str, ModelProvider] = {}
+        self._mapping: typing.Dict[str, ModelProvider] = {}
 
     def has_prefix(self, prefix: str) -> bool:
         """Returns True if the given prefix is in the mapping."""
         return prefix in self._mapping
 
-    def get_mapping(self) -> dict[str, ModelProvider]:
+    def get_mapping(self) -> typing.Dict[str, ModelProvider]:
         """Returns a copy of the current prefix -> ModelProvider mapping."""
         return self._mapping.copy()
 
-    def set_mapping(self, mapping: dict[str, ModelProvider]):
+    def set_mapping(self, mapping: typing.Dict[str, ModelProvider]):
         """Overwrites the current mapping with a new one."""
         self._mapping = mapping
 
@@ -97,9 +98,9 @@ class MultiProvider(ModelProvider):
             use_responses=openai_use_responses,
         )
 
-        self._fallback_providers: dict[str, ModelProvider] = {}
+        self._fallback_providers: typing.Dict[str, ModelProvider] = {}
 
-    def _get_prefix_and_model_name(self, model_name: str | None) -> tuple[str | None, str | None]:
+    def _get_prefix_and_model_name(self, model_name: str | None) -> typing.Tuple[str | None, str | None]:
         if model_name is None:
             return None, None
         elif "/" in model_name:

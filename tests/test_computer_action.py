@@ -1,3 +1,5 @@
+import typing
+
 """Unit tests for the ComputerAction methods in `agents._run_impl`.
 
 These confirm that the correct computer action method is invoked for each action type and
@@ -39,7 +41,7 @@ class LoggingComputer(Computer):
     """A `Computer` implementation that logs calls to its methods for verification in tests."""
 
     def __init__(self, screenshot_return: str = "screenshot"):
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.calls: typing.List[typing.Tuple[str, typing.Tuple[Any, ...]]] = []
         self._screenshot_return = screenshot_return
 
     @property
@@ -47,7 +49,7 @@ class LoggingComputer(Computer):
         return "mac"
 
     @property
-    def dimensions(self) -> tuple[int, int]:
+    def dimensions(self) -> typing.Tuple[int, int]:
         return (800, 600)
 
     def screenshot(self) -> str:
@@ -72,10 +74,10 @@ class LoggingComputer(Computer):
     def move(self, x: int, y: int) -> None:
         self.calls.append(("move", (x, y)))
 
-    def keypress(self, keys: list[str]) -> None:
+    def keypress(self, keys: typing.List[str]) -> None:
         self.calls.append(("keypress", (keys,)))
 
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         self.calls.append(("drag", (tuple(path),)))
 
 
@@ -83,7 +85,7 @@ class LoggingAsyncComputer(AsyncComputer):
     """An `AsyncComputer` implementation that logs calls to its methods for verification."""
 
     def __init__(self, screenshot_return: str = "async_screenshot"):
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.calls: typing.List[typing.Tuple[str, typing.Tuple[Any, ...]]] = []
         self._screenshot_return = screenshot_return
 
     @property
@@ -91,7 +93,7 @@ class LoggingAsyncComputer(AsyncComputer):
         return "mac"
 
     @property
-    def dimensions(self) -> tuple[int, int]:
+    def dimensions(self) -> typing.Tuple[int, int]:
         return (800, 600)
 
     async def screenshot(self) -> str:
@@ -116,10 +118,10 @@ class LoggingAsyncComputer(AsyncComputer):
     async def move(self, x: int, y: int) -> None:
         self.calls.append(("move", (x, y)))
 
-    async def keypress(self, keys: list[str]) -> None:
+    async def keypress(self, keys: typing.List[str]) -> None:
         self.calls.append(("keypress", (keys,)))
 
-    async def drag(self, path: list[tuple[int, int]]) -> None:
+    async def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         self.calls.append(("drag", (tuple(path),)))
 
 
@@ -145,7 +147,7 @@ class LoggingAsyncComputer(AsyncComputer):
     ],
 )
 async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
-    action: Any, expected_call: tuple[str, tuple[Any, ...]]
+    action: Any, expected_call: typing.Tuple[str, typing.Tuple[Any, ...]]
 ) -> None:
     """For each action type, assert that the corresponding computer method is invoked
     and that a screenshot is taken and returned."""
@@ -190,7 +192,7 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
     ],
 )
 async def test_get_screenshot_async_executes_action_and_takes_screenshot(
-    action: Any, expected_call: tuple[str, tuple[Any, ...]]
+    action: Any, expected_call: typing.Tuple[str, typing.Tuple[Any, ...]]
 ) -> None:
     """For each action type on an `AsyncComputer`, the corresponding coroutine should be awaited
     and a screenshot taken."""
@@ -218,8 +220,8 @@ class LoggingRunHooks(RunHooks[Any]):
 
     def __init__(self) -> None:
         super().__init__()
-        self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.started: typing.List[typing.Tuple[Agent[Any], Any]] = []
+        self.ended: typing.List[typing.Tuple[Agent[Any], Any, str]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any
@@ -237,8 +239,8 @@ class LoggingAgentHooks(AgentHooks[Any]):
 
     def __init__(self) -> None:
         super().__init__()
-        self.started: list[tuple[Agent[Any], Any]] = []
-        self.ended: list[tuple[Agent[Any], Any, str]] = []
+        self.started: typing.List[typing.Tuple[Agent[Any], Any]] = []
+        self.ended: typing.List[typing.Tuple[Agent[Any], Any, str]] = []
 
     async def on_tool_start(
         self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Any

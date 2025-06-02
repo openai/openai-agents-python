@@ -1,3 +1,5 @@
+import typing
+
 from collections.abc import AsyncIterator
 
 import pytest
@@ -59,7 +61,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         ),
     )
 
-    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+    async def fake_stream() -> typing.AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
 
@@ -153,7 +155,7 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
         usage=CompletionUsage(completion_tokens=2, prompt_tokens=2, total_tokens=4),
     )
 
-    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+    async def fake_stream() -> typing.AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
 
@@ -241,7 +243,7 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
         usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
     )
 
-    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+    async def fake_stream() -> typing.AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
 

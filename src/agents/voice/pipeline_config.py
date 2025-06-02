@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,7 +35,7 @@ class VoicePipelineConfig:
     or process. If not provided, we will create a random group ID.
     """
 
-    trace_metadata: dict[str, Any] | None = None
+    trace_metadata: typing.Dict[str, Any] | None = None
     """
     An optional dictionary of additional metadata to include with the trace.
     """

@@ -1,3 +1,5 @@
+import typing
+
 # Tests for the OpenAI text-to-speech model (OpenAITTSModel).
 
 from types import SimpleNamespace
@@ -14,7 +16,7 @@ except ImportError:
 class _FakeStreamResponse:
     """A minimal async context manager to simulate streaming audio bytes."""
 
-    def __init__(self, chunks: list[bytes]):
+    def __init__(self, chunks: typing.List[bytes]):
         self._chunks = chunks
 
     async def __aenter__(self) -> "_FakeStreamResponse":
@@ -41,10 +43,10 @@ def _make_fake_openai_client(fake_create) -> SimpleNamespace:
 async def test_openai_tts_default_voice_and_instructions() -> None:
     """If no voice is specified, OpenAITTSModel uses its default voice and passes instructions."""
     chunks = [b"abc", b"def"]
-    captured: dict[str, object] = {}
+    captured: typing.Dict[str, object] = {}
 
     def fake_create(
-        *, model: str, voice: str, input: str, response_format: str, extra_body: dict[str, Any]
+        *, model: str, voice: str, input: str, response_format: str, extra_body: typing.Dict[str, Any]
     ) -> _FakeStreamResponse:
         captured["model"] = model
         captured["voice"] = voice
@@ -56,7 +58,7 @@ async def test_openai_tts_default_voice_and_instructions() -> None:
     client = _make_fake_openai_client(fake_create)
     tts_model = OpenAITTSModel(model="test-model", openai_client=client)  # type: ignore[arg-type]
     settings = TTSModelSettings()
-    out: list[bytes] = []
+    out: typing.List[bytes] = []
     async for b in tts_model.run("hello world", settings):
         out.append(b)
     assert out == chunks
@@ -71,10 +73,10 @@ async def test_openai_tts_default_voice_and_instructions() -> None:
 async def test_openai_tts_custom_voice_and_instructions() -> None:
     """Specifying voice and instructions are forwarded to the API."""
     chunks = [b"x"]
-    captured: dict[str, object] = {}
+    captured: typing.Dict[str, object] = {}
 
     def fake_create(
-        *, model: str, voice: str, input: str, response_format: str, extra_body: dict[str, Any]
+        *, model: str, voice: str, input: str, response_format: str, extra_body: typing.Dict[str, Any]
     ) -> _FakeStreamResponse:
         captured["model"] = model
         captured["voice"] = voice
@@ -86,7 +88,7 @@ async def test_openai_tts_custom_voice_and_instructions() -> None:
     client = _make_fake_openai_client(fake_create)
     tts_model = OpenAITTSModel(model="my-model", openai_client=client)  # type: ignore[arg-type]
     settings = TTSModelSettings(voice="fable", instructions="Custom instructions")
-    out: list[bytes] = []
+    out: typing.List[bytes] = []
     async for b in tts_model.run("hi", settings):
         out.append(b)
     assert out == chunks

@@ -22,6 +22,7 @@ These tests exercise both conversion directions:
 """
 
 from __future__ import annotations
+import typing
 
 from typing import Literal, cast
 
@@ -124,7 +125,7 @@ def test_items_to_messages_with_easy_input_message():
     Given an easy input message dict (just role/content), the converter should
     produce the appropriate ChatCompletionMessageParam with the same content.
     """
-    items: list[TResponseInputItem] = [
+    items: typing.List[TResponseInputItem] = [
         {
             "role": "user",
             "content": "How are you?",
@@ -170,7 +171,7 @@ def test_items_to_messages_with_output_message_and_function_call():
         "arguments": "{}",
         "type": "function_call",
     }
-    items: list[TResponseInputItem] = [
+    items: typing.List[TResponseInputItem] = [
         resp_msg.model_dump(),  # type:ignore
         func_item,
     ]
@@ -287,12 +288,12 @@ def test_items_to_messages_handles_system_and_developer_roles():
     converted appropriately whether provided as simple dicts or as full
     `message` typed dicts.
     """
-    sys_items: list[TResponseInputItem] = [{"role": "system", "content": "setup"}]
+    sys_items: typing.List[TResponseInputItem] = [{"role": "system", "content": "setup"}]
     sys_msgs = Converter.items_to_messages(sys_items)
     assert len(sys_msgs) == 1
     assert sys_msgs[0]["role"] == "system"
     assert sys_msgs[0]["content"] == "setup"
-    dev_items: list[TResponseInputItem] = [{"role": "developer", "content": "debug"}]
+    dev_items: typing.List[TResponseInputItem] = [{"role": "developer", "content": "debug"}]
     dev_msgs = Converter.items_to_messages(dev_items)
     assert len(dev_msgs) == 1
     assert dev_msgs[0]["role"] == "developer"

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import time
@@ -71,11 +72,11 @@ class FinancialResearchManager:
         )
         return result.final_output_as(FinancialSearchPlan)
 
-    async def _perform_searches(self, search_plan: FinancialSearchPlan) -> Sequence[str]:
+    async def _perform_searches(self, search_plan: FinancialSearchPlan) -> typing.Sequence[str]:
         with custom_span("Search the web"):
             self.printer.update_item("searching", "Searching...")
             tasks = [asyncio.create_task(self._search(item)) for item in search_plan.searches]
-            results: list[str] = []
+            results: typing.List[str] = []
             num_completed = 0
             for task in asyncio.as_completed(tasks):
                 result = await task
@@ -96,7 +97,7 @@ class FinancialResearchManager:
         except Exception:
             return None
 
-    async def _write_report(self, query: str, search_results: Sequence[str]) -> FinancialReportData:
+    async def _write_report(self, query: str, search_results: typing.Sequence[str]) -> FinancialReportData:
         # Expose the specialist analysts as tools so the writer can invoke them inline
         # and still produce the final FinancialReportData output.
         fundamentals_tool = financials_agent.as_tool(

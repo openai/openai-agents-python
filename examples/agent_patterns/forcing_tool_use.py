@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 from typing import Any, Literal
@@ -49,7 +50,7 @@ def get_weather(city: str) -> Weather:
 
 
 async def custom_tool_use_behavior(
-    context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    context: RunContextWrapper[Any], results: typing.List[FunctionToolResult]
 ) -> ToolsToFinalOutputResult:
     weather: Weather = results[0].output
     return ToolsToFinalOutputResult(

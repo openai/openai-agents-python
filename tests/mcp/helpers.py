@@ -1,3 +1,5 @@
+import typing
+
 import json
 import shutil
 from typing import Any
@@ -29,12 +31,12 @@ class DummyStreamsContextManager:
 
 
 class FakeMCPServer(MCPServer):
-    def __init__(self, tools: list[MCPTool] | None = None):
-        self.tools: list[MCPTool] = tools or []
-        self.tool_calls: list[str] = []
-        self.tool_results: list[str] = []
+    def __init__(self, tools: typing.List[MCPTool] | None = None):
+        self.tools: typing.List[MCPTool] = tools or []
+        self.tool_calls: typing.List[str] = []
+        self.tool_results: typing.List[str] = []
 
-    def add_tool(self, name: str, input_schema: dict[str, Any]):
+    def add_tool(self, name: str, input_schema: typing.Dict[str, Any]):
         self.tools.append(MCPTool(name=name, inputSchema=input_schema))
 
     async def connect(self):
@@ -46,7 +48,7 @@ class FakeMCPServer(MCPServer):
     async def list_tools(self):
         return self.tools
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(self, tool_name: str, arguments: typing.Dict[str, Any] | None) -> CallToolResult:
         self.tool_calls.append(tool_name)
         self.tool_results.append(f"result_{tool_name}_{json.dumps(arguments)}")
         return CallToolResult(

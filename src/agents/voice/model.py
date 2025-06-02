@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 from collections.abc import AsyncIterator
@@ -50,7 +51,7 @@ class TTSModelSettings:
     audio output.
     """
 
-    text_splitter: Callable[[str], tuple[str, str]] = get_sentence_based_splitter()
+    text_splitter: Callable[[str], typing.Tuple[str, str]] = get_sentence_based_splitter()
     """
     A function to split the text into chunks. This is useful if you want to split the text into
     chunks before sending it to the TTS model rather than waiting for the whole text to be
@@ -71,7 +72,7 @@ class TTSModel(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+    def run(self, text: str, settings: TTSModelSettings) -> typing.AsyncIterator[bytes]:
         """Given a text string, produces a stream of audio bytes, in PCM format.
 
         Args:
@@ -87,7 +88,7 @@ class StreamedTranscriptionSession(abc.ABC):
     """A streamed transcription of audio input."""
 
     @abc.abstractmethod
-    def transcribe_turns(self) -> AsyncIterator[str]:
+    def transcribe_turns(self) -> typing.AsyncIterator[str]:
         """Yields a stream of text transcriptions. Each transcription is a turn in the conversation.
 
         This method is expected to return only after `close()` is called.
@@ -113,7 +114,7 @@ class STTModelSettings:
     temperature: float | None = None
     """The temperature of the model."""
 
-    turn_detection: dict[str, Any] | None = None
+    turn_detection: typing.Dict[str, Any] | None = None
     """The turn detection settings for the model when using streamed audio input."""
 
 

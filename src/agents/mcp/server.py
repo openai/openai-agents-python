@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 import asyncio
@@ -44,12 +45,12 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_tools(self) -> list[MCPTool]:
+    async def list_tools(self) -> typing.List[MCPTool]:
         """List the tools available on the server."""
         pass
 
     @abc.abstractmethod
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(self, tool_name: str, arguments: typing.Dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
         pass
 
@@ -79,13 +80,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
-        self._tools_list: list[MCPTool] | None = None
+        self._tools_list: typing.List[MCPTool] | None = None
 
     @abc.abstractmethod
     def create_streams(
         self,
     ) -> AbstractAsyncContextManager[
-        tuple[
+        typing.Tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
             GetSessionIdCallback | None,
@@ -131,7 +132,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             await self.cleanup()
             raise
 
-    async def list_tools(self) -> list[MCPTool]:
+    async def list_tools(self) -> typing.List[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
@@ -147,7 +148,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list = (await self.session.list_tools()).tools
         return self._tools_list
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(self, tool_name: str, arguments: typing.Dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
@@ -173,11 +174,11 @@ class MCPServerStdioParams(TypedDict):
     command: str
     """The executable to run to start the server. For example, `python` or `node`."""
 
-    args: NotRequired[list[str]]
+    args: NotRequired[typing.List[str]]
     """Command line args to pass to the `command` executable. For example, `['foo.py']` or
     `['server.js', '--port', '8080']`."""
 
-    env: NotRequired[dict[str, str]]
+    env: NotRequired[typing.Dict[str, str]]
     """The environment variables to set for the server. ."""
 
     cwd: NotRequired[str | Path]
@@ -240,7 +241,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
     def create_streams(
         self,
     ) -> AbstractAsyncContextManager[
-        tuple[
+        typing.Tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
             GetSessionIdCallback | None,
@@ -261,7 +262,7 @@ class MCPServerSseParams(TypedDict):
     url: str
     """The URL of the server."""
 
-    headers: NotRequired[dict[str, str]]
+    headers: NotRequired[typing.Dict[str, str]]
     """The headers to send to the server."""
 
     timeout: NotRequired[float]
@@ -311,7 +312,7 @@ class MCPServerSse(_MCPServerWithClientSession):
     def create_streams(
         self,
     ) -> AbstractAsyncContextManager[
-        tuple[
+        typing.Tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
             GetSessionIdCallback | None,
@@ -337,7 +338,7 @@ class MCPServerStreamableHttpParams(TypedDict):
     url: str
     """The URL of the server."""
 
-    headers: NotRequired[dict[str, str]]
+    headers: NotRequired[typing.Dict[str, str]]
     """The headers to send to the server."""
 
     timeout: NotRequired[timedelta]
@@ -391,7 +392,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
     def create_streams(
         self,
     ) -> AbstractAsyncContextManager[
-        tuple[
+        typing.Tuple[
             MemoryObjectReceiveStream[SessionMessage | Exception],
             MemoryObjectSendStream[SessionMessage],
             GetSessionIdCallback | None,

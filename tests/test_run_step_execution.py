@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from typing import Any
 
@@ -279,8 +280,8 @@ async def get_execute_result(
     agent: Agent[Any],
     response: ModelResponse,
     *,
-    original_input: str | list[TResponseInputItem] | None = None,
-    generated_items: list[RunItem] | None = None,
+    original_input: str | typing.List[TResponseInputItem] | None = None,
+    generated_items: typing.List[RunItem] | None = None,
     hooks: RunHooks[Any] | None = None,
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from typing import Any
 
@@ -24,7 +25,7 @@ async def run_demo_loop(agent: Agent[Any], *, stream: bool = True) -> None:
     """
 
     current_agent = agent
-    input_items: list[TResponseInputItem] = []
+    input_items: typing.List[TResponseInputItem] = []
     while True:
         try:
             user_input = input(" > ")

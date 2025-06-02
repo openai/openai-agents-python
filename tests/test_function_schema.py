@@ -1,3 +1,5 @@
+import typing
+
 from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal
@@ -402,7 +404,7 @@ def test_run_context_in_non_first_position_raises_value_error():
 def test_var_positional_tuple_annotation():
     # When a function has a var-positional parameter annotated with a tuple type,
     # function_schema() should convert it into a field with type List[<tuple-element>].
-    def func(*args: tuple[int, ...]) -> int:
+    def func(*args: typing.Tuple[int, ...]) -> int:
         total = 0
         for arg in args:
             total += sum(arg)
@@ -419,7 +421,7 @@ def test_var_keyword_dict_annotation():
     # Case 3:
     # When a function has a var-keyword parameter annotated with a dict type,
     # function_schema() should convert it into a field with type Dict[<key>, <value>].
-    def func(**kwargs: dict[str, int]):
+    def func(**kwargs: typing.Dict[str, int]):
         return kwargs
 
     fs = function_schema(func, use_docstring_info=False, strict_json_schema=False)
@@ -434,7 +436,7 @@ def test_var_keyword_dict_annotation():
 def test_schema_with_mapping_raises_strict_mode_error():
     """A mapping type is not allowed in strict mode. Same for dicts. Ensure we raise a UserError."""
 
-    def func_with_mapping(test_one: Mapping[str, int]) -> str:
+    def func_with_mapping(test_one: typing.Mapping[str, int]) -> str:
         return "foo"
 
     with pytest.raises(UserError):

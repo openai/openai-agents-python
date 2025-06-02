@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import json
@@ -508,7 +509,7 @@ async def test_max_turns_exceeded():
 
 
 def input_guardrail_function(
-    context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    context: RunContextWrapper[Any], agent: Agent[Any], input: str | typing.List[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
     return GuardrailFunctionOutput(
         output_info=None,

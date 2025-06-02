@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import copy
@@ -71,10 +72,10 @@ class RunConfig:
     agent. See the documentation in `Handoff.input_filter` for more details.
     """
 
-    input_guardrails: list[InputGuardrail[Any]] | None = None
+    input_guardrails: typing.List[InputGuardrail[Any]] | None = None
     """A list of input guardrails to run on the initial run input."""
 
-    output_guardrails: list[OutputGuardrail[Any]] | None = None
+    output_guardrails: typing.List[OutputGuardrail[Any]] | None = None
     """A list of output guardrails to run on the final output of the run."""
 
     tracing_disabled: bool = False
@@ -101,7 +102,7 @@ class RunConfig:
     or process. For example, you might use a chat thread ID.
     """
 
-    trace_metadata: dict[str, Any] | None = None
+    trace_metadata: typing.Dict[str, Any] | None = None
     """
     An optional dictionary of additional metadata to include with the trace.
     """
@@ -112,7 +113,7 @@ class Runner:
     async def run(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -165,15 +166,15 @@ class Runner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(input)
-            generated_items: list[RunItem] = []
-            model_responses: list[ModelResponse] = []
+            original_input: str | typing.List[TResponseInputItem] = copy.deepcopy(input)
+            generated_items: typing.List[RunItem] = []
+            model_responses: typing.List[ModelResponse] = []
 
             context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
                 context=context,  # type: ignore
             )
 
-            input_guardrail_results: list[InputGuardrailResult] = []
+            input_guardrail_results: typing.List[InputGuardrailResult] = []
 
             current_span: Span[AgentSpanData] | None = None
             current_agent = starting_agent
@@ -303,7 +304,7 @@ class Runner:
     def run_sync(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -361,7 +362,7 @@ class Runner:
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
@@ -458,8 +459,8 @@ class Runner:
     async def _run_input_guardrails_with_queue(
         cls,
         agent: Agent[Any],
-        guardrails: list[InputGuardrail[TContext]],
-        input: str | list[TResponseInputItem],
+        guardrails: typing.List[InputGuardrail[TContext]],
+        input: str | typing.List[TResponseInputItem],
         context: RunContextWrapper[TContext],
         streamed_result: RunResultStreaming,
         parent_span: Span[Any],
@@ -500,7 +501,7 @@ class Runner:
     @classmethod
     async def _run_streamed_impl(
         cls,
-        starting_input: str | list[TResponseInputItem],
+        starting_input: str | typing.List[TResponseInputItem],
         streamed_result: RunResultStreaming,
         starting_agent: Agent[TContext],
         max_turns: int,
@@ -664,7 +665,7 @@ class Runner:
         run_config: RunConfig,
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
-        all_tools: list[Tool],
+        all_tools: typing.List[Tool],
         previous_response_id: str | None,
     ) -> SingleStepResult:
         if should_run_agent_start_hooks:
@@ -756,9 +757,9 @@ class Runner:
         cls,
         *,
         agent: Agent[TContext],
-        all_tools: list[Tool],
-        original_input: str | list[TResponseInputItem],
-        generated_items: list[RunItem],
+        all_tools: typing.List[Tool],
+        original_input: str | typing.List[TResponseInputItem],
+        generated_items: typing.List[RunItem],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
@@ -816,12 +817,12 @@ class Runner:
         cls,
         *,
         agent: Agent[TContext],
-        all_tools: list[Tool],
-        original_input: str | list[TResponseInputItem],
-        pre_step_items: list[RunItem],
+        all_tools: typing.List[Tool],
+        original_input: str | typing.List[TResponseInputItem],
+        pre_step_items: typing.List[RunItem],
         new_response: ModelResponse,
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
@@ -853,10 +854,10 @@ class Runner:
     async def _run_input_guardrails(
         cls,
         agent: Agent[Any],
-        guardrails: list[InputGuardrail[TContext]],
-        input: str | list[TResponseInputItem],
+        guardrails: typing.List[InputGuardrail[TContext]],
+        input: str | typing.List[TResponseInputItem],
         context: RunContextWrapper[TContext],
-    ) -> list[InputGuardrailResult]:
+    ) -> typing.List[InputGuardrailResult]:
         if not guardrails:
             return []
 
@@ -890,11 +891,11 @@ class Runner:
     @classmethod
     async def _run_output_guardrails(
         cls,
-        guardrails: list[OutputGuardrail[TContext]],
+        guardrails: typing.List[OutputGuardrail[TContext]],
         agent: Agent[TContext],
         agent_output: Any,
         context: RunContextWrapper[TContext],
-    ) -> list[OutputGuardrailResult]:
+    ) -> typing.List[OutputGuardrailResult]:
         if not guardrails:
             return []
 
@@ -930,10 +931,10 @@ class Runner:
         cls,
         agent: Agent[TContext],
         system_prompt: str | None,
-        input: list[TResponseInputItem],
+        input: typing.List[TResponseInputItem],
         output_schema: AgentOutputSchemaBase | None,
-        all_tools: list[Tool],
-        handoffs: list[Handoff],
+        all_tools: typing.List[Tool],
+        handoffs: typing.List[Handoff],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
@@ -970,7 +971,7 @@ class Runner:
         return AgentOutputSchema(agent.output_type)
 
     @classmethod
-    def _get_handoffs(cls, agent: Agent[Any]) -> list[Handoff]:
+    def _get_handoffs(cls, agent: Agent[Any]) -> typing.List[Handoff]:
         handoffs = []
         for handoff_item in agent.handoffs:
             if isinstance(handoff_item, Handoff):
@@ -982,7 +983,7 @@ class Runner:
     @classmethod
     async def _get_all_tools(
         cls, agent: Agent[Any], context_wrapper: RunContextWrapper[Any]
-    ) -> list[Tool]:
+    ) -> typing.List[Tool]:
         return await agent.get_all_tools(context_wrapper)
 
     @classmethod

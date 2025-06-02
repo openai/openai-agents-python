@@ -1,3 +1,5 @@
+import typing
+
 import asyncio
 import base64
 from typing import Literal, Union
@@ -73,7 +75,7 @@ class LocalPlaywrightComputer(AsyncComputer):
         self._browser: Union[Browser, None] = None
         self._page: Union[Page, None] = None
 
-    async def _get_browser_and_page(self) -> tuple[Browser, Page]:
+    async def _get_browser_and_page(self) -> typing.Tuple[Browser, Page]:
         width, height = self.dimensions
         launch_args = [f"--window-size={width},{height}"]
         browser = await self.playwright.chromium.launch(headless=False, args=launch_args)
@@ -114,7 +116,7 @@ class LocalPlaywrightComputer(AsyncComputer):
         return "browser"
 
     @property
-    def dimensions(self) -> tuple[int, int]:
+    def dimensions(self) -> typing.Tuple[int, int]:
         return (1024, 768)
 
     async def screenshot(self) -> str:
@@ -147,14 +149,14 @@ class LocalPlaywrightComputer(AsyncComputer):
     async def move(self, x: int, y: int) -> None:
         await self.page.mouse.move(x, y)
 
-    async def keypress(self, keys: list[str]) -> None:
+    async def keypress(self, keys: typing.List[str]) -> None:
         mapped_keys = [CUA_KEY_TO_PLAYWRIGHT_KEY.get(key.lower(), key) for key in keys]
         for key in mapped_keys:
             await self.page.keyboard.down(key)
         for key in reversed(mapped_keys):
             await self.page.keyboard.up(key)
 
-    async def drag(self, path: list[tuple[int, int]]) -> None:
+    async def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         if not path:
             return
         await self.page.mouse.move(path[0][0], path[0][1])

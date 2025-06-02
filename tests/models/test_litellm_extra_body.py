@@ -1,3 +1,5 @@
+import typing
+
 import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
@@ -16,7 +18,7 @@ async def test_extra_body_is_forwarded(monkeypatch):
     This ensures that user-provided parameters (e.g. cached_content)
     arrive alongside default arguments.
     """
-    captured: dict[str, object] = {}
+    captured: typing.Dict[str, object] = {}
 
     async def fake_acompletion(model, messages=None, **kwargs):
         captured.update(kwargs)

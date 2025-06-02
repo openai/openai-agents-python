@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import base64
@@ -17,7 +18,7 @@ def _buffer_to_audio_file(
     frame_rate: int = DEFAULT_SAMPLE_RATE,
     sample_width: int = 2,
     channels: int = 1,
-) -> tuple[str, io.BytesIO, str]:
+) -> typing.Tuple[str, io.BytesIO, str]:
     if buffer.dtype == np.float32:
         # convert to int16
         buffer = np.clip(buffer, -1.0, 1.0)
@@ -55,7 +56,7 @@ class AudioInput:
     channels: int = 1
     """The number of channels in the audio data. Defaults to 1."""
 
-    def to_audio_file(self) -> tuple[str, io.BytesIO, str]:
+    def to_audio_file(self) -> typing.Tuple[str, io.BytesIO, str]:
         """Returns a tuple of (filename, bytes, content_type)"""
         return _buffer_to_audio_file(self.buffer, self.frame_rate, self.sample_width, self.channels)
 

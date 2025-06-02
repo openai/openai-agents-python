@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 import enum
@@ -38,11 +39,11 @@ class Model(abc.ABC):
     async def get_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
@@ -69,15 +70,15 @@ class Model(abc.ABC):
     def stream_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> typing.AsyncIterator[TResponseStreamEvent]:
         """Stream a response from the model.
 
         Args:

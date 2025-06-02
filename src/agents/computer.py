@@ -1,3 +1,5 @@
+import typing
+
 import abc
 from typing import Literal
 
@@ -16,7 +18,7 @@ class Computer(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
+    def dimensions(self) -> typing.Tuple[int, int]:
         pass
 
     @abc.abstractmethod
@@ -48,11 +50,11 @@ class Computer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def keypress(self, keys: list[str]) -> None:
+    def keypress(self, keys: typing.List[str]) -> None:
         pass
 
     @abc.abstractmethod
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         pass
 
 
@@ -67,7 +69,7 @@ class AsyncComputer(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def dimensions(self) -> tuple[int, int]:
+    def dimensions(self) -> typing.Tuple[int, int]:
         pass
 
     @abc.abstractmethod
@@ -99,9 +101,9 @@ class AsyncComputer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def keypress(self, keys: list[str]) -> None:
+    async def keypress(self, keys: typing.List[str]) -> None:
         pass
 
     @abc.abstractmethod
-    async def drag(self, path: list[tuple[int, int]]) -> None:
+    async def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         pass

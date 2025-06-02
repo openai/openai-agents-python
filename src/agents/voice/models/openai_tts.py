@@ -1,3 +1,5 @@
+import typing
+
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -29,7 +31,7 @@ class OpenAITTSModel(TTSModel):
     def model_name(self) -> str:
         return self.model
 
-    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+    async def run(self, text: str, settings: TTSModelSettings) -> typing.AsyncIterator[bytes]:
         """Run the text-to-speech model.
 
         Args:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import time
@@ -62,7 +63,7 @@ class ResearchManager:
         )
         return result.final_output_as(WebSearchPlan)
 
-    async def _perform_searches(self, search_plan: WebSearchPlan) -> list[str]:
+    async def _perform_searches(self, search_plan: WebSearchPlan) -> typing.List[str]:
         with custom_span("Search the web"):
             self.printer.update_item("searching", "Searching...")
             num_completed = 0
@@ -90,7 +91,7 @@ class ResearchManager:
         except Exception:
             return None
 
-    async def _write_report(self, query: str, search_results: list[str]) -> ReportData:
+    async def _write_report(self, query: str, search_results: typing.List[str]) -> ReportData:
         self.printer.update_item("writing", "Thinking about report...")
         input = f"Original query: {query}\nSummarized search results: {search_results}"
         result = Runner.run_streamed(

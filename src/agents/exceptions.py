@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -16,13 +17,13 @@ from .util._pretty_print import pretty_print_run_error_details
 class RunErrorDetails:
     """Data collected from an agent run when an exception occurs."""
 
-    input: str | list[TResponseInputItem]
-    new_items: list[RunItem]
-    raw_responses: list[ModelResponse]
+    input: str | typing.List[TResponseInputItem]
+    new_items: typing.List[RunItem]
+    raw_responses: typing.List[ModelResponse]
     last_agent: Agent[Any]
     context_wrapper: RunContextWrapper[Any]
-    input_guardrail_results: list[InputGuardrailResult]
-    output_guardrail_results: list[OutputGuardrailResult]
+    input_guardrail_results: typing.List[InputGuardrailResult]
+    output_guardrail_results: typing.List[OutputGuardrailResult]
 
     def __str__(self) -> str:
         return pretty_print_run_error_details(self)

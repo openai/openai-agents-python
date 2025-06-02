@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 from collections.abc import Mapping, Sequence
@@ -14,7 +15,7 @@ class SpanData(abc.ABC):
     """
 
     @abc.abstractmethod
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         """Export the span data as a dictionary."""
         pass
 
@@ -36,20 +37,20 @@ class AgentSpanData(SpanData):
     def __init__(
         self,
         name: str,
-        handoffs: list[str] | None = None,
-        tools: list[str] | None = None,
+        handoffs: typing.List[str] | None = None,
+        tools: typing.List[str] | None = None,
         output_type: str | None = None,
     ):
         self.name = name
-        self.handoffs: list[str] | None = handoffs
-        self.tools: list[str] | None = tools
+        self.handoffs: typing.List[str] | None = handoffs
+        self.tools: typing.List[str] | None = tools
         self.output_type: str | None = output_type
 
     @property
     def type(self) -> str:
         return "agent"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "name": self.name,
@@ -72,7 +73,7 @@ class FunctionSpanData(SpanData):
         name: str,
         input: str | None,
         output: Any | None,
-        mcp_data: dict[str, Any] | None = None,
+        mcp_data: typing.Dict[str, Any] | None = None,
     ):
         self.name = name
         self.input = input
@@ -83,7 +84,7 @@ class FunctionSpanData(SpanData):
     def type(self) -> str:
         return "function"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "name": self.name,
@@ -109,11 +110,11 @@ class GenerationSpanData(SpanData):
 
     def __init__(
         self,
-        input: Sequence[Mapping[str, Any]] | None = None,
-        output: Sequence[Mapping[str, Any]] | None = None,
+        input: typing.Sequence[typing.Mapping[str, Any]] | None = None,
+        output: typing.Sequence[typing.Mapping[str, Any]] | None = None,
         model: str | None = None,
-        model_config: Mapping[str, Any] | None = None,
-        usage: dict[str, Any] | None = None,
+        model_config: typing.Mapping[str, Any] | None = None,
+        usage: typing.Dict[str, Any] | None = None,
     ):
         self.input = input
         self.output = output
@@ -125,7 +126,7 @@ class GenerationSpanData(SpanData):
     def type(self) -> str:
         return "generation"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "input": self.input,
@@ -147,7 +148,7 @@ class ResponseSpanData(SpanData):
     def __init__(
         self,
         response: Response | None = None,
-        input: str | list[ResponseInputItemParam] | None = None,
+        input: str | typing.List[ResponseInputItemParam] | None = None,
     ) -> None:
         self.response = response
         # This is not used by the OpenAI trace processors, but is useful for other tracing
@@ -158,7 +159,7 @@ class ResponseSpanData(SpanData):
     def type(self) -> str:
         return "response"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "response_id": self.response.id if self.response else None,
@@ -181,7 +182,7 @@ class HandoffSpanData(SpanData):
     def type(self) -> str:
         return "handoff"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "from_agent": self.from_agent,
@@ -197,7 +198,7 @@ class CustomSpanData(SpanData):
 
     __slots__ = ("name", "data")
 
-    def __init__(self, name: str, data: dict[str, Any]):
+    def __init__(self, name: str, data: typing.Dict[str, Any]):
         self.name = name
         self.data = data
 
@@ -205,7 +206,7 @@ class CustomSpanData(SpanData):
     def type(self) -> str:
         return "custom"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "name": self.name,
@@ -229,7 +230,7 @@ class GuardrailSpanData(SpanData):
     def type(self) -> str:
         return "guardrail"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "name": self.name,
@@ -256,7 +257,7 @@ class TranscriptionSpanData(SpanData):
         input_format: str | None = "pcm",
         output: str | None = None,
         model: str | None = None,
-        model_config: Mapping[str, Any] | None = None,
+        model_config: typing.Mapping[str, Any] | None = None,
     ):
         self.input = input
         self.input_format = input_format
@@ -268,7 +269,7 @@ class TranscriptionSpanData(SpanData):
     def type(self) -> str:
         return "transcription"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "input": {
@@ -295,7 +296,7 @@ class SpeechSpanData(SpanData):
         output: str | None = None,
         output_format: str | None = "pcm",
         model: str | None = None,
-        model_config: Mapping[str, Any] | None = None,
+        model_config: typing.Mapping[str, Any] | None = None,
         first_content_at: str | None = None,
     ):
         self.input = input
@@ -309,7 +310,7 @@ class SpeechSpanData(SpanData):
     def type(self) -> str:
         return "speech"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "input": self.input,
@@ -340,7 +341,7 @@ class SpeechGroupSpanData(SpanData):
     def type(self) -> str:
         return "speech_group"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "input": self.input,
@@ -358,7 +359,7 @@ class MCPListToolsSpanData(SpanData):
         "result",
     )
 
-    def __init__(self, server: str | None = None, result: list[str] | None = None):
+    def __init__(self, server: str | None = None, result: typing.List[str] | None = None):
         self.server = server
         self.result = result
 
@@ -366,7 +367,7 @@ class MCPListToolsSpanData(SpanData):
     def type(self) -> str:
         return "mcp_tools"
 
-    def export(self) -> dict[str, Any]:
+    def export(self) -> typing.Dict[str, Any]:
         return {
             "type": self.type,
             "server": self.server,

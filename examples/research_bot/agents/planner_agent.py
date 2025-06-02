@@ -1,3 +1,5 @@
+import typing
+
 from pydantic import BaseModel
 
 from agents import Agent
@@ -17,7 +19,7 @@ class WebSearchItem(BaseModel):
 
 
 class WebSearchPlan(BaseModel):
-    searches: list[WebSearchItem]
+    searches: typing.List[WebSearchItem]
     """A list of web searches to perform to best answer the query."""
 
 

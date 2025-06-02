@@ -1,3 +1,5 @@
+import typing
+
 import functools
 import json
 from typing import TYPE_CHECKING, Any
@@ -22,11 +24,11 @@ class MCPUtil:
 
     @classmethod
     async def get_all_function_tools(
-        cls, servers: list["MCPServer"], convert_schemas_to_strict: bool
-    ) -> list[Tool]:
+        cls, servers: typing.List["MCPServer"], convert_schemas_to_strict: bool
+    ) -> typing.List[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
-        tool_names: set[str] = set()
+        tool_names: typing.Set[str] = set()
         for server in servers:
             server_tools = await cls.get_function_tools(server, convert_schemas_to_strict)
             server_tool_names = {tool.name for tool in server_tools}
@@ -43,7 +45,7 @@ class MCPUtil:
     @classmethod
     async def get_function_tools(
         cls, server: "MCPServer", convert_schemas_to_strict: bool
-    ) -> list[Tool]:
+    ) -> typing.List[Tool]:
         """Get all function tools from a single MCP server."""
 
         with mcp_tools_span(server=server.name) as span:
@@ -85,7 +87,7 @@ class MCPUtil:
     ) -> str:
         """Invoke an MCP tool and return the result as a string."""
         try:
-            json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
+            json_data: typing.Dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Invalid JSON input for tool {tool.name}")

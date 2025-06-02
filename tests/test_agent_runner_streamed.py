@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import json
 from typing import Any
@@ -634,9 +635,9 @@ async def test_streaming_events():
     )
 
     # event_type: (count, event)
-    event_counts: dict[str, int] = {}
-    item_data: list[RunItem] = []
-    agent_data: list[AgentUpdatedStreamEvent] = []
+    event_counts: typing.Dict[str, int] = {}
+    item_data: typing.List[RunItem] = []
+    agent_data: typing.List[AgentUpdatedStreamEvent] = []
 
     result = Runner.run_streamed(
         agent_2,
@@ -691,7 +692,7 @@ async def test_streaming_events():
 async def test_dynamic_tool_addition_run_streamed() -> None:
     model = FakeModel()
 
-    executed: dict[str, bool] = {"called": False}
+    executed: typing.Dict[str, bool] = {"called": False}
 
     agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
 

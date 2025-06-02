@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import inspect
 from collections.abc import Awaitable
@@ -83,7 +84,7 @@ class InputGuardrail(Generic[TContext]):
     """
 
     guardrail_function: Callable[
-        [RunContextWrapper[TContext], Agent[Any], str | list[TResponseInputItem]],
+        [RunContextWrapper[TContext], Agent[Any], str | typing.List[TResponseInputItem]],
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
     """A function that receives the agent input and the context, and returns a
@@ -105,7 +106,7 @@ class InputGuardrail(Generic[TContext]):
     async def run(
         self,
         agent: Agent[Any],
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         context: RunContextWrapper[TContext],
     ) -> InputGuardrailResult:
         if not callable(self.guardrail_function):
@@ -183,12 +184,12 @@ TContext_co = TypeVar("TContext_co", bound=Any, covariant=True)
 
 # For InputGuardrail
 _InputGuardrailFuncSync = Callable[
-    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, list[TResponseInputItem]]],
+    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, typing.List[TResponseInputItem]]],
     GuardrailFunctionOutput,
 ]
 _InputGuardrailFuncAsync = Callable[
-    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, list[TResponseInputItem]]],
-    Awaitable[GuardrailFunctionOutput],
+    [RunContextWrapper[TContext_co], "Agent[Any]", Union[str, typing.List[TResponseInputItem]]],
+    typing.Awaitable[GuardrailFunctionOutput],
 ]
 
 
@@ -257,7 +258,7 @@ _OutputGuardrailFuncSync = Callable[
 ]
 _OutputGuardrailFuncAsync = Callable[
     [RunContextWrapper[TContext_co], "Agent[Any]", Any],
-    Awaitable[GuardrailFunctionOutput],
+    typing.Awaitable[GuardrailFunctionOutput],
 ]
 
 

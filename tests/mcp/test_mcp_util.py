@@ -1,3 +1,5 @@
+import typing
+
 import logging
 from typing import Any
 
@@ -19,13 +21,13 @@ class Foo(BaseModel):
 
 
 class Bar(BaseModel):
-    qux: dict[str, str]
+    qux: typing.Dict[str, str]
 
 
-Baz = TypeAdapter(dict[str, str])
+Baz = TypeAdapter(typing.Dict[str, str])
 
 
-def _convertible_schema() -> dict[str, Any]:
+def _convertible_schema() -> typing.Dict[str, Any]:
     schema = Foo.model_json_schema()
     schema["additionalProperties"] = False
     return schema
@@ -56,7 +58,7 @@ async def test_get_all_function_tools():
     server3 = FakeMCPServer()
     server3.add_tool(names[4], schemas[4])
 
-    servers: list[MCPServer] = [server1, server2, server3]
+    servers: typing.List[MCPServer] = [server1, server2, server3]
     tools = await MCPUtil.get_all_function_tools(servers, convert_schemas_to_strict=False)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
@@ -106,7 +108,7 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
 
 
 class CrashingFakeMCPServer(FakeMCPServer):
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+    async def call_tool(self, tool_name: str, arguments: typing.Dict[str, Any] | None):
         raise Exception("Crash!")
 
 

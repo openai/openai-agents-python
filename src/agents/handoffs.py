@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import inspect
 from collections.abc import Awaitable
@@ -28,17 +29,17 @@ OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
 
 @dataclass(frozen=True)
 class HandoffInputData:
-    input_history: str | tuple[TResponseInputItem, ...]
+    input_history: str | typing.Tuple[TResponseInputItem, ...]
     """
     The input history before `Runner.run()` was called.
     """
 
-    pre_handoff_items: tuple[RunItem, ...]
+    pre_handoff_items: typing.Tuple[RunItem, ...]
     """
     The items generated before the agent turn where the handoff was invoked.
     """
 
-    new_items: tuple[RunItem, ...]
+    new_items: typing.Tuple[RunItem, ...]
     """
     The new items generated during the current agent turn, including the item that triggered the
     handoff and the tool output message representing the response from the handoff output.
@@ -63,11 +64,11 @@ class Handoff(Generic[TContext]):
     tool_description: str
     """The description of the tool that represents the handoff."""
 
-    input_json_schema: dict[str, Any]
+    input_json_schema: typing.Dict[str, Any]
     """The JSON schema for the handoff input. Can be empty if the handoff does not take an input.
     """
 
-    on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[Agent[TContext]]]
+    on_invoke_handoff: Callable[[RunContextWrapper[Any], str], typing.Awaitable[Agent[TContext]]]
     """The function that invokes the handoff. The parameters passed are:
     1. The handoff run context
     2. The arguments from the LLM, as a JSON string. Empty string if input_json_schema is empty.
@@ -129,7 +130,7 @@ def handoff(
     agent: Agent[TContext],
     *,
     on_handoff: OnHandoffWithInput[THandoffInput],
-    input_type: type[THandoffInput],
+    input_type: typing.Type[THandoffInput],
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
@@ -152,7 +153,7 @@ def handoff(
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
-    input_type: type[THandoffInput] | None = None,
+    input_type: typing.Type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
 ) -> Handoff[TContext]:
     """Create a handoff from an agent.

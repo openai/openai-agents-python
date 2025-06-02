@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from typing import Any
 
@@ -16,8 +17,8 @@ _EMPTY_SCHEMA = {
 
 
 def ensure_strict_json_schema(
-    schema: dict[str, Any],
-) -> dict[str, Any]:
+    schema: typing.Dict[str, Any],
+) -> typing.Dict[str, Any]:
     """Mutates the given JSON schema to ensure it conforms to the `strict` standard
     that the OpenAI API expects.
     """
@@ -30,9 +31,9 @@ def ensure_strict_json_schema(
 def _ensure_strict_json_schema(
     json_schema: object,
     *,
-    path: tuple[str, ...],
-    root: dict[str, object],
-) -> dict[str, Any]:
+    path: typing.Tuple[str, ...],
+    root: typing.Dict[str, object],
+) -> typing.Dict[str, Any]:
     if not is_dict(json_schema):
         raise TypeError(f"Expected {json_schema} to be a dictionary; path={path}")
 
@@ -132,7 +133,7 @@ def _ensure_strict_json_schema(
     return json_schema
 
 
-def resolve_ref(*, root: dict[str, object], ref: str) -> object:
+def resolve_ref(*, root: typing.Dict[str, object], ref: str) -> object:
     if not ref.startswith("#/"):
         raise ValueError(f"Unexpected $ref format {ref!r}; Does not start with #/")
 
@@ -148,17 +149,17 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     return resolved
 
 
-def is_dict(obj: object) -> TypeGuard[dict[str, object]]:
+def is_dict(obj: object) -> TypeGuard[typing.Dict[str, object]]:
     # just pretend that we know there are only `str` keys
     # as that check is not worth the performance cost
     return isinstance(obj, dict)
 
 
-def is_list(obj: object) -> TypeGuard[list[object]]:
+def is_list(obj: object) -> TypeGuard[typing.List[object]]:
     return isinstance(obj, list)
 
 
-def has_more_than_n_keys(obj: dict[str, object], n: int) -> bool:
+def has_more_than_n_keys(obj: typing.Dict[str, object], n: int) -> bool:
     i = 0
     for _ in obj.keys():
         i += 1

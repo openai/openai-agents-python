@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -33,9 +34,9 @@ from .fake_id import FAKE_RESPONSES_ID
 @dataclass
 class StreamingState:
     started: bool = False
-    text_content_index_and_output: tuple[int, ResponseOutputText] | None = None
-    refusal_content_index_and_output: tuple[int, ResponseOutputRefusal] | None = None
-    function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
+    text_content_index_and_output: typing.Tuple[int, ResponseOutputText] | None = None
+    refusal_content_index_and_output: typing.Tuple[int, ResponseOutputRefusal] | None = None
+    function_calls: typing.Dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
 
 
 class SequenceNumber:
@@ -54,7 +55,7 @@ class ChatCmplStreamHandler:
         cls,
         response: Response,
         stream: AsyncStream[ChatCompletionChunk],
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> typing.AsyncIterator[TResponseStreamEvent]:
         usage: CompletionUsage | None = None
         state = StreamingState()
         sequence_number = SequenceNumber()
@@ -260,7 +261,7 @@ class ChatCmplStreamHandler:
             )
 
         # Finally, send the Response completed event
-        outputs: list[ResponseOutputItem] = []
+        outputs: typing.List[ResponseOutputItem] = []
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
                 id=FAKE_RESPONSES_ID,

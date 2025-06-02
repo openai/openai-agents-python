@@ -1,3 +1,5 @@
+import typing
+
 import asyncio
 import json
 from typing import Any, Optional
@@ -188,7 +190,7 @@ async def test_all_optional_params_function():
 
     assert tool.params_json_schema.get("required") is None, "required should be empty"
 
-    input_data: dict[str, Any] = {}
+    input_data: typing.Dict[str, Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "42_hello_no_z"
 

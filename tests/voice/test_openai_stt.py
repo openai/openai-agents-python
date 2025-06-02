@@ -1,3 +1,5 @@
+import typing
+
 # test_openai_stt_transcription_session.py
 
 import asyncio
@@ -21,7 +23,7 @@ except ImportError:
 # ===== Helpers =====
 
 
-def create_mock_websocket(messages: list[str]) -> AsyncMock:
+def create_mock_websocket(messages: typing.List[str]) -> AsyncMock:
     """
     Creates a mock websocket (AsyncMock) that will return the provided incoming_messages
     from __aiter__() as if they came from the server.
@@ -355,7 +357,7 @@ async def test_inactivity_timeout():
             trace_include_sensitive_audio_data=False,
         )
 
-        collected_turns: list[str] = []
+        collected_turns: typing.List[str] = []
         with pytest.raises(STTWebsocketConnectionError) as exc_info:
             async for turn in session.transcribe_turns():
                 collected_turns.append(turn)

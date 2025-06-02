@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import os
 import queue
@@ -19,7 +20,7 @@ from .traces import Trace
 class ConsoleSpanExporter(TracingExporter):
     """Prints the traces and spans to the console."""
 
-    def export(self, items: list[Trace | Span[Any]]) -> None:
+    def export(self, items: typing.List[Trace | Span[Any]]) -> None:
         for item in items:
             if isinstance(item, Trace):
                 print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}, ")
@@ -85,7 +86,7 @@ class BackendSpanExporter(TracingExporter):
     def project(self):
         return self._project or os.environ.get("OPENAI_PROJECT_ID")
 
-    def export(self, items: list[Trace | Span[Any]]) -> None:
+    def export(self, items: typing.List[Trace | Span[Any]]) -> None:
         if not items:
             return
 
@@ -273,7 +274,7 @@ class BatchTraceProcessor(TracingProcessor):
         certain threshold.
         """
         while True:
-            items_to_export: list[Span[Any] | Trace] = []
+            items_to_export: typing.List[Span[Any] | Trace] = []
 
             # Gather a batch of spans up to max_batch_size
             while not self._queue.empty() and (

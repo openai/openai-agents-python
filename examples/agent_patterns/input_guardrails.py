@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 
@@ -43,7 +44,7 @@ guardrail_agent = Agent(
 
 @input_guardrail
 async def math_guardrail(
-    context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+    context: RunContextWrapper[None], agent: Agent, input: str | typing.List[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
     """This is an input guardrail function, which happens to call an agent to check if the input
     is a math homework question.
@@ -67,7 +68,7 @@ async def main():
         input_guardrails=[math_guardrail],
     )
 
-    input_data: list[TResponseInputItem] = []
+    input_data: typing.List[TResponseInputItem] = []
 
     while True:
         user_input = input("Enter a message: ")

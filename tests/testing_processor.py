@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import threading
 from datetime import datetime
@@ -18,9 +19,9 @@ class SpanProcessorForTests(TracingProcessor):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # Dictionary of trace_id -> list of spans
-        self._spans: list[Span[Any]] = []
-        self._traces: list[Trace] = []
-        self._events: list[TestSpanProcessorEvent] = []
+        self._spans: typing.List[Span[Any]] = []
+        self._traces: typing.List[Trace] = []
+        self._events: typing.List[TestSpanProcessorEvent] = []
 
     def on_trace_start(self, trace: Trace) -> None:
         with self._lock:
@@ -42,12 +43,12 @@ class SpanProcessorForTests(TracingProcessor):
             self._events.append("span_end")
             self._spans.append(span)
 
-    def get_ordered_spans(self, including_empty: bool = False) -> list[Span[Any]]:
+    def get_ordered_spans(self, including_empty: bool = False) -> typing.List[Span[Any]]:
         with self._lock:
             spans = [x for x in self._spans if including_empty or x.export()]
             return sorted(spans, key=lambda x: x.started_at or 0)
 
-    def get_traces(self, including_empty: bool = False) -> list[Trace]:
+    def get_traces(self, including_empty: bool = False) -> typing.List[Trace]:
         with self._lock:
             traces = [x for x in self._traces if including_empty or x.export()]
             return traces
@@ -68,15 +69,15 @@ class SpanProcessorForTests(TracingProcessor):
 SPAN_PROCESSOR_TESTING = SpanProcessorForTests()
 
 
-def fetch_ordered_spans() -> list[Span[Any]]:
+def fetch_ordered_spans() -> typing.List[Span[Any]]:
     return SPAN_PROCESSOR_TESTING.get_ordered_spans()
 
 
-def fetch_traces() -> list[Trace]:
+def fetch_traces() -> typing.List[Trace]:
     return SPAN_PROCESSOR_TESTING.get_traces()
 
 
-def fetch_events() -> list[TestSpanProcessorEvent]:
+def fetch_events() -> typing.List[TestSpanProcessorEvent]:
     return SPAN_PROCESSOR_TESTING._events
 
 
@@ -95,8 +96,8 @@ def assert_no_traces():
 
 def fetch_normalized_spans(
     keep_span_id: bool = False, keep_trace_id: bool = False
-) -> list[dict[str, Any]]:
-    nodes: dict[tuple[str, str | None], dict[str, Any]] = {}
+) -> typing.List[typing.Dict[str, Any]]:
+    nodes: typing.Dict[typing.Tuple[str, str | None], typing.Dict[str, Any]] = {}
     traces = []
     for trace_obj in fetch_traces():
         trace = trace_obj.export()

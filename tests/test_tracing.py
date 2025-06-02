@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 from typing import Any
@@ -167,7 +168,7 @@ async def test_async_tracing() -> None:
     )
 
 
-async def run_tasks_parallel(span_ids: list[str]) -> None:
+async def run_tasks_parallel(span_ids: typing.List[str]) -> None:
     await asyncio.gather(
         *[run_subtask(span_id=span_id) for span_id in span_ids],
     )

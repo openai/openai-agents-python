@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import graphviz  # type: ignore
 
@@ -32,7 +33,7 @@ def get_main_graph(agent: Agent) -> str:
 
 
 def get_all_nodes(
-    agent: Agent, parent: Agent | None = None, visited: set[str] | None = None
+    agent: Agent, parent: Agent | None = None, visited: typing.Set[str] | None = None
 ) -> str:
     """
     Recursively generates the nodes for the given agent and its handoffs in DOT format.
@@ -91,7 +92,7 @@ def get_all_nodes(
 
 
 def get_all_edges(
-    agent: Agent, parent: Agent | None = None, visited: set[str] | None = None
+    agent: Agent, parent: Agent | None = None, visited: typing.Set[str] | None = None
 ) -> str:
     """
     Recursively generates the edges for the given agent and its handoffs in DOT format.

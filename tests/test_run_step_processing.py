@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import pytest
 from openai.types.responses import (
@@ -383,10 +384,10 @@ class DummyComputer(Computer):
     def move(self, x: int, y: int) -> None:
         return None  # pragma: no cover
 
-    def keypress(self, keys: list[str]) -> None:
+    def keypress(self, keys: typing.List[str]) -> None:
         return None  # pragma: no cover
 
-    def drag(self, path: list[tuple[int, int]]) -> None:
+    def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
         return None  # pragma: no cover
 
 

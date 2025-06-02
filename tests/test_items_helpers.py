@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -33,7 +34,7 @@ from agents import (
 
 
 def make_message(
-    content_items: list[ResponseOutputText | ResponseOutputRefusal],
+    content_items: typing.List[ResponseOutputText | ResponseOutputRefusal],
 ) -> ResponseOutputMessage:
     """
     Helper to construct a ResponseOutputMessage with a single batch of content
@@ -98,7 +99,7 @@ def test_input_to_new_input_list_from_string() -> None:
 
 def test_input_to_new_input_list_deep_copies_lists() -> None:
     # Given a list of message dictionaries, ensure the returned list is a deep copy.
-    original: list[TResponseInputItem] = [{"content": "abc", "role": "developer"}]
+    original: typing.List[TResponseInputItem] = [{"content": "abc", "role": "developer"}]
     new_list = ItemHelpers.input_to_new_input_list(original)
     assert new_list == original
     # Mutating the returned list should not mutate the original.
@@ -108,7 +109,7 @@ def test_input_to_new_input_list_deep_copies_lists() -> None:
 
 def test_text_message_output_concatenates_text_segments() -> None:
     # Build a message with both text and refusal segments, only text segments are concatenated.
-    pieces: list[ResponseOutputText | ResponseOutputRefusal] = []
+    pieces: typing.List[ResponseOutputText | ResponseOutputRefusal] = []
     pieces.append(ResponseOutputText(annotations=[], text="a", type="output_text"))
     pieces.append(ResponseOutputRefusal(refusal="denied", type="refusal"))
     pieces.append(ResponseOutputText(annotations=[], text="b", type="output_text"))

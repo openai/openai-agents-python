@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import base64
@@ -39,7 +40,7 @@ class WebsocketDoneSentinel:
     pass
 
 
-def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> str:
+def _audio_to_base64(audio_data: typing.List[npt.NDArray[np.int16 | np.float32]]) -> str:
     concatenated_audio = np.concatenate(audio_data)
     if concatenated_audio.dtype == np.float32:
         # convert to int16
@@ -50,7 +51,7 @@ def _audio_to_base64(audio_data: list[npt.NDArray[np.int16 | np.float32]]) -> st
 
 
 async def _wait_for_event(
-    event_queue: asyncio.Queue[dict[str, Any]], expected_types: list[str], timeout: float
+    event_queue: asyncio.Queue[typing.Dict[str, Any]], expected_types: typing.List[str], timeout: float
 ):
     """
     Wait for an event from event_queue whose type is in expected_types within the specified timeout.
@@ -93,9 +94,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             asyncio.Queue()
         )
         self._websocket: websockets.ClientConnection | None = None
-        self._event_queue: asyncio.Queue[dict[str, Any] | WebsocketDoneSentinel] = asyncio.Queue()
-        self._state_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._turn_audio_buffer: list[npt.NDArray[np.int16 | np.float32]] = []
+        self._event_queue: asyncio.Queue[typing.Dict[str, Any] | WebsocketDoneSentinel] = asyncio.Queue()
+        self._state_queue: asyncio.Queue[typing.Dict[str, Any]] = asyncio.Queue()
+        self._turn_audio_buffer: typing.List[npt.NDArray[np.int16 | np.float32]] = []
         self._tracing_span: Span[TranscriptionSpanData] | None = None
 
         # tasks
@@ -326,7 +327,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         if self._connection_task and not self._connection_task.done():
             self._connection_task.cancel()
 
-    async def transcribe_turns(self) -> AsyncIterator[str]:
+    async def transcribe_turns(self) -> typing.AsyncIterator[str]:
         self._connection_task = asyncio.create_task(self._process_websocket_connection())
 
         while True:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import contextlib
 import inspect
@@ -25,9 +26,9 @@ class FuncSchema:
     """The name of the function."""
     description: str | None
     """The description of the function."""
-    params_pydantic_model: type[BaseModel]
+    params_pydantic_model: typing.Type[BaseModel]
     """A Pydantic model that represents the function's parameters."""
-    params_json_schema: dict[str, Any]
+    params_json_schema: typing.Dict[str, Any]
     """The JSON schema for the function's parameters, derived from the Pydantic model."""
     signature: inspect.Signature
     """The signature of the function."""
@@ -37,13 +38,13 @@ class FuncSchema:
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
 
-    def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
+    def to_call_args(self, data: BaseModel) -> typing.Tuple[typing.List[Any], typing.Dict[str, Any]]:
         """
         Converts validated data from the Pydantic model into (args, kwargs), suitable for calling
         the original function.
         """
-        positional_args: list[Any] = []
-        keyword_args: dict[str, Any] = {}
+        positional_args: typing.List[Any] = []
+        keyword_args: typing.Dict[str, Any] = {}
         seen_var_positional = False
 
         # Use enumerate() so we can skip the first parameter if it's context.
@@ -80,7 +81,7 @@ class FuncDocumentation:
     """The name of the function, via `__name__`."""
     description: str | None
     """The description of the function, derived from the docstring."""
-    param_descriptions: dict[str, str] | None
+    param_descriptions: typing.Dict[str, str] | None
     """The parameter descriptions of the function, derived from the docstring."""
 
 
@@ -90,7 +91,7 @@ DocstringStyle = Literal["google", "numpy", "sphinx"]
 # As of Feb 2025, the automatic style detection in griffe is an Insiders feature. This
 # code approximates it.
 def _detect_docstring_style(doc: str) -> DocstringStyle:
-    scores: dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
+    scores: typing.Dict[DocstringStyle, int] = {"sphinx": 0, "numpy": 0, "google": 0}
 
     # Sphinx style detection: look for :param, :type, :return:, and :rtype:
     sphinx_patterns = [r"^:param\s", r"^:type\s", r"^:return:", r"^:rtype:"]
@@ -120,7 +121,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
         return "google"
 
     # Priority order: sphinx > numpy > google in case of tie
-    styles: list[DocstringStyle] = ["sphinx", "numpy", "google"]
+    styles: typing.List[DocstringStyle] = ["sphinx", "numpy", "google"]
 
     for style in styles:
         if scores[style] == max_score:
@@ -169,7 +170,7 @@ def generate_func_documentation(
         (section.value for section in parsed if section.kind == DocstringSectionKind.text), None
     )
 
-    param_descriptions: dict[str, str] = {
+    param_descriptions: typing.Dict[str, str] = {
         param.name: param.description
         for section in parsed
         if section.kind == DocstringSectionKind.parameters
@@ -258,7 +259,7 @@ def function_schema(
 
     # We will collect field definitions for create_model as a dict:
     #   field_name -> (type_annotation, default_value_or_Field(...))
-    fields: dict[str, Any] = {}
+    fields: typing.Dict[str, Any] = {}
 
     for name, param in filtered_params:
         ann = type_hints.get(name, param.annotation)
@@ -275,15 +276,15 @@ def function_schema(
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
             if get_origin(ann) is tuple:
-                # e.g. def foo(*args: tuple[int, ...]) -> treat as List[int]
+                # e.g. def foo(*args: typing.Tuple[int, ...]) -> treat as List[int]
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[args_of_tuple[0]]  # type: ignore
+                    ann = typing.List[args_of_tuple[0]]  # type: ignore
                 else:
-                    ann = list[Any]
+                    ann = typing.List[Any]
             else:
                 # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                ann = typing.List[ann]  # type: ignore
 
             # Default factory to empty list
             fields[name] = (
@@ -294,15 +295,15 @@ def function_schema(
         elif param.kind == param.VAR_KEYWORD:
             # **kwargs handling
             if get_origin(ann) is dict:
-                # e.g. def foo(**kwargs: dict[str, int])
+                # e.g. def foo(**kwargs: typing.Dict[str, int])
                 dict_args = get_args(ann)
                 if len(dict_args) == 2:
-                    ann = dict[dict_args[0], dict_args[1]]  # type: ignore
+                    ann = typing.Dict[dict_args[0], dict_args[1]]  # type: ignore
                 else:
-                    ann = dict[str, Any]
+                    ann = typing.Dict[str, Any]
             else:
                 # e.g. def foo(**kwargs: int) -> Dict[str, int]
-                ann = dict[str, ann]  # type: ignore
+                ann = typing.Dict[str, ann]  # type: ignore
 
             fields[name] = (
                 ann,

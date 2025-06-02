@@ -1,3 +1,5 @@
+import typing
+
 import random
 from collections.abc import AsyncIterator
 from typing import Callable
@@ -43,12 +45,12 @@ class MyWorkflow(VoiceWorkflowBase):
             on_start: A callback that is called when the workflow starts. The transcription
                 is passed in as an argument.
         """
-        self._input_history: list[TResponseInputItem] = []
+        self._input_history: typing.List[TResponseInputItem] = []
         self._current_agent = agent
         self._secret_word = secret_word.lower()
         self._on_start = on_start
 
-    async def run(self, transcription: str) -> AsyncIterator[str]:
+    async def run(self, transcription: str) -> typing.AsyncIterator[str]:
         self._on_start(transcription)
 
         # Add the transcription to the input history

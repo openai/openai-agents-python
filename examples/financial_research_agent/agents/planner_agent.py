@@ -1,3 +1,5 @@
+import typing
+
 from pydantic import BaseModel
 
 from agents import Agent
@@ -23,7 +25,7 @@ class FinancialSearchItem(BaseModel):
 
 
 class FinancialSearchPlan(BaseModel):
-    searches: list[FinancialSearchItem]
+    searches: typing.List[FinancialSearchItem]
     """A list of searches to perform."""
 
 

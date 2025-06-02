@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from collections.abc import AsyncIterator
 from typing import Literal
@@ -31,7 +32,7 @@ class FakeTTS(TTSModel):
     def model_name(self) -> str:
         return "fake_tts"
 
-    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+    async def run(self, text: str, settings: TTSModelSettings) -> typing.AsyncIterator[bytes]:
         if self.strategy == "default":
             yield np.zeros(2, dtype=np.int16).tobytes()
         elif self.strategy == "split_words":
@@ -42,7 +43,7 @@ class FakeTTS(TTSModel):
         assert audio == np.zeros(2, dtype=dtype).tobytes()
 
     async def verify_audio_chunks(
-        self, text: str, audio_chunks: list[bytes], dtype: npt.DTypeLike = np.int16
+        self, text: str, audio_chunks: typing.List[bytes], dtype: npt.DTypeLike = np.int16
     ) -> None:
         assert audio_chunks == [np.zeros(2, dtype=dtype).tobytes() for _word in text.split()]
 
@@ -51,9 +52,9 @@ class FakeSession(StreamedTranscriptionSession):
     """A fake streamed transcription session that yields preconfigured transcripts."""
 
     def __init__(self):
-        self.outputs: list[str] = []
+        self.outputs: typing.List[str] = []
 
-    async def transcribe_turns(self) -> AsyncIterator[str]:
+    async def transcribe_turns(self) -> typing.AsyncIterator[str]:
         for t in self.outputs:
             yield t
 
@@ -64,7 +65,7 @@ class FakeSession(StreamedTranscriptionSession):
 class FakeSTT(STTModel):
     """A fake STT model that either returns a single transcript or yields multiple."""
 
-    def __init__(self, outputs: list[str] | None = None):
+    def __init__(self, outputs: typing.List[str] | None = None):
         self.outputs = outputs or []
 
     @property
@@ -89,16 +90,16 @@ class FakeSTT(STTModel):
 class FakeWorkflow(VoiceWorkflowBase):
     """A fake workflow that yields preconfigured outputs."""
 
-    def __init__(self, outputs: list[list[str]] | None = None):
+    def __init__(self, outputs: typing.List[typing.List[str]] | None = None):
         self.outputs = outputs or []
 
-    def add_output(self, output: list[str]) -> None:
+    def add_output(self, output: typing.List[str]) -> None:
         self.outputs.append(output)
 
-    def add_multiple_outputs(self, outputs: list[list[str]]) -> None:
+    def add_multiple_outputs(self, outputs: typing.List[typing.List[str]]) -> None:
         self.outputs.extend(outputs)
 
-    async def run(self, _: str) -> AsyncIterator[str]:
+    async def run(self, _: str) -> typing.AsyncIterator[str]:
         if not self.outputs:
             raise ValueError("No output configured")
         output = self.outputs.pop(0)

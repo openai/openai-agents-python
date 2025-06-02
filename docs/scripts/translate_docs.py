@@ -1,3 +1,5 @@
+import typing
+
 # ruff: noqa
 import os
 from openai import OpenAI
@@ -183,14 +185,14 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
         content = f.read()
 
     # Split content into lines
-    lines: list[str] = content.splitlines()
-    chunks: list[str] = []
-    current_chunk: list[str] = []
+    lines: typing.List[str] = content.splitlines()
+    chunks: typing.List[str] = []
+    current_chunk: typing.List[str] = []
 
     # Split content into chunks of up to 120 lines, ensuring splits occur before section titles
     in_code_block = False
-    code_blocks: list[str] = []
-    code_block_chunks: list[str] = []
+    code_blocks: typing.List[str] = []
+    code_block_chunks: typing.List[str] = []
     for line in lines:
         if (
             ENABLE_SMALL_CHUNK_TRANSLATION is True
@@ -216,7 +218,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
         chunks.append("\n".join(current_chunk))
 
     # Translate each chunk separately and combine results
-    translated_content: list[str] = []
+    translated_content: typing.List[str] = []
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
         if OPENAI_MODEL.startswith("o"):

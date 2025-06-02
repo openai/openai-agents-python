@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from typing import Any
 
@@ -18,7 +19,7 @@ from agents.guardrail import input_guardrail, output_guardrail
 
 def get_sync_guardrail(triggers: bool, output_info: Any | None = None):
     def sync_guardrail(
-        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | typing.List[TResponseInputItem]
     ):
         return GuardrailFunctionOutput(
             output_info=output_info,
@@ -56,7 +57,7 @@ async def test_sync_input_guardrail():
 
 def get_async_input_guardrail(triggers: bool, output_info: Any | None = None):
     async def async_guardrail(
-        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | typing.List[TResponseInputItem]
     ):
         return GuardrailFunctionOutput(
             output_info=output_info,
@@ -188,7 +189,7 @@ async def test_invalid_output_guardrail_raises_user_error():
 
 @input_guardrail
 def decorated_input_guardrail(
-    context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    context: RunContextWrapper[Any], agent: Agent[Any], input: str | typing.List[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
     return GuardrailFunctionOutput(
         output_info="test_1",
@@ -198,7 +199,7 @@ def decorated_input_guardrail(
 
 @input_guardrail(name="Custom name")
 def decorated_named_input_guardrail(
-    context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    context: RunContextWrapper[Any], agent: Agent[Any], input: str | typing.List[TResponseInputItem]
 ) -> GuardrailFunctionOutput:
     return GuardrailFunctionOutput(
         output_info="test_2",

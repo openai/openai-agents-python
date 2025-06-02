@@ -1,3 +1,5 @@
+import typing
+
 # Copyright (c) OpenAI
 #
 # Licensed under the MIT License.
@@ -141,15 +143,15 @@ def test_convert_tools_basic_types_and_includes():
         def move(self, x: int, y: int) -> None:
             raise NotImplementedError
 
-        def keypress(self, keys: list[str]) -> None:
+        def keypress(self, keys: typing.List[str]) -> None:
             raise NotImplementedError
 
-        def drag(self, path: list[tuple[int, int]]) -> None:
+        def drag(self, path: typing.List[typing.Tuple[int, int]]) -> None:
             raise NotImplementedError
 
     # Wrap our concrete computer in a ComputerTool for conversion.
     comp_tool = ComputerTool(computer=DummyComputer())
-    tools: list[Tool] = [tool_fn, file_tool, web_tool, comp_tool]
+    tools: typing.List[Tool] = [tool_fn, file_tool, web_tool, comp_tool]
     converted = Converter.convert_tools(tools, handoffs=[])
     assert isinstance(converted.tools, list)
     assert isinstance(converted.includes, list)

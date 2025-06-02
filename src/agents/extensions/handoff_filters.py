@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from ..handoffs import HandoffInputData
 from ..items import (
@@ -32,7 +33,7 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     )
 
 
-def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
+def _remove_tools_from_items(items: typing.Tuple[RunItem, ...]) -> typing.Tuple[RunItem, ...]:
     filtered_items = []
     for item in items:
         if (
@@ -47,8 +48,8 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
 
 
 def _remove_tool_types_from_input(
-    items: tuple[TResponseInputItem, ...],
-) -> tuple[TResponseInputItem, ...]:
+    items: typing.Tuple[TResponseInputItem, ...],
+) -> typing.Tuple[TResponseInputItem, ...]:
     tool_types = [
         "function_call",
         "function_call_output",
@@ -58,7 +59,7 @@ def _remove_tool_types_from_input(
         "web_search_call",
     ]
 
-    filtered_items: list[TResponseInputItem] = []
+    filtered_items: typing.List[TResponseInputItem] = []
     for item in items:
         itype = item.get("type")
         if itype in tool_types:

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
@@ -29,7 +30,7 @@ def trace(
     workflow_name: str,
     trace_id: str | None = None,
     group_id: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    metadata: typing.Dict[str, Any] | None = None,
     disabled: bool = False,
 ) -> Trace:
     """
@@ -83,8 +84,8 @@ def get_current_span() -> Span[Any] | None:
 
 def agent_span(
     name: str,
-    handoffs: list[str] | None = None,
-    tools: list[str] | None = None,
+    handoffs: typing.List[str] | None = None,
+    tools: typing.List[str] | None = None,
     output_type: str | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
@@ -150,11 +151,11 @@ def function_span(
 
 
 def generation_span(
-    input: Sequence[Mapping[str, Any]] | None = None,
-    output: Sequence[Mapping[str, Any]] | None = None,
+    input: typing.Sequence[typing.Mapping[str, Any]] | None = None,
+    output: typing.Sequence[typing.Mapping[str, Any]] | None = None,
     model: str | None = None,
-    model_config: Mapping[str, Any] | None = None,
-    usage: dict[str, Any] | None = None,
+    model_config: typing.Mapping[str, Any] | None = None,
+    usage: typing.Dict[str, Any] | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
@@ -256,7 +257,7 @@ def handoff_span(
 
 def custom_span(
     name: str,
-    data: dict[str, Any] | None = None,
+    data: typing.Dict[str, Any] | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
@@ -319,7 +320,7 @@ def transcription_span(
     input: str | None = None,
     input_format: str | None = "pcm",
     output: str | None = None,
-    model_config: Mapping[str, Any] | None = None,
+    model_config: typing.Mapping[str, Any] | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
@@ -363,7 +364,7 @@ def speech_span(
     input: str | None = None,
     output: str | None = None,
     output_format: str | None = "pcm",
-    model_config: Mapping[str, Any] | None = None,
+    model_config: typing.Mapping[str, Any] | None = None,
     first_content_at: str | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
@@ -429,7 +430,7 @@ def speech_group_span(
 
 def mcp_tools_span(
     server: str | None = None,
-    result: list[str] | None = None,
+    result: typing.List[str] | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,

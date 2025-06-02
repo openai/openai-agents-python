@@ -1,3 +1,5 @@
+import typing
+
 import asyncio
 import json
 from dataclasses import dataclass
@@ -20,7 +22,7 @@ https://platform.openai.com/docs/guides/structured-outputs?api-mode=responses#su
 
 @dataclass
 class OutputType:
-    jokes: dict[int, str]
+    jokes: typing.Dict[int, str]
     """A list of jokes, indexed by joke number."""
 
 
@@ -33,7 +35,7 @@ class CustomOutputSchema(AgentOutputSchemaBase):
     def name(self) -> str:
         return "CustomOutputSchema"
 
-    def json_schema(self) -> dict[str, Any]:
+    def json_schema(self) -> typing.Dict[str, Any]:
         return {
             "type": "object",
             "properties": {"jokes": {"type": "object", "properties": {"joke": {"type": "string"}}}},

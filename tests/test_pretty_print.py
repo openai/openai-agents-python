@@ -1,3 +1,5 @@
+import typing
+
 import json
 
 import pytest
@@ -144,7 +146,7 @@ async def test_pretty_run_result_list_structured_output():
         ]
     )
 
-    agent = Agent(name="test_agent", model=model, output_type=list[Foo])
+    agent = Agent(name="test_agent", model=model, output_type=typing.List[Foo])
     result = await Runner.run(agent, input="Hello")
 
     assert pretty_print_result(result) == snapshot("""\
@@ -179,7 +181,7 @@ async def test_pretty_run_result_streaming_list_structured_output():
         ]
     )
 
-    agent = Agent(name="test_agent", model=model, output_type=list[Foo])
+    agent = Agent(name="test_agent", model=model, output_type=typing.List[Foo])
     result = Runner.run_streamed(agent, input="Hello")
 
     async for _ in result.stream_events():

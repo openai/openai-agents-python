@@ -1,3 +1,5 @@
+import typing
+
 from pydantic import BaseModel
 
 from agents import Agent
@@ -20,7 +22,7 @@ class FinancialReportData(BaseModel):
     markdown_report: str
     """The full markdown report."""
 
-    follow_up_questions: list[str]
+    follow_up_questions: typing.List[str]
     """Suggested follow‑up questions for further research."""
 
 

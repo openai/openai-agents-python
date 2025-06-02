@@ -1,3 +1,5 @@
+import typing
+
 import abc
 from dataclasses import dataclass
 from typing import Any
@@ -29,7 +31,7 @@ class AgentOutputSchemaBase(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def json_schema(self) -> dict[str, Any]:
+    def json_schema(self) -> typing.Dict[str, Any]:
         """Returns the JSON schema of the output. Will only be called if the output type is not
         plain text.
         """
@@ -57,7 +59,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
     produced by the LLM into the output type.
     """
 
-    output_type: type[Any]
+    output_type: typing.Type[Any]
     """The type of the output."""
 
     _type_adapter: TypeAdapter[Any]
@@ -68,7 +70,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
     output type cannot be represented as a JSON Schema object.
     """
 
-    _output_schema: dict[str, Any]
+    _output_schema: typing.Dict[str, Any]
     """The JSON schema of the output."""
 
     _strict_json_schema: bool
@@ -76,7 +78,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
     as it increases the likelihood of correct JSON input.
     """
 
-    def __init__(self, output_type: type[Any], strict_json_schema: bool = True):
+    def __init__(self, output_type: typing.Type[Any], strict_json_schema: bool = True):
         """
         Args:
             output_type: The type of the output.
@@ -127,7 +129,7 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """Whether the JSON schema is in strict mode."""
         return self._strict_json_schema
 
-    def json_schema(self) -> dict[str, Any]:
+    def json_schema(self) -> typing.Dict[str, Any]:
         """The JSON schema of the output type."""
         if self.is_plain_text():
             raise UserError("Output type is plain text, so no JSON schema is available")
@@ -176,11 +178,11 @@ def _is_subclass_of_base_model_or_dict(t: Any) -> bool:
     origin = get_origin(t)
 
     allowed_types = (BaseModel, dict)
-    # If it's a generic alias e.g. list[str], then we should check the origin type i.e. list
+    # If it's a generic alias e.g. typing.List[str], then we should check the origin type i.e. list
     return issubclass(origin or t, allowed_types)
 
 
-def _type_to_str(t: type[Any]) -> str:
+def _type_to_str(t: typing.Type[Any]) -> str:
     origin = get_origin(t)
     args = get_args(t)
 

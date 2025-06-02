@@ -1,4 +1,5 @@
 from __future__ import annotations as _annotations
+import typing
 
 import asyncio
 import random
@@ -134,7 +135,7 @@ seat_booking_agent.handoffs.append(triage_agent)
 
 async def main():
     current_agent: Agent[AirlineAgentContext] = triage_agent
-    input_items: list[TResponseInputItem] = []
+    input_items: typing.List[TResponseInputItem] = []
     context = AirlineAgentContext()
 
     # Normally, each input from the user would be an API request to your app, and you can wrap the request in a trace()

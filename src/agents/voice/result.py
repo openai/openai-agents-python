@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 import base64
@@ -20,7 +21,7 @@ from .model import TTSModel, TTSModelSettings
 from .pipeline_config import VoicePipelineConfig
 
 
-def _audio_to_base64(audio_data: list[bytes]) -> str:
+def _audio_to_base64(audio_data: typing.List[bytes]) -> str:
     joined_audio_data = b"".join(audio_data)
     return base64.b64encode(joined_audio_data).decode("utf-8")
 
@@ -51,8 +52,8 @@ class StreamedAudioResult:
         self._text_buffer = ""
         self._turn_text_buffer = ""
         self._queue: asyncio.Queue[VoiceStreamEvent] = asyncio.Queue()
-        self._tasks: list[asyncio.Task[Any]] = []
-        self._ordered_tasks: list[
+        self._tasks: typing.List[asyncio.Task[Any]] = []
+        self._ordered_tasks: typing.List[
             asyncio.Queue[VoiceStreamEvent | None]
         ] = []  # New: list to hold local queues for each text segment
         self._dispatcher_task: asyncio.Task[Any] | None = (
@@ -86,7 +87,7 @@ class StreamedAudioResult:
         await self._queue.put(VoiceStreamEventError(error))
 
     def _transform_audio_buffer(
-        self, buffer: list[bytes], output_dtype: npt.DTypeLike
+        self, buffer: typing.List[bytes], output_dtype: npt.DTypeLike
     ) -> npt.NDArray[np.int16 | np.float32]:
         np_array = np.frombuffer(b"".join(buffer), dtype=np.int16)
 
@@ -116,8 +117,8 @@ class StreamedAudioResult:
         ) as tts_span:
             try:
                 first_byte_received = False
-                buffer: list[bytes] = []
-                full_audio_data: list[bytes] = []
+                buffer: typing.List[bytes] = []
+                full_audio_data: typing.List[bytes] = []
 
                 async for chunk in self.tts_model.run(text, self.tts_settings):
                     if not first_byte_received:
@@ -238,7 +239,7 @@ class StreamedAudioResult:
         await self._queue.put(VoiceStreamEventLifecycle(event="session_ended"))
 
     async def _wait_for_completion(self):
-        tasks: list[asyncio.Task[Any]] = self._tasks
+        tasks: typing.List[asyncio.Task[Any]] = self._tasks
         if self._dispatcher_task is not None:
             tasks.append(self._dispatcher_task)
         await asyncio.gather(*tasks)
@@ -263,7 +264,7 @@ class StreamedAudioResult:
                     self._stored_exception = task.exception()
                     break
 
-    async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
+    async def stream(self) -> typing.AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
         while True:
             try:

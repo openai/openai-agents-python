@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import json
 from typing import Any
@@ -598,7 +599,7 @@ async def test_tool_use_behavior_first_output():
 
 
 def custom_tool_use_behavior(
-    context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    context: RunContextWrapper[Any], results: typing.List[FunctionToolResult]
 ) -> ToolsToFinalOutputResult:
     if "test_tool_one" in [result.tool.name for result in results]:
         return ToolsToFinalOutputResult(is_final_output=True, final_output="the_final_output")
@@ -752,7 +753,7 @@ async def test_dynamic_tool_addition_run() -> None:
     """Test that tools can be added to an agent during a run."""
     model = FakeModel()
 
-    executed: dict[str, bool] = {"called": False}
+    executed: typing.Dict[str, bool] = {"called": False}
 
     agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
 

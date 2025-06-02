@@ -1,3 +1,5 @@
+import typing
+
 import atexit
 
 from .create import (
@@ -83,7 +85,7 @@ def add_trace_processor(span_processor: TracingProcessor) -> None:
     GLOBAL_TRACE_PROVIDER.register_processor(span_processor)
 
 
-def set_trace_processors(processors: list[TracingProcessor]) -> None:
+def set_trace_processors(processors: typing.List[TracingProcessor]) -> None:
     """
     Set the list of trace processors. This will replace the current list of processors.
     """

@@ -1,6 +1,7 @@
 # Copyright
 
 from __future__ import annotations
+import typing
 
 from typing import cast
 
@@ -91,7 +92,7 @@ async def test_custom_tool_use_behavior_sync() -> None:
     """If tool_use_behavior is a sync function, we should call it and propagate its return."""
 
     def behavior(
-        context: RunContextWrapper, results: list[FunctionToolResult]
+        context: RunContextWrapper, results: typing.List[FunctionToolResult]
     ) -> ToolsToFinalOutputResult:
         assert len(results) == 3
         return ToolsToFinalOutputResult(is_final_output=True, final_output="custom")
@@ -117,7 +118,7 @@ async def test_custom_tool_use_behavior_async() -> None:
     """If tool_use_behavior is an async function, we should await it and propagate its return."""
 
     async def behavior(
-        context: RunContextWrapper, results: list[FunctionToolResult]
+        context: RunContextWrapper, results: typing.List[FunctionToolResult]
     ) -> ToolsToFinalOutputResult:
         assert len(results) == 3
         return ToolsToFinalOutputResult(is_final_output=True, final_output="async_custom")

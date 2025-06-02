@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import json
 from collections import defaultdict
@@ -21,7 +22,7 @@ from .test_responses import (
 
 class RunHooksForTests(RunHooks):
     def __init__(self):
-        self.events: dict[str, int] = defaultdict(int)
+        self.events: typing.Dict[str, int] = defaultdict(int)
 
     def reset(self):
         self.events.clear()

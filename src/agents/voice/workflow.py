@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 from collections.abc import AsyncIterator
@@ -23,7 +24,7 @@ class VoiceWorkflowBase(abc.ABC):
     """
 
     @abc.abstractmethod
-    def run(self, transcription: str) -> AsyncIterator[str]:
+    def run(self, transcription: str) -> typing.AsyncIterator[str]:
         """
         Run the voice workflow. You will receive an input transcription, and must yield text that
         will be spoken to the user. You can run whatever logic you want here. In most cases, the
@@ -35,7 +36,7 @@ class VoiceWorkflowBase(abc.ABC):
 
 class VoiceWorkflowHelper:
     @classmethod
-    async def stream_text_from(cls, result: RunResultStreaming) -> AsyncIterator[str]:
+    async def stream_text_from(cls, result: RunResultStreaming) -> typing.AsyncIterator[str]:
         """Wraps a `RunResultStreaming` object and yields text events from the stream."""
         async for event in result.stream_events():
             if (
@@ -65,11 +66,11 @@ class SingleAgentVoiceWorkflow(VoiceWorkflowBase):
             agent: The agent to run.
             callbacks: Optional callbacks to call during the workflow.
         """
-        self._input_history: list[TResponseInputItem] = []
+        self._input_history: typing.List[TResponseInputItem] = []
         self._current_agent = agent
         self._callbacks = callbacks
 
-    async def run(self, transcription: str) -> AsyncIterator[str]:
+    async def run(self, transcription: str) -> typing.AsyncIterator[str]:
         if self._callbacks:
             self._callbacks.on_run(self, transcription)
 

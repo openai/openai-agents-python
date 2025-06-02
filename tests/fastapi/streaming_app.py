@@ -1,3 +1,5 @@
+import typing
+
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
@@ -25,6 +27,6 @@ class StreamHandler:
     def __init__(self, result: RunResultStreaming):
         self.result = result
 
-    async def stream_events(self) -> AsyncIterator[str]:
+    async def stream_events(self) -> typing.AsyncIterator[str]:
         async for event in self.result.stream_events():
             yield f"{event.type}\n\n"

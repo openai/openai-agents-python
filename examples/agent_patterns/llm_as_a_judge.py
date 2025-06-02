@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import asyncio
 from dataclasses import dataclass
@@ -40,7 +41,7 @@ evaluator = Agent[None](
 
 async def main() -> None:
     msg = input("What kind of story would you like to hear? ")
-    input_items: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+    input_items: typing.List[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
     latest_outline: str | None = None
 

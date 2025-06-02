@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -237,7 +238,7 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     # Dummy completions to record kwargs
     class DummyCompletions:
         def __init__(self) -> None:
-            self.kwargs: dict[str, Any] = {}
+            self.kwargs: typing.Dict[str, Any] = {}
 
         async def create(self, **kwargs: Any) -> Any:
             self.kwargs = kwargs
@@ -297,13 +298,13 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     should include `stream_options` to request usage-delimited chunks.
     """
 
-    async def event_stream() -> AsyncIterator[ChatCompletionChunk]:
+    async def event_stream() -> typing.AsyncIterator[ChatCompletionChunk]:
         if False:  # pragma: no cover
             yield  # pragma: no cover
 
     class DummyCompletions:
         def __init__(self) -> None:
-            self.kwargs: dict[str, Any] = {}
+            self.kwargs: typing.Dict[str, Any] = {}
 
         async def create(self, **kwargs: Any) -> Any:
             self.kwargs = kwargs

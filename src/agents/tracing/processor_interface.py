@@ -1,3 +1,5 @@
+import typing
+
 import abc
 from typing import TYPE_CHECKING, Any
 
@@ -60,7 +62,7 @@ class TracingExporter(abc.ABC):
     """Exports traces and spans. For example, could log them or send them to a backend."""
 
     @abc.abstractmethod
-    def export(self, items: list["Trace | Span[Any]"]) -> None:
+    def export(self, items: typing.List["Trace | Span[Any]"]) -> None:
         """Exports a list of traces and spans.
 
         Args:

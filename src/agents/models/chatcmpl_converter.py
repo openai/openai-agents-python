@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import json
 from collections.abc import Iterable
@@ -82,8 +83,8 @@ class Converter:
         }
 
     @classmethod
-    def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
-        items: list[TResponseOutputItem] = []
+    def message_to_output_items(cls, message: ChatCompletionMessage) -> typing.List[TResponseOutputItem]:
+        items: typing.List[TResponseOutputItem] = []
 
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,
@@ -195,12 +196,12 @@ class Converter:
 
     @classmethod
     def extract_text_content(
-        cls, content: str | Iterable[ResponseInputContentParam]
-    ) -> str | list[ChatCompletionContentPartTextParam]:
+        cls, content: str | typing.Iterable[ResponseInputContentParam]
+    ) -> str | typing.List[ChatCompletionContentPartTextParam]:
         all_content = cls.extract_all_content(content)
         if isinstance(all_content, str):
             return all_content
-        out: list[ChatCompletionContentPartTextParam] = []
+        out: typing.List[ChatCompletionContentPartTextParam] = []
         for c in all_content:
             if c.get("type") == "text":
                 out.append(cast(ChatCompletionContentPartTextParam, c))
@@ -208,11 +209,11 @@ class Converter:
 
     @classmethod
     def extract_all_content(
-        cls, content: str | Iterable[ResponseInputContentParam]
-    ) -> str | list[ChatCompletionContentPartParam]:
+        cls, content: str | typing.Iterable[ResponseInputContentParam]
+    ) -> str | typing.List[ChatCompletionContentPartParam]:
         if isinstance(content, str):
             return content
-        out: list[ChatCompletionContentPartParam] = []
+        out: typing.List[ChatCompletionContentPartParam] = []
 
         for c in content:
             if isinstance(c, dict) and c.get("type") == "input_text":
@@ -247,8 +248,8 @@ class Converter:
     @classmethod
     def items_to_messages(
         cls,
-        items: str | Iterable[TResponseInputItem],
-    ) -> list[ChatCompletionMessageParam]:
+        items: str | typing.Iterable[TResponseInputItem],
+    ) -> typing.List[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
 
@@ -270,7 +271,7 @@ class Converter:
                 )
             ]
 
-        result: list[ChatCompletionMessageParam] = []
+        result: typing.List[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
 
         def flush_assistant_message() -> None:

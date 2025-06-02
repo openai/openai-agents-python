@@ -1,3 +1,5 @@
+import typing
+
 import curses
 import time
 
@@ -15,7 +17,7 @@ def _record_audio(screen: curses.window) -> npt.NDArray[np.float32]:
     screen.refresh()
 
     recording = False
-    audio_buffer: list[npt.NDArray[np.float32]] = []
+    audio_buffer: typing.List[npt.NDArray[np.float32]] = []
 
     def _audio_callback(indata, frames, time_info, status):
         if status:

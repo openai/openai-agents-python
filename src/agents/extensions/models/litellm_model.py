@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import json
 import time
@@ -64,11 +65,11 @@ class LitellmModel(Model):
     async def get_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
     ) -> ModelResponse:
@@ -147,15 +148,15 @@ class LitellmModel(Model):
     async def stream_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> typing.AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
             model_config=model_settings.to_json_dict()
@@ -194,25 +195,25 @@ class LitellmModel(Model):
     async def _fetch_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[True],
-    ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
+    ) -> typing.Tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
     async def _fetch_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[False],
@@ -221,15 +222,15 @@ class LitellmModel(Model):
     async def _fetch_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: bool = False,
-    ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+    ) -> litellm.types.utils.ModelResponse | typing.Tuple[Response, AsyncStream[ChatCompletionChunk]]:
         converted_messages = Converter.items_to_messages(input)
 
         if system_instructions:
@@ -362,8 +363,8 @@ class LitellmConverter:
     @classmethod
     def convert_annotations_to_openai(
         cls, message: litellm.types.utils.Message
-    ) -> list[Annotation] | None:
-        annotations: list[litellm.types.llms.openai.ChatCompletionAnnotation] | None = message.get(
+    ) -> typing.List[Annotation] | None:
+        annotations: typing.List[litellm.types.llms.openai.ChatCompletionAnnotation] | None = message.get(
             "annotations", None
         )
         if not annotations:

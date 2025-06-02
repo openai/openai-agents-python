@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,27 +26,27 @@ class FakeModel(Model):
     def __init__(
         self,
         tracing_enabled: bool = False,
-        initial_output: list[TResponseOutputItem] | Exception | None = None,
+        initial_output: typing.List[TResponseOutputItem] | Exception | None = None,
     ):
         if initial_output is None:
             initial_output = []
-        self.turn_outputs: list[list[TResponseOutputItem] | Exception] = (
+        self.turn_outputs: typing.List[typing.List[TResponseOutputItem] | Exception] = (
             [initial_output] if initial_output else []
         )
         self.tracing_enabled = tracing_enabled
-        self.last_turn_args: dict[str, Any] = {}
+        self.last_turn_args: typing.Dict[str, Any] = {}
         self.hardcoded_usage: Usage | None = None
 
     def set_hardcoded_usage(self, usage: Usage):
         self.hardcoded_usage = usage
 
-    def set_next_output(self, output: list[TResponseOutputItem] | Exception):
+    def set_next_output(self, output: typing.List[TResponseOutputItem] | Exception):
         self.turn_outputs.append(output)
 
-    def add_multiple_turn_outputs(self, outputs: list[list[TResponseOutputItem] | Exception]):
+    def add_multiple_turn_outputs(self, outputs: typing.List[typing.List[TResponseOutputItem] | Exception]):
         self.turn_outputs.extend(outputs)
 
-    def get_next_output(self) -> list[TResponseOutputItem] | Exception:
+    def get_next_output(self) -> typing.List[TResponseOutputItem] | Exception:
         if not self.turn_outputs:
             return []
         return self.turn_outputs.pop(0)
@@ -53,11 +54,11 @@ class FakeModel(Model):
     async def get_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
@@ -95,15 +96,15 @@ class FakeModel(Model):
     async def stream_response(
         self,
         system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        input: str | typing.List[TResponseInputItem],
         model_settings: ModelSettings,
-        tools: list[Tool],
+        tools: typing.List[Tool],
         output_schema: AgentOutputSchemaBase | None,
-        handoffs: list[Handoff],
+        handoffs: typing.List[Handoff],
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
-    ) -> AsyncIterator[TResponseStreamEvent]:
+    ) -> typing.AsyncIterator[TResponseStreamEvent]:
         self.last_turn_args = {
             "system_instructions": system_instructions,
             "input": input,
@@ -134,7 +135,7 @@ class FakeModel(Model):
 
 
 def get_response_obj(
-    output: list[TResponseOutputItem],
+    output: typing.List[TResponseOutputItem],
     response_id: str | None = None,
     usage: Usage | None = None,
 ) -> Response:

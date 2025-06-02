@@ -1,3 +1,5 @@
+import typing
+
 from typing import Any
 
 from rich.console import Console, Group
@@ -8,8 +10,8 @@ from rich.spinner import Spinner
 class Printer:
     def __init__(self, console: Console):
         self.live = Live(console=console)
-        self.items: dict[str, tuple[str, bool]] = {}
-        self.hide_done_ids: set[str] = set()
+        self.items: typing.Dict[str, typing.Tuple[str, bool]] = {}
+        self.hide_done_ids: typing.Set[str] = set()
         self.live.start()
 
     def end(self) -> None:
@@ -31,7 +33,7 @@ class Printer:
         self.flush()
 
     def flush(self) -> None:
-        renderables: list[Any] = []
+        renderables: typing.List[Any] = []
         for item_id, (content, is_done) in self.items.items():
             if is_done:
                 prefix = "✅ " if item_id not in self.hide_done_ids else ""

@@ -1,13 +1,15 @@
+import typing
+
 try:
     from agents.voice import StreamedAudioResult
 except ImportError:
     pass
 
 
-async def extract_events(result: StreamedAudioResult) -> tuple[list[str], list[bytes]]:
+async def extract_events(result: StreamedAudioResult) -> typing.Tuple[typing.List[str], typing.List[bytes]]:
     """Collapse pipeline stream events to simple labels for ordering assertions."""
-    flattened: list[str] = []
-    audio_chunks: list[bytes] = []
+    flattened: typing.List[str] = []
+    audio_chunks: typing.List[bytes] = []
 
     async for ev in result.stream():
         if ev.type == "voice_stream_event_audio":

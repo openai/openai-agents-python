@@ -1,3 +1,5 @@
+import typing
+
 import pytest
 from pydantic import BaseModel
 
@@ -7,7 +9,7 @@ from agents.models.chatcmpl_converter import Converter
 from agents.tool import FileSearchTool, WebSearchTool
 
 
-def some_function(a: str, b: list[int]) -> str:
+def some_function(a: str, b: typing.List[int]) -> str:
     return "hello"
 
 
@@ -28,7 +30,7 @@ def test_to_openai_with_function_tool():
 
 class Foo(BaseModel):
     a: str
-    b: list[int]
+    b: typing.List[int]
 
 
 def test_convert_handoff_tool():

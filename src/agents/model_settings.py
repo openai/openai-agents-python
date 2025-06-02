@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import dataclasses
 from dataclasses import dataclass, fields, replace
@@ -50,7 +51,7 @@ class ModelSettings:
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
-    metadata: dict[str, str] | None = None
+    metadata: typing.Dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
     store: bool | None = None
@@ -86,10 +87,10 @@ class ModelSettings:
         }
         return replace(self, **changes)
 
-    def to_json_dict(self) -> dict[str, Any]:
+    def to_json_dict(self) -> typing.Dict[str, Any]:
         dataclass_dict = dataclasses.asdict(self)
 
-        json_dict: dict[str, Any] = {}
+        json_dict: typing.Dict[str, Any] = {}
 
         for field_name, value in dataclass_dict.items():
             if isinstance(value, BaseModel):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 from openai import AsyncOpenAI
 
@@ -23,7 +24,7 @@ class ChatCmplHelpers:
     @classmethod
     def get_stream_options_param(
         cls, client: AsyncOpenAI, model_settings: ModelSettings, stream: bool
-    ) -> dict[str, bool] | None:
+    ) -> typing.Dict[str, bool] | None:
         if not stream:
             return None
 

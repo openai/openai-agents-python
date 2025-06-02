@@ -1,3 +1,5 @@
+import typing
+
 import json
 from typing import Any
 
@@ -64,11 +66,11 @@ def test_structured_output_typed_dict():
 
 
 def test_structured_output_list():
-    agent = Agent(name="test", output_type=list[str])
+    agent = Agent(name="test", output_type=typing.List[str])
     output_schema = Runner._get_output_schema(agent)
     assert output_schema, "Should have an output tool config with a structured output type"
     assert isinstance(output_schema, AgentOutputSchema)
-    assert output_schema.output_type == list[str], "Should have the correct output type"
+    assert output_schema.output_type == typing.List[str], "Should have the correct output type"
     assert output_schema._is_wrapped, "Lists should be wrapped"
 
     # This is testing implementation details, but it's useful  to make sure this doesn't break
@@ -85,7 +87,7 @@ def test_bad_json_raises_error(mocker):
     with pytest.raises(ModelBehaviorError):
         output_schema.validate_json("not valid json")
 
-    agent = Agent(name="test", output_type=list[str])
+    agent = Agent(name="test", output_type=typing.List[str])
     output_schema = Runner._get_output_schema(agent)
     assert output_schema, "Should have an output tool config with a structured output type"
 
@@ -142,7 +144,7 @@ class CustomOutputSchema(AgentOutputSchemaBase):
     def name(self) -> str:
         return "FooBarBaz"
 
-    def json_schema(self) -> dict[str, Any]:
+    def json_schema(self) -> typing.Dict[str, Any]:
         return _CUSTOM_OUTPUT_SCHEMA_JSON_SCHEMA
 
     def is_strict_json_schema(self) -> bool:

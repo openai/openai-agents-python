@@ -1,3 +1,5 @@
+import typing
+
 # Agent used to synthesize a final report from the individual summaries.
 from pydantic import BaseModel
 
@@ -21,7 +23,7 @@ class ReportData(BaseModel):
     markdown_report: str
     """The final report"""
 
-    follow_up_questions: list[str]
+    follow_up_questions: typing.List[str]
     """Suggested topics to research further"""
 
 

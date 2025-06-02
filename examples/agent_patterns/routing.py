@@ -1,3 +1,5 @@
+import typing
+
 import asyncio
 import uuid
 
@@ -39,7 +41,7 @@ async def main():
 
     msg = input("Hi! We speak French, Spanish and English. How can I help? ")
     agent = triage_agent
-    inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+    inputs: typing.List[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
     while True:
         # Each conversation turn is a single trace. Normally, each input from the user would be an

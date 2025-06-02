@@ -1,4 +1,5 @@
 from __future__ import annotations
+import typing
 
 import abc
 import contextvars
@@ -60,7 +61,7 @@ class Trace:
         pass
 
     @abc.abstractmethod
-    def export(self) -> dict[str, Any] | None:
+    def export(self) -> typing.Dict[str, Any] | None:
         """
         Export the trace as a dictionary.
         """
@@ -107,7 +108,7 @@ class NoOpTrace(Trace):
     def name(self) -> str:
         return "no-op"
 
-    def export(self) -> dict[str, Any] | None:
+    def export(self) -> typing.Dict[str, Any] | None:
         return None
 
 
@@ -134,7 +135,7 @@ class TraceImpl(Trace):
         name: str,
         trace_id: str | None,
         group_id: str | None,
-        metadata: dict[str, Any] | None,
+        metadata: typing.Dict[str, Any] | None,
         processor: TracingProcessor,
     ):
         self._name = name
@@ -185,7 +186,7 @@ class TraceImpl(Trace):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.finish(reset_current=exc_type is not GeneratorExit)
 
-    def export(self) -> dict[str, Any] | None:
+    def export(self) -> typing.Dict[str, Any] | None:
         return {
             "object": "trace",
             "id": self.trace_id,
