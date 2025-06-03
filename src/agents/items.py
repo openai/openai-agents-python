@@ -56,6 +56,31 @@ TResponseOutputItem = ResponseOutputItem
 TResponseStreamEvent = ResponseStreamEvent
 """A type alias for the ResponseStreamEvent type from the OpenAI SDK."""
 
+# Tool call type aliases
+TLocalShellCall = LocalShellCall
+"""A type alias for the LocalShellCall type from the OpenAI SDK."""
+
+TMcpCall = McpCall
+"""A type alias for the McpCall type from the OpenAI SDK."""
+
+TResponseCodeInterpreterToolCall = ResponseCodeInterpreterToolCall
+"""A type alias for the ResponseCodeInterpreterToolCall type from the OpenAI SDK."""
+
+TResponseComputerToolCall = ResponseComputerToolCall
+"""A type alias for the ResponseComputerToolCall type from the OpenAI SDK."""
+
+TResponseFileSearchToolCall = ResponseFileSearchToolCall
+"""A type alias for the ResponseFileSearchToolCall type from the OpenAI SDK."""
+
+TResponseFunctionToolCall = ResponseFunctionToolCall
+"""A type alias for the ResponseFunctionToolCall type from the OpenAI SDK."""
+
+TResponseFunctionWebSearch = ResponseFunctionWebSearch
+"""A type alias for the ResponseFunctionWebSearch type from the OpenAI SDK."""
+
+TImageGenerationCall = ImageGenerationCall
+"""A type alias for the ImageGenerationCall type from the OpenAI SDK."""
+
 T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
 
