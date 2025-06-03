@@ -100,7 +100,7 @@ for tool in agent.tools:
 
 1.  You can use any Python types as arguments to your functions, and the function can be sync or async.
 2.  Docstrings, if present, are used to capture descriptions and argument descriptions
-3.  Functions can optionally take the `context` (must be the first argument). You can also set overrides, like the name of the tool, description, which docstring style to use, etc.
+3.  Functions can optionally take the `context` (must be the first argument). You can also set overrides, like the name of the tool, description, which docstring style to use, and exclude specific parameters from the schema, etc.
 4.  You can pass the decorated functions to the list of tools.
 
 ??? note "Expand to see output"
@@ -283,6 +283,45 @@ async def run_my_agent() -> str:
 
     return str(result.final_output)
 ```
+
+## Excluding parameters from the schema
+
+Sometimes, you might want to exclude certain parameters from the JSON schema that's presented to the LLM, while still making them available to your function with their default values. This can be useful for:
+
+- Keeping implementation details hidden from the LLM
+- Simplifying the tool interface presented to the model
+- Maintaining backward compatibility when adding new parameters
+- Supporting internal parameters that should always use default values
+
+You can do this using the `exclude_params` parameter of the `@function_tool` decorator:
+
+```python
+from typing import Optional
+from agents import function_tool, RunContextWrapper
+
+@function_tool(exclude_params=["timestamp", "internal_id"])
+def search_database(
+    query: str,
+    limit: int = 10,
+    timestamp: Optional[str] = None,
+    internal_id: Optional[str] = None
+) -> str:
+    """
+    Search the database for records matching the query.
+    
+    Args:
+        query: The search query string
+        limit: Maximum number of results to return
+        timestamp: The timestamp to use for the search (hidden from schema)
+        internal_id: Internal tracking ID for telemetry (hidden from schema)
+    """
+    # Implementation...
+```
+
+In this example:
+- The LLM will only see `query` and `limit` parameters in the tool schema
+- `timestamp` and `internal_id` will be automatically set to their default values when the function runs
+- All excluded parameters must have default values (either `None` or a specific value)
 
 ## Handling errors in function tools
 

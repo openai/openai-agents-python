@@ -439,3 +439,67 @@ def test_schema_with_mapping_raises_strict_mode_error():
 
     with pytest.raises(UserError):
         function_schema(func_with_mapping)
+
+
+def function_with_optional_params(a: int, b: int = 5, c: str = "default"):
+    """Function with multiple optional parameters."""
+    return f"{a}-{b}-{c}"
+
+
+def test_exclude_params_feature():
+    """Test the exclude_params feature works correctly."""
+    # Test excluding a single optional parameter
+    func_schema = function_schema(
+        function_with_optional_params,
+        exclude_params=["c"],
+    )
+    
+    # Verify 'c' is not in the schema properties
+    assert "c" not in func_schema.params_json_schema.get("properties", {})
+    
+    # Verify the excluded parameter defaults are stored
+    excluded_defaults = getattr(func_schema.params_pydantic_model, "__excluded_param_defaults__", {})
+    assert "c" in excluded_defaults
+    assert excluded_defaults["c"] == "default"
+    
+    # Test function still works correctly with excluded parameter
+    valid_input = {"a": 10, "b": 20}
+    parsed = func_schema.params_pydantic_model(**valid_input)
+    args, kwargs_dict = func_schema.to_call_args(parsed)
+    result = function_with_optional_params(*args, **kwargs_dict)
+    assert result == "10-20-default"  # 'c' should use its default value
+    
+    # Test excluding multiple parameters
+    func_schema_multi = function_schema(
+        function_with_optional_params,
+        exclude_params=["b", "c"],
+    )
+    
+    # Verify both 'b' and 'c' are not in the schema properties
+    assert "b" not in func_schema_multi.params_json_schema.get("properties", {})
+    assert "c" not in func_schema_multi.params_json_schema.get("properties", {})
+    
+    # Test function still works correctly with multiple excluded parameters
+    valid_input = {"a": 10}
+    parsed = func_schema_multi.params_pydantic_model(**valid_input)
+    args, kwargs_dict = func_schema_multi.to_call_args(parsed)
+    result = function_with_optional_params(*args, **kwargs_dict)
+    assert result == "10-5-default"  # 'b' and 'c' should use their default values
+
+
+def function_with_required_param(a: int, b: str):
+    """Function with required parameters only."""
+    return f"{a}-{b}"
+
+
+def test_exclude_params_requires_default_value():
+    """Test that excluding a parameter without a default value raises an error."""
+    # Attempt to exclude a parameter without a default value
+    with pytest.raises(UserError) as excinfo:
+        function_schema(
+            function_with_required_param,
+            exclude_params=["b"],
+        )
+    
+    # Check the error message
+    assert "must have a default value" in str(excinfo.value)

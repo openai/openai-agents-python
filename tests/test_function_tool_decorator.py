@@ -233,3 +233,39 @@ async def test_extract_descriptions_from_docstring():
             "additionalProperties": False,
         }
     )
+
+
+@function_tool(exclude_params=["timestamp"])
+def function_with_excluded_param(
+    city: str, country: str = "US", timestamp: Optional[str] = None
+) -> str:
+    """Get the weather for a given city with timestamp.
+    
+    Args:
+        city: The city to get the weather for.
+        country: The country the city is in.
+        timestamp: The timestamp for the weather data (hidden from schema).
+    """
+    time_str = f" at {timestamp}" if timestamp else ""
+    return f"The weather in {city}, {country}{time_str} is sunny."
+
+
+@pytest.mark.asyncio
+async def test_exclude_params_from_schema():
+    """Test that excluded parameters are not included in the schema."""
+    tool = function_with_excluded_param
+    
+    # Check that the parameter is not in the schema
+    assert "timestamp" not in tool.params_json_schema.get("properties", {})
+    
+    # Check that only non-excluded parameters are required
+    assert set(tool.params_json_schema.get("required", [])) == {"city"}
+    
+    # Test function still works with excluded parameter
+    input_data = {"city": "Seattle", "country": "US"}
+    output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
+    assert output == "The weather in Seattle, US is sunny."
+    
+    # Test function works when we supply a default excluded parameter value in the code
+    function_result = function_with_excluded_param("Seattle", "US", "2023-05-29T12:00:00Z")
+    assert function_result == "The weather in Seattle, US at 2023-05-29T12:00:00Z is sunny."
