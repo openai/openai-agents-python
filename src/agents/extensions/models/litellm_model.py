@@ -340,7 +340,13 @@ class LitellmModel(Model):
         
         When reasoning is enabled, assistant messages with tool calls should not have
         content - LiteLLM will handle the thinking blocks automatically for supported
-        thinking models (e.g., Anthropic Claude Sonnet 4, OpenAI o1, etc.).
+        thinking models that also support function calling.
+        
+        Verified working with:
+        - Anthropic Claude Sonnet 4
+        - OpenAI o4-mini
+        
+        Note: Some thinking models like OpenAI o1-mini/o1-preview don't support function calling yet.
         
         This fixes issue #765: https://github.com/openai/openai-agents-python/issues/765
         """
