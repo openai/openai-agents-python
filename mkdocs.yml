@@ -59,6 +59,7 @@ plugins:
                 - running_agents.md
                 - results.md
                 - streaming.md
+                - repl.md
                 - tools.md
                 - mcp.md
                 - handoffs.md
@@ -80,6 +81,7 @@ plugins:
                     - ref/index.md
                     - ref/agent.md
                     - ref/run.md
+                    - ref/repl.md
                     - ref/tool.md
                     - ref/result.md
                     - ref/stream_events.md
@@ -139,6 +141,7 @@ plugins:
                 - running_agents.md
                 - results.md
                 - streaming.md
+                - repl.md
                 - tools.md
                 - mcp.md
                 - handoffs.md
