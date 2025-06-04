@@ -72,6 +72,7 @@ plugins:
                     - models/litellm.md
                 - config.md
                 - visualization.md
+                - release.md
                 - Voice agents:
                     - voice/quickstart.md
                     - voice/pipeline.md
