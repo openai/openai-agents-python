@@ -231,6 +231,10 @@ class LitellmModel(Model):
         stream: bool = False,
     ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         converted_messages = Converter.items_to_messages(input)
+        
+        # Fix for thinking models: Handle assistant messages with tool calls properly
+        if model_settings.reasoning:
+            converted_messages = self._fix_thinking_model_messages(converted_messages)
 
         if system_instructions:
             converted_messages.insert(
@@ -329,6 +333,42 @@ class LitellmModel(Model):
         if isinstance(value, NotGiven):
             return None
         return value
+
+    def _fix_thinking_model_messages(self, messages: list[dict]) -> list[dict]:
+        """
+        Fix assistant messages for LiteLLM thinking models.
+        
+        When reasoning is enabled, assistant messages with tool calls should not have
+        content - LiteLLM will handle the thinking blocks automatically for supported
+        thinking models (e.g., Anthropic Claude Sonnet 4, OpenAI o1, etc.).
+        
+        This fixes issue #765: https://github.com/openai/openai-agents-python/issues/765
+        """
+        logger.debug(f"Fixing messages for LiteLLM thinking model: {self.model}")
+        modified_messages = []
+        
+        for i, message in enumerate(messages):
+            if (
+                message.get("role") == "assistant" 
+                and message.get("tool_calls") 
+                and len(message.get("tool_calls", [])) > 0
+            ):
+                logger.debug(f"Message {i}: Removing content from assistant message with tool calls")
+                # This assistant message has tool calls, remove content for thinking models
+                modified_message = message.copy()
+                
+                # Remove content entirely - let LiteLLM handle thinking blocks automatically
+                if "content" in modified_message:
+                    del modified_message["content"]
+                
+                logger.debug(f"Message {i}: Removed content, message now: {modified_message}")
+                modified_messages.append(modified_message)
+            else:
+                logger.debug(f"Message {i}: {message.get('role')} message, no modification needed")
+                modified_messages.append(message)
+        
+        return modified_messages
+
 
 
 class LitellmConverter:
