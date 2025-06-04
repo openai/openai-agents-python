@@ -4,6 +4,9 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 
 <img src="https://cdn.openai.com/API/docs/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
 
+> [!NOTE]
+> Looking for the JavaScript/TypeScript version? Check out [Agents SDK JS/TS](https://github.com/openai/openai-agents-js).
+
 ### Core concepts:
 
 1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
