@@ -1,24 +1,18 @@
 # Release process
 
-The project follows semantic versioning using the form `0.Y.Z`. The leading `0` indicates the SDK is still evolving rapidly. Increment the components as follows:
+The project follows a slightly modified version of semantic versioning using the form `0.Y.Z`. The leading `0` indicates the SDK is still evolving rapidly. Increment the components as follows:
 
 ## Minor (`Y`) versions
 
-Increase `Y` for **breaking changes** to any public interfaces that are not marked as beta.
+We will increase minor versions `Y` for **breaking changes** to any public interfaces that are not marked as beta. For example, going from `0.0.x` to `0.1.x` might include breaking changes.
+
+If you don't want breaking changes, we recommend pinning to `0.0.x` versions in your project.
 
 ## Patch (`Z`) versions
 
-Increment `Z` for:
+We will increment `Z` for non-breaking changes:
 
 - Bug fixes
 - New features
 - Changes to private interfaces
 - Updates to beta features
-
-## Steps to cut a release
-
-1. Ensure `main` is stable and all tests pass.
-2. Update the version in `pyproject.toml`.
-3. Document notable changes in `CHANGELOG.md`.
-4. Tag the commit with the version number and push the tag.
-5. Publish the release on GitHub and PyPI.
