@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -26,6 +27,8 @@ from agents._run_impl import (
     RunImpl,
     SingleStepResult,
 )
+from agents.tool import function_tool
+from agents.tool_context import ToolContext
 
 from .test_responses import (
     get_final_output_message,
@@ -154,6 +157,42 @@ async def test_multiple_tool_calls():
     assert_item_is_message(items[0], "Hello, world!")
     assert_item_is_function_tool_call(items[1], "test_1", None)
     assert_item_is_function_tool_call(items[2], "test_2", None)
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_multiple_tool_calls_with_tool_context():
+    async def _fake_tool(context: ToolContext[str], value: str) -> str:
+        return f"{value}-{context.tool_call_id}"
+
+    tool = function_tool(_fake_tool, name_override="fake_tool", failure_error_function=None)
+
+    agent = Agent(
+        name="test",
+        tools=[tool],
+    )
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("fake_tool", json.dumps({"value": "123"}), call_id="1"),
+            get_function_tool_call("fake_tool", json.dumps({"value": "456"}), call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+    assert result.original_input == "hello"
+
+    # 4 items: new message, 2 tool calls, 2 tool call outputs
+    assert len(result.generated_items) == 4
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+    items = result.generated_items
+    assert_item_is_function_tool_call(items[0], "fake_tool", json.dumps({"value": "123"}))
+    assert_item_is_function_tool_call(items[1], "fake_tool", json.dumps({"value": "456"}))
+    assert_item_is_function_tool_call_output(items[2], "123-1")
+    assert_item_is_function_tool_call_output(items[3], "456-2")
 
     assert isinstance(result.next_step, NextStepRunAgain)
 

@@ -7,6 +7,7 @@ from inline_snapshot import snapshot
 
 from agents import function_tool
 from agents.run_context import RunContextWrapper
+from agents.tool_context import ToolContext
 
 
 class DummyContext:
@@ -14,8 +15,8 @@ class DummyContext:
         self.data = "something"
 
 
-def ctx_wrapper() -> RunContextWrapper[DummyContext]:
-    return RunContextWrapper(DummyContext())
+def ctx_wrapper() -> ToolContext[DummyContext]:
+    return ToolContext(context=DummyContext(), tool_call_id="1")
 
 
 @function_tool
@@ -44,7 +45,7 @@ async def test_sync_no_context_with_args_invocation():
 
 
 @function_tool
-def sync_with_context(ctx: RunContextWrapper[DummyContext], name: str) -> str:
+def sync_with_context(ctx: ToolContext[DummyContext], name: str) -> str:
     return f"{name}_{ctx.context.data}"
 
 
@@ -71,7 +72,7 @@ async def test_async_no_context_invocation():
 
 
 @function_tool
-async def async_with_context(ctx: RunContextWrapper[DummyContext], prefix: str, num: int) -> str:
+async def async_with_context(ctx: ToolContext[DummyContext], prefix: str, num: int) -> str:
     await asyncio.sleep(0)
     return f"{prefix}-{num}-{ctx.context.data}"
 

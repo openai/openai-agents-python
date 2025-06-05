@@ -20,6 +20,7 @@ from .function_schema import DocstringStyle, function_schema
 from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .tool_context import ToolContext
 from .tracing import SpanError
 from .util import _error_tracing
 from .util._types import MaybeAwaitable
@@ -31,8 +32,13 @@ ToolParams = ParamSpec("ToolParams")
 
 ToolFunctionWithoutContext = Callable[ToolParams, Any]
 ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
+ToolFunctionWithToolContext = Callable[Concatenate[ToolContext, ToolParams], Any]
 
-ToolFunction = Union[ToolFunctionWithoutContext[ToolParams], ToolFunctionWithContext[ToolParams]]
+ToolFunction = Union[
+    ToolFunctionWithoutContext[ToolParams],
+    ToolFunctionWithContext[ToolParams],
+    ToolFunctionWithToolContext[ToolParams],
+]
 
 
 @dataclass
@@ -62,7 +68,7 @@ class FunctionTool:
     params_json_schema: dict[str, Any]
     """The JSON schema for the tool's parameters."""
 
-    on_invoke_tool: Callable[[RunContextWrapper[Any], str], Awaitable[Any]]
+    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any]]
     """A function that invokes the tool with the given context and parameters. The params passed
     are:
     1. The tool run context.
@@ -344,7 +350,7 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-        async def _on_invoke_tool_impl(ctx: RunContextWrapper[Any], input: str) -> Any:
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
             try:
                 json_data: dict[str, Any] = json.loads(input) if input else {}
             except Exception as e:
@@ -393,7 +399,7 @@ def function_tool(
 
             return result
 
-        async def _on_invoke_tool(ctx: RunContextWrapper[Any], input: str) -> Any:
+        async def _on_invoke_tool(ctx: ToolContext[Any], input: str) -> Any:
             try:
                 return await _on_invoke_tool_impl(ctx, input)
             except Exception as e:

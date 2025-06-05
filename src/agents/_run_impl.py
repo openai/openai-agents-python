@@ -75,6 +75,7 @@ from .tool import (
     MCPToolApprovalRequest,
     Tool,
 )
+from .tool_context import ToolContext
 from .tracing import (
     SpanError,
     Trace,
@@ -543,23 +544,24 @@ class RunImpl:
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
+                tool_context = ToolContext.from_agent_context(context_wrapper, tool_call.call_id)
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(context_wrapper, agent, func_tool),
+                        hooks.on_tool_start(tool_context, agent, func_tool),
                         (
-                            agent.hooks.on_tool_start(context_wrapper, agent, func_tool)
+                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
-                        func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
+                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
                     )
 
                     await asyncio.gather(
-                        hooks.on_tool_end(context_wrapper, agent, func_tool, result),
+                        hooks.on_tool_end(tool_context, agent, func_tool, result),
                         (
-                            agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
+                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
