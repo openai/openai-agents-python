@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -276,3 +277,10 @@ def test_handoff_input_schema_is_strict():
         "additionalProperties" in obj.input_json_schema
         and not obj.input_json_schema["additionalProperties"]
     ), "Input schema should be strict and have additionalProperties=False"
+
+
+def test_get_transfer_message_is_valid_json() -> None:
+    agent = Agent(name="foo")
+    obj = handoff(agent)
+    transfer = obj.get_transfer_message(agent)
+    assert json.loads(transfer) == {"assistant": agent.name}
