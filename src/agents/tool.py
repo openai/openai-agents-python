@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable
@@ -382,9 +383,9 @@ def function_tool(
                     result = await the_func(*args, **kwargs_dict)
             else:
                 if schema.takes_context:
-                    result = the_func(ctx, *args, **kwargs_dict)
+                    result = await asyncio.to_thread(the_func, ctx, *args, **kwargs_dict)
                 else:
-                    result = the_func(*args, **kwargs_dict)
+                    result = await asyncio.to_thread(the_func, *args, **kwargs_dict)
 
             if _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool {schema.name} completed.")
