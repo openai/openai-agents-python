@@ -1,16 +1,18 @@
-from dataclasses import KW_ONLY, dataclass, fields
+from dataclasses import fields
 from typing import Any
 
 from .run_context import RunContextWrapper, TContext
 
 
-@dataclass
 class ToolContext(RunContextWrapper[TContext]):
     """The context of a tool call."""
 
-    _: KW_ONLY
     tool_call_id: str
     """The ID of the tool call."""
+
+    def __init__(self, *args: Any, tool_call_id: str, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.tool_call_id = tool_call_id
 
     @classmethod
     def from_agent_context(
