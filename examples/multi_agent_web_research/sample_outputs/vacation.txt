@@ -1,6 +1,6 @@
 # Terminal output for a vacation related query. See vacation.md for final report.
 
-$ uv run python -m examples.research_bot.main
+$ uv run python -m examples.multi_agent_web_research.main
 What would you like to research? Caribbean vacation spots in April, optimizing for surfing, hiking and water sports
 View trace: https://platform.openai.com/traces/trace?trace_id=trace_....
 Starting research...

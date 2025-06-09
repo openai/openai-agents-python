@@ -32,11 +32,11 @@ Check out a variety of sample implementations of the SDK in the examples section
 - **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
   Learn how to build agents with MCP.
 
-- **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** and **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
+- **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** and **[multi_agent_web_research](https://github.com/openai/openai-agents-python/tree/main/examples/multi_agent_web_research):**
   Two more built-out examples that illustrate real-world applications
 
     - **customer_service**: Example customer service system for an airline.
-    - **research_bot**: Simple deep research clone.
+    - **multi_agent_web_research**: Simple deep research clone.
 
 - **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
   See examples of voice agents, using our TTS and STT models.

@@ -1,9 +1,9 @@
-# Research bot
+# Multi-Agent Web Research
 
-This is a simple example of a multi-agent research bot. To run it:
+This is a simple example of a multi-agent web research system. To run it:
 
 ```bash
-python -m examples.research_bot.main
+python -m examples.multi_agent_web_research.main
 ```
 
 ## Architecture
@@ -17,7 +17,7 @@ The flow is:
 
 ## Suggested improvements
 
-If you're building your own research bot, some ideas to add to this are:
+If you're building your own multi-agent research system, some ideas to add to this are:
 
 1. Retrieval: Add support for fetching relevant information from a vector store. You could use the File Search tool for this.
 2. Image and file upload: Allow users to attach PDFs or other files, as baseline context for the research.

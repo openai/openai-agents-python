@@ -1,6 +1,6 @@
 # Terminal output for a product recommendation related query. See product_recs.md for final report.
 
-$ uv run python -m examples.research_bot.main
+$ uv run python -m examples.multi_agent_web_research.main
 
 What would you like to research? Best surfboards for beginners. I can catch my own waves, but previously used an 11ft board. What should I look for, what are my options? Various budget ranges.
 View trace: https://platform.openai.com/traces/trace?trace_id=trace_...

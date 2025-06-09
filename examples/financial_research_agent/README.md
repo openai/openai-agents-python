@@ -1,6 +1,6 @@
 # Financial Research Agent Example
 
-This example shows how you might compose a richer financial research agent using the Agents SDK. The pattern is similar to the `research_bot` example, but with more specialized sub‑agents and a verification step.
+This example shows how you might compose a richer financial research agent using the Agents SDK. The pattern is similar to the `multi_agent_web_research` example, but with more specialized sub‑agents and a verification step.
 
 The flow is:
 

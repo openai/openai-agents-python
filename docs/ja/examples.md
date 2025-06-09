@@ -35,11 +35,11 @@ search:
 - **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**  
   MCP を使ったエージェントの構築方法を学べます。
 
-- **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**  
+- **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[multi_agent_web_research](https://github.com/openai/openai-agents-python/tree/main/examples/multi_agent_web_research):**  
   より実践的なユースケースを示す、拡張された 2 つの例です。
 
     - **customer_service**: 航空会社向けカスタマーサービスシステムの例  
-    - **research_bot**: シンプルなディープリサーチクローン  
+    - **multi_agent_web_research**: シンプルなディープリサーチクローン  
 
 - **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**  
   TTS と STT モデルを用いた音声エージェントの例をご覧ください。
