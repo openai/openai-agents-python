@@ -1,18 +1,18 @@
-from dataclasses import fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from .run_context import RunContextWrapper, TContext
 
 
+def _assert_must_pass_tool_call_id() -> str:
+    raise ValueError("tool_call_id must be passed to ToolContext")
+
+@dataclass
 class ToolContext(RunContextWrapper[TContext]):
     """The context of a tool call."""
 
-    tool_call_id: str
+    tool_call_id: str = field(default_factory=_assert_must_pass_tool_call_id)
     """The ID of the tool call."""
-
-    def __init__(self, *args: Any, tool_call_id: str, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self.tool_call_id = tool_call_id
 
     @classmethod
     def from_agent_context(
