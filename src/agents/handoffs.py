@@ -99,6 +99,12 @@ class Handoff(Generic[TContext]):
     True, as it increases the likelihood of correct JSON input.
     """
 
+    should_return_control: bool = False
+    """Whether the Agent that receives control during a handoff should return control to the
+    original (previous) Agent upon completion of its work. If False, after the Agent that received
+    the handoff completes its work, the interaction will end.
+    """
+
     def get_transfer_message(self, agent: Agent[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
@@ -121,6 +127,7 @@ def handoff(
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -133,6 +140,7 @@ def handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -144,6 +152,7 @@ def handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    should_return_control: bool = False,
 ) -> Handoff[TContext]: ...
 
 
@@ -154,6 +163,7 @@ def handoff(
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
     input_type: type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    should_return_control: bool = False,
 ) -> Handoff[TContext]:
     """Create a handoff from an agent.
 
@@ -168,7 +178,7 @@ def handoff(
         input_filter: a function that filters the inputs that are passed to the next agent.
     """
     assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_handoff and input_type, or neither"
+        "You must provide either both on_input and input_type, or neither"
     )
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
@@ -233,4 +243,5 @@ def handoff(
         on_invoke_handoff=_invoke_handoff,
         input_filter=input_filter,
         agent_name=agent.name,
+        should_return_control=should_return_control,
     )
