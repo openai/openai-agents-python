@@ -57,7 +57,10 @@ class MCPServer(abc.ABC):
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
 
-    def __init__(self, cache_tools_list: bool, client_session_timeout_seconds: float | None):
+    def __init__(
+        self, cache_tools_list: bool, client_session_timeout_seconds: float | None,
+        allowed_tools: list[str] | None = None
+    ):
         """
         Args:
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
@@ -68,6 +71,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             (by avoiding a round-trip to the server every time).
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+
+            allowed_tools: the names of the tools from the server that can be accessed.
         """
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -80,6 +85,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
+        self.allowed_tools = allowed_tools
 
     @abc.abstractmethod
     def create_streams(
@@ -145,6 +151,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # Fetch the tools from the server
         self._tools_list = (await self.session.list_tools()).tools
+        # Filter out tools that should not be available
+        if self.allowed_tools:
+            self._tools_list = [
+                tool for tool in self._tools_list
+                if tool.name in self.allowed_tools
+            ]
+
         return self._tools_list
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
@@ -206,6 +219,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -214,17 +228,23 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 start the server, the args to pass to the command, the environment variables to
                 set for the server, the working directory to use when spawning the process, and
                 the text encoding used when sending/receiving messages to the server.
+
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
                 cached and only fetched from the server once. If `False`, the tools list will be
                 fetched from the server on each call to `list_tools()`. The cache can be
                 invalidated by calling `invalidate_tools_cache()`. You should set this to `True`
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
+
             name: A readable name for the server. If not provided, we'll create one from the
                 command.
+
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+
+            allowed_tools: A list of tool names provided by the server that the client is
+                permitted to access.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(cache_tools_list, client_session_timeout_seconds, allowed_tools)
 
         self.params = StdioServerParameters(
             command=params["command"],
@@ -283,6 +303,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -302,8 +323,11 @@ class MCPServerSse(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+
+            allowed_tools: A list of tool names provided by the server that the client is
+                permitted to access.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(cache_tools_list, client_session_timeout_seconds, allowed_tools)
 
         self.params = params
         self._name = name or f"sse: {self.params['url']}"
@@ -362,6 +386,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -382,8 +407,11 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+
+            allowed_tools: A list of tool names provided by the server that the client is
+                permitted to access.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(cache_tools_list, client_session_timeout_seconds, allowed_tools)
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
