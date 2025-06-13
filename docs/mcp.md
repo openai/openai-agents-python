@@ -41,6 +41,57 @@ agent=Agent(
 )
 ```
 
+## Tool filtering
+
+You can filter which tools are available to your Agent in two ways:
+
+### Server-level filtering
+
+Each MCP server instance can be configured with `allowed_tools` and `excluded_tools` parameters to control which tools it exposes:
+
+```python
+# Only expose specific tools from this server
+server = MCPServerStdio(
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+    allowed_tools=["read_file", "write_file"],  # Only these tools will be available
+)
+
+# Exclude specific tools from this server
+server = MCPServerStdio(
+    params={
+        "command": "npx", 
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+    excluded_tools=["delete_file"],  # This tool will be filtered out
+)
+```
+
+### Agent-level filtering
+
+You can also filter tools at the Agent level using the `mcp_config` parameter. This allows you to control which tools are available across all MCP servers:
+
+```python
+agent = Agent(
+    name="Assistant",
+    instructions="Use the tools to achieve the task",
+    mcp_servers=[server1, server2, server3],
+    mcp_config={
+        "allowed_tools": {
+            "server1": ["read_file", "write_file"],  # Only these tools from server1
+            "server2": ["search"],                   # Only search tool from server2
+        },
+        "excluded_tools": {
+            "server3": ["dangerous_tool"],           # Exclude this tool from server3
+        }
+    }
+)
+```
+
+**Filtering priority**: Server-level filtering is applied first, then Agent-level filtering. This allows for fine-grained control where servers can limit their exposed tools, and Agents can further restrict which tools they use.
+
 ## Caching
 
 Every time an Agent runs, it calls `list_tools()` on the MCP server. This can be a latency hit, especially if the server is a remote server. To automatically cache the list of tools, you can pass `cache_tools_list=True` to [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. You should only do this if you're certain the tool list will not change.

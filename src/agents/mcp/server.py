@@ -57,7 +57,13 @@ class MCPServer(abc.ABC):
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
 
-    def __init__(self, cache_tools_list: bool, client_session_timeout_seconds: float | None):
+    def __init__(
+        self,
+        cache_tools_list: bool,
+        client_session_timeout_seconds: float | None,
+        allowed_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
+    ):
         """
         Args:
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
@@ -68,6 +74,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             (by avoiding a round-trip to the server every time).
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            allowed_tools: Optional list of tool names to allow (whitelist).
+                If set, only these tools will be available.
+            excluded_tools: Optional list of tool names to exclude (blacklist).
+                If set, these tools will be filtered out.
         """
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -80,6 +90,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
+
+        self.allowed_tools = allowed_tools
+        self.excluded_tools = excluded_tools
 
     @abc.abstractmethod
     def create_streams(
@@ -138,14 +151,21 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
-            return self._tools_list
+            tools = self._tools_list
+        else:
+            # Reset the cache dirty to False
+            self._cache_dirty = False
+            # Fetch the tools from the server
+            self._tools_list = (await self.session.list_tools()).tools
+            tools = self._tools_list
 
-        # Reset the cache dirty to False
-        self._cache_dirty = False
-
-        # Fetch the tools from the server
-        self._tools_list = (await self.session.list_tools()).tools
-        return self._tools_list
+        # Filter tools based on allowed and excluded tools
+        filtered_tools = tools
+        if self.allowed_tools is not None:
+            filtered_tools = [t for t in filtered_tools if t.name in self.allowed_tools]
+        if self.excluded_tools is not None:
+            filtered_tools = [t for t in filtered_tools if t.name not in self.excluded_tools]
+        return filtered_tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
@@ -206,6 +226,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -223,8 +245,15 @@ class MCPServerStdio(_MCPServerWithClientSession):
             name: A readable name for the server. If not provided, we'll create one from the
                 command.
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            allowed_tools: Optional list of tool names to allow (whitelist).
+            excluded_tools: Optional list of tool names to exclude (blacklist).
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            allowed_tools,
+            excluded_tools,
+        )
 
         self.params = StdioServerParameters(
             command=params["command"],
@@ -283,6 +312,8 @@ class MCPServerSse(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -302,8 +333,15 @@ class MCPServerSse(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            allowed_tools: Optional list of tool names to allow (whitelist).
+            excluded_tools: Optional list of tool names to exclude (blacklist).
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            allowed_tools,
+            excluded_tools,
+        )
 
         self.params = params
         self._name = name or f"sse: {self.params['url']}"
@@ -362,6 +400,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        allowed_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -382,8 +422,15 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            allowed_tools: Optional list of tool names to allow (whitelist).
+            excluded_tools: Optional list of tool names to exclude (blacklist).
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            allowed_tools,
+            excluded_tools,
+        )
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
