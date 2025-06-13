@@ -1,6 +1,6 @@
 import functools
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from agents.strict_schema import ensure_strict_json_schema
 
@@ -22,13 +22,23 @@ class MCPUtil:
 
     @classmethod
     async def get_all_function_tools(
-        cls, servers: list["MCPServer"], convert_schemas_to_strict: bool
+        cls,
+        servers: list["MCPServer"],
+        convert_schemas_to_strict: bool,
+        allowed_tools_map: Optional[dict[str, list[str]]] = None,
+        excluded_tools_map: Optional[dict[str, list[str]]] = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
+        allowed_tools_map = allowed_tools_map or {}
+        excluded_tools_map = excluded_tools_map or {}
         for server in servers:
-            server_tools = await cls.get_function_tools(server, convert_schemas_to_strict)
+            allowed = allowed_tools_map.get(server.name)
+            excluded = excluded_tools_map.get(server.name)
+            server_tools = await cls.get_function_tools(
+                server, convert_schemas_to_strict, allowed, excluded
+            )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
                 raise UserError(
@@ -42,7 +52,11 @@ class MCPUtil:
 
     @classmethod
     async def get_function_tools(
-        cls, server: "MCPServer", convert_schemas_to_strict: bool
+        cls,
+        server: "MCPServer",
+        convert_schemas_to_strict: bool,
+        allowed_tools: Optional[list[str]] = None,
+        excluded_tools: Optional[list[str]] = None,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -50,7 +64,17 @@ class MCPUtil:
             tools = await server.list_tools()
             span.span_data.result = [tool.name for tool in tools]
 
-        return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
+        # Apply Agent-level filtering (additional filtering on top of server-level filtering)
+        filtered_tools = tools
+        if allowed_tools is not None:
+            filtered_tools = [t for t in filtered_tools if t.name in allowed_tools]
+        if excluded_tools is not None:
+            filtered_tools = [t for t in filtered_tools if t.name not in excluded_tools]
+
+        return [
+            cls.to_function_tool(tool, server, convert_schemas_to_strict)
+            for tool in filtered_tools
+        ]
 
     @classmethod
     def to_function_tool(

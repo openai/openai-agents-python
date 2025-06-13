@@ -64,6 +64,10 @@ class MCPConfig(TypedDict):
     """If True, we will attempt to convert the MCP schemas to strict-mode schemas. This is a
     best-effort conversion, so some schemas may not be convertible. Defaults to False.
     """
+    allowed_tools: NotRequired[dict[str, list[str]]]
+    """Optional: server_name -> allowed tool names (whitelist)"""
+    excluded_tools: NotRequired[dict[str, list[str]]]
+    """Optional: server_name -> excluded tool names (blacklist)"""
 
 
 @dataclass
@@ -259,7 +263,14 @@ class Agent(Generic[TContext]):
     async def get_mcp_tools(self) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
-        return await MCPUtil.get_all_function_tools(self.mcp_servers, convert_schemas_to_strict)
+        allowed_tools_map = self.mcp_config.get("allowed_tools", {})
+        excluded_tools_map = self.mcp_config.get("excluded_tools", {})
+        return await MCPUtil.get_all_function_tools(
+            self.mcp_servers,
+            convert_schemas_to_strict,
+            allowed_tools_map,
+            excluded_tools_map,
+        )
 
     async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
