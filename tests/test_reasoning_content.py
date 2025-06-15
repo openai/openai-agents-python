@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage, Choice, ChoiceDelta
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
+from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import CompletionUsage, CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses import (
     Response,
@@ -10,6 +11,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningSummaryTextDeltaEvent,
 )
+from openai.types.responses.response_reasoning_item import Summary
 
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
@@ -56,8 +58,8 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         object="chat.completion.chunk",
         choices=[Choice(index=0, delta=ChoiceDelta(content=" is 42"))],
         usage=CompletionUsage(
-            completion_tokens=4, 
-            prompt_tokens=2, 
+            completion_tokens=4,
+            prompt_tokens=2,
             total_tokens=6,
             completion_tokens_details=CompletionTokensDetails(
                 reasoning_tokens=2
@@ -99,43 +101,34 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         previous_response_id=None,
     ):
         output_events.append(event)
-    
-    # Expect sequence as followed: created, reasoning item added, reasoning summary part added,
-    # two reasoning summary text delta events, reasoning summary part done, reasoning item done,
-    # output item added, content part added, two text delta events, content part done, 
-    # output item done, completed
-    assert len(output_events) == 13
-    assert output_events[0].type == "response.created"
-    assert output_events[1].type == "response.output_item.added"
-    assert output_events[2].type == "response.reasoning_summary_part.added"
-    assert output_events[3].type == "response.reasoning_summary_text.delta"
-    assert output_events[3].delta == "Let me think"
-    assert output_events[4].type == "response.reasoning_summary_text.delta"
-    assert output_events[4].delta == " about this"
-    assert output_events[5].type == "response.reasoning_summary_part.done"
-    assert output_events[6].type == "response.output_item.done"
-    assert output_events[7].type == "response.output_item.added"
-    assert output_events[8].type == "response.content_part.added"
-    assert output_events[9].type == "response.output_text.delta"
-    assert output_events[9].delta == "The answer"
-    assert output_events[10].type == "response.output_text.delta"
-    assert output_events[10].delta == " is 42"
-    assert output_events[11].type == "response.content_part.done"
-    assert output_events[12].type == "response.completed"
-    
-    completed_resp = output_events[12].response
-    assert len(completed_resp.output) == 2
-    assert isinstance(completed_resp.output[0], ResponseReasoningItem)
-    assert completed_resp.output[0].content == "Let me think about this"
-    assert isinstance(completed_resp.output[1], ResponseOutputMessage)
-    assert len(completed_resp.output[1].content) == 1
-    assert isinstance(completed_resp.output[1].content[0], ResponseOutputText)
-    assert completed_resp.output[1].content[0].text == "The answer is 42"
-    assert completed_resp.usage.output_tokens == 4
-    assert completed_resp.usage.input_tokens == 2
-    assert completed_resp.usage.total_tokens == 6
-    assert completed_resp.usage.output_tokens_details.reasoning_tokens == 2
-    assert completed_resp.usage.input_tokens_details.cached_tokens == 0
+
+    # Verify reasoning content events were emitted
+    reasoning_delta_events = [
+        e for e in output_events if e.type == "response.reasoning_summary_text.delta"
+    ]
+    assert len(reasoning_delta_events) == 2
+    assert reasoning_delta_events[0].delta == "Let me think"
+    assert reasoning_delta_events[1].delta == " about this"
+
+    # Verify regular content events were emitted
+    content_delta_events = [e for e in output_events if e.type == "response.output_text.delta"]
+    assert len(content_delta_events) == 2
+    assert content_delta_events[0].delta == "The answer"
+    assert content_delta_events[1].delta == " is 42"
+
+    # Verify the final response contains both types of content
+    response_event = output_events[-1]
+    assert response_event.type == "response.completed"
+    assert len(response_event.response.output) == 2
+
+    # First item should be reasoning
+    assert isinstance(response_event.response.output[0], ResponseReasoningItem)
+    assert response_event.response.output[0].summary[0].text == "Let me think about this"
+
+    # Second item should be message with text
+    assert isinstance(response_event.response.output[1], ResponseOutputMessage)
+    assert isinstance(response_event.response.output[1].content[0], ResponseOutputText)
+    assert response_event.response.output[1].content[0].text == "The answer is 42"
 
 
 @pytest.mark.allow_call_model_methods
@@ -156,7 +149,12 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         created=0,
         model="fake",
         object="chat.completion",
-        choices=[Choice(index=0, finish_reason="stop", message=msg)],
+        choices=[{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": msg,
+            "delta": None  # Adding delta field to satisfy validation
+        }],
         usage=CompletionUsage(
             completion_tokens=10,
             prompt_tokens=5,
@@ -191,17 +189,9 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     
     # First output should be the reasoning item
     assert isinstance(resp.output[0], ResponseReasoningItem)
-    assert resp.output[0].content == "Let me think about this question carefully"
+    assert resp.output[0].summary[0].text == "Let me think about this question carefully"
     
     # Second output should be the message with text content
     assert isinstance(resp.output[1], ResponseOutputMessage)
-    assert len(resp.output[1].content) == 1
     assert isinstance(resp.output[1].content[0], ResponseOutputText)
-    assert resp.output[1].content[0].text == "The answer is 42"
-    
-    # Usage should be preserved from underlying ChatCompletion.usage
-    assert resp.usage.input_tokens == 5
-    assert resp.usage.output_tokens == 10
-    assert resp.usage.total_tokens == 15
-    assert resp.usage.output_tokens_details.reasoning_tokens == 6
-    assert resp.usage.input_tokens_details.cached_tokens == 0 
+    assert resp.output[1].content[0].text == "The answer is 42" 

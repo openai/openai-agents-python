@@ -28,6 +28,7 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
     ResponseUsage,
 )
+from openai.types.responses.response_reasoning_item import Summary
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from ..items import TResponseStreamEvent
@@ -85,16 +86,18 @@ class ChatCmplStreamHandler:
                 reasoning_content = delta.reasoning_content
                 if reasoning_content and not state.reasoning_content_index_and_output:
                     state.reasoning_content_index_and_output = (
-                        0,  
+                        0,
                         ResponseReasoningItem(
-                            content="",
-                            type="reasoning_item",
+                            id=FAKE_RESPONSES_ID,
+                            summary=[Summary(text="", type="summary_text")],
+                            type="reasoning",
                         ),
                     )
                     yield ResponseOutputItemAddedEvent(
                         item=ResponseReasoningItem(
-                            content="",
-                            type="reasoning_item",
+                            id=FAKE_RESPONSES_ID,
+                            summary=[Summary(text="", type="summary_text")],
+                            type="reasoning",
                         ),
                         output_index=0,
                         type="response.output_item.added",
@@ -104,10 +107,8 @@ class ChatCmplStreamHandler:
                     yield ResponseReasoningSummaryPartAddedEvent(
                         item_id=FAKE_RESPONSES_ID,
                         output_index=0,
-                        part=ResponseReasoningItem(
-                            content="",
-                            type="reasoning_item",
-                        ),
+                        summary_index=0,
+                        part={"text": "", "type": "summary_text"},
                         type="response.reasoning_summary_part.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
@@ -117,10 +118,16 @@ class ChatCmplStreamHandler:
                         delta=reasoning_content,
                         item_id=FAKE_RESPONSES_ID,
                         output_index=0,
+                        summary_index=0,
                         type="response.reasoning_summary_text.delta",
                         sequence_number=sequence_number.get_and_increment(),
                     )
-                    state.reasoning_content_index_and_output[1].content += reasoning_content
+                    
+                    # Create a new summary with updated text
+                    current_summary = state.reasoning_content_index_and_output[1].summary[0]
+                    updated_text = current_summary.text + reasoning_content
+                    new_summary = Summary(text=updated_text, type="summary_text")
+                    state.reasoning_content_index_and_output[1].summary[0] = new_summary
             
             # Handle regular content
             if delta.content is not None:
@@ -258,7 +265,8 @@ class ChatCmplStreamHandler:
             yield ResponseReasoningSummaryPartDoneEvent(
                 item_id=FAKE_RESPONSES_ID,
                 output_index=0,
-                part=state.reasoning_content_index_and_output[1],
+                summary_index=0,
+                part={"text": state.reasoning_content_index_and_output[1].summary[0].text, "type": "summary_text"},
                 type="response.reasoning_summary_part.done",
                 sequence_number=sequence_number.get_and_increment(),
             )

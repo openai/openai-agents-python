@@ -36,6 +36,7 @@ from openai.types.responses import (
     ResponseReasoningItem,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_reasoning_item import Summary
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
@@ -90,8 +91,9 @@ class Converter:
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             items.append(
                 ResponseReasoningItem(
-                    content=message.reasoning_content,
-                    type="reasoning_item",
+                    id=FAKE_RESPONSES_ID,
+                    summary=[Summary(text=message.reasoning_content, type="summary_text")],
+                    type="reasoning",
                 )
             )
         
