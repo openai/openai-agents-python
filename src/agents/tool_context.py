@@ -7,6 +7,7 @@ from .run_context import RunContextWrapper, TContext
 def _assert_must_pass_tool_call_id() -> str:
     raise ValueError("tool_call_id must be passed to ToolContext")
 
+
 @dataclass
 class ToolContext(RunContextWrapper[TContext]):
     """The context of a tool call."""
