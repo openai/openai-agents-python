@@ -223,7 +223,8 @@ def function_schema(
         doc_info = None
         param_descs = {}
 
-    func_name = name_override or doc_info.name if doc_info else func.__name__
+    # Ensure name_override takes precedence even if docstring info is disabled.
+    func_name = name_override or (doc_info.name if doc_info else func.__name__)
 
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)
