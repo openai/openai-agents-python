@@ -33,6 +33,7 @@ from openai.types.responses import (
     ResponseOutputMessageParam,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 
@@ -84,7 +85,16 @@ class Converter:
     @classmethod
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
-
+        
+        # Handle reasoning content if available
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            items.append(
+                ResponseReasoningItem(
+                    content=message.reasoning_content,
+                    type="reasoning_item",
+                )
+            )
+        
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,
             content=[],
