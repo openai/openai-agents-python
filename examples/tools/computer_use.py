@@ -76,7 +76,7 @@ class LocalPlaywrightComputer(AsyncComputer):
     async def _get_browser_and_page(self) -> tuple[Browser, Page]:
         width, height = self.dimensions
         launch_args = [f"--window-size={width},{height}"]
-        browser = await self.playwright.chromium.launch(headless=False, args=launch_args)
+        browser = await self.playwright.chromium.launch(headless=True, args=launch_args)
         page = await browser.new_page()
         await page.set_viewport_size({"width": width, "height": height})
         await page.goto("https://www.bing.com")
