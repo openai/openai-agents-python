@@ -1,6 +1,8 @@
 import functools
 import json
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Union
+from typing_extensions import NotRequired, TypedDict
 
 from agents.strict_schema import ensure_strict_json_schema
 
@@ -10,11 +12,80 @@ from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, Tool
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
 
+    from ..agent import Agent
     from .server import MCPServer
+
+
+@dataclass
+class ToolFilterContext:
+    """Context information available to tool filter functions."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    agent: "Agent[Any]"
+    """The agent that is requesting the tool list."""
+
+    server_name: str
+    """The name of the MCP server."""
+
+
+ToolFilterCallable = Callable[["ToolFilterContext", "MCPTool"], MaybeAwaitable[bool]]
+"""A function that determines whether a tool should be available.
+
+Args:
+    context: The context information including run context, agent, and server name.
+    tool: The MCP tool to filter.
+
+Returns:
+    Whether the tool should be available (True) or filtered out (False).
+"""
+
+
+class ToolFilterStatic(TypedDict):
+    """Static tool filter configuration using allowlists and blocklists."""
+
+    allowed_tool_names: NotRequired[list[str]]
+    """Optional list of tool names to allow (whitelist). If set, only these tools will be available."""
+
+    blocked_tool_names: NotRequired[list[str]]
+    """Optional list of tool names to exclude (blacklist). If set, these tools will be filtered out."""
+
+
+ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]
+"""A tool filter that can be either a function, static configuration, or None (no filtering)."""
+
+
+def create_static_tool_filter(
+    allowed_tool_names: list[str] | None = None,
+    blocked_tool_names: list[str] | None = None,
+) -> ToolFilterStatic | None:
+    """Create a static tool filter from allowlist and blocklist parameters.
+
+    This is a convenience function for creating a ToolFilterStatic.
+
+    Args:
+        allowed_tool_names: Optional list of tool names to allow (whitelist).
+        blocked_tool_names: Optional list of tool names to exclude (blacklist).
+
+    Returns:
+        A ToolFilterStatic if any filtering is specified, None otherwise.
+    """
+    if allowed_tool_names is None and blocked_tool_names is None:
+        return None
+
+    filter_dict: ToolFilterStatic = {}
+    if allowed_tool_names is not None:
+        filter_dict["allowed_tool_names"] = allowed_tool_names
+    if blocked_tool_names is not None:
+        filter_dict["blocked_tool_names"] = blocked_tool_names
+
+    return filter_dict
 
 
 class MCPUtil:

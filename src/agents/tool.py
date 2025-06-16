@@ -27,6 +27,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from mcp.types import Tool as MCPTool
 
 ToolParams = ParamSpec("ToolParams")
 
