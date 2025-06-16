@@ -340,10 +340,10 @@ class MCPServerStreamableHttpParams(TypedDict):
     headers: NotRequired[dict[str, str]]
     """The headers to send to the server."""
 
-    timeout: NotRequired[float]
+    timeout: NotRequired[timedelta | float]
     """The timeout for the HTTP request. Defaults to 5 seconds."""
 
-    sse_read_timeout: NotRequired[float]
+    sse_read_timeout: NotRequired[timedelta | float]
     """The timeout for the SSE connection, in seconds. Defaults to 5 minutes."""
 
     terminate_on_close: NotRequired[bool]
