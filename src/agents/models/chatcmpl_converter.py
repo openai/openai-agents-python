@@ -86,7 +86,7 @@ class Converter:
     @classmethod
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
-        
+
         # Handle reasoning content if available
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             items.append(
@@ -96,7 +96,7 @@ class Converter:
                     type="reasoning",
                 )
             )
-        
+
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,
             content=[],

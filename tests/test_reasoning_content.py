@@ -1,22 +1,36 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
-from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-from openai.types.completion_usage import CompletionUsage, CompletionTokensDetails, PromptTokensDetails
+from openai.types.chat.chat_completion_chunk import Choice
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseReasoningItem,
-    ResponseReasoningSummaryTextDeltaEvent,
 )
-from openai.types.responses.response_reasoning_item import Summary
 
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
+
+
+# Define our own ChoiceDelta since the import is causing issues
+class ChoiceDelta:
+    def __init__(self, content=None, role=None, function_call=None, tool_calls=None):
+        self.content = content
+        self.role = role
+        self.function_call = function_call
+        self.tool_calls = tool_calls
+        # We'll add reasoning_content attribute dynamically later
 
 
 @pytest.mark.allow_call_model_methods
@@ -34,39 +48,62 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(reasoning_content="Let me think"))],
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content=None, role=None, function_call=None, tool_calls=None),  # type: ignore
+            )
+        ],
     )
+    chunk1.choices[0].delta.reasoning_content = "Let me think"  # type: ignore[attr-defined]
+
     chunk2 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(reasoning_content=" about this"))],
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content=None, role=None, function_call=None, tool_calls=None),  # type: ignore
+            )
+        ],
     )
+    chunk2.choices[0].delta.reasoning_content = " about this"  # type: ignore[attr-defined]
+
     # Then regular content in two pieces
     chunk3 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(content="The answer"))],
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(
+                    content="The answer", role=None, function_call=None, tool_calls=None  # type: ignore
+                ),
+            )
+        ],
     )
+
     chunk4 = ChatCompletionChunk(
         id="chunk-id",
         created=1,
         model="fake",
         object="chat.completion.chunk",
-        choices=[Choice(index=0, delta=ChoiceDelta(content=" is 42"))],
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content=" is 42", role=None, function_call=None, tool_calls=None),  # type: ignore
+            )
+        ],
         usage=CompletionUsage(
             completion_tokens=4,
             prompt_tokens=2,
             total_tokens=6,
-            completion_tokens_details=CompletionTokensDetails(
-                reasoning_tokens=2
-            ),
-            prompt_tokens_details=PromptTokensDetails(
-                cached_tokens=0
-            ),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
         ),
     )
 
@@ -140,31 +177,32 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     """
     # Create a mock completion with reasoning content
     msg = ChatCompletionMessage(
-        role="assistant", 
+        role="assistant",
         content="The answer is 42",
-        reasoning_content="Let me think about this question carefully"
     )
+    # Add reasoning_content attribute dynamically
+    msg.reasoning_content = "Let me think about this question carefully"  # type: ignore[attr-defined]
+
+    # Using a dict directly to avoid type errors
+    mock_choice: dict[str, Any] = {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": msg,
+        "delta": None
+    }
+
     chat = ChatCompletion(
         id="resp-id",
         created=0,
         model="fake",
         object="chat.completion",
-        choices=[{
-            "index": 0,
-            "finish_reason": "stop",
-            "message": msg,
-            "delta": None  # Adding delta field to satisfy validation
-        }],
+        choices=[mock_choice],  # type: ignore[list-item]
         usage=CompletionUsage(
             completion_tokens=10,
             prompt_tokens=5,
             total_tokens=15,
-            completion_tokens_details=CompletionTokensDetails(
-                reasoning_tokens=6
-            ),
-            prompt_tokens_details=PromptTokensDetails(
-                cached_tokens=0
-            ),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=6),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
         ),
     )
 
@@ -183,15 +221,15 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
     )
-    
+
     # Should have produced a reasoning item and a message with text content
     assert len(resp.output) == 2
-    
+
     # First output should be the reasoning item
     assert isinstance(resp.output[0], ResponseReasoningItem)
     assert resp.output[0].summary[0].text == "Let me think about this question carefully"
-    
+
     # Second output should be the message with text content
     assert isinstance(resp.output[1], ResponseOutputMessage)
     assert isinstance(resp.output[1].content[0], ResponseOutputText)
-    assert resp.output[1].content[0].text == "The answer is 42" 
+    assert resp.output[1].content[0].text == "The answer is 42"

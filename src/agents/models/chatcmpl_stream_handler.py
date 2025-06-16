@@ -29,10 +29,21 @@ from openai.types.responses import (
     ResponseUsage,
 )
 from openai.types.responses.response_reasoning_item import Summary
+from openai.types.responses.response_reasoning_summary_part_added_event import (
+    Part as AddedEventPart,
+)
+from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from ..items import TResponseStreamEvent
 from .fake_id import FAKE_RESPONSES_ID
+
+
+# Define a Part class for internal use
+class Part:
+    def __init__(self, text: str, type: str):
+        self.text = text
+        self.type = type
 
 
 @dataclass
@@ -80,7 +91,7 @@ class ChatCmplStreamHandler:
                 continue
 
             delta = chunk.choices[0].delta
-            
+
             # Handle reasoning content
             if hasattr(delta, "reasoning_content"):
                 reasoning_content = delta.reasoning_content
@@ -103,16 +114,16 @@ class ChatCmplStreamHandler:
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
-                    
+
                     yield ResponseReasoningSummaryPartAddedEvent(
                         item_id=FAKE_RESPONSES_ID,
                         output_index=0,
                         summary_index=0,
-                        part={"text": "", "type": "summary_text"},
+                        part=AddedEventPart(text="", type="summary_text"),
                         type="response.reasoning_summary_part.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
-                
+
                 if reasoning_content and state.reasoning_content_index_and_output:
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
@@ -122,13 +133,13 @@ class ChatCmplStreamHandler:
                         type="response.reasoning_summary_text.delta",
                         sequence_number=sequence_number.get_and_increment(),
                     )
-                    
+
                     # Create a new summary with updated text
                     current_summary = state.reasoning_content_index_and_output[1].summary[0]
                     updated_text = current_summary.text + reasoning_content
                     new_summary = Summary(text=updated_text, type="summary_text")
                     state.reasoning_content_index_and_output[1].summary[0] = new_summary
-            
+
             # Handle regular content
             if delta.content is not None:
                 if not state.text_content_index_and_output:
@@ -137,7 +148,7 @@ class ChatCmplStreamHandler:
                         content_index += 1
                     if state.refusal_content_index_and_output:
                         content_index += 1
-                        
+
                     state.text_content_index_and_output = (
                         content_index,
                         ResponseOutputText(
@@ -157,14 +168,16 @@ class ChatCmplStreamHandler:
                     # Notify consumers of the start of a new output message + first content part
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
-                        output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                        output_index=state.reasoning_content_index_and_output
+                        is not None,  # fixed 0 -> 0 or 1
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.text_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                        output_index=state.reasoning_content_index_and_output
+                        is not None,  # fixed 0 -> 0 or 1
                         part=ResponseOutputText(
                             text="",
                             type="output_text",
@@ -178,7 +191,8 @@ class ChatCmplStreamHandler:
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                    output_index=state.reasoning_content_index_and_output
+                    is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
@@ -194,7 +208,7 @@ class ChatCmplStreamHandler:
                         refusal_index += 1
                     if state.text_content_index_and_output:
                         refusal_index += 1
-                        
+
                     state.refusal_content_index_and_output = (
                         refusal_index,
                         ResponseOutputRefusal(refusal="", type="refusal"),
@@ -210,14 +224,16 @@ class ChatCmplStreamHandler:
                     # Notify downstream that assistant message + first content part are starting
                     yield ResponseOutputItemAddedEvent(
                         item=assistant_item,
-                        output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                        output_index=state.reasoning_content_index_and_output
+                        is not None,  # fixed 0 -> 0 or 1
                         type="response.output_item.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                        output_index=state.reasoning_content_index_and_output
+                        is not None,  # fixed 0 -> 0 or 1
                         part=ResponseOutputText(
                             text="",
                             type="output_text",
@@ -231,7 +247,8 @@ class ChatCmplStreamHandler:
                     content_index=state.refusal_content_index_and_output[0],
                     delta=delta.refusal,
                     item_id=FAKE_RESPONSES_ID,
-                    output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                    output_index=state.reasoning_content_index_and_output
+                    is not None,  # fixed 0 -> 0 or 1
                     type="response.refusal.delta",
                     sequence_number=sequence_number.get_and_increment(),
                 )
@@ -266,7 +283,10 @@ class ChatCmplStreamHandler:
                 item_id=FAKE_RESPONSES_ID,
                 output_index=0,
                 summary_index=0,
-                part={"text": state.reasoning_content_index_and_output[1].summary[0].text, "type": "summary_text"},
+                part=DoneEventPart(
+                    text=state.reasoning_content_index_and_output[1].summary[0].text,
+                    type="summary_text",
+                ),
                 type="response.reasoning_summary_part.done",
                 sequence_number=sequence_number.get_and_increment(),
             )
@@ -280,14 +300,15 @@ class ChatCmplStreamHandler:
         function_call_starting_index = 0
         if state.reasoning_content_index_and_output:
             function_call_starting_index += 1
-            
+
         if state.text_content_index_and_output:
             function_call_starting_index += 1
             # Send end event for this content part
             yield ResponseContentPartDoneEvent(
                 content_index=state.text_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
-                output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                output_index=state.reasoning_content_index_and_output
+                is not None,  # fixed 0 -> 0 or 1
                 part=state.text_content_index_and_output[1],
                 type="response.content_part.done",
                 sequence_number=sequence_number.get_and_increment(),
@@ -299,7 +320,8 @@ class ChatCmplStreamHandler:
             yield ResponseContentPartDoneEvent(
                 content_index=state.refusal_content_index_and_output[0],
                 item_id=FAKE_RESPONSES_ID,
-                output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                output_index=state.reasoning_content_index_and_output
+                is not None,  # fixed 0 -> 0 or 1
                 part=state.refusal_content_index_and_output[1],
                 type="response.content_part.done",
                 sequence_number=sequence_number.get_and_increment(),
@@ -344,11 +366,11 @@ class ChatCmplStreamHandler:
 
         # Finally, send the Response completed event
         outputs: list[ResponseOutputItem] = []
-        
+
         # include Reasoning item if it exists
         if state.reasoning_content_index_and_output:
             outputs.append(state.reasoning_content_index_and_output[1])
-            
+
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:
             assistant_msg = ResponseOutputMessage(
@@ -367,7 +389,8 @@ class ChatCmplStreamHandler:
             # send a ResponseOutputItemDone for the assistant message
             yield ResponseOutputItemDoneEvent(
                 item=assistant_msg,
-                output_index=state.reasoning_content_index_and_output is not None,  # fixed 0 -> 0 or 1
+                output_index=state.reasoning_content_index_and_output
+                is not None,  # fixed 0 -> 0 or 1
                 type="response.output_item.done",
                 sequence_number=sequence_number.get_and_increment(),
             )

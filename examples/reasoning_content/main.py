@@ -9,16 +9,18 @@ To run this example, you need to:
 2. Use a model that supports reasoning content (e.g., deepseek-reasoner)
 """
 
-import os
 import asyncio
+from typing import Any, cast
 
-from agents.models.openai_provider import OpenAIProvider
 from agents import ModelSettings
-from agents.items import ReasoningItem
+from agents.models.interface import ModelTracing
+from agents.models.openai_provider import OpenAIProvider
+from agents.types import ResponseOutputRefusal, ResponseOutputText  # type: ignore
 
 # Replace this with a model that supports reasoning content (e.g., deepseek-reasoner)
 # For demonstration purposes, we'll use a placeholder model name
 MODEL_NAME = "deepseek-reasoner"
+
 
 async def stream_with_reasoning_content():
     """
@@ -27,13 +29,13 @@ async def stream_with_reasoning_content():
     """
     provider = OpenAIProvider()
     model = provider.get_model(MODEL_NAME)
-    
+
     print("\n=== Streaming Example ===")
     print("Prompt: Write a haiku about recursion in programming")
-    
+
     reasoning_content = ""
     regular_content = ""
-    
+
     async for event in model.stream_response(
         system_instructions="You are a helpful assistant that writes creative content.",
         input="Write a haiku about recursion in programming",
@@ -41,21 +43,24 @@ async def stream_with_reasoning_content():
         tools=[],
         output_schema=None,
         handoffs=[],
-        tracing=None,
+        tracing=ModelTracing.DISABLED,
         previous_response_id=None,
     ):
         if event.type == "response.reasoning_summary_text.delta":
-            print(f"\033[33m{event.delta}\033[0m", end="", flush=True)  # Yellow for reasoning content
+            print(
+                f"\033[33m{event.delta}\033[0m", end="", flush=True
+            )  # Yellow for reasoning content
             reasoning_content += event.delta
         elif event.type == "response.output_text.delta":
             print(f"\033[32m{event.delta}\033[0m", end="", flush=True)  # Green for regular content
             regular_content += event.delta
-    
+
     print("\n\nReasoning Content:")
     print(reasoning_content)
     print("\nRegular Content:")
     print(regular_content)
     print("\n")
+
 
 async def get_response_with_reasoning_content():
     """
@@ -64,10 +69,10 @@ async def get_response_with_reasoning_content():
     """
     provider = OpenAIProvider()
     model = provider.get_model(MODEL_NAME)
-    
+
     print("\n=== Non-streaming Example ===")
     print("Prompt: Explain the concept of recursion in programming")
-    
+
     response = await model.get_response(
         system_instructions="You are a helpful assistant that explains technical concepts clearly.",
         input="Explain the concept of recursion in programming",
@@ -75,28 +80,34 @@ async def get_response_with_reasoning_content():
         tools=[],
         output_schema=None,
         handoffs=[],
-        tracing=None,
+        tracing=ModelTracing.DISABLED,
         previous_response_id=None,
     )
-    
+
     # Extract reasoning content and regular content from the response
     reasoning_content = None
     regular_content = None
-    
+
     for item in response.output:
-        if hasattr(item, "type") and item.type == "reasoning_item":
-            reasoning_content = item.content
+        if hasattr(item, "type") and item.type == "reasoning":
+            reasoning_content = item.summary[0].text
         elif hasattr(item, "type") and item.type == "message":
             if item.content and len(item.content) > 0:
-                regular_content = item.content[0].text
-    
+                content_item = item.content[0]
+                if isinstance(content_item, ResponseOutputText):
+                    regular_content = content_item.text
+                elif isinstance(content_item, ResponseOutputRefusal):
+                    refusal_item = cast(Any, content_item)
+                    regular_content = refusal_item.refusal
+
     print("\nReasoning Content:")
     print(reasoning_content or "No reasoning content provided")
-    
+
     print("\nRegular Content:")
     print(regular_content or "No regular content provided")
-    
+
     print("\n")
+
 
 async def main():
     try:
@@ -107,5 +118,6 @@ async def main():
         print("\nNote: This example requires a model that supports reasoning content.")
         print("You may need to use a specific model like deepseek-reasoner or similar.")
 
+
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())
