@@ -4,7 +4,7 @@ import os
 import threading
 from typing import Any
 
-from ..logger import logger
+from .logger import logger
 from . import util
 from .processor_interface import TracingProcessor
 from .scope import Scope
