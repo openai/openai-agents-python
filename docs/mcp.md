@@ -43,11 +43,7 @@ agent=Agent(
 
 ## Tool filtering
 
-You can filter which tools are available to your Agent in two ways:
-
-### Server-level filtering
-
-Each MCP server instance can be configured with `allowed_tools` and `excluded_tools` parameters to control which tools it exposes:
+You can filter which tools are available to your Agent using server-level filtering:
 
 ```python
 # Only expose specific tools from this server
@@ -68,29 +64,6 @@ server = MCPServerStdio(
     excluded_tools=["delete_file"],  # This tool will be filtered out
 )
 ```
-
-### Agent-level filtering
-
-You can also filter tools at the Agent level using the `mcp_config` parameter. This allows you to control which tools are available across all MCP servers:
-
-```python
-agent = Agent(
-    name="Assistant",
-    instructions="Use the tools to achieve the task",
-    mcp_servers=[server1, server2, server3],
-    mcp_config={
-        "allowed_tools": {
-            "server1": ["read_file", "write_file"],  # Only these tools from server1
-            "server2": ["search"],                   # Only search tool from server2
-        },
-        "excluded_tools": {
-            "server3": ["dangerous_tool"],           # Exclude this tool from server3
-        }
-    }
-)
-```
-
-**Filtering priority**: Server-level filtering is applied first, then Agent-level filtering. This allows for fine-grained control where servers can limit their exposed tools, and Agents can further restrict which tools they use.
 
 ## Caching
 
