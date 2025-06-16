@@ -13,7 +13,7 @@ dependencies = [
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
-    "mcp>=1.8.0, <2; python_version >= '3.10'",
+    "mcp>=1.9.4, <2; python_version >= '3.10'",
 ]
 classifiers = [
     "Typing :: Typed",

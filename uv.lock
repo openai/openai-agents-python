@@ -1047,7 +1047,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.8.1"
+version = "1.9.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio", marker = "python_full_version >= '3.10'" },
@@ -1060,9 +1060,9 @@ dependencies = [
     { name = "starlette", marker = "python_full_version >= '3.10'" },
     { name = "uvicorn", marker = "python_full_version >= '3.10' and sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/13/16b712e8a3be6a736b411df2fc6b4e75eb1d3e99b1cd57a3a1decf17f612/mcp-1.8.1.tar.gz", hash = "sha256:ec0646271d93749f784d2316fb5fe6102fb0d1be788ec70a9e2517e8f2722c0e", size = 265605 }
+sdist = { url = "https://files.pythonhosted.org/packages/06/f2/dc2450e566eeccf92d89a00c3e813234ad58e2ba1e31d11467a09ac4f3b9/mcp-1.9.4.tar.gz", hash = "sha256:cfb0bcd1a9535b42edaef89947b9e18a8feb49362e1cc059d6e7fc636f2cb09f", size = 333294 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/5d/91cf0d40e40ae9ecf8d4004e0f9611eea86085aa0b5505493e0ff53972da/mcp-1.8.1-py3-none-any.whl", hash = "sha256:948e03783859fa35abe05b9b6c0a1d5519be452fc079dc8d7f682549591c1770", size = 119761 },
+    { url = "https://files.pythonhosted.org/packages/97/fc/80e655c955137393c443842ffcc4feccab5b12fa7cb8de9ced90f90e6998/mcp-1.9.4-py3-none-any.whl", hash = "sha256:7fcf36b62936adb8e63f89346bccca1268eeca9bf6dfb562ee10b1dfbda9dac0", size = 130232 },
 ]
 
 [[package]]
@@ -1534,7 +1534,7 @@ requires-dist = [
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffe", specifier = ">=1.5.6,<2" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.67.4.post1,<2" },
-    { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.8.0,<2" },
+    { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.9.4,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
     { name = "openai", specifier = ">=1.81.0" },
     { name = "pydantic", specifier = ">=2.10,<3" },
