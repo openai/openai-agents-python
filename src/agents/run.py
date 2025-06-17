@@ -279,6 +279,10 @@ class Runner:
 
 
 class AgentRunner:
+    """
+    ATTENTION: this class is not part of the public API and should not be used directly or subclassed.
+    """
+
     async def run(
         self,
         starting_agent: Agent[TContext],
