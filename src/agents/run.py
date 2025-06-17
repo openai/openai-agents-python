@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import abc
 import asyncio
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Generic, cast, NotRequired
 
 from openai.types.responses import ResponseCompletedEvent
 from typing_extensions import TypedDict, Unpack
@@ -112,49 +111,20 @@ class RunConfig:
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
 
-    context: TContext | None
+    context: NotRequired[TContext | None]
     """The context for the run."""
 
-    max_turns: int
+    max_turns: NotRequired[int]
     """The maximum number of turns to run for."""
 
-    hooks: RunHooks[TContext] | None
+    hooks: NotRequired[RunHooks[TContext] | None]
     """Lifecycle hooks for the run."""
 
-    run_config: RunConfig | None
+    run_config: NotRequired[RunConfig | None]
     """Run configuration."""
 
-    previous_response_id: str | None
+    previous_response_id: NotRequired[str | None]
     """The ID of the previous response, if any."""
-
-
-class AgentRunner(abc.ABC):
-    @abc.abstractmethod
-    async def run(
-        self,
-        starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
-        **kwargs: Unpack[RunOptions[TContext]],
-    ) -> RunResult:
-        pass
-
-    @abc.abstractmethod
-    def run_sync(
-        self,
-        starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
-        **kwargs: Unpack[RunOptions[TContext]],
-    ) -> RunResult:
-        pass
-
-    @abc.abstractmethod
-    def run_streamed(
-        self,
-        starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
-        **kwargs: Unpack[RunOptions[TContext]],
-    ) -> RunResultStreaming:
-        pass
 
 
 class Runner:
@@ -196,7 +166,7 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DefaultAgentRunner()
+        runner = AgentRunner()
         return await runner.run(
             starting_agent,
             input,
@@ -248,7 +218,7 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DefaultAgentRunner()
+        runner = AgentRunner()
         return runner.run_sync(
             starting_agent,
             input,
@@ -296,7 +266,7 @@ class Runner:
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
-        runner = DefaultAgentRunner()
+        runner = AgentRunner()
         return runner.run_streamed(
             starting_agent,
             input,
@@ -308,7 +278,7 @@ class Runner:
         )
 
 
-class DefaultAgentRunner(AgentRunner):
+class AgentRunner:
     async def run(
         self,
         starting_agent: Agent[TContext],
@@ -351,7 +321,7 @@ class DefaultAgentRunner(AgentRunner):
 
             try:
                 while True:
-                    all_tools = await DefaultAgentRunner._get_all_tools(
+                    all_tools = await AgentRunner._get_all_tools(
                         current_agent, context_wrapper
                     )
 
@@ -359,9 +329,9 @@ class DefaultAgentRunner(AgentRunner):
                     # agent changes, or if the agent loop ends.
                     if current_span is None:
                         handoff_names = [
-                            h.agent_name for h in DefaultAgentRunner._get_handoffs(current_agent)
+                            h.agent_name for h in AgentRunner._get_handoffs(current_agent)
                         ]
-                        if output_schema := DefaultAgentRunner._get_output_schema(current_agent):
+                        if output_schema := AgentRunner._get_output_schema(current_agent):
                             output_type_name = output_schema.name()
                         else:
                             output_type_name = "str"
@@ -527,7 +497,7 @@ class DefaultAgentRunner(AgentRunner):
             )
         )
 
-        output_schema = DefaultAgentRunner._get_output_schema(starting_agent)
+        output_schema = AgentRunner._get_output_schema(starting_agent)
         context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
             context=context  # type: ignore
         )

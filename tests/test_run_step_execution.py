@@ -26,7 +26,7 @@ from agents._run_impl import (
     RunImpl,
     SingleStepResult,
 )
-from agents.run import DefaultAgentRunner
+from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
 
@@ -324,8 +324,8 @@ async def get_execute_result(
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
-    output_schema = DefaultAgentRunner._get_output_schema(agent)
-    handoffs = DefaultAgentRunner._get_handoffs(agent)
+    output_schema = AgentRunner._get_output_schema(agent)
+    handoffs = AgentRunner._get_handoffs(agent)
 
     processed_response = RunImpl.process_model_response(
         agent=agent,
