@@ -60,13 +60,13 @@ DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
 
 
-def set_default_agent_runner(runner: AgentRunner) -> None:
+def set_default_agent_runner(runner: AgentRunner | None) -> None:
     """
     WARNING: this class is experimental and not part of the public API
     It should not be used directly.
     """
     global DEFAULT_AGENT_RUNNER
-    DEFAULT_AGENT_RUNNER = runner
+    DEFAULT_AGENT_RUNNER = runner or AgentRunner()
 
 
 def get_default_agent_runner() -> AgentRunner:
