@@ -49,8 +49,6 @@ from .util import _coro, _error_tracing
 
 DEFAULT_MAX_TURNS = 10
 
-DEFAULT_RUNNER: AgentRunner = None  # type: ignore
-
 
 @dataclass
 class RunConfig:
@@ -114,12 +112,6 @@ class RunConfig:
 class AgentRunnerParams(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
 
-    starting_agent: Agent[TContext]
-    """The starting agent to run."""
-
-    input: str | list[TResponseInputItem]
-    """The initial input passed to the agent."""
-
     context: TContext | None
     """The context for the run."""
 
@@ -138,22 +130,28 @@ class AgentRunnerParams(TypedDict, Generic[TContext]):
 
 class AgentRunner(abc.ABC):
     @abc.abstractmethod
-    async def run_impl(
+    async def run(
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
         pass
 
     @abc.abstractmethod
-    def run_sync_impl(
+    def run_sync(
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
         pass
 
     @abc.abstractmethod
-    def run_streamed_impl(
+    def run_streamed(
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResultStreaming:
         pass
@@ -200,10 +198,10 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DEFAULT_RUNNER
-        return await runner.run_impl(
-            starting_agent=starting_agent,
-            input=input,
+        runner = DefaultAgentRunner()
+        return await runner.run(
+            starting_agent,
+            input,
             context=context,
             max_turns=max_turns,
             hooks=hooks,
@@ -252,10 +250,10 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DEFAULT_RUNNER
-        return runner.run_sync_impl(
-            starting_agent=starting_agent,
-            input=input,
+        runner = DefaultAgentRunner()
+        return runner.run_sync(
+            starting_agent,
+            input,
             context=context,
             max_turns=max_turns,
             hooks=hooks,
@@ -300,10 +298,10 @@ class Runner:
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
-        runner = DEFAULT_RUNNER
-        return runner.run_streamed_impl(
-            starting_agent=starting_agent,
-            input=input,
+        runner = DefaultAgentRunner()
+        return runner.run_streamed(
+            starting_agent,
+            input,
             context=context,
             max_turns=max_turns,
             hooks=hooks,
@@ -349,12 +347,12 @@ class Runner:
 
 
 class DefaultAgentRunner(AgentRunner, Runner):
-    async def run_impl(
+    async def run(  # type: ignore[override]
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
-        starting_agent = kwargs["starting_agent"]
-        input = kwargs["input"]
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = kwargs.get("hooks")
@@ -509,12 +507,12 @@ class DefaultAgentRunner(AgentRunner, Runner):
                 if current_span:
                     current_span.finish(reset_current=True)
 
-    def run_sync_impl(
+    def run_sync(  # type: ignore[override]
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
-        starting_agent = kwargs["starting_agent"]
-        input = kwargs["input"]
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = kwargs.get("hooks")
@@ -532,12 +530,12 @@ class DefaultAgentRunner(AgentRunner, Runner):
             )
         )
 
-    def run_streamed_impl(
+    def run_streamed(  # type: ignore[override]
         self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
         **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResultStreaming:
-        starting_agent = kwargs["starting_agent"]
-        input = kwargs["input"]
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = kwargs.get("hooks")
@@ -1104,6 +1102,3 @@ class DefaultAgentRunner(AgentRunner, Runner):
         context_wrapper.usage.add(new_response.usage)
 
         return new_response
-
-
-DEFAULT_RUNNER = DefaultAgentRunner()
