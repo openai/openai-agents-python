@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Generic, NotRequired, cast
+from typing import Any, Generic, cast
 
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
-from typing_extensions import TypedDict, Unpack
+from typing_extensions import NotRequired, TypedDict, Unpack
 
 from ._run_impl import (
     AgentToolUseTracker,
