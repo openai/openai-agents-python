@@ -4,9 +4,10 @@ import abc
 import asyncio
 import copy
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Generic, cast
 
 from openai.types.responses import ResponseCompletedEvent
+from typing_extensions import TypedDict, Unpack
 
 from ._run_impl import (
     AgentToolUseTracker,
@@ -47,23 +48,6 @@ from .usage import Usage
 from .util import _coro, _error_tracing
 
 DEFAULT_MAX_TURNS = 10
-DEFAULT_RUNNER: Runner = None # type: ignore
-# assigned at the end of the module initialization
-
-
-def set_default_runner(runner: Runner | None) -> None:
-    """
-    Set the default runner to use for the agent run.
-    """
-    global DEFAULT_RUNNER
-    DEFAULT_RUNNER = runner or DefaultRunner()
-
-def get_default_runner() -> Runner | None:
-    """
-    Get the default runner to use for the agent run.
-    """
-    global DEFAULT_RUNNER
-    return DEFAULT_RUNNER
 
 
 @dataclass
@@ -125,47 +109,56 @@ class RunConfig:
     """
 
 
-class Runner(abc.ABC):
+class AgentRunnerParams(TypedDict, Generic[TContext]):
+    """Arguments for ``AgentRunner`` methods."""
+
+    context: TContext | None
+    """The context for the run."""
+
+    max_turns: int
+    """The maximum number of turns to run for."""
+
+    hooks: RunHooks[TContext] | None
+    """Lifecycle hooks for the run."""
+
+    run_config: RunConfig | None
+    """Run configuration."""
+
+    previous_response_id: str | None
+    """The ID of the previous response, if any."""
+
+
+class AgentRunner(abc.ABC):
     @abc.abstractmethod
-    async def _run_impl(
+    async def run(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        *,
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
         pass
 
     @abc.abstractmethod
-    def _run_sync_impl(
+    def run_sync(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        *,
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
         pass
 
     @abc.abstractmethod
-    def _run_streamed_impl(
+    def run_streamed(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResultStreaming:
         pass
+
+
+class Runner:
+    pass
 
     @classmethod
     async def run(
@@ -205,8 +198,8 @@ class Runner(abc.ABC):
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DEFAULT_RUNNER
-        return await runner._run_impl(
+        runner = DefaultAgentRunner()
+        return await runner.run(
             starting_agent,
             input,
             context=context,
@@ -257,8 +250,8 @@ class Runner(abc.ABC):
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = DEFAULT_RUNNER
-        return runner._run_sync_impl(
+        runner = DefaultAgentRunner()
+        return runner.run_sync(
             starting_agent,
             input,
             context=context,
@@ -305,8 +298,8 @@ class Runner(abc.ABC):
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
-        runner = DEFAULT_RUNNER
-        return runner._run_streamed_impl(
+        runner = DefaultAgentRunner()
+        return runner.run_streamed(
             starting_agent,
             input,
             context=context,
@@ -315,7 +308,6 @@ class Runner(abc.ABC):
             run_config=run_config,
             previous_response_id=previous_response_id,
         )
-
 
     @classmethod
     def _get_output_schema(cls, agent: Agent[Any]) -> AgentOutputSchemaBase | None:
@@ -353,18 +345,19 @@ class Runner(abc.ABC):
 
         return run_config.model_provider.get_model(agent.model)
 
-class DefaultRunner(Runner):
-    async def _run_impl(
+
+class DefaultAgentRunner(AgentRunner, Runner):
+    async def run(  # type: ignore[override]
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        *,
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = kwargs.get("hooks")
+        run_config = kwargs.get("run_config")
+        previous_response_id = kwargs.get("previous_response_id")
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:
@@ -514,17 +507,17 @@ class DefaultRunner(Runner):
                 if current_span:
                     current_span.finish(reset_current=True)
 
-    def _run_sync_impl(
+    def run_sync(  # type: ignore[override]
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        *,
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResult:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = kwargs.get("hooks")
+        run_config = kwargs.get("run_config")
+        previous_response_id = kwargs.get("previous_response_id")
         return asyncio.get_event_loop().run_until_complete(
             self.run(
                 starting_agent,
@@ -537,16 +530,17 @@ class DefaultRunner(Runner):
             )
         )
 
-    def _run_streamed_impl(
+    def run_streamed(  # type: ignore[override]
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
-        hooks: RunHooks[TContext] | None = None,
-        run_config: RunConfig | None = None,
-        previous_response_id: str | None = None,
+        **kwargs: Unpack[AgentRunnerParams[TContext]],
     ) -> RunResultStreaming:
+        context = kwargs.get("context")
+        max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
+        hooks = kwargs.get("hooks")
+        run_config = kwargs.get("run_config")
+        previous_response_id = kwargs.get("previous_response_id")
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:
@@ -1108,6 +1102,3 @@ class DefaultRunner(Runner):
         context_wrapper.usage.add(new_response.usage)
 
         return new_response
-
-
-DEFAULT_RUNNER = DefaultRunner()

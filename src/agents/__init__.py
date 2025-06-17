@@ -47,7 +47,7 @@ from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
 from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
-from .run import DefaultRunner, RunConfig, Runner, set_default_runner
+from .run import AgentRunner, DefaultAgentRunner, RunConfig, Runner
 from .run_context import RunContextWrapper, TContext
 from .stream_events import (
     AgentUpdatedStreamEvent,
@@ -162,7 +162,8 @@ __all__ = [
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
     "Runner",
-    "DefaultRunner",
+    "AgentRunner",
+    "DefaultAgentRunner",
     "run_demo_loop",
     "Model",
     "ModelProvider",
@@ -241,7 +242,6 @@ __all__ = [
     "generation_span",
     "get_current_span",
     "get_current_trace",
-    "get_default_runner",
     "guardrail_span",
     "handoff_span",
     "set_trace_processors",
@@ -270,7 +270,6 @@ __all__ = [
     "set_default_openai_key",
     "set_default_openai_client",
     "set_default_openai_api",
-    "set_default_runner",
     "set_tracing_export_api_key",
     "enable_verbose_stdout_logging",
     "gen_trace_id",

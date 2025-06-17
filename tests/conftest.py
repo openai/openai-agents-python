@@ -5,7 +5,6 @@ import pytest
 from agents.models import _openai_shared
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
-from agents.run import set_default_runner
 from agents.tracing import set_trace_processors
 from agents.tracing.setup import get_trace_provider
 
@@ -32,11 +31,6 @@ def clear_openai_settings():
     _openai_shared._default_openai_key = None
     _openai_shared._default_openai_client = None
     _openai_shared._use_responses_by_default = True
-
-
-@pytest.fixture(autouse=True)
-def clear_default_runner():
-    set_default_runner(None)
 
 
 # This fixture will run after all tests end
