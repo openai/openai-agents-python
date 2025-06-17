@@ -2,6 +2,7 @@ import functools
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Union
+
 from typing_extensions import NotRequired, TypedDict
 
 from agents.strict_schema import ensure_strict_json_schema
@@ -35,11 +36,12 @@ class ToolFilterContext:
     """The name of the MCP server."""
 
 
-ToolFilterCallable = Callable[["ToolFilterContext", "MCPTool"], MaybeAwaitable[bool]]
+ToolFilterCallable = Callable[["ToolFilterContext | None", "MCPTool"], MaybeAwaitable[bool]]
 """A function that determines whether a tool should be available.
 
 Args:
     context: The context information including run context, agent, and server name.
+             Can be None if run_context or agent is not available.
     tool: The MCP tool to filter.
 
 Returns:
@@ -51,10 +53,12 @@ class ToolFilterStatic(TypedDict):
     """Static tool filter configuration using allowlists and blocklists."""
 
     allowed_tool_names: NotRequired[list[str]]
-    """Optional list of tool names to allow (whitelist). If set, only these tools will be available."""
+    """Optional list of tool names to allow (whitelist).
+    If set, only these tools will be available."""
 
     blocked_tool_names: NotRequired[list[str]]
-    """Optional list of tool names to exclude (blacklist). If set, these tools will be filtered out."""
+    """Optional list of tool names to exclude (blacklist).
+    If set, these tools will be filtered out."""
 
 
 ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]
@@ -93,13 +97,19 @@ class MCPUtil:
 
     @classmethod
     async def get_all_function_tools(
-        cls, servers: list["MCPServer"], convert_schemas_to_strict: bool
+        cls,
+        servers: list["MCPServer"],
+        convert_schemas_to_strict: bool,
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: "Agent[Any] | None" = None,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
         tool_names: set[str] = set()
         for server in servers:
-            server_tools = await cls.get_function_tools(server, convert_schemas_to_strict)
+            server_tools = await cls.get_function_tools(
+                server, convert_schemas_to_strict, run_context, agent
+            )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
                 raise UserError(
@@ -113,12 +123,16 @@ class MCPUtil:
 
     @classmethod
     async def get_function_tools(
-        cls, server: "MCPServer", convert_schemas_to_strict: bool
+        cls,
+        server: "MCPServer",
+        convert_schemas_to_strict: bool,
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: "Agent[Any] | None" = None,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
         with mcp_tools_span(server=server.name) as span:
-            tools = await server.list_tools()
+            tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
         return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
