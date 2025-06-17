@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
@@ -54,6 +55,7 @@ class FakeStreamingModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> ModelResponse:
         raise NotImplementedError("Not implemented")
 
@@ -68,6 +70,7 @@ class FakeStreamingModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         output = self.get_next_output()
         for item in output:

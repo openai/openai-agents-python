@@ -17,6 +17,7 @@ from openai.types.responses import (
     WebSearchToolParam,
     response_create_params,
 )
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
@@ -74,6 +75,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -86,6 +88,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=False,
+                    prompt=prompt,
                 )
 
                 if _debug.DONT_LOG_MODEL_DATA:
@@ -141,6 +144,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -156,6 +160,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=True,
+                    prompt=prompt,
                 )
 
                 final_response: Response | None = None
@@ -192,6 +197,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
 
     @overload
@@ -205,6 +211,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
 
     async def _fetch_response(
@@ -217,6 +224,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True] | Literal[False] = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
 
@@ -252,6 +260,7 @@ class OpenAIResponsesModel(Model):
             input=list_input,
             include=converted_tools.includes,
             tools=converted_tools.tools,
+            prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
             truncation=self._non_null_or_not_given(model_settings.truncation),

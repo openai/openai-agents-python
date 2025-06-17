@@ -45,6 +45,7 @@ from .models.interface import Model, ModelProvider, ModelTracing
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
+from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
 from .run import RunConfig, Runner
@@ -179,6 +180,9 @@ __all__ = [
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
+    "DynamicPromptFunction",
+    "GenerateDynamicPromptData",
+    "Prompt",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
     "UserError",

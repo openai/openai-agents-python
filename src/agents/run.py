@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast, NotRequired
+from typing import Any, Generic, NotRequired, cast
 
 from openai.types.responses import ResponseCompletedEvent
+from openai.types.responses.response_prompt_param import (
+    ResponsePromptParam,
+)
 from typing_extensions import TypedDict, Unpack
 
 from ._run_impl import (
@@ -29,7 +32,12 @@ from .exceptions import (
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
 )
-from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
+from .guardrail import (
+    InputGuardrail,
+    InputGuardrailResult,
+    OutputGuardrail,
+    OutputGuardrailResult,
+)
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
@@ -280,7 +288,8 @@ class Runner:
 
 class AgentRunner:
     """
-    ATTENTION: this class is not part of the public API and should not be used directly or subclassed.
+    ATTENTION: this class is not part of the public API and
+    should not be used directly or subclassed.
     """
 
     async def run(
@@ -325,9 +334,7 @@ class AgentRunner:
 
             try:
                 while True:
-                    all_tools = await AgentRunner._get_all_tools(
-                        current_agent, context_wrapper
-                    )
+                    all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
 
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
@@ -765,7 +772,10 @@ class AgentRunner:
         streamed_result.current_agent = agent
         streamed_result._current_agent_output_schema = output_schema
 
-        system_prompt = await agent.get_system_prompt(context_wrapper)
+        system_prompt, prompt_config = await asyncio.gather(
+            agent.get_system_prompt(context_wrapper),
+            agent.get_prompt(context_wrapper),
+        )
 
         handoffs = cls._get_handoffs(agent)
         model = cls._get_model(agent, run_config)
@@ -789,6 +799,7 @@ class AgentRunner:
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
             previous_response_id=previous_response_id,
+            prompt=prompt_config,
         ):
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
@@ -860,7 +871,10 @@ class AgentRunner:
                 ),
             )
 
-        system_prompt = await agent.get_system_prompt(context_wrapper)
+        system_prompt, prompt_config = await asyncio.gather(
+            agent.get_system_prompt(context_wrapper),
+            agent.get_prompt(context_wrapper),
+        )
 
         output_schema = cls._get_output_schema(agent)
         handoffs = cls._get_handoffs(agent)
@@ -878,6 +892,7 @@ class AgentRunner:
             run_config,
             tool_use_tracker,
             previous_response_id,
+            prompt_config,
         )
 
         return await cls._get_single_step_result_from_response(
@@ -1021,6 +1036,7 @@ class AgentRunner:
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
         previous_response_id: str | None,
+        prompt_config: ResponsePromptParam | None,
     ) -> ModelResponse:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
@@ -1037,6 +1053,7 @@ class AgentRunner:
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
             previous_response_id=previous_response_id,
+            prompt=prompt_config,
         )
 
         context_wrapper.usage.add(new_response.usage)

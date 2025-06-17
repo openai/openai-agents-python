@@ -9,6 +9,7 @@ from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.responses import Response
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from .. import _debug
@@ -53,6 +54,7 @@ class OpenAIChatCompletionsModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -69,6 +71,7 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=False,
+                prompt=prompt,
             )
 
             first_choice = response.choices[0]
@@ -136,8 +139,8 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        *,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -157,6 +160,7 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=True,
+                prompt=prompt,
             )
 
             final_response: Response | None = None
@@ -187,6 +191,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
@@ -201,6 +206,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion: ...
 
     async def _fetch_response(
@@ -214,6 +220,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: bool = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         converted_messages = Converter.items_to_messages(input)
 
