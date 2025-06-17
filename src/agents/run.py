@@ -56,6 +56,27 @@ from .util import _coro, _error_tracing
 
 DEFAULT_MAX_TURNS = 10
 
+DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
+# the value is set at the end of the module
+
+
+def set_default_agent_runner(runner: AgentRunner) -> None:
+    """
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly.
+    """
+    global DEFAULT_AGENT_RUNNER
+    DEFAULT_AGENT_RUNNER = runner
+
+
+def get_default_agent_runner() -> AgentRunner:
+    """
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly.
+    """
+    global DEFAULT_AGENT_RUNNER
+    return DEFAULT_AGENT_RUNNER
+
 
 @dataclass
 class RunConfig:
@@ -174,7 +195,7 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = AgentRunner()
+        runner = DEFAULT_AGENT_RUNNER
         return await runner.run(
             starting_agent,
             input,
@@ -226,7 +247,7 @@ class Runner:
             A run result containing all the inputs, guardrail results and the output of the last
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
-        runner = AgentRunner()
+        runner = DEFAULT_AGENT_RUNNER
         return runner.run_sync(
             starting_agent,
             input,
@@ -274,7 +295,7 @@ class Runner:
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
-        runner = AgentRunner()
+        runner = DEFAULT_AGENT_RUNNER
         return runner.run_streamed(
             starting_agent,
             input,
@@ -288,8 +309,8 @@ class Runner:
 
 class AgentRunner:
     """
-    ATTENTION: this class is not part of the public API and
-    should not be used directly or subclassed.
+    WARNING: this class is experimental and not part of the public API
+    It should not be used directly or subclassed.
     """
 
     async def run(
@@ -1095,3 +1116,6 @@ class AgentRunner:
             return agent.model
 
         return run_config.model_provider.get_model(agent.model)
+
+
+DEFAULT_AGENT_RUNNER = AgentRunner()
