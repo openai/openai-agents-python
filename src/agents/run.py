@@ -109,7 +109,7 @@ class RunConfig:
     """
 
 
-class AgentRunnerParams(TypedDict, Generic[TContext]):
+class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
 
     context: TContext | None
@@ -134,7 +134,7 @@ class AgentRunner(abc.ABC):
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         pass
 
@@ -143,7 +143,7 @@ class AgentRunner(abc.ABC):
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         pass
 
@@ -152,14 +152,12 @@ class AgentRunner(abc.ABC):
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         pass
 
 
 class Runner:
-    pass
-
     @classmethod
     async def run(
         cls,
@@ -309,49 +307,13 @@ class Runner:
             previous_response_id=previous_response_id,
         )
 
-    @classmethod
-    def _get_output_schema(cls, agent: Agent[Any]) -> AgentOutputSchemaBase | None:
-        if agent.output_type is None or agent.output_type is str:
-            return None
-        elif isinstance(agent.output_type, AgentOutputSchemaBase):
-            return agent.output_type
 
-        return AgentOutputSchema(agent.output_type)
-
-    @classmethod
-    def _get_handoffs(cls, agent: Agent[Any]) -> list[Handoff]:
-        handoffs = []
-        for handoff_item in agent.handoffs:
-            if isinstance(handoff_item, Handoff):
-                handoffs.append(handoff_item)
-            elif isinstance(handoff_item, Agent):
-                handoffs.append(handoff(handoff_item))
-        return handoffs
-
-    @classmethod
-    async def _get_all_tools(
-        cls, agent: Agent[Any], context_wrapper: RunContextWrapper[Any]
-    ) -> list[Tool]:
-        return await agent.get_all_tools(context_wrapper)
-
-    @classmethod
-    def _get_model(cls, agent: Agent[Any], run_config: RunConfig) -> Model:
-        if isinstance(run_config.model, Model):
-            return run_config.model
-        elif isinstance(run_config.model, str):
-            return run_config.model_provider.get_model(run_config.model)
-        elif isinstance(agent.model, Model):
-            return agent.model
-
-        return run_config.model_provider.get_model(agent.model)
-
-
-class DefaultAgentRunner(AgentRunner, Runner):
-    async def run(  # type: ignore[override]
+class DefaultAgentRunner(AgentRunner):
+    async def run(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
@@ -389,13 +351,17 @@ class DefaultAgentRunner(AgentRunner, Runner):
 
             try:
                 while True:
-                    all_tools = await self._get_all_tools(current_agent, context_wrapper)
+                    all_tools = await DefaultAgentRunner._get_all_tools(
+                        current_agent, context_wrapper
+                    )
 
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
                     if current_span is None:
-                        handoff_names = [h.agent_name for h in self._get_handoffs(current_agent)]
-                        if output_schema := self._get_output_schema(current_agent):
+                        handoff_names = [
+                            h.agent_name for h in DefaultAgentRunner._get_handoffs(current_agent)
+                        ]
+                        if output_schema := DefaultAgentRunner._get_output_schema(current_agent):
                             output_type_name = output_schema.name()
                         else:
                             output_type_name = "str"
@@ -507,11 +473,11 @@ class DefaultAgentRunner(AgentRunner, Runner):
                 if current_span:
                     current_span.finish(reset_current=True)
 
-    def run_sync(  # type: ignore[override]
+    def run_sync(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
@@ -530,11 +496,11 @@ class DefaultAgentRunner(AgentRunner, Runner):
             )
         )
 
-    def run_streamed(  # type: ignore[override]
+    def run_streamed(
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        **kwargs: Unpack[AgentRunnerParams[TContext]],
+        **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
@@ -561,7 +527,7 @@ class DefaultAgentRunner(AgentRunner, Runner):
             )
         )
 
-        output_schema = self._get_output_schema(starting_agent)
+        output_schema = DefaultAgentRunner._get_output_schema(starting_agent)
         context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
             context=context  # type: ignore
         )
@@ -1102,3 +1068,39 @@ class DefaultAgentRunner(AgentRunner, Runner):
         context_wrapper.usage.add(new_response.usage)
 
         return new_response
+
+    @classmethod
+    def _get_output_schema(cls, agent: Agent[Any]) -> AgentOutputSchemaBase | None:
+        if agent.output_type is None or agent.output_type is str:
+            return None
+        elif isinstance(agent.output_type, AgentOutputSchemaBase):
+            return agent.output_type
+
+        return AgentOutputSchema(agent.output_type)
+
+    @classmethod
+    def _get_handoffs(cls, agent: Agent[Any]) -> list[Handoff]:
+        handoffs = []
+        for handoff_item in agent.handoffs:
+            if isinstance(handoff_item, Handoff):
+                handoffs.append(handoff_item)
+            elif isinstance(handoff_item, Agent):
+                handoffs.append(handoff(handoff_item))
+        return handoffs
+
+    @classmethod
+    async def _get_all_tools(
+        cls, agent: Agent[Any], context_wrapper: RunContextWrapper[Any]
+    ) -> list[Tool]:
+        return await agent.get_all_tools(context_wrapper)
+
+    @classmethod
+    def _get_model(cls, agent: Agent[Any], run_config: RunConfig) -> Model:
+        if isinstance(run_config.model, Model):
+            return run_config.model
+        elif isinstance(run_config.model, str):
+            return run_config.model_provider.get_model(run_config.model)
+        elif isinstance(agent.model, Model):
+            return agent.model
+
+        return run_config.model_provider.get_model(agent.model)
