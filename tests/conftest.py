@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from agents import run as run_module
 from agents.models import _openai_shared
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
-from agents.run import set_default_runner
 from agents.tracing import set_trace_processors
 from agents.tracing.setup import get_trace_provider
 
@@ -36,7 +36,7 @@ def clear_openai_settings():
 
 @pytest.fixture(autouse=True)
 def clear_default_runner():
-    set_default_runner(None)
+    run_module.DEFAULT_RUNNER = run_module.DefaultAgentRunner()
 
 
 # This fixture will run after all tests end
