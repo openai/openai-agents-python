@@ -19,11 +19,11 @@ from agents import (
     ModelResponse,
     ReasoningItem,
     RunContextWrapper,
-    Runner,
     ToolCallItem,
     Usage,
 )
 from agents._run_impl import RunImpl
+from agents.run import AgentRunner
 
 from .test_responses import (
     get_final_output_message,
@@ -186,7 +186,7 @@ async def test_handoffs_parsed_correctly():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=Runner._get_handoffs(agent_3),
+        handoffs=AgentRunner._get_handoffs(agent_3),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert len(result.handoffs) == 1, "Should have a handoff here"
@@ -216,7 +216,7 @@ async def test_missing_handoff_fails():
             agent=agent_3,
             response=response,
             output_schema=None,
-            handoffs=Runner._get_handoffs(agent_3),
+            handoffs=AgentRunner._get_handoffs(agent_3),
             all_tools=await agent_3.get_all_tools(_dummy_ctx()),
         )
 
@@ -239,7 +239,7 @@ async def test_multiple_handoffs_doesnt_error():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=Runner._get_handoffs(agent_3),
+        handoffs=AgentRunner._get_handoffs(agent_3),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert len(result.handoffs) == 2, "Should have multiple handoffs here"
@@ -264,7 +264,7 @@ async def test_final_output_parsed_correctly():
     RunImpl.process_model_response(
         agent=agent,
         response=response,
-        output_schema=Runner._get_output_schema(agent),
+        output_schema=AgentRunner._get_output_schema(agent),
         handoffs=[],
         all_tools=await agent.get_all_tools(_dummy_ctx()),
     )
@@ -471,7 +471,7 @@ async def test_tool_and_handoff_parsed_correctly():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=Runner._get_handoffs(agent_3),
+        handoffs=AgentRunner._get_handoffs(agent_3),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert result.functions and len(result.functions) == 1

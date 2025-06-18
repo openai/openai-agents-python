@@ -12,10 +12,10 @@ from agents import (
     MessageOutputItem,
     ModelBehaviorError,
     RunContextWrapper,
-    Runner,
     UserError,
     handoff,
 )
+from agents.run import AgentRunner
 
 
 def message_item(content: str, agent: Agent[Any]) -> MessageOutputItem:
@@ -45,9 +45,9 @@ def test_single_handoff_setup():
     assert not agent_1.handoffs
     assert agent_2.handoffs == [agent_1]
 
-    assert not Runner._get_handoffs(agent_1)
+    assert not AgentRunner._get_handoffs(agent_1)
 
-    handoff_objects = Runner._get_handoffs(agent_2)
+    handoff_objects = AgentRunner._get_handoffs(agent_2)
     assert len(handoff_objects) == 1
     obj = handoff_objects[0]
     assert obj.tool_name == Handoff.default_tool_name(agent_1)
@@ -64,7 +64,7 @@ def test_multiple_handoffs_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = Runner._get_handoffs(agent_3)
+    handoff_objects = AgentRunner._get_handoffs(agent_3)
     assert len(handoff_objects) == 2
     assert handoff_objects[0].tool_name == Handoff.default_tool_name(agent_1)
     assert handoff_objects[1].tool_name == Handoff.default_tool_name(agent_2)
@@ -95,7 +95,7 @@ def test_custom_handoff_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = Runner._get_handoffs(agent_3)
+    handoff_objects = AgentRunner._get_handoffs(agent_3)
     assert len(handoff_objects) == 2
 
     first_handoff = handoff_objects[0]

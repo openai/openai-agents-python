@@ -19,11 +19,12 @@ from agents.items import (
     TResponseStreamEvent,
 )
 
+from ..fake_model import get_response_obj
+from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
+
 try:
     from agents.voice import SingleAgentVoiceWorkflow
 
-    from ..fake_model import get_response_obj
-    from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
 except ImportError:
     pass
 
