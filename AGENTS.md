@@ -35,6 +35,8 @@ Welcome to the OpenAI Agents SDK repository. This file contains the main points 
 
    Coverage can be generated with `make coverage`.
 
+*Note*: Use `uv run ...` to execute arbitrary cli commands within the project's virtual environment.
+
 ## Snapshot tests
 
 Some tests rely on inline snapshots. See `tests/README.md` for details on updating them:
