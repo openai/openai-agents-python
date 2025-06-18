@@ -41,6 +41,93 @@ agent=Agent(
 )
 ```
 
+## Tool filtering
+
+You can filter which tools are available to your Agent by configuring tool filters on MCP servers. The SDK supports both static and dynamic tool filtering.
+
+### Static tool filtering
+
+For simple allow/block lists, you can use static filtering:
+
+```python
+from agents.mcp import create_static_tool_filter
+
+# Only expose specific tools from this server
+server = MCPServerStdio(
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+    tool_filter=create_static_tool_filter(
+        allowed_tool_names=["read_file", "write_file"]
+    )
+)
+
+# Exclude specific tools from this server
+server = MCPServerStdio(
+    params={
+        "command": "npx", 
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+    tool_filter=create_static_tool_filter(
+        blocked_tool_names=["delete_file"]
+    )
+)
+
+```
+
+**When both `allowed_tool_names` and `blocked_tool_names` are configured, the processing order is:**
+1. First apply `allowed_tool_names` (allowlist) - only keep the specified tools
+2. Then apply `blocked_tool_names` (blocklist) - exclude specified tools from the remaining tools
+
+For example, if you configure `allowed_tool_names=["read_file", "write_file", "delete_file"]` and `blocked_tool_names=["delete_file"]`, only `read_file` and `write_file` tools will be available.
+
+### Dynamic tool filtering
+
+For more complex filtering logic, you can use dynamic filters with functions:
+
+```python
+from agents.mcp import ToolFilterContext
+
+# Simple synchronous filter
+def custom_filter(context: ToolFilterContext, tool) -> bool:
+    """Example of a custom tool filter."""
+    # Filter logic based on tool name patterns
+    return tool.name.startswith("allowed_prefix")
+
+# Context-aware filter
+def context_aware_filter(context: ToolFilterContext, tool) -> bool:
+    """Filter tools based on context information."""
+    # Access agent information
+    agent_name = context.agent.name
+
+    # Access server information  
+    server_name = context.server_name
+
+    # Implement your custom filtering logic here
+    return some_filtering_logic(agent_name, server_name, tool)
+
+# Asynchronous filter
+async def async_filter(context: ToolFilterContext, tool) -> bool:
+    """Example of an asynchronous filter."""
+    # Perform async operations if needed
+    result = await some_async_check(context, tool)
+    return result
+
+server = MCPServerStdio(
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+    tool_filter=custom_filter  # or context_aware_filter or async_filter
+)
+```
+
+The `ToolFilterContext` provides access to:
+- `run_context`: The current run context
+- `agent`: The agent requesting the tools 
+- `server_name`: The name of the MCP server
+
 ## Caching
 
 Every time an Agent runs, it calls `list_tools()` on the MCP server. This can be a latency hit, especially if the server is a remote server. To automatically cache the list of tools, you can pass `cache_tools_list=True` to [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. You should only do this if you're certain the tool list will not change.
