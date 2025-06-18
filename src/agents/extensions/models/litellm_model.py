@@ -98,7 +98,11 @@ class LitellmModel(Model):
                 logger.debug("Received model response")
             else:
                 logger.debug(
-                    f"LLM resp:\n{json.dumps(response.choices[0].message.model_dump(), indent=2)}\n"
+                    f"""LLM resp:\n{
+                        json.dumps(
+                            response.choices[0].message.model_dump(), indent=2, ensure_ascii=False
+                        )
+                    }\n"""
                 )
 
             if hasattr(response, "usage"):
@@ -269,8 +273,8 @@ class LitellmModel(Model):
         else:
             logger.debug(
                 f"Calling Litellm model: {self.model}\n"
-                f"{json.dumps(converted_messages, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2)}\n"
+                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
