@@ -1,5 +1,7 @@
 # ruff: noqa
 import os
+import sys
+import argparse
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 
@@ -263,24 +265,45 @@ def translate_single_source_file(file_path: str) -> None:
 
 
 def main():
-    # Traverse the source directory
-    for root, _, file_names in os.walk(source_dir):
-        # Skip the target directories
-        if any(lang in root for lang in languages):
-            continue
-        # Increasing this will make the translation faster; you can decide considering the model's capacity
-        concurrency = 6
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = []
-            for file_name in file_names:
-                filepath = os.path.join(root, file_name)
-                futures.append(executor.submit(translate_single_source_file, filepath))
-                if len(futures) >= concurrency:
-                    for future in futures:
-                        future.result()
-                    futures.clear()
+    parser = argparse.ArgumentParser(description="Translate documentation files")
+    parser.add_argument("--file", type=str, help="Specific file to translate (relative to docs directory)")
+    args = parser.parse_args()
 
-    print("Translation completed.")
+    if args.file:
+        # Translate a single file
+        # Handle both "foo.md" and "docs/foo.md" formats
+        if args.file.startswith("docs/"):
+            # Remove "docs/" prefix if present
+            relative_file = args.file[5:]
+        else:
+            relative_file = args.file
+
+        file_path = os.path.join(source_dir, relative_file)
+        if os.path.exists(file_path):
+            translate_single_source_file(file_path)
+            print(f"Translation completed for {relative_file}")
+        else:
+            print(f"Error: File {file_path} does not exist")
+            sys.exit(1)
+    else:
+        # Traverse the source directory (original behavior)
+        for root, _, file_names in os.walk(source_dir):
+            # Skip the target directories
+            if any(lang in root for lang in languages):
+                continue
+            # Increasing this will make the translation faster; you can decide considering the model's capacity
+            concurrency = 6
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = []
+                for file_name in file_names:
+                    filepath = os.path.join(root, file_name)
+                    futures.append(executor.submit(translate_single_source_file, filepath))
+                    if len(futures) >= concurrency:
+                        for future in futures:
+                            future.result()
+                        futures.clear()
+
+        print("Translation completed.")
 
 
 if __name__ == "__main__":
