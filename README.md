@@ -20,14 +20,21 @@ Explore the [examples](examples) directory to see the SDK in action, and read ou
 
 1. Set up your Python environment
 
-```
+- Option A: Using venv (traditional method)
+```bash
 python -m venv env
-source env/bin/activate
+source env/bin/activate  # On Windows: env\Scripts\activate
+```
+
+- Option B: Using uv (recommended)
+```bash
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 2. Install Agents SDK
 
-```
+```bash
 pip install openai-agents
 ```
 
