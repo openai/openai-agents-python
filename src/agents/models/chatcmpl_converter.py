@@ -290,6 +290,16 @@ class Converter:
             return current_assistant_msg
 
         for item in items:
+            # Anthropic Claude needs explicit prompt cache directive
+            # But "cache_control" key is not supported by OpenAI models
+            # So we need to remove it from the item and add it manually to the message
+            # Check if item is dict-like and try to get cache_control key
+            cache_control = None
+            if hasattr(item, "get") and hasattr(item, "__contains__"):
+                cache_control = item.get("cache_control", None)
+                if "cache_control" in item:
+                    del item["cache_control"]  # type: ignore[typeddict-item]
+
             # 1) Check easy input message
             if easy_msg := cls.maybe_easy_input_message(item):
                 role = easy_msg["role"]
@@ -301,6 +311,8 @@ class Converter:
                         "role": "user",
                         "content": cls.extract_all_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_user)
                 elif role == "system":
                     flush_assistant_message()
@@ -308,6 +320,8 @@ class Converter:
                         "role": "system",
                         "content": cls.extract_text_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_system)
                 elif role == "developer":
                     flush_assistant_message()
@@ -315,6 +329,8 @@ class Converter:
                         "role": "developer",
                         "content": cls.extract_text_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_developer)
                 elif role == "assistant":
                     flush_assistant_message()
@@ -322,6 +338,8 @@ class Converter:
                         "role": "assistant",
                         "content": cls.extract_text_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_assistant)
                 else:
                     raise UserError(f"Unexpected role in easy_input_message: {role}")
@@ -337,18 +355,24 @@ class Converter:
                         "role": "user",
                         "content": cls.extract_all_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_user)
                 elif role == "system":
                     msg_system = {
                         "role": "system",
                         "content": cls.extract_text_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_system)
                 elif role == "developer":
                     msg_developer = {
                         "role": "developer",
                         "content": cls.extract_text_content(content),
                     }
+                    if cache_control:
+                        msg_user["cache_control"] = cache_control  # type: ignore[typeddict-unknown-key]
                     result.append(msg_developer)
                 else:
                     raise UserError(f"Unexpected role in input_message: {role}")
