@@ -11,7 +11,7 @@ There are two kinds of guardrails:
 
 Input guardrails run in 3 steps:
 
-1. First, the guardrail receives the same input passed to the agent.
+1. First, the guardrail receives the same output produced by the agent.
 2. Next, the guardrail function runs to produce a [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput], which is then wrapped in an [`InputGuardrailResult`][agents.guardrail.InputGuardrailResult]
 3. Finally, we check if [`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] is true. If true, an [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered] exception is raised, so you can appropriately respond to the user or handle the exception.
 
