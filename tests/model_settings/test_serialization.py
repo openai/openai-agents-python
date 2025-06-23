@@ -47,6 +47,7 @@ def test_all_fields_serialization() -> None:
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
+        extra_args={"custom_param": "value", "another_param": 42},
     )
 
     # Verify that every single field is set to a non-None value
@@ -57,3 +58,76 @@ def test_all_fields_serialization() -> None:
 
     # Now, lets serialize the ModelSettings instance to a JSON string
     verify_serialization(model_settings)
+
+
+def test_extra_args_serialization() -> None:
+    """Test that extra_args are properly serialized."""
+    model_settings = ModelSettings(
+        temperature=0.5,
+        extra_args={"custom_param": "value", "another_param": 42, "nested": {"key": "value"}},
+    )
+
+    json_dict = model_settings.to_json_dict()
+    assert json_dict["extra_args"] == {
+        "custom_param": "value",
+        "another_param": 42,
+        "nested": {"key": "value"},
+    }
+
+    # Verify serialization works
+    verify_serialization(model_settings)
+
+
+def test_extra_args_resolve() -> None:
+    """Test that extra_args are properly merged in the resolve method."""
+    base_settings = ModelSettings(
+        temperature=0.5, extra_args={"param1": "base_value", "param2": "base_only"}
+    )
+
+    override_settings = ModelSettings(
+        top_p=0.9, extra_args={"param1": "override_value", "param3": "override_only"}
+    )
+
+    resolved = base_settings.resolve(override_settings)
+
+    # Check that regular fields are properly resolved
+    assert resolved.temperature == 0.5  # from base
+    assert resolved.top_p == 0.9  # from override
+
+    # Check that extra_args are properly merged
+    expected_extra_args = {
+        "param1": "override_value",  # override wins
+        "param2": "base_only",  # from base
+        "param3": "override_only",  # from override
+    }
+    assert resolved.extra_args == expected_extra_args
+
+
+def test_extra_args_resolve_with_none() -> None:
+    """Test that resolve works properly when one side has None extra_args."""
+    # Base with extra_args, override with None
+    base_settings = ModelSettings(extra_args={"param1": "value1"})
+    override_settings = ModelSettings(temperature=0.8)
+
+    resolved = base_settings.resolve(override_settings)
+    assert resolved.extra_args == {"param1": "value1"}
+    assert resolved.temperature == 0.8
+
+    # Base with None, override with extra_args
+    base_settings = ModelSettings(temperature=0.5)
+    override_settings = ModelSettings(extra_args={"param2": "value2"})
+
+    resolved = base_settings.resolve(override_settings)
+    assert resolved.extra_args == {"param2": "value2"}
+    assert resolved.temperature == 0.5
+
+
+def test_extra_args_resolve_both_none() -> None:
+    """Test that resolve works when both sides have None extra_args."""
+    base_settings = ModelSettings(temperature=0.5)
+    override_settings = ModelSettings(top_p=0.9)
+
+    resolved = base_settings.resolve(override_settings)
+    assert resolved.extra_args is None
+    assert resolved.temperature == 0.5
+    assert resolved.top_p == 0.9

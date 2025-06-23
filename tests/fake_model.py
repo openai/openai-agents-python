@@ -61,6 +61,7 @@ class FakeModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> ModelResponse:
         self.last_turn_args = {
             "system_instructions": system_instructions,
@@ -103,6 +104,7 @@ class FakeModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         self.last_turn_args = {
             "system_instructions": system_instructions,

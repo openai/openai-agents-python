@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
@@ -18,11 +19,12 @@ from agents.items import (
     TResponseStreamEvent,
 )
 
+from ..fake_model import get_response_obj
+from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
+
 try:
     from agents.voice import SingleAgentVoiceWorkflow
 
-    from ..fake_model import get_response_obj
-    from ..test_responses import get_function_tool, get_function_tool_call, get_text_message
 except ImportError:
     pass
 
@@ -53,6 +55,7 @@ class FakeStreamingModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> ModelResponse:
         raise NotImplementedError("Not implemented")
 
@@ -67,6 +70,7 @@ class FakeStreamingModel(Model):
         tracing: ModelTracing,
         *,
         previous_response_id: str | None,
+        prompt: Any | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         output = self.get_next_output()
         for item in output:

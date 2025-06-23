@@ -90,6 +90,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # We expect a response.created, then a response.output_item.added, content part added,
@@ -182,6 +183,7 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # Expect sequence similar to text: created, output_item.added, content part added,
@@ -270,6 +272,7 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # Sequence should be: response.created, then after loop we expect function call-related events:
