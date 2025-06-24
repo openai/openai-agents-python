@@ -253,6 +253,9 @@ class RunImpl:
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
+                original_input=original_input,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
             ),
             cls.execute_computer_actions(
                 agent=agent,
@@ -539,12 +542,25 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
+        original_input: str | list[TResponseInputItem],
+        pre_step_items: list[RunItem],
+        new_step_items: list[RunItem],
     ) -> list[FunctionToolResult]:
         async def run_single_tool(
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
-                tool_context = ToolContext.from_agent_context(context_wrapper, tool_call.call_id)
+                # Build conversation history from original input and all items generated so far
+                original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(
+                    original_input
+                )
+                pre_items = [item.to_input_item() for item in pre_step_items]
+                new_items = [item.to_input_item() for item in new_step_items]
+                conversation_history = original_items + pre_items + new_items
+
+                tool_context = ToolContext.from_agent_context(
+                    context_wrapper, tool_call.call_id, conversation_history=conversation_history
+                )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
