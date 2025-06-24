@@ -22,10 +22,12 @@ from agents import (
 from agents._run_impl import (
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepHandoffReturnControl,
     NextStepRunAgain,
     RunImpl,
     SingleStepResult,
 )
+from agents.handoffs import handoff
 from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
@@ -215,6 +217,46 @@ async def test_handoff_output_leads_to_handoff_next_step():
     assert len(result.generated_items) == 3
 
 
+@pytest.mark.asyncio
+async def test_handoff_output_leads_to_handoff_return_control_next_step():
+    agent_1 = Agent(name="test_1")
+    agent_2 = Agent(name="test_2")
+    agent_3 = Agent(name="test_3", handoffs=[handoff(agent_1, should_return_control=True), agent_2])
+    response = ModelResponse(
+        output=[get_text_message("Hello, world!"), get_handoff_tool_call(agent_1)],
+        usage=Usage(),
+        response_id=None,
+    )
+    previous_agents: list[Agent[Any]] = []
+    result = await get_execute_result(agent_3, response, previous_agents=previous_agents)
+
+    assert isinstance(result.next_step, NextStepHandoff)
+    assert result.next_step.new_agent == agent_1
+    assert len(previous_agents) == 1
+    assert previous_agents[0] == agent_3
+    assert len(result.generated_items) == 3
+
+
+@pytest.mark.asyncio
+async def test_completion_of_handoff_returns_control_to_previous_agent():
+    last_agent = Agent(name="last_agent")
+    sub_agent = Agent(name="sub_agent", handoffs=[last_agent])
+    main_agent = Agent(name="main_agent", handoffs=[sub_agent])
+    response = ModelResponse(
+        output=[get_text_message("Completed everything")],
+        usage=Usage(),
+        response_id=None,
+    )
+    previous_agents = [main_agent]
+    result = await get_execute_result(last_agent, response, previous_agents=previous_agents)
+
+    assert isinstance(result.next_step, NextStepHandoffReturnControl)
+    assert result.next_step.previous_agent == main_agent
+    assert len(previous_agents) == 0
+    assert len(result.generated_items) == 1
+    assert_item_is_message(result.generated_items[0], "Completed everything")
+
+
 class Foo(BaseModel):
     bar: str
 
@@ -323,9 +365,11 @@ async def get_execute_result(
     hooks: RunHooks[Any] | None = None,
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
+    previous_agents: list[Agent[Any]] | None = None,
 ) -> SingleStepResult:
     output_schema = AgentRunner._get_output_schema(agent)
     handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
+    previous_agents = previous_agents if previous_agents is not None else []
 
     processed_response = RunImpl.process_model_response(
         agent=agent,
@@ -344,4 +388,5 @@ async def get_execute_result(
         hooks=hooks or RunHooks(),
         context_wrapper=context_wrapper or RunContextWrapper(None),
         run_config=run_config or RunConfig(),
+        previous_agents=previous_agents,
     )
