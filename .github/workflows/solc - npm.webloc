@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>URL</key>
+	<string>https://www.npmjs.com/package/solc/v/0.4.2#:~:text=Uses%20the%20Emscripten%20compiled%20Solidity%20found%20in%20the,a%20command-line%20tool%20called%20solcjs%20will%20be%20available.</string>
+</dict>
+</plist>
