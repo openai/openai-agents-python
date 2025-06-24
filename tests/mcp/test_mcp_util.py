@@ -144,7 +144,8 @@ async def test_agent_convert_schemas_true():
     agent = Agent(
         name="test_agent", mcp_servers=[server], mcp_config={"convert_schemas_to_strict": True}
     )
-    tools = await agent.get_mcp_tools()
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
 
     foo_tool = next(tool for tool in tools if tool.name == "foo")
     assert isinstance(foo_tool, FunctionTool)
@@ -208,7 +209,8 @@ async def test_agent_convert_schemas_false():
     agent = Agent(
         name="test_agent", mcp_servers=[server], mcp_config={"convert_schemas_to_strict": False}
     )
-    tools = await agent.get_mcp_tools()
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
 
     foo_tool = next(tool for tool in tools if tool.name == "foo")
     assert isinstance(foo_tool, FunctionTool)
@@ -245,7 +247,8 @@ async def test_agent_convert_schemas_unset():
     server.add_tool("bar", non_strict_schema)
     server.add_tool("baz", possible_to_convert_schema)
     agent = Agent(name="test_agent", mcp_servers=[server])
-    tools = await agent.get_mcp_tools()
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
 
     foo_tool = next(tool for tool in tools if tool.name == "foo")
     assert isinstance(foo_tool, FunctionTool)
