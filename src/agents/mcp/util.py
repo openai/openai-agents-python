@@ -36,12 +36,11 @@ class ToolFilterContext:
     """The name of the MCP server."""
 
 
-ToolFilterCallable = Callable[["ToolFilterContext | None", "MCPTool"], MaybeAwaitable[bool]]
+ToolFilterCallable = Callable[["ToolFilterContext", "MCPTool"], MaybeAwaitable[bool]]
 """A function that determines whether a tool should be available.
 
 Args:
     context: The context information including run context, agent, and server name.
-             Can be None if run_context or agent is not available.
     tool: The MCP tool to filter.
 
 Returns:
@@ -100,8 +99,8 @@ class MCPUtil:
         cls,
         servers: list["MCPServer"],
         convert_schemas_to_strict: bool,
-        run_context: RunContextWrapper[Any] | None = None,
-        agent: "Agent[Any] | None" = None,
+        run_context: RunContextWrapper[Any],
+        agent: "Agent[Any]",
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -126,8 +125,8 @@ class MCPUtil:
         cls,
         server: "MCPServer",
         convert_schemas_to_strict: bool,
-        run_context: RunContextWrapper[Any] | None = None,
-        agent: "Agent[Any] | None" = None,
+        run_context: RunContextWrapper[Any],
+        agent: "Agent[Any]",
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 

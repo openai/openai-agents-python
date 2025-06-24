@@ -52,8 +52,8 @@ class MCPServer(abc.ABC):
     @abc.abstractmethod
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         pass
@@ -102,8 +102,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any] | None,
-        agent: Agent[Any] | None,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
         if self.tool_filter is None:
@@ -140,8 +140,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_dynamic_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any] | None,
-        agent: Agent[Any] | None,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
 
@@ -150,35 +150,18 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise ValueError("Tool filter must be callable for dynamic filtering")
         tool_filter_func = cast(ToolFilterCallable, self.tool_filter)
 
-        # Create filter context - it may be None if run_context or agent is None
-        filter_context = None
-        if run_context is not None and agent is not None:
-            filter_context = ToolFilterContext(
-                run_context=run_context,
-                agent=agent,
-                server_name=self.name,
-            )
+        # Create filter context
+        filter_context = ToolFilterContext(
+            run_context=run_context,
+            agent=agent,
+            server_name=self.name,
+        )
 
         filtered_tools = []
         for tool in tools:
             try:
-                # Try to call the filter function
-                if filter_context is not None:
-                    # We have full context, call with context
-                    result = tool_filter_func(filter_context, tool)
-                else:
-                    # Try to call without context first to see if it works
-                    try:
-                        # Some filters might not need context parameters at all
-                        result = tool_filter_func(None, tool)
-                    except (TypeError, AttributeError) as e:
-                        # If the filter tries to access context attributes, raise a helpful error
-                        raise UserError(
-                            "Dynamic tool filters require both run_context and agent when the "
-                            "filter function accesses context information. This typically happens "
-                            "when calling list_tools() directly without these parameters. Either "
-                            "provide both parameters or use a static tool filter instead."
-                        ) from e
+                # Call the filter function with context
+                result = tool_filter_func(filter_context, tool)
 
                 if inspect.isawaitable(result):
                     should_include = await result
@@ -187,9 +170,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
                 if should_include:
                     filtered_tools.append(tool)
-            except UserError:
-                # Re-raise UserError as-is (this includes our context requirement error)
-                raise
             except Exception as e:
                 logger.error(
                     f"Error applying tool filter to tool '{tool.name}' on server '{self.name}': {e}"
@@ -251,8 +231,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:

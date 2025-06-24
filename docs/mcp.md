@@ -19,13 +19,20 @@ You can use the [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServe
 For example, this is how you'd use the [official MCP filesystem server](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem).
 
 ```python
+from agents.run_context import RunContextWrapper
+
 async with MCPServerStdio(
     params={
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
     }
 ) as server:
-    tools = await server.list_tools()
+    # Note: In practice, you typically add the server to an Agent
+    # and let the framework handle tool listing automatically.
+    # Direct calls to list_tools() require run_context and agent parameters.
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test", instructions="test")
+    tools = await server.list_tools(run_context, agent)
 ```
 
 ## Using MCP servers

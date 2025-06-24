@@ -9,7 +9,6 @@ import pytest
 from mcp import Tool as MCPTool
 
 from agents import Agent
-from agents.exceptions import UserError
 from agents.mcp import ToolFilterContext, create_static_tool_filter
 from agents.run_context import RunContextWrapper
 
@@ -19,6 +18,11 @@ from .helpers import FakeMCPServer
 def create_test_agent(name: str = "test_agent") -> Agent:
     """Create a test agent for filtering tests."""
     return Agent(name=name, instructions="Test agent")
+
+
+def create_test_context() -> RunContextWrapper:
+    """Create a test run context for filtering tests."""
+    return RunContextWrapper(context=None)
 
 
 # === Static Tool Filtering Tests ===
@@ -32,15 +36,19 @@ async def test_static_tool_filtering():
     server.add_tool("tool3", {})
     server.add_tool("tool4", {})
 
+    # Create test context and agent for all calls
+    run_context = create_test_context()
+    agent = create_test_agent()
+
     # Test allowed_tool_names only
     server.tool_filter = {"allowed_tool_names": ["tool1", "tool2"]}
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"tool1", "tool2"}
 
     # Test blocked_tool_names only
     server.tool_filter = {"blocked_tool_names": ["tool3", "tool4"]}
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"tool1", "tool2"}
 
@@ -49,13 +57,13 @@ async def test_static_tool_filtering():
         "allowed_tool_names": ["tool1", "tool2", "tool3"],
         "blocked_tool_names": ["tool3"]
     }
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"tool1", "tool2"}
 
     # Test no filter
     server.tool_filter = None
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 4
 
     # Test helper function
@@ -63,7 +71,7 @@ async def test_static_tool_filtering():
         allowed_tool_names=["tool1", "tool2"],
         blocked_tool_names=["tool2"]
     )
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 1
     assert tools[0].name == "tool1"
 
@@ -78,45 +86,51 @@ async def test_dynamic_filter_sync_and_async():
     server.add_tool("blocked_tool", {})
     server.add_tool("restricted_tool", {})
 
+    # Create test context and agent
+    run_context = create_test_context()
+    agent = create_test_agent()
+
     # Test sync filter
-    def sync_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    def sync_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         return tool.name.startswith("allowed")
 
     server.tool_filter = sync_filter
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 1
     assert tools[0].name == "allowed_tool"
 
     # Test async filter
-    async def async_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    async def async_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         await asyncio.sleep(0.001)  # Simulate async operation
         return "restricted" not in tool.name
 
     server.tool_filter = async_filter
-    tools = await server.list_tools()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"allowed_tool", "blocked_tool"}
 
 
 @pytest.mark.asyncio
 async def test_dynamic_filter_context_handling():
-    """Test dynamic filters with and without context access"""
+    """Test dynamic filters with context access"""
     server = FakeMCPServer(server_name="test_server")
     server.add_tool("admin_tool", {})
     server.add_tool("user_tool", {})
     server.add_tool("guest_tool", {})
 
-    # Test context-independent filter (should work without context)
-    def context_independent_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    # Test context-independent filter
+    def context_independent_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         return not tool.name.startswith("admin")
 
     server.tool_filter = context_independent_filter
-    tools = await server.list_tools(None, None)
+    run_context = create_test_context()
+    agent = create_test_agent()
+    tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
     assert {t.name for t in tools} == {"user_tool", "guest_tool"}
 
     # Test context-dependent filter (needs context)
-    def context_dependent_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    def context_dependent_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         assert context is not None
         assert context.run_context is not None
         assert context.agent is not None
@@ -141,19 +155,6 @@ async def test_dynamic_filter_context_handling():
     tools = await server.list_tools(run_context, admin_agent)
     assert len(tools) == 3
 
-    # Should fail without context when trying to access context
-    def context_accessing_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
-        # This will raise AttributeError when context is None
-        return "admin" in context.agent.name.lower()  # type: ignore[union-attr]
-
-    server.tool_filter = context_accessing_filter
-    with pytest.raises(
-        UserError,
-        match="Dynamic tool filters require both run_context and agent when the filter "
-        "function accesses context information",
-    ):
-        await server.list_tools(None, None)
-
 
 @pytest.mark.asyncio
 async def test_dynamic_filter_error_handling():
@@ -163,20 +164,15 @@ async def test_dynamic_filter_error_handling():
     server.add_tool("error_tool", {})
     server.add_tool("another_good_tool", {})
 
-    def error_prone_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    def error_prone_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         if tool.name == "error_tool":
             raise ValueError("Simulated filter error")
         return True
 
     server.tool_filter = error_prone_filter
 
-    # Test with direct server call
-    tools = await server.list_tools()
-    assert len(tools) == 2
-    assert {t.name for t in tools} == {"good_tool", "another_good_tool"}
-
-    # Test with agent context
-    run_context = RunContextWrapper(context=None)
+    # Test with server call
+    run_context = create_test_context()
     agent = create_test_agent()
     tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
@@ -205,11 +201,10 @@ async def test_agent_dynamic_filtering_integration():
     )
 
     # Role-based filter for comprehensive testing
-    async def role_based_filter(context: ToolFilterContext | None, tool: MCPTool) -> bool:
+    async def role_based_filter(context: ToolFilterContext, tool: MCPTool) -> bool:
         # Simulate async permission check
         await asyncio.sleep(0.001)
 
-        assert context is not None
         agent_name = context.agent.name.lower()
         if "admin" in agent_name:
             return True

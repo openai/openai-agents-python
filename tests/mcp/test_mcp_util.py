@@ -57,7 +57,10 @@ async def test_get_all_function_tools():
     server3.add_tool(names[4], schemas[4])
 
     servers: list[MCPServer] = [server1, server2, server3]
-    tools = await MCPUtil.get_all_function_tools(servers, convert_schemas_to_strict=False)
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    tools = await MCPUtil.get_all_function_tools(servers, False, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
 
@@ -70,7 +73,7 @@ async def test_get_all_function_tools():
         assert tool.name == names[idx]
 
     # Also make sure it works with strict schemas
-    tools = await MCPUtil.get_all_function_tools(servers, convert_schemas_to_strict=True)
+    tools = await MCPUtil.get_all_function_tools(servers, True, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
 
@@ -282,7 +285,9 @@ async def test_util_adds_properties():
     server = FakeMCPServer()
     server.add_tool("test_tool", schema)
 
-    tools = await MCPUtil.get_all_function_tools([server], convert_schemas_to_strict=False)
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+    tools = await MCPUtil.get_all_function_tools([server], False, run_context, agent)
     tool = next(tool for tool in tools if tool.name == "test_tool")
 
     assert isinstance(tool, FunctionTool)
