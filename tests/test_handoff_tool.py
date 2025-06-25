@@ -38,16 +38,17 @@ def get_len(data: HandoffInputData) -> int:
     return input_len + pre_handoff_len + new_items_len
 
 
-def test_single_handoff_setup():
+@pytest.mark.asyncio
+async def test_single_handoff_setup():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2", handoffs=[agent_1])
 
     assert not agent_1.handoffs
     assert agent_2.handoffs == [agent_1]
 
-    assert not AgentRunner._get_handoffs(agent_1)
+    assert not (await AgentRunner._get_handoffs(agent_1, RunContextWrapper(agent_1)))
 
-    handoff_objects = AgentRunner._get_handoffs(agent_2)
+    handoff_objects = await AgentRunner._get_handoffs(agent_2, RunContextWrapper(agent_2))
     assert len(handoff_objects) == 1
     obj = handoff_objects[0]
     assert obj.tool_name == Handoff.default_tool_name(agent_1)
@@ -55,7 +56,8 @@ def test_single_handoff_setup():
     assert obj.agent_name == agent_1.name
 
 
-def test_multiple_handoffs_setup():
+@pytest.mark.asyncio
+async def test_multiple_handoffs_setup():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")
     agent_3 = Agent(name="test_3", handoffs=[agent_1, agent_2])
@@ -64,7 +66,7 @@ def test_multiple_handoffs_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = AgentRunner._get_handoffs(agent_3)
+    handoff_objects = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(agent_3))
     assert len(handoff_objects) == 2
     assert handoff_objects[0].tool_name == Handoff.default_tool_name(agent_1)
     assert handoff_objects[1].tool_name == Handoff.default_tool_name(agent_2)
@@ -76,7 +78,8 @@ def test_multiple_handoffs_setup():
     assert handoff_objects[1].agent_name == agent_2.name
 
 
-def test_custom_handoff_setup():
+@pytest.mark.asyncio
+async def test_custom_handoff_setup():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")
     agent_3 = Agent(
@@ -95,7 +98,7 @@ def test_custom_handoff_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = AgentRunner._get_handoffs(agent_3)
+    handoff_objects = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(agent_3))
     assert len(handoff_objects) == 2
 
     first_handoff = handoff_objects[0]
@@ -284,3 +287,86 @@ def test_get_transfer_message_is_valid_json() -> None:
     obj = handoff(agent)
     transfer = obj.get_transfer_message(agent)
     assert json.loads(transfer) == {"assistant": agent.name}
+
+
+def test_handoff_is_enabled_bool():
+    """Test that handoff respects is_enabled boolean parameter."""
+    agent = Agent(name="test")
+
+    # Test enabled handoff (default)
+    handoff_enabled = handoff(agent)
+    assert handoff_enabled.is_enabled is True
+
+    # Test explicitly enabled handoff
+    handoff_explicit_enabled = handoff(agent, is_enabled=True)
+    assert handoff_explicit_enabled.is_enabled is True
+
+    # Test disabled handoff
+    handoff_disabled = handoff(agent, is_enabled=False)
+    assert handoff_disabled.is_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_callable():
+    """Test that handoff respects is_enabled callable parameter."""
+    agent = Agent(name="test")
+
+    # Test callable that returns True
+    def always_enabled(ctx: RunContextWrapper[Any], agent: Agent[Any]) -> bool:
+        return True
+
+    handoff_callable_enabled = handoff(agent, is_enabled=always_enabled)
+    assert callable(handoff_callable_enabled.is_enabled)
+    result = handoff_callable_enabled.is_enabled(RunContextWrapper(agent), agent)
+    assert result is True
+
+    # Test callable that returns False
+    def always_disabled(ctx: RunContextWrapper[Any], agent: Agent[Any]) -> bool:
+        return False
+
+    handoff_callable_disabled = handoff(agent, is_enabled=always_disabled)
+    assert callable(handoff_callable_disabled.is_enabled)
+    result = handoff_callable_disabled.is_enabled(RunContextWrapper(agent), agent)
+    assert result is False
+
+    # Test async callable
+    async def async_enabled(ctx: RunContextWrapper[Any], agent: Agent[Any]) -> bool:
+        return True
+
+    handoff_async_enabled = handoff(agent, is_enabled=async_enabled)
+    assert callable(handoff_async_enabled.is_enabled)
+    result = await handoff_async_enabled.is_enabled(RunContextWrapper(agent), agent)  # type: ignore
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_handoff_is_enabled_filtering_integration():
+    """Integration test that disabled handoffs are filtered out by the runner."""
+
+    # Set up agents
+    agent_1 = Agent(name="agent_1")
+    agent_2 = Agent(name="agent_2")
+    agent_3 = Agent(name="agent_3")
+
+    # Create main agent with mixed enabled/disabled handoffs
+    main_agent = Agent(
+        name="main_agent",
+        handoffs=[
+            handoff(agent_1, is_enabled=True),  # enabled
+            handoff(agent_2, is_enabled=False),  # disabled
+            handoff(agent_3, is_enabled=lambda ctx, agent: True),  # enabled callable
+        ],
+    )
+
+    context_wrapper = RunContextWrapper(main_agent)
+
+    # Get filtered handoffs using the runner's method
+    filtered_handoffs = await AgentRunner._get_handoffs(main_agent, context_wrapper)
+
+    # Should only have 2 handoffs (agent_1 and agent_3), agent_2 should be filtered out
+    assert len(filtered_handoffs) == 2
+
+    # Check that the correct agents are present
+    agent_names = {h.agent_name for h in filtered_handoffs}
+    assert agent_names == {"agent_1", "agent_3"}
+    assert "agent_2" not in agent_names
