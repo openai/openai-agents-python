@@ -76,8 +76,33 @@ class RunItemBase(Generic[T], abc.ABC):
             # We know that input items are dicts, so we can ignore the type error
             return self.raw_item  # type: ignore
         elif isinstance(self.raw_item, BaseModel):
-            # All output items are Pydantic models that can be converted to input items.
-            return self.raw_item.model_dump(exclude_unset=True)  # type: ignore
+            # For Claude extended thinking: preserve thinking blocks by bypassing Pydantic filtering
+            if hasattr(self.raw_item, 'content') and hasattr(self.raw_item, 'role'):
+                result_dict = {}
+                # Copy all fields except content
+                for field_name, field_value in self.raw_item.__dict__.items():
+                    if field_name != 'content':
+                        result_dict[field_name] = field_value
+                
+                # Preserve thinking blocks in content
+                if hasattr(self.raw_item, 'content') and isinstance(self.raw_item.content, list):
+                    preserved_content = []
+                    for content_item in self.raw_item.content:
+                        if isinstance(content_item, dict):
+                            preserved_content.append(content_item)  # Thinking blocks
+                        elif hasattr(content_item, 'model_dump'):
+                            preserved_content.append(content_item.model_dump(exclude_unset=False))
+                        else:
+                            try:
+                                preserved_content.append(dict(content_item))
+                            except:
+                                pass
+                    result_dict['content'] = preserved_content
+                
+                return result_dict  # type: ignore
+            else:
+                # All output items are Pydantic models that can be converted to input items.
+                return self.raw_item.model_dump(exclude_unset=True)  # type: ignore
         else:
             raise AgentsException(f"Unexpected raw item type: {type(self.raw_item)}")
 
@@ -229,10 +254,36 @@ class ModelResponse:
 
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
-        # We happen to know that the shape of the Pydantic output items are the same as the
-        # equivalent TypedDict input items, so we can just convert each one.
-        # This is also tested via unit tests.
-        return [it.model_dump(exclude_unset=True) for it in self.output]  # type: ignore
+        result = []
+        for item in self.output:
+            if isinstance(item, ResponseOutputMessage):
+                # For Claude extended thinking: preserve thinking blocks in conversation history
+                result_dict = {}
+                for field_name, field_value in item.__dict__.items():
+                    if field_name != 'content':
+                        result_dict[field_name] = field_value
+                
+                if hasattr(item, 'content') and isinstance(item.content, list):
+                    preserved_content = []
+                    for content_item in item.content:
+                        if isinstance(content_item, dict):
+                            preserved_content.append(content_item)  # Thinking blocks
+                        elif hasattr(content_item, 'model_dump'):
+                            preserved_content.append(content_item.model_dump(exclude_unset=False))
+                        else:
+                            try:
+                                preserved_content.append(dict(content_item))
+                            except:
+                                pass
+                    result_dict['content'] = preserved_content
+                
+                result.append(result_dict)  # type: ignore
+            else:
+                # We happen to know that the shape of the Pydantic output items are the same as the
+                # equivalent TypedDict input items, so we can just convert each one.
+                # This is also tested via unit tests.
+                result.append(item.model_dump(exclude_unset=True))  # type: ignore
+        return result
 
 
 class ItemHelpers:

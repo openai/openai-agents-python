@@ -178,11 +178,52 @@ class LitellmModel(Model):
             )
 
             final_response: Response | None = None
-            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+            collected_chunks = []
+            
+            # Create async generator from collected chunks
+            async def replay_chunks():
+                async for raw_chunk in stream:
+                    collected_chunks.append(raw_chunk)
+                    yield raw_chunk
+                
+            # Process chunks through handler  
+            async for chunk in ChatCmplStreamHandler.handle_stream(response, replay_chunks()):
                 yield chunk
-
                 if chunk.type == "response.completed":
                     final_response = chunk.response
+
+            # Claude extended thinking: reconstruct thinking blocks from stream chunks
+            if final_response and collected_chunks:
+                # Extract thinking blocks and reasoning content from chunks
+                complete_thinking_blocks = []
+                aggregated_reasoning = ""
+                
+                for chunk in collected_chunks:
+                    if hasattr(chunk, 'choices') and chunk.choices:
+                        choice = chunk.choices[0]
+                        if hasattr(choice, 'delta'):
+                            delta = choice.delta
+                            if hasattr(delta, 'thinking_blocks') and delta.thinking_blocks:
+                                for tb in delta.thinking_blocks:
+                                    if isinstance(tb, dict) and 'signature' in tb:
+                                        complete_thinking_blocks.append(tb)
+                            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                aggregated_reasoning += delta.reasoning_content
+                
+                # Fill empty thinking fields with reasoning content
+                if complete_thinking_blocks and aggregated_reasoning:
+                    for thinking_block in complete_thinking_blocks:
+                        if isinstance(thinking_block, dict) and thinking_block.get('thinking') == '':
+                            thinking_block['thinking'] = aggregated_reasoning
+                
+                # Inject thinking blocks into final response
+                if complete_thinking_blocks and final_response.output:
+                    for output_item in final_response.output:
+                        if (hasattr(output_item, 'role') and getattr(output_item, 'role') == 'assistant' and 
+                            hasattr(output_item, 'content') and isinstance(output_item.content, list)):
+                            # Insert thinking blocks at the beginning
+                            output_item.content = complete_thinking_blocks + output_item.content
+                            break
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]
@@ -360,14 +401,31 @@ class LitellmConverter:
             provider_specific_fields.get("refusal", None) if provider_specific_fields else None
         )
 
-        return ChatCompletionMessage(
-            content=message.content,
+        # For ChatCompletionMessage, we need to keep content as string only
+        # We'll store thinking blocks separately and restore them during items_to_messages conversion
+        content = message.content
+        
+        # Store thinking blocks in a custom field that we can retrieve later
+        thinking_blocks = None
+        if hasattr(message, 'thinking_blocks') and getattr(message, 'thinking_blocks', None):
+            thinking_blocks = getattr(message, 'thinking_blocks', None)
+        
+        # Note: We don't modify content here because ChatCompletionMessage.content must be a string
+
+        completion_message = ChatCompletionMessage(
+            content=content,
             refusal=refusal,
             role="assistant",
             annotations=cls.convert_annotations_to_openai(message),
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
         )
+        
+        # Store thinking blocks as an extra field so we can retrieve them later
+        if thinking_blocks:
+            completion_message.thinking_blocks = thinking_blocks
+        
+        return completion_message
 
     @classmethod
     def convert_annotations_to_openai(

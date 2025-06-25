@@ -92,6 +92,11 @@ class Converter:
             type="message",
             status="completed",
         )
+        
+        # Claude extended thinking: store thinking blocks as direct content items
+        thinking_blocks = getattr(message, 'thinking_blocks', None)
+        if thinking_blocks:
+            message_item.content.extend(thinking_blocks)
         if message.content:
             message_item.content.append(
                 ResponseOutputText(text=message.content, type="output_text", annotations=[])
@@ -359,9 +364,13 @@ class Converter:
                 new_asst = ChatCompletionAssistantMessageParam(role="assistant")
                 contents = resp_msg["content"]
 
+                # Claude extended thinking: extract thinking blocks and text segments
+                thinking_blocks = []
                 text_segments = []
                 for c in contents:
-                    if c["type"] == "output_text":
+                    if c["type"] == "thinking":
+                        thinking_blocks.append(c)
+                    elif c["type"] == "output_text":
                         text_segments.append(c["text"])
                     elif c["type"] == "refusal":
                         new_asst["refusal"] = c["refusal"]
@@ -373,9 +382,19 @@ class Converter:
                     else:
                         raise UserError(f"Unknown content type in ResponseOutputMessage: {c}")
 
-                if text_segments:
-                    combined = "\n".join(text_segments)
-                    new_asst["content"] = combined
+                # Create content array with thinking blocks first
+                if thinking_blocks:
+                    content_array = thinking_blocks[:]
+                    if text_segments:
+                        content_array.append({
+                            "type": "text",
+                            "text": "\n".join(text_segments)
+                        })
+                    new_asst["content"] = content_array
+                elif text_segments:
+                        combined = "\n".join(text_segments)
+                        new_asst["content"] = combined
+                        new_asst["content"] = "\n".join(text_segments)
 
                 new_asst["tool_calls"] = []
                 current_assistant_msg = new_asst
