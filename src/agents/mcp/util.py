@@ -1,7 +1,7 @@
 import functools
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -65,9 +65,9 @@ ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]
 
 
 def create_static_tool_filter(
-    allowed_tool_names: list[str] | None = None,
-    blocked_tool_names: list[str] | None = None,
-) -> ToolFilterStatic | None:
+    allowed_tool_names: Optional[list[str]] = None,
+    blocked_tool_names: Optional[list[str]] = None,
+) -> Optional[ToolFilterStatic]:
     """Create a static tool filter from allowlist and blocklist parameters.
 
     This is a convenience function for creating a ToolFilterStatic.
