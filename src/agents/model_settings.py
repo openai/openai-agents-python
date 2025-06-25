@@ -5,6 +5,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any, Literal
 
 from openai._types import Body, Headers, Query
+from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
@@ -60,6 +61,10 @@ class ModelSettings:
     include_usage: bool | None = None
     """Whether to include usage chunk.
     Defaults to True if not provided."""
+
+    response_include: list[ResponseIncludable] | None = None
+    """Additional output data to include in the model response.
+    [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
 
     extra_query: Query | None = None
     """Additional query fields to provide with the request.

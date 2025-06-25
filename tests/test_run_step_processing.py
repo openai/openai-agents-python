@@ -186,7 +186,7 @@ async def test_handoffs_parsed_correctly():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=AgentRunner._get_handoffs(agent_3),
+        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert len(result.handoffs) == 1, "Should have a handoff here"
@@ -216,7 +216,7 @@ async def test_missing_handoff_fails():
             agent=agent_3,
             response=response,
             output_schema=None,
-            handoffs=AgentRunner._get_handoffs(agent_3),
+            handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
             all_tools=await agent_3.get_all_tools(_dummy_ctx()),
         )
 
@@ -239,7 +239,7 @@ async def test_multiple_handoffs_doesnt_error():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=AgentRunner._get_handoffs(agent_3),
+        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert len(result.handoffs) == 2, "Should have multiple handoffs here"
@@ -471,7 +471,7 @@ async def test_tool_and_handoff_parsed_correctly():
         agent=agent_3,
         response=response,
         output_schema=None,
-        handoffs=AgentRunner._get_handoffs(agent_3),
+        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
         all_tools=await agent_3.get_all_tools(_dummy_ctx()),
     )
     assert result.functions and len(result.functions) == 1

@@ -240,6 +240,10 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
+        include: list[ResponseIncludable] = converted_tools.includes
+        if model_settings.response_include is not None:
+            include = list({*include, *model_settings.response_include})
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
@@ -258,7 +262,7 @@ class OpenAIResponsesModel(Model):
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
-            include=converted_tools.includes,
+            include=include,
             tools=converted_tools.tools,
             prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),

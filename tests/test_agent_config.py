@@ -43,7 +43,7 @@ async def test_handoff_with_agents():
         handoffs=[agent_1, agent_2],
     )
 
-    handoffs = AgentRunner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -78,7 +78,7 @@ async def test_handoff_with_handoff_obj():
         ],
     )
 
-    handoffs = AgentRunner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -112,7 +112,7 @@ async def test_handoff_with_handoff_obj_and_agent():
         handoffs=[handoff(agent_1), agent_2],
     )
 
-    handoffs = AgentRunner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"

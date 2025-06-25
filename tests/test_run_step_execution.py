@@ -325,7 +325,7 @@ async def get_execute_result(
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
     output_schema = AgentRunner._get_output_schema(agent)
-    handoffs = AgentRunner._get_handoffs(agent)
+    handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
 
     processed_response = RunImpl.process_model_response(
         agent=agent,
