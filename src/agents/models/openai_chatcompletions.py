@@ -90,10 +90,8 @@ class OpenAIChatCompletionsModel(Model):
                         json.dumps(message.model_dump(), indent=2),
                     )
                 else:
-                    logger.debug(
-                        "LLM resp had no message. finish_reason: %s",
-                        first_choice.finish_reason,
-                    )
+                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    logger.debug("LLM resp had no message. finish_reason: %s", finish_reason)
 
             usage = (
                 Usage(
