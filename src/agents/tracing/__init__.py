@@ -1,119 +1,161 @@
+"""
+OpenAI Agents Tracing
+
+Configuration:
+  - AGENT_TRACE_PROVIDER: Optional "module.ClassName" specifying a custom TraceProvider.
+    If unset, DefaultTraceProvider is used.
+  - Use `set_tracing_export_api_key()` to configure the API key for the built-in exporter.
+
+Runtime APIs:
+  - add_trace_processor(span_processor: TracingProcessor)
+  - set_trace_processors(processors: List[TracingProcessor])
+  - set_tracing_disabled(disabled: bool)
+  - set_tracing_export_api_key(api_key: str)
+"""
+
+# Enable postponed evaluation of annotations for Python <3.10 compatibility
+from __future__ import annotations
+
 import atexit
+import os
+import logging
+from typing import List  # Removed unused Optional
 
-from agents.tracing.provider import DefaultTraceProvider, TraceProvider
-
-from .create import (
-    agent_span,
-    custom_span,
-    function_span,
-    generation_span,
-    get_current_span,
-    get_current_trace,
-    guardrail_span,
-    handoff_span,
-    mcp_tools_span,
-    response_span,
-    speech_group_span,
-    speech_span,
-    trace,
-    transcription_span,
-)
+# Critical imports explicitly exposed in __all__
+from .provider import TraceProvider  # Now directly available for importers
+from .provider import DefaultTraceProvider
 from .processor_interface import TracingProcessor
-from .processors import default_exporter, default_processor
-from .setup import get_trace_provider, set_trace_provider
 from .span_data import (
-    AgentSpanData,
-    CustomSpanData,
-    FunctionSpanData,
-    GenerationSpanData,
-    GuardrailSpanData,
-    HandoffSpanData,
-    MCPListToolsSpanData,
-    ResponseSpanData,
-    SpanData,
-    SpeechGroupSpanData,
-    SpeechSpanData,
-    TranscriptionSpanData,
+    AgentSpanData, CustomSpanData, FunctionSpanData, GenerationSpanData,
+    GuardrailSpanData, HandoffSpanData, MCPListToolsSpanData,
+    ResponseSpanData, SpanData, SpeechGroupSpanData, SpeechSpanData,
+    TranscriptionSpanData
 )
 from .spans import Span, SpanError
 from .traces import Trace
 from .util import gen_span_id, gen_trace_id
+from .create import (
+    agent_span, custom_span, function_span, generation_span, get_current_span,
+    get_current_trace, guardrail_span, handoff_span, mcp_tools_span,
+    response_span, speech_group_span, speech_span, trace, transcription_span
+)
 
 __all__ = [
     "add_trace_processor",
-    "agent_span",
-    "custom_span",
-    "function_span",
-    "generation_span",
-    "get_current_span",
-    "get_current_trace",
-    "get_trace_provider",
-    "guardrail_span",
-    "handoff_span",
-    "response_span",
     "set_trace_processors",
-    "set_trace_provider",
     "set_tracing_disabled",
-    "trace",
-    "Trace",
-    "SpanError",
-    "Span",
-    "SpanData",
-    "AgentSpanData",
-    "CustomSpanData",
-    "FunctionSpanData",
-    "GenerationSpanData",
-    "GuardrailSpanData",
-    "HandoffSpanData",
-    "MCPListToolsSpanData",
-    "ResponseSpanData",
-    "SpeechGroupSpanData",
-    "SpeechSpanData",
-    "TranscriptionSpanData",
-    "TracingProcessor",
-    "TraceProvider",
-    "gen_trace_id",
-    "gen_span_id",
-    "speech_group_span",
-    "speech_span",
-    "transcription_span",
-    "mcp_tools_span",
+    "set_tracing_export_api_key",
+    "agent_span", "custom_span", "function_span", "generation_span",
+    "get_current_span", "get_current_trace",
+    "guardrail_span", "handoff_span", "response_span", "speech_group_span",
+    "speech_span", "trace", "transcription_span", "mcp_tools_span",
+    "Trace", "Span", "SpanError",
+    "SpanData", "AgentSpanData", "CustomSpanData", "FunctionSpanData",
+    "GenerationSpanData", "GuardrailSpanData", "HandoffSpanData",
+    "MCPListToolsSpanData", "ResponseSpanData", "SpeechGroupSpanData",
+    "SpeechSpanData", "TranscriptionSpanData",
+    "TracingProcessor", "TraceProvider", "gen_trace_id", "gen_span_id",
 ]
 
+def _load_provider() -> TraceProvider:
+    """
+    Load a TraceProvider implementation based on AGENT_TRACE_PROVIDER env var,
+    or fall back to DefaultTraceProvider.
+    """
+    from .provider import DefaultTraceProvider, TraceProvider
+
+    spec = os.getenv("AGENT_TRACE_PROVIDER")
+    if not spec:
+        provider = DefaultTraceProvider()
+        logging.debug("Using default trace provider: %s", type(provider).__name__)
+        return provider
+
+    module_name, _, class_name = spec.rpartition(".")
+    try:
+        mod = __import__(module_name, fromlist=[class_name])
+        provider_cls = getattr(mod, class_name)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Custom provider '{spec}' not found. Check your AGENT_TRACE_PROVIDER value."
+        ) from exc
+    except Exception as exc:
+        logging.warning(
+            "Error loading AGENT_TRACE_PROVIDER=%r: %s", spec, exc
+        )
+        return DefaultTraceProvider()
+
+    if not issubclass(provider_cls, TraceProvider):
+        raise TypeError(f"{spec!r} must inherit from TraceProvider")
+
+    provider = provider_cls()
+    logging.debug("Using custom trace provider: %s", spec)
+    return provider
+
+# Bootstrap the global provider
+from .setup import set_trace_provider, get_trace_provider
+try:
+    provider = _load_provider()
+    set_trace_provider(provider)
+except Exception as exc:
+    logging.warning("Failed to set trace provider: %s", exc)
 
 def add_trace_processor(span_processor: TracingProcessor) -> None:
-    """
-    Adds a new trace processor. This processor will receive all traces/spans.
-    """
-    get_trace_provider().register_processor(span_processor)
+    """Register a new trace processor to receive all spans."""
+    try:
+        from .setup import get_trace_provider as _get
+        _get().register_processor(span_processor)
+    except Exception as exc:
+        logging.warning("Failed to register trace processor: %s", exc)
 
-
-def set_trace_processors(processors: list[TracingProcessor]) -> None:
-    """
-    Set the list of trace processors. This will replace the current list of processors.
-    """
-    get_trace_provider().set_processors(processors)
-
+def set_trace_processors(processors: List[TracingProcessor]) -> None:
+    """Replace all trace processors with the given list."""
+    if not processors:
+        logging.warning("Empty processor list provided to set_trace_processors()")
+    try:
+        from .setup import get_trace_provider as _get
+        _get().set_processors(processors)
+    except Exception as exc:
+        logging.warning("Failed to set trace processors: %s", exc)
 
 def set_tracing_disabled(disabled: bool) -> None:
-    """
-    Set whether tracing is globally disabled.
-    """
-    get_trace_provider().set_disabled(disabled)
-
+    """Globally enable or disable tracing at runtime."""
+    try:
+        from .setup import get_trace_provider as _get
+        _get().set_disabled(disabled)
+    except Exception as exc:
+        logging.warning("Failed to toggle tracing: %s", exc)
 
 def set_tracing_export_api_key(api_key: str) -> None:
-    """
-    Set the OpenAI API key for the backend exporter.
-    """
-    default_exporter().set_api_key(api_key)
+    """Configure the OpenAI API key for the built-in tracing exporter."""
+    try:
+        from .processors import default_exporter
+        exporter = default_exporter()
+        if exporter is None:
+            raise RuntimeError(
+                "No tracing exporter available; did you install the optional extras?"
+            )
+        exporter.set_api_key(api_key)
+    except Exception as exc:
+        logging.warning("Failed to set tracing export API key: %s", exc)
+        if isinstance(exc, RuntimeError):
+            raise
 
+# Install default processor (only if it succeeds)
+try:
+    from .processors import default_processor
+    proc = default_processor()
+    if proc is not None:
+        add_trace_processor(proc)
+except Exception as exc:
+    logging.warning("Failed to install default trace processor: %s", exc)
 
-set_trace_provider(DefaultTraceProvider())
-# Add the default processor, which exports traces and spans to the backend in batches. You can
-# change the default behavior by either:
-# 1. calling add_trace_processor(), which adds additional processors, or
-# 2. calling set_trace_processors(), which replaces the default processor.
-add_trace_processor(default_processor())
-
-atexit.register(get_trace_provider().shutdown)
+# Ensure provider shutdown at exit (with safety checks)
+try:
+    provider = get_trace_provider()
+    shutdown_fn = getattr(provider, "shutdown", None)
+    if callable(shutdown_fn):
+        atexit.register(shutdown_fn)
+    else:
+        logging.debug("Trace provider has no shutdown method - skipping cleanup registration")
+except Exception as exc:
+    logging.warning("Failed to register shutdown hook: %s", exc)
