@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Dict, cast
+from typing import Any, cast
 
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
@@ -25,7 +25,7 @@ from agents.models.openai_provider import OpenAIProvider
 
 
 # Helper functions to create test objects consistently
-def create_content_delta(content: str) -> Dict[str, Any]:
+def create_content_delta(content: str) -> dict[str, Any]:
     """Create a delta dictionary with regular content"""
     return {
         "content": content,
@@ -34,7 +34,7 @@ def create_content_delta(content: str) -> Dict[str, Any]:
         "tool_calls": None
     }
 
-def create_reasoning_delta(content: str) -> Dict[str, Any]:
+def create_reasoning_delta(content: str) -> dict[str, Any]:
     """Create a delta dictionary with reasoning content. The Only difference is reasoning_content"""
     return {
         "content": None,
@@ -45,7 +45,7 @@ def create_reasoning_delta(content: str) -> Dict[str, Any]:
     }
 
 
-def create_chunk(delta: Dict[str, Any], include_usage: bool = False) -> ChatCompletionChunk:
+def create_chunk(delta: dict[str, Any], include_usage: bool = False) -> ChatCompletionChunk:
     """Create a ChatCompletionChunk with the given delta"""
     # Create a ChoiceDelta object from the dictionary
     delta_obj = ChoiceDelta(
@@ -54,11 +54,13 @@ def create_chunk(delta: Dict[str, Any], include_usage: bool = False) -> ChatComp
         function_call=delta.get("function_call"),
         tool_calls=delta.get("tool_calls"),
     )
-    
+
     # Add reasoning_content attribute dynamically if present in the delta
     if "reasoning_content" in delta:
-        setattr(delta_obj, "reasoning_content", delta["reasoning_content"])
-    
+        # Use direct assignment for the reasoning_content attribute
+        delta_obj_any = cast(Any, delta_obj)
+        delta_obj_any.reasoning_content = delta["reasoning_content"]
+
     # Create the chunk
     chunk = ChatCompletionChunk(
         id="chunk-id",
@@ -67,7 +69,7 @@ def create_chunk(delta: Dict[str, Any], include_usage: bool = False) -> ChatComp
         object="chat.completion.chunk",
         choices=[Choice(index=0, delta=delta_obj)],
     )
-    
+
     if include_usage:
         chunk.usage = CompletionUsage(
             completion_tokens=4,
@@ -76,7 +78,7 @@ def create_chunk(delta: Dict[str, Any], include_usage: bool = False) -> ChatComp
             completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
             prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
         )
-    
+
     return chunk
 
 
@@ -276,7 +278,7 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
     # verify the final response contains the content
     response_event = output_events[-1]
     assert response_event.type == "response.completed"
-    
+
     # should only have the message, not an empty reasoning item
     assert len(response_event.response.output) == 1
     assert isinstance(response_event.response.output[0], ResponseOutputMessage)
