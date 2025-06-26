@@ -180,7 +180,7 @@ class LitellmModel(Model):
             final_response: Response | None = None
             collected_chunks = []
             
-            # Create async generator from collected chunks
+            # Create async generator that streams thinking and regular content
             async def replay_chunks():
                 async for raw_chunk in stream:
                     collected_chunks.append(raw_chunk)
