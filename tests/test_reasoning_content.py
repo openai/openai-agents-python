@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any, Dict, cast
 
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
-from openai.types.chat.chat_completion_chunk import Choice
+from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import (
     CompletionTokensDetails,
     CompletionUsage,
@@ -24,7 +25,7 @@ from agents.models.openai_provider import OpenAIProvider
 
 
 # Helper functions to create test objects consistently
-def create_content_delta(content: str) -> dict:
+def create_content_delta(content: str) -> Dict[str, Any]:
     """Create a delta dictionary with regular content"""
     return {
         "content": content,
@@ -33,7 +34,7 @@ def create_content_delta(content: str) -> dict:
         "tool_calls": None
     }
 
-def create_reasoning_delta(content: str) -> dict:
+def create_reasoning_delta(content: str) -> Dict[str, Any]:
     """Create a delta dictionary with reasoning content. The Only difference is reasoning_content"""
     return {
         "content": None,
@@ -44,25 +45,39 @@ def create_reasoning_delta(content: str) -> dict:
     }
 
 
-def create_chunk(delta: dict, include_usage: bool = False) -> ChatCompletionChunk:
-    kwargs = {
-        "id": "chunk-id",
-        "created": 1,
-        "model": "deepseek is usually expected",
-        "object": "chat.completion.chunk",
-        "choices": [Choice(index=0, delta=delta)],
-    }
-
+def create_chunk(delta: Dict[str, Any], include_usage: bool = False) -> ChatCompletionChunk:
+    """Create a ChatCompletionChunk with the given delta"""
+    # Create a ChoiceDelta object from the dictionary
+    delta_obj = ChoiceDelta(
+        content=delta.get("content"),
+        role=delta.get("role"),
+        function_call=delta.get("function_call"),
+        tool_calls=delta.get("tool_calls"),
+    )
+    
+    # Add reasoning_content attribute dynamically if present in the delta
+    if "reasoning_content" in delta:
+        setattr(delta_obj, "reasoning_content", delta["reasoning_content"])
+    
+    # Create the chunk
+    chunk = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="deepseek is usually expected",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=delta_obj)],
+    )
+    
     if include_usage:
-        kwargs["usage"] = CompletionUsage(
+        chunk.usage = CompletionUsage(
             completion_tokens=4,
             prompt_tokens=2,
             total_tokens=6,
             completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
             prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
         )
-
-    return ChatCompletionChunk(**kwargs)
+    
+    return chunk
 
 
 async def create_fake_stream(
@@ -160,14 +175,16 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         role="assistant",
         content="The answer is 42",
     )
-    # Use direct assignment instead of setattr
-    msg.reasoning_content = "Let me think about this question carefully"
+    # Use dynamic attribute for reasoning_content
+    # We need to cast to Any to avoid mypy errors since reasoning_content is not a defined attribute
+    msg_with_reasoning = cast(Any, msg)
+    msg_with_reasoning.reasoning_content = "Let me think about this question carefully"
 
     # create a choice with the message
     mock_choice = {
         "index": 0,
         "finish_reason": "stop",
-        "message": msg,
+        "message": msg_with_reasoning,
         "delta": None
     }
 
@@ -259,8 +276,9 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
     # verify the final response contains the content
     response_event = output_events[-1]
     assert response_event.type == "response.completed"
-
+    
     # should only have the message, not an empty reasoning item
     assert len(response_event.response.output) == 1
     assert isinstance(response_event.response.output[0], ResponseOutputMessage)
+    assert isinstance(response_event.response.output[0].content[0], ResponseOutputText)
     assert response_event.response.output[0].content[0].text == "The answer is 42"
