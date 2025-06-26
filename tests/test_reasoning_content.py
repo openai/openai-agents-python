@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
@@ -23,14 +23,50 @@ from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
 
 
-# Define our own ChoiceDelta since the import is causing issues
-class ChoiceDelta:
-    def __init__(self, content=None, role=None, function_call=None, tool_calls=None):
-        self.content = content
-        self.role = role
-        self.function_call = function_call
-        self.tool_calls = tool_calls
-        # We'll add reasoning_content attribute dynamically later
+def create_content_delta(content: str) -> dict:
+    """Create a delta dictionary with regular content"""
+    return {
+        "content": content, 
+        "role": None, 
+        "function_call": None, 
+        "tool_calls": None
+    }
+    
+def create_reasoning_delta(content: str) -> dict:
+    """Create a delta dictionary with reasoning content. The Only difference is reasoning_content"""
+    return {
+        "content": None, 
+        "role": None, 
+        "function_call": None, 
+        "tool_calls": None, 
+        "reasoning_content": content
+    }
+
+
+
+def create_chunk(delta: dict, include_usage: bool = False) -> ChatCompletionChunk:
+    kwargs = {
+        "id": "chunk-id",
+        "created": 1,
+        "model": "deepseek is usually expected",
+        "object": "chat.completion.chunk",
+        "choices": [Choice(index=0, delta=delta)],
+    }
+    
+    if include_usage:
+        kwargs["usage"] = CompletionUsage(
+            completion_tokens=4,
+            prompt_tokens=2,
+            total_tokens=6,
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+        )
+    
+    return ChatCompletionChunk(**kwargs)
+
+async def create_fake_stream(chunks: list[ChatCompletionChunk]) -> AsyncIterator[ChatCompletionChunk]:
+    for chunk in chunks:
+        yield chunk
 
 
 @pytest.mark.allow_call_model_methods
@@ -42,70 +78,15 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     `response.reasoning_summary_text.delta` events for each chunk of the reasoning content and
     constructs a completed response with a `ResponseReasoningItem` part.
     """
-    # Simulate reasoning content coming in two pieces
-    chunk1 = ChatCompletionChunk(
-        id="chunk-id",
-        created=1,
-        model="fake",
-        object="chat.completion.chunk",
-        choices=[
-            Choice(
-                index=0,
-                delta={"content": None, "role": None, "function_call": None, "tool_calls": None, "reasoning_content": "Let me think"},
-            )
-        ],
-    )
-
-    chunk2 = ChatCompletionChunk(
-        id="chunk-id",
-        created=1,
-        model="fake",
-        object="chat.completion.chunk",
-        choices=[
-            Choice(
-                index=0,
-                delta={"content": None, "role": None, "function_call": None, "tool_calls": None, "reasoning_content": " about this"},
-            )
-        ],
-    )
-
-    # Then regular content in two pieces
-    chunk3 = ChatCompletionChunk(
-        id="chunk-id",
-        created=1,
-        model="fake",
-        object="chat.completion.chunk",
-        choices=[
-            Choice(
-                index=0,
-                delta={"content": "The answer", "role": None, "function_call": None, "tool_calls": None},
-            )
-        ],
-    )
-
-    chunk4 = ChatCompletionChunk(
-        id="chunk-id",
-        created=1,
-        model="fake",
-        object="chat.completion.chunk",
-        choices=[
-            Choice(
-                index=0,
-                delta={"content": " is 42", "role": None, "function_call": None, "tool_calls": None},
-            )
-        ],
-        usage=CompletionUsage(
-            completion_tokens=4,
-            prompt_tokens=2,
-            total_tokens=6,
-            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
-            prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
-        ),
-    )
-
-    async def fake_stream():
-        for c in (chunk1, chunk2, chunk3, chunk4):
-            yield c
+    # Create test chunks
+    chunks = [
+        # Reasoning content chunks
+        create_chunk(create_reasoning_delta("Let me think")),
+        create_chunk(create_reasoning_delta(" about this")),
+        # Regular content chunks
+        create_chunk(create_content_delta("The answer")),
+        create_chunk(create_content_delta(" is 42"), include_usage=True),
+    ]
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -118,7 +99,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
             tools=[],
             parallel_tool_calls=False,
         )
-        return resp, fake_stream()
+        return resp, create_fake_stream(chunks)
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
@@ -135,7 +116,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     ):
         output_events.append(event)
 
-    # Verify reasoning content events were emitted
+    # verify reasoning content events were emitted
     reasoning_delta_events = [
         e for e in output_events if e.type == "response.reasoning_summary_text.delta"
     ]
@@ -143,22 +124,22 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
     assert reasoning_delta_events[0].delta == "Let me think"
     assert reasoning_delta_events[1].delta == " about this"
 
-    # Verify regular content events were emitted
+    # verify regular content events were emitted
     content_delta_events = [e for e in output_events if e.type == "response.output_text.delta"]
     assert len(content_delta_events) == 2
     assert content_delta_events[0].delta == "The answer"
     assert content_delta_events[1].delta == " is 42"
 
-    # Verify the final response contains both types of content
+    # verify the final response contains both types of content
     response_event = output_events[-1]
     assert response_event.type == "response.completed"
     assert len(response_event.response.output) == 2
 
-    # First item should be reasoning
+    # first item should be reasoning
     assert isinstance(response_event.response.output[0], ResponseReasoningItem)
     assert response_event.response.output[0].summary[0].text == "Let me think about this"
 
-    # Second item should be message with text
+    # second item should be message with text
     assert isinstance(response_event.response.output[1], ResponseOutputMessage)
     assert isinstance(response_event.response.output[1].content[0], ResponseOutputText)
     assert response_event.response.output[1].content[0].text == "The answer is 42"
@@ -171,13 +152,14 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     Test that when a model returns reasoning content in addition to regular content,
     `get_response` properly includes both in the response output.
     """
+    # create a message with reasoning content
     msg = ChatCompletionMessage(
         role="assistant",
         content="The answer is 42",
     )
     setattr(msg, "reasoning_content", "Let me think about this question carefully")
 
-    # use dict to avoid type errors for now
+    # create a choice with the message
     mock_choice = {
         "index": 0,
         "finish_reason": "stop",
@@ -185,10 +167,11 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         "delta": None
     }
 
+    # Create the completion
     chat = ChatCompletion(
         id="resp-id",
         created=0,
-        model="fake",
+        model="deepseek is expected",
         object="chat.completion",
         choices=[mock_choice],  # type: ignore[list-item]
         usage=CompletionUsage(
@@ -216,14 +199,65 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         previous_response_id=None,
     )
 
-    # Should have produced a reasoning item and a message with text content
+    # should have produced a reasoning item and a message with text content
     assert len(resp.output) == 2
 
-    # First output should be the reasoning item
+    # first output should be the reasoning item
     assert isinstance(resp.output[0], ResponseReasoningItem)
     assert resp.output[0].summary[0].text == "Let me think about this question carefully"
 
-    # Second output should be the message with text content
+    # second output should be the message with text content
     assert isinstance(resp.output[1], ResponseOutputMessage)
     assert isinstance(resp.output[1].content[0], ResponseOutputText)
     assert resp.output[1].content[0].text == "The answer is 42"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None:
+    """
+    Test that when a model streams empty reasoning content,
+    the response still processes correctly without errors.
+    """
+    # create test chunks with empty reasoning content
+    chunks = [
+        create_chunk(create_reasoning_delta("")),
+        create_chunk(create_content_delta("The answer is 42"), include_usage=True),
+    ]
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, create_fake_stream(chunks)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    ):
+        output_events.append(event)
+
+    # verify the final response contains the content
+    response_event = output_events[-1]
+    assert response_event.type == "response.completed"
+    
+    # should only have the message, not an empty reasoning item
+    assert len(response_event.response.output) == 1
+    assert isinstance(response_event.response.output[0], ResponseOutputMessage)
+    assert response_event.response.output[0].content[0].text == "The answer is 42"
