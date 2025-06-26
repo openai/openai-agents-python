@@ -38,7 +38,8 @@ class UserInfo:  # (1)!
 
 @function_tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
-    return f"User {wrapper.context.name} is 47 years old"
+    """Fetch the age of the user. Call this function to get user's age information."""
+    return f"The user {wrapper.context.name} is 47 years old"
 
 async def main():
     user_info = UserInfo(name="John", uid=123)
