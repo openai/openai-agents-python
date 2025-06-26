@@ -51,11 +51,10 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         choices=[
             Choice(
                 index=0,
-                delta=ChoiceDelta(content=None, role=None, function_call=None, tool_calls=None),  # type: ignore
+                delta={"content": None, "role": None, "function_call": None, "tool_calls": None, "reasoning_content": "Let me think"},
             )
         ],
     )
-    chunk1.choices[0].delta.reasoning_content = "Let me think"  # type: ignore[attr-defined]
 
     chunk2 = ChatCompletionChunk(
         id="chunk-id",
@@ -65,11 +64,10 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         choices=[
             Choice(
                 index=0,
-                delta=ChoiceDelta(content=None, role=None, function_call=None, tool_calls=None),  # type: ignore
+                delta={"content": None, "role": None, "function_call": None, "tool_calls": None, "reasoning_content": " about this"},
             )
         ],
     )
-    chunk2.choices[0].delta.reasoning_content = " about this"  # type: ignore[attr-defined]
 
     # Then regular content in two pieces
     chunk3 = ChatCompletionChunk(
@@ -80,9 +78,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         choices=[
             Choice(
                 index=0,
-                delta=ChoiceDelta(
-                    content="The answer", role=None, function_call=None, tool_calls=None  # type: ignore
-                ),
+                delta={"content": "The answer", "role": None, "function_call": None, "tool_calls": None},
             )
         ],
     )
@@ -95,7 +91,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         choices=[
             Choice(
                 index=0,
-                delta=ChoiceDelta(content=" is 42", role=None, function_call=None, tool_calls=None),  # type: ignore
+                delta={"content": " is 42", "role": None, "function_call": None, "tool_calls": None},
             )
         ],
         usage=CompletionUsage(
@@ -175,16 +171,14 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     Test that when a model returns reasoning content in addition to regular content,
     `get_response` properly includes both in the response output.
     """
-    # Create a mock completion with reasoning content
     msg = ChatCompletionMessage(
         role="assistant",
         content="The answer is 42",
     )
-    # Add reasoning_content attribute dynamically
-    msg.reasoning_content = "Let me think about this question carefully"  # type: ignore[attr-defined]
+    setattr(msg, "reasoning_content", "Let me think about this question carefully")
 
-    # Using a dict directly to avoid type errors
-    mock_choice: dict[str, Any] = {
+    # use dict to avoid type errors for now
+    mock_choice = {
         "index": 0,
         "finish_reason": "stop",
         "message": msg,
