@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
 
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
@@ -23,25 +23,25 @@ from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
 
 
+# Helper functions to create test objects consistently
 def create_content_delta(content: str) -> dict:
     """Create a delta dictionary with regular content"""
     return {
-        "content": content, 
-        "role": None, 
-        "function_call": None, 
+        "content": content,
+        "role": None,
+        "function_call": None,
         "tool_calls": None
     }
-    
+
 def create_reasoning_delta(content: str) -> dict:
     """Create a delta dictionary with reasoning content. The Only difference is reasoning_content"""
     return {
-        "content": None, 
-        "role": None, 
-        "function_call": None, 
-        "tool_calls": None, 
+        "content": None,
+        "role": None,
+        "function_call": None,
+        "tool_calls": None,
         "reasoning_content": content
     }
-
 
 
 def create_chunk(delta: dict, include_usage: bool = False) -> ChatCompletionChunk:
@@ -52,7 +52,7 @@ def create_chunk(delta: dict, include_usage: bool = False) -> ChatCompletionChun
         "object": "chat.completion.chunk",
         "choices": [Choice(index=0, delta=delta)],
     }
-    
+
     if include_usage:
         kwargs["usage"] = CompletionUsage(
             completion_tokens=4,
@@ -61,10 +61,13 @@ def create_chunk(delta: dict, include_usage: bool = False) -> ChatCompletionChun
             completion_tokens_details=CompletionTokensDetails(reasoning_tokens=2),
             prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
         )
-    
+
     return ChatCompletionChunk(**kwargs)
 
-async def create_fake_stream(chunks: list[ChatCompletionChunk]) -> AsyncIterator[ChatCompletionChunk]:
+
+async def create_fake_stream(
+    chunks: list[ChatCompletionChunk],
+) -> AsyncIterator[ChatCompletionChunk]:
     for chunk in chunks:
         yield chunk
 
@@ -157,7 +160,8 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         role="assistant",
         content="The answer is 42",
     )
-    setattr(msg, "reasoning_content", "Let me think about this question carefully")
+    # Use direct assignment instead of setattr
+    msg.reasoning_content = "Let me think about this question carefully"
 
     # create a choice with the message
     mock_choice = {
@@ -167,7 +171,6 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         "delta": None
     }
 
-    # Create the completion
     chat = ChatCompletion(
         id="resp-id",
         created=0,
@@ -256,7 +259,7 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
     # verify the final response contains the content
     response_event = output_events[-1]
     assert response_event.type == "response.completed"
-    
+
     # should only have the message, not an empty reasoning item
     assert len(response_event.response.output) == 1
     assert isinstance(response_event.response.output[0], ResponseOutputMessage)
