@@ -125,6 +125,12 @@ class VoicePipeline:
                 self._get_tts_model(), self.config.tts_settings, self.config
             )
 
+            try:
+                async for intro_text in self.workflow.on_start():
+                    await output._add_text(intro_text)
+            except Exception as e:
+                logger.warning(f"on_start() failed: {e}")
+
             transcription_session = await self._get_stt_model().create_session(
                 audio_input,
                 self.config.stt_settings,
