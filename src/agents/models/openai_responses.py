@@ -96,7 +96,13 @@ class OpenAIResponsesModel(Model):
                 else:
                     logger.debug(
                         "LLM resp:\n"
-                        f"{json.dumps([x.model_dump() for x in response.output], indent=2)}\n"
+                        f"""{
+                            json.dumps(
+                                [x.model_dump() for x in response.output],
+                                indent=2,
+                                ensure_ascii=False,
+                            )
+                        }\n"""
                     )
 
                 usage = (
@@ -249,8 +255,8 @@ class OpenAIResponsesModel(Model):
         else:
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2)}\n"
+                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
