@@ -87,7 +87,7 @@ class OpenAIChatCompletionsModel(Model):
                 if message is not None:
                     logger.debug(
                         "LLM resp:\n%s\n",
-                        json.dumps(message.model_dump(), indent=2),
+                        json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
                     finish_reason = first_choice.finish_reason if first_choice else "-"
@@ -256,8 +256,8 @@ class OpenAIChatCompletionsModel(Model):
             logger.debug("Calling LLM")
         else:
             logger.debug(
-                f"{json.dumps(converted_messages, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2)}\n"
+                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
