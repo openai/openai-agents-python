@@ -2,6 +2,8 @@ import json
 from dataclasses import fields
 
 from openai.types.shared import Reasoning
+from pydantic import TypeAdapter
+from pydantic_core import to_json
 
 from agents.model_settings import ModelSettings
 
@@ -132,3 +134,32 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.extra_args is None
     assert resolved.temperature == 0.5
     assert resolved.top_p == 0.9
+
+def test_pydantic_serialization() -> None:
+
+    """Tests whether ModelSettings can be serialized with Pydantic."""
+
+    # First, lets create a ModelSettings instance
+    model_settings = ModelSettings(
+        temperature=0.5,
+        top_p=0.9,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        truncation="auto",
+        max_tokens=100,
+        reasoning=Reasoning(),
+        metadata={"foo": "bar"},
+        store=False,
+        include_usage=False,
+        extra_query={"foo": "bar"},
+        extra_body={"foo": "bar"},
+        extra_headers={"foo": "bar"},
+        extra_args={"custom_param": "value", "another_param": 42},
+    )
+
+    json = to_json(model_settings)
+    deserialized = TypeAdapter(ModelSettings).validate_json(json)
+
+    assert model_settings == deserialized
