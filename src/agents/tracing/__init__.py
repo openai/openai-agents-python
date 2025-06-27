@@ -1,6 +1,6 @@
 import atexit
 
-from agents.tracing.provider import DefaultTraceProvider, TraceProvider
+from .provider import DefaultTraceProvider, TraceProvider
 
 from .create import (
     agent_span,
