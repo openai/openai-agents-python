@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from openai import AsyncStream
 from openai.types.chat import ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
+from dataclasses import dataclass
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -25,6 +26,12 @@ from openai.types.responses import (
     ResponseUsage,
 )
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+
+@dataclass
+class ThinkingDeltaEvent:
+    type: str
+    delta: str
+    sequence_number: int
 
 from ..items import TResponseStreamEvent
 from .fake_id import FAKE_RESPONSES_ID
@@ -74,6 +81,26 @@ class ChatCmplStreamHandler:
                 continue
 
             delta = chunk.choices[0].delta
+
+            # Handle thinking content - emit as custom events
+            # Prioritize reasoning_content over thinking_blocks to avoid duplicates
+            thinking_content = None
+            
+            if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                thinking_content = delta.reasoning_content
+            elif hasattr(delta, 'thinking_blocks') and delta.thinking_blocks:
+                # Only use thinking_blocks if no reasoning_content
+                for tb in delta.thinking_blocks:
+                    if isinstance(tb, dict) and tb.get('thinking'):
+                        thinking_content = tb['thinking']
+                        break  # Only take the first one
+            
+            if thinking_content:
+                yield ThinkingDeltaEvent(
+                    type="thinking.delta",
+                    delta=thinking_content,
+                    sequence_number=sequence_number.get_and_increment(),
+                )
 
             # Handle text
             if delta.content:
