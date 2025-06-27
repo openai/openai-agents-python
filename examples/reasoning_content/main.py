@@ -10,6 +10,7 @@ To run this example, you need to:
 """
 
 import asyncio
+import os
 from typing import Any, cast
 
 from agents import ModelSettings
@@ -17,9 +18,7 @@ from agents.models.interface import ModelTracing
 from agents.models.openai_provider import OpenAIProvider
 from agents.types import ResponseOutputRefusal, ResponseOutputText  # type: ignore
 
-# Replace this with a model that supports reasoning content (e.g., deepseek-reasoner)
-# For demonstration purposes, we'll use a placeholder model name
-MODEL_NAME = "deepseek-reasoner"
+MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "deepseek-reasoner"
 
 
 async def stream_with_reasoning_content():
@@ -45,6 +44,7 @@ async def stream_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None
     ):
         if event.type == "response.reasoning_summary_text.delta":
             print(
@@ -82,6 +82,7 @@ async def get_response_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None
     )
 
     # Extract reasoning content and regular content from the response

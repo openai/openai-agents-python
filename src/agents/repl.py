@@ -5,7 +5,7 @@ from typing import Any
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
 
 from .agent import Agent
-from .items import ItemHelpers, TResponseInputItem
+from .items import TResponseInputItem
 from .result import RunResultBase
 from .run import Runner
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
@@ -50,9 +50,6 @@ async def run_demo_loop(agent: Agent[Any], *, stream: bool = True) -> None:
                         print("\n[tool called]", flush=True)
                     elif event.item.type == "tool_call_output_item":
                         print(f"\n[tool output: {event.item.output}]", flush=True)
-                    elif event.item.type == "message_output_item":
-                        message = ItemHelpers.text_message_output(event.item)
-                        print(message, end="", flush=True)
                 elif isinstance(event, AgentUpdatedStreamEvent):
                     print(f"\n[Agent updated: {event.new_agent.name}]", flush=True)
             print()

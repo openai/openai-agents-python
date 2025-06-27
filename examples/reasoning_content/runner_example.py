@@ -10,14 +10,13 @@ To run this example, you need to:
 """
 
 import asyncio
+import os
 from typing import Any
 
 from agents import Agent, Runner, trace
 from agents.items import ReasoningItem
 
-# Replace this with a model that supports reasoning content (e.g., deepseek-reasoner)
-# For demonstration purposes, we'll use a placeholder model name
-MODEL_NAME = "deepseek-reasoner"
+MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "deepseek-reasoner"
 
 
 async def main():
@@ -61,7 +60,7 @@ async def main():
         content_buffer = ""
 
         # RunResultStreaming is async iterable
-        stream = Runner.run_streamed(agent, "What is 15 × 27? Please explain your reasoning.")
+        stream = Runner.run_streamed(agent, "What is 15 x 27? Please explain your reasoning.")
 
         async for event in stream:  # type: ignore
             if isinstance(event, ReasoningItem):

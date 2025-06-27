@@ -133,6 +133,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
 
@@ -219,6 +220,7 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None,
     )
 
     # should have produced a reasoning item and a message with text content
@@ -272,6 +274,7 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        prompt=None
     ):
         output_events.append(event)
 

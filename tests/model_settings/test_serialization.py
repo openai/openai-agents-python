@@ -44,6 +44,7 @@ def test_all_fields_serialization() -> None:
         metadata={"foo": "bar"},
         store=False,
         include_usage=False,
+        response_include=["reasoning.encrypted_content"],
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
