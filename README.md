@@ -12,9 +12,118 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
 2. [**Handoffs**](https://openai.github.io/openai-agents-python/handoffs/): A specialized tool call used by the Agents SDK for transferring control between agents
 3. [**Guardrails**](https://openai.github.io/openai-agents-python/guardrails/): Configurable safety checks for input and output validation
-4. [**Tracing**](https://openai.github.io/openai-agents-python/tracing/): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
+4. [**Sessions**](#sessions): Automatic conversation history management across agent runs
+5. [**Tracing**](https://openai.github.io/openai-agents-python/tracing/): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
 
 Explore the [examples](examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
+
+## Sessions
+
+The Agents SDK provides built-in session memory to automatically maintain conversation history across multiple agent runs, eliminating the need to manually handle `.to_input_list()` between turns.
+
+### Quick start
+
+```python
+from agents import Agent, Runner, SQLiteSession
+
+# Create agent
+agent = Agent(
+    name="Assistant",
+    instructions="Reply very concisely.",
+)
+
+# Create a session instance
+session = SQLiteSession("conversation_123")
+
+# First turn
+result = await Runner.run(
+    agent,
+    "What city is the Golden Gate Bridge in?",
+    session=session
+)
+print(result.final_output)  # "San Francisco"
+
+# Second turn - agent automatically remembers previous context
+result = await Runner.run(
+    agent,
+    "What state is it in?",
+    session=session
+)
+print(result.final_output)  # "California"
+
+# Also works with synchronous runner
+result = Runner.run_sync(
+    agent,
+    "What's the population?",
+    session=session
+)
+print(result.final_output)  # "Approximately 39 million"
+```
+
+### Session options
+
+-   **No memory** (default): No session memory when session parameter is omitted
+-   **`session: Session = DatabaseSession(...)`**: Use a Session instance to manage conversation history
+
+```python
+from agents import Agent, Runner, SQLiteSession
+
+# Custom SQLite database file
+session = SQLiteSession("user_123", "conversations.db")
+agent = Agent(name="Assistant")
+
+# Different session IDs maintain separate conversation histories
+result1 = await Runner.run(
+    agent,
+    "Hello",
+    session=session
+)
+result2 = await Runner.run(
+    agent,
+    "Hello",
+    session=SQLiteSession("user_456", "conversations.db")
+)
+```
+
+### Custom session implementations
+
+You can implement your own session memory by creating a class that follows the `Session` protocol:
+
+```python
+from agents.memory import Session
+from typing import List
+
+class MyCustomSession:
+    """Custom session implementation following the Session protocol."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        # Your initialization here
+
+    async def get_items(self, limit: int | None = None) -> List[dict]:
+        # Retrieve conversation history for the session
+        pass
+
+    async def add_items(self, items: List[dict]) -> None:
+        # Store new items for the session
+        pass
+
+    async def pop_item(self) -> dict | None:
+        # Remove and return the most recent item from the session
+        pass
+
+    async def clear_session(self) -> None:
+        # Clear all items for the session
+        pass
+
+# Use your custom session
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=MyCustomSession("my_session")
+)
+```
 
 ## Get started
 
