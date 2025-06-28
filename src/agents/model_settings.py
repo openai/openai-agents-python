@@ -1,14 +1,50 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
-from openai._types import Body, Headers, Query
+from openai import Omit as _Omit
+from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
-from pydantic import BaseModel
+from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic_core import core_schema
+from typing_extensions import TypeAlias
 
+
+class _OmitTypeAnnotation:
+    @classmethod
+    def __get_pydantic_core_schema__(
+            cls,
+            _source_type: Any,
+            _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        def validate_from_none(value: None) -> _Omit:
+            return _Omit()
+
+        from_none_schema = core_schema.chain_schema(
+            [
+                core_schema.none_schema(),
+                core_schema.no_info_plain_validator_function(validate_from_none),
+            ]
+        )
+        return core_schema.json_or_python_schema(
+            json_schema=from_none_schema,
+            python_schema=core_schema.union_schema(
+                [
+                    # check if it's an instance first before doing any further work
+                    core_schema.is_instance_schema(_Omit),
+                    from_none_schema,
+                ]
+            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda instance: None
+            ),
+        )
+Omit = Annotated[_Omit, _OmitTypeAnnotation]
+Headers: TypeAlias = Mapping[str, Union[str, Omit]]
 
 @dataclass
 class ModelSettings:

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import inspect
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -17,6 +18,11 @@ from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
 from ..logger import logger
+from ..run_context import RunContextWrapper
+from .util import ToolFilter, ToolFilterCallable, ToolFilterContext, ToolFilterStatic
+
+if TYPE_CHECKING:
+    from ..agent import Agent
 
 
 class MCPServer(abc.ABC):
@@ -44,7 +50,11 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_tools(self) -> list[MCPTool]:
+    async def list_tools(
+        self,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> list[MCPTool]:
         """List the tools available on the server."""
         pass
 
@@ -57,7 +67,12 @@ class MCPServer(abc.ABC):
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
 
-    def __init__(self, cache_tools_list: bool, client_session_timeout_seconds: float | None):
+    def __init__(
+        self,
+        cache_tools_list: bool,
+        client_session_timeout_seconds: float | None,
+        tool_filter: ToolFilter = None,
+    ):
         """
         Args:
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
@@ -68,6 +83,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             (by avoiding a round-trip to the server every time).
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            tool_filter: The tool filter to use for filtering tools.
         """
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -80,6 +96,88 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
+
+        self.tool_filter = tool_filter
+
+    async def _apply_tool_filter(
+        self,
+        tools: list[MCPTool],
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> list[MCPTool]:
+        """Apply the tool filter to the list of tools."""
+        if self.tool_filter is None:
+            return tools
+
+        # Handle static tool filter
+        if isinstance(self.tool_filter, dict):
+            return self._apply_static_tool_filter(tools, self.tool_filter)
+
+        # Handle callable tool filter (dynamic filter)
+        else:
+            return await self._apply_dynamic_tool_filter(tools, run_context, agent)
+
+    def _apply_static_tool_filter(
+        self,
+        tools: list[MCPTool],
+        static_filter: ToolFilterStatic
+    ) -> list[MCPTool]:
+        """Apply static tool filtering based on allowlist and blocklist."""
+        filtered_tools = tools
+
+        # Apply allowed_tool_names filter (whitelist)
+        if "allowed_tool_names" in static_filter:
+            allowed_names = static_filter["allowed_tool_names"]
+            filtered_tools = [t for t in filtered_tools if t.name in allowed_names]
+
+        # Apply blocked_tool_names filter (blacklist)
+        if "blocked_tool_names" in static_filter:
+            blocked_names = static_filter["blocked_tool_names"]
+            filtered_tools = [t for t in filtered_tools if t.name not in blocked_names]
+
+        return filtered_tools
+
+    async def _apply_dynamic_tool_filter(
+        self,
+        tools: list[MCPTool],
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> list[MCPTool]:
+        """Apply dynamic tool filtering using a callable filter function."""
+
+        # Ensure we have a callable filter and cast to help mypy
+        if not callable(self.tool_filter):
+            raise ValueError("Tool filter must be callable for dynamic filtering")
+        tool_filter_func = cast(ToolFilterCallable, self.tool_filter)
+
+        # Create filter context
+        filter_context = ToolFilterContext(
+            run_context=run_context,
+            agent=agent,
+            server_name=self.name,
+        )
+
+        filtered_tools = []
+        for tool in tools:
+            try:
+                # Call the filter function with context
+                result = tool_filter_func(filter_context, tool)
+
+                if inspect.isawaitable(result):
+                    should_include = await result
+                else:
+                    should_include = result
+
+                if should_include:
+                    filtered_tools.append(tool)
+            except Exception as e:
+                logger.error(
+                    f"Error applying tool filter to tool '{tool.name}' on server '{self.name}': {e}"
+                )
+                # On error, exclude the tool for safety
+                continue
+
+        return filtered_tools
 
     @abc.abstractmethod
     def create_streams(
@@ -131,21 +229,30 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             await self.cleanup()
             raise
 
-    async def list_tools(self) -> list[MCPTool]:
+    async def list_tools(
+        self,
+        run_context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
-            return self._tools_list
+            tools = self._tools_list
+        else:
+            # Reset the cache dirty to False
+            self._cache_dirty = False
+            # Fetch the tools from the server
+            self._tools_list = (await self.session.list_tools()).tools
+            tools = self._tools_list
 
-        # Reset the cache dirty to False
-        self._cache_dirty = False
-
-        # Fetch the tools from the server
-        self._tools_list = (await self.session.list_tools()).tools
-        return self._tools_list
+        # Filter tools based on tool_filter
+        filtered_tools = tools
+        if self.tool_filter is not None:
+            filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
+        return filtered_tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
@@ -206,6 +313,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        tool_filter: ToolFilter = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -223,8 +331,13 @@ class MCPServerStdio(_MCPServerWithClientSession):
             name: A readable name for the server. If not provided, we'll create one from the
                 command.
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            tool_filter: The tool filter to use for filtering tools.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            tool_filter,
+        )
 
         self.params = StdioServerParameters(
             command=params["command"],
@@ -283,6 +396,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        tool_filter: ToolFilter = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -302,8 +416,13 @@ class MCPServerSse(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            tool_filter: The tool filter to use for filtering tools.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            tool_filter,
+        )
 
         self.params = params
         self._name = name or f"sse: {self.params['url']}"
@@ -362,6 +481,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         cache_tools_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
+        tool_filter: ToolFilter = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -382,8 +502,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 URL.
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
+            tool_filter: The tool filter to use for filtering tools.
         """
-        super().__init__(cache_tools_list, client_session_timeout_seconds)
+        super().__init__(
+            cache_tools_list,
+            client_session_timeout_seconds,
+            tool_filter,
+        )
 
         self.params = params
         self._name = name or f"streamable_http: {self.params['url']}"
