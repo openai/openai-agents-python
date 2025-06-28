@@ -1,7 +1,48 @@
 {
-    "python.testing.pytestArgs": [
-        "tests"
-    ],
-    "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+  // ─── PREREQUISITES ────────────────────────────────────────────────────────
+  // Run: `make sync && make tests` to mirror CI/CD workflows
+  // For secrets, use `.env` (ignored by git—see .gitignore)
+
+  // ─── Testing Configuration ────────────────────────────────────────────────
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": [
+    "tests",
+    "--asyncio-mode=auto"
+  ],
+
+  // ─── Linting & Type Checking ──────────────────────────────────────────────
+  "python.linting.enabled": true,
+  "python.linting.pylintEnabled": false,
+  "python.linting.ruffEnabled": true,
+  "python.linting.mypyEnabled": true,
+  "python.analysis.typeCheckingMode": "basic",
+
+  // ─── Formatting ───────────────────────────────────────────────────────────
+  "python.formatting.provider": "black",
+
+  // ─── Virtual Environment Management ───────────────────────────────────────
+  "python.pythonPath": "${workspaceFolder}/env/bin/python",
+  "python.venvPath": "${workspaceFolder}/env",
+
+  // ─── Debugging Configuration ──────────────────────────────────────────────
+  "python.debug.settings": {
+    "console": "integratedTerminal",
+    "subProcess": true,
+    "args": ["-m", "pytest", "--trace"]
+  },
+
+  // ─── Language Server & Editor Integrations ────────────────────────────────
+  "python.languageServer": "Pylance",
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "always",
+    "source.fixAll": "always"
+  },
+
+  // ─── Workspace Hygiene ────────────────────────────────────────────────────
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/env": true
+  }
 }
