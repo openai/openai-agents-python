@@ -1,0 +1,1 @@
+name: CI`. Paste the entire block exactly as it is, including `name: CI`, `on:`, `jobs:`, and all the steps under it. It should look like this in the box: ```yaml name: CI on: jobs: build: runs-on: ubuntu-latest steps: - uses: actions/checkout@v4 - name: Set up Python uses: actions/setup-python@v5 with: python-version: '
