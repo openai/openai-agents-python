@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
 from openai.types import ChatModel
@@ -246,9 +246,12 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
-        include: list[ResponseIncludable] = converted_tools.includes
+        include_set: set[str] = set(converted_tools.includes)
         if model_settings.response_include is not None:
-            include = list({*include, *model_settings.response_include})
+            include_set.update(model_settings.response_include)
+        if model_settings.top_logprobs is not None:
+            include_set.add("message.output_text.logprobs")
+        include = cast(list[ResponseIncludable], list(include_set))
 
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
@@ -262,6 +265,10 @@ class OpenAIResponsesModel(Model):
                 f"Response format: {response_format}\n"
                 f"Previous response id: {previous_response_id}\n"
             )
+
+        extra_args = dict(model_settings.extra_args or {})
+        if model_settings.top_logprobs is not None:
+            extra_args["top_logprobs"] = model_settings.top_logprobs
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
@@ -285,7 +292,7 @@ class OpenAIResponsesModel(Model):
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
             metadata=self._non_null_or_not_given(model_settings.metadata),
-            **(model_settings.extra_args or {}),
+            **extra_args,
         )
 
     def _get_client(self) -> AsyncOpenAI:

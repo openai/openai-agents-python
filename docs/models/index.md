@@ -109,6 +109,20 @@ english_agent = Agent(
 )
 ```
 
+You can also request token log probabilities when using the Responses API by
+setting `top_logprobs` in `ModelSettings`.
+
+```python
+from agents import Agent, ModelSettings
+
+agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+    model="gpt-4o",
+    model_settings=ModelSettings(top_logprobs=2),
+)
+```
+
 ## Common issues with using other LLM providers
 
 ### Tracing client error 401

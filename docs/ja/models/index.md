@@ -103,7 +103,7 @@ OpenAI の Responses API を使用する場合、`user` や `service_tier` な�
 ```python
 from agents import Agent, ModelSettings
 
-english_agent = Agent(
+ english_agent = Agent(
     name="English agent",
     instructions="You only speak English",
     model="gpt-4o",
@@ -111,6 +111,20 @@ english_agent = Agent(
         temperature=0.1,
         extra_args={"service_tier": "flex", "user": "user_12345"},
     ),
+)
+```
+
+Responses API でトークンの対数確率を取得したい場合は、
+`ModelSettings` の `top_logprobs` を設定してください。
+
+```python
+from agents import Agent, ModelSettings
+
+agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+    model="gpt-4o",
+    model_settings=ModelSettings(top_logprobs=2),
 )
 ```
 
