@@ -23,7 +23,7 @@ class TracingProcessor(abc.ABC):
         """Called when a trace is finished.
 
         Args:
-            trace: The trace that started.
+            trace: The trace that finished.
         """
         pass
 

@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
+from openai.types.responses.response_computer_tool_call import (
+    PendingSafetyCheck,
+    ResponseComputerToolCall,
+)
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 from openai.types.responses.web_search_tool_param import UserLocation
@@ -20,19 +24,26 @@ from .function_schema import DocstringStyle, function_schema
 from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .tool_context import ToolContext
 from .tracing import SpanError
 from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+
     from .agent import Agent
 
 ToolParams = ParamSpec("ToolParams")
 
 ToolFunctionWithoutContext = Callable[ToolParams, Any]
 ToolFunctionWithContext = Callable[Concatenate[RunContextWrapper[Any], ToolParams], Any]
+ToolFunctionWithToolContext = Callable[Concatenate[ToolContext, ToolParams], Any]
 
-ToolFunction = Union[ToolFunctionWithoutContext[ToolParams], ToolFunctionWithContext[ToolParams]]
+ToolFunction = Union[
+    ToolFunctionWithoutContext[ToolParams],
+    ToolFunctionWithContext[ToolParams],
+    ToolFunctionWithToolContext[ToolParams],
+]
 
 
 @dataclass
@@ -62,7 +73,7 @@ class FunctionTool:
     params_json_schema: dict[str, Any]
     """The JSON schema for the tool's parameters."""
 
-    on_invoke_tool: Callable[[RunContextWrapper[Any], str], Awaitable[Any]]
+    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any]]
     """A function that invokes the tool with the given context and parameters. The params passed
     are:
     1. The tool run context.
@@ -135,9 +146,29 @@ class ComputerTool:
     as well as implements the computer actions like click, screenshot, etc.
     """
 
+    on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
+    """Optional callback to acknowledge computer tool safety checks."""
+
     @property
     def name(self):
         return "computer_use_preview"
+
+
+@dataclass
+class ComputerToolSafetyCheckData:
+    """Information about a computer tool safety check."""
+
+    ctx_wrapper: RunContextWrapper[Any]
+    """The run context."""
+
+    agent: Agent[Any]
+    """The agent performing the computer action."""
+
+    tool_call: ResponseComputerToolCall
+    """The computer tool call."""
+
+    safety_check: PendingSafetyCheck
+    """The pending safety check to acknowledge."""
 
 
 @dataclass
@@ -344,7 +375,7 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-        async def _on_invoke_tool_impl(ctx: RunContextWrapper[Any], input: str) -> Any:
+        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
             try:
                 json_data: dict[str, Any] = json.loads(input) if input else {}
             except Exception as e:
@@ -393,7 +424,7 @@ def function_tool(
 
             return result
 
-        async def _on_invoke_tool(ctx: RunContextWrapper[Any], input: str) -> Any:
+        async def _on_invoke_tool(ctx: ToolContext[Any], input: str) -> Any:
             try:
                 return await _on_invoke_tool_impl(ctx, input)
             except Exception as e:

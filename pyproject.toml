@@ -1,19 +1,19 @@
 [project]
 name = "openai-agents"
-version = "0.0.17"
+version = "0.1.0"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=1.81.0",
+    "openai>=1.87.0",
     "pydantic>=2.10, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
-    "mcp>=1.8.0, <2; python_version >= '3.10'",
+    "mcp>=1.9.4, <2; python_version >= '3.10'",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -23,14 +23,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "License :: OSI Approved :: MIT License",
 ]
 
 [project.urls]
-Homepage = "https://github.com/openai/openai-agents-python"
+Homepage = "https://openai.github.io/openai-agents-python/"
 Repository = "https://github.com/openai/openai-agents-python"
 
 [project.optional-dependencies]

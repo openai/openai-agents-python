@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
 from openai.types import ChatModel
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice
 from openai.types.responses import Response
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from .. import _debug
@@ -53,6 +55,7 @@ class OpenAIChatCompletionsModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -69,10 +72,14 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=False,
+                prompt=prompt,
             )
 
-            first_choice = response.choices[0]
-            message = first_choice.message
+            message: ChatCompletionMessage | None = None
+            first_choice: Choice | None = None
+            if response.choices and len(response.choices) > 0:
+                first_choice = response.choices[0]
+                message = first_choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
@@ -80,13 +87,11 @@ class OpenAIChatCompletionsModel(Model):
                 if message is not None:
                     logger.debug(
                         "LLM resp:\n%s\n",
-                        json.dumps(message.model_dump(), indent=2),
+                        json.dumps(message.model_dump(), indent=2, ensure_ascii=False),
                     )
                 else:
-                    logger.debug(
-                        "LLM resp had no message. finish_reason: %s",
-                        first_choice.finish_reason,
-                    )
+                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
 
             usage = (
                 Usage(
@@ -136,8 +141,8 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        *,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -157,6 +162,7 @@ class OpenAIChatCompletionsModel(Model):
                 span_generation,
                 tracing,
                 stream=True,
+                prompt=prompt,
             )
 
             final_response: Response | None = None
@@ -187,6 +193,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
@@ -201,6 +208,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion: ...
 
     async def _fetch_response(
@@ -214,6 +222,7 @@ class OpenAIChatCompletionsModel(Model):
         span: Span[GenerationSpanData],
         tracing: ModelTracing,
         stream: bool = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         converted_messages = Converter.items_to_messages(input)
 
@@ -247,8 +256,8 @@ class OpenAIChatCompletionsModel(Model):
             logger.debug("Calling LLM")
         else:
             logger.debug(
-                f"{json.dumps(converted_messages, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2)}\n"
+                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
@@ -281,6 +290,7 @@ class OpenAIChatCompletionsModel(Model):
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),
+            **(model_settings.extra_args or {}),
         )
 
         if isinstance(ret, ChatCompletion):
