@@ -16,6 +16,7 @@ from ._run_impl import (
     AgentToolUseTracker,
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepHandoffReturnControl,
     NextStepRunAgain,
     QueueCompleteSentinel,
     RunImpl,
@@ -156,6 +157,9 @@ class RunOptions(TypedDict, Generic[TContext]):
     previous_response_id: NotRequired[str | None]
     """The ID of the previous response, if any."""
 
+    previous_agents: NotRequired[list[Agent[TContext]] | None]
+    """The agents that have been run before, and wish to regain control of the run."""
+
 
 class Runner:
     @classmethod
@@ -169,6 +173,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        previous_agents: list[Agent[TContext]] | None = None,
     ) -> RunResult:
         """Run a workflow starting at the given agent. The agent will run in a loop until a final
         output is generated. The loop runs like so:
@@ -205,6 +210,7 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            previous_agents=previous_agents,
         )
 
     @classmethod
@@ -218,6 +224,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        previous_agents: list[Agent[TContext]] | None = None,
     ) -> RunResult:
         """Run a workflow synchronously, starting at the given agent. Note that this just wraps the
         `run` method, so it will not work if there's already an event loop (e.g. inside an async
@@ -257,6 +264,7 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            previous_agents=previous_agents,
         )
 
     @classmethod
@@ -269,6 +277,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        previous_agents: list[Agent[TContext]] | None = None,
     ) -> RunResultStreaming:
         """Run a workflow starting at the given agent in streaming mode. The returned result object
         contains a method you can use to stream semantic events as they are generated.
@@ -305,6 +314,7 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            previous_agents=previous_agents,
         )
 
 
@@ -325,10 +335,13 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        previous_agents = kwargs.get("previous_agents")
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
+        if previous_agents is None:
+            previous_agents = []
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -413,6 +426,7 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 previous_response_id=previous_response_id,
+                                previous_agents=previous_agents,
                             ),
                         )
                     else:
@@ -427,6 +441,7 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             previous_response_id=previous_response_id,
+                            previous_agents=previous_agents,
                         )
                     should_run_agent_start_hooks = False
 
@@ -451,8 +466,13 @@ class AgentRunner:
                             output_guardrail_results=output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-                    elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                    elif isinstance(turn_result.next_step, NextStepHandoff) or isinstance(
+                        turn_result.next_step, NextStepHandoffReturnControl
+                    ):
+                        if isinstance(turn_result.next_step, NextStepHandoffReturnControl):
+                            current_agent = turn_result.next_step.previous_agent
+                        else:
+                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                         current_span.finish(reset_current=True)
                         current_span = None
                         should_run_agent_start_hooks = True
@@ -488,6 +508,7 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        previous_agents = kwargs.get("previous_agents")
         return asyncio.get_event_loop().run_until_complete(
             self.run(
                 starting_agent,
@@ -497,6 +518,7 @@ class AgentRunner:
                 hooks=hooks,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                previous_agents=previous_agents,
             )
         )
 
@@ -511,10 +533,13 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        previous_agents = kwargs.get("previous_agents")
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
+        if previous_agents is None:
+            previous_agents = []
 
         # If there's already a trace, we don't create a new one. In addition, we can't end the
         # trace here, because the actual work is done in `stream_events` and this method ends
@@ -563,6 +588,7 @@ class AgentRunner:
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                previous_agents=previous_agents,
             )
         )
         return streamed_result
@@ -621,6 +647,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         previous_response_id: str | None,
+        previous_agents: list[Agent[TContext]],
     ):
         if streamed_result.trace:
             streamed_result.trace.start(mark_as_current=True)
@@ -697,6 +724,7 @@ class AgentRunner:
                         tool_use_tracker,
                         all_tools,
                         previous_response_id,
+                        previous_agents,
                     )
                     should_run_agent_start_hooks = False
 
@@ -706,8 +734,14 @@ class AgentRunner:
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
 
-                    if isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = turn_result.next_step.new_agent
+                    if isinstance(turn_result.next_step, NextStepHandoff) or isinstance(
+                        turn_result.next_step, NextStepHandoffReturnControl
+                    ):
+                        if isinstance(turn_result.next_step, NextStepHandoff):
+                            current_agent = turn_result.next_step.new_agent
+                        else:
+                            current_agent = turn_result.next_step.previous_agent
+
                         current_span.finish(reset_current=True)
                         current_span = None
                         should_run_agent_start_hooks = True
@@ -782,6 +816,7 @@ class AgentRunner:
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
         previous_response_id: str | None,
+        previous_agents: list[Agent[TContext]],
     ) -> SingleStepResult:
         if should_run_agent_start_hooks:
             await asyncio.gather(
@@ -866,6 +901,7 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            previous_agents=previous_agents,
         )
 
         RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
@@ -885,6 +921,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         previous_response_id: str | None,
+        previous_agents: list[Agent[TContext]],
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -933,6 +970,7 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            previous_agents=previous_agents,
         )
 
     @classmethod
@@ -950,6 +988,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        previous_agents: list[Agent[TContext]],
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -971,6 +1010,7 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            previous_agents=previous_agents,
         )
 
     @classmethod
