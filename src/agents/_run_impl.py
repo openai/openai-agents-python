@@ -28,6 +28,9 @@ from openai.types.responses.response_computer_tool_call import (
     ActionType,
     ActionWait,
 )
+from openai.types.responses.response_input_item_param import (
+    ComputerCallOutputAcknowledgedSafetyCheck,
+)
 from openai.types.responses.response_input_param import ComputerCallOutput, McpApprovalResponse
 from openai.types.responses.response_output_item import (
     ImageGenerationCall,
@@ -67,6 +70,7 @@ from .run_context import RunContextWrapper, TContext
 from .stream_events import RunItemStreamEvent, StreamEvent
 from .tool import (
     ComputerTool,
+    ComputerToolSafetyCheckData,
     FunctionTool,
     FunctionToolResult,
     HostedMCPTool,
@@ -75,6 +79,7 @@ from .tool import (
     MCPToolApprovalRequest,
     Tool,
 )
+from .tool_context import ToolContext
 from .tracing import (
     SpanError,
     Trace,
@@ -543,23 +548,24 @@ class RunImpl:
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
+                tool_context = ToolContext.from_agent_context(context_wrapper, tool_call.call_id)
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(context_wrapper, agent, func_tool),
+                        hooks.on_tool_start(tool_context, agent, func_tool),
                         (
-                            agent.hooks.on_tool_start(context_wrapper, agent, func_tool)
+                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
-                        func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
+                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
                     )
 
                     await asyncio.gather(
-                        hooks.on_tool_end(context_wrapper, agent, func_tool, result),
+                        hooks.on_tool_end(tool_context, agent, func_tool, result),
                         (
-                            agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
+                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
@@ -636,6 +642,29 @@ class RunImpl:
         results: list[RunItem] = []
         # Need to run these serially, because each action can affect the computer state
         for action in actions:
+            acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
+            if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
+                acknowledged = []
+                for check in action.tool_call.pending_safety_checks:
+                    data = ComputerToolSafetyCheckData(
+                        ctx_wrapper=context_wrapper,
+                        agent=agent,
+                        tool_call=action.tool_call,
+                        safety_check=check,
+                    )
+                    maybe = action.computer_tool.on_safety_check(data)
+                    ack = await maybe if inspect.isawaitable(maybe) else maybe
+                    if ack:
+                        acknowledged.append(
+                            ComputerCallOutputAcknowledgedSafetyCheck(
+                                id=check.id,
+                                code=check.code,
+                                message=check.message,
+                            )
+                        )
+                    else:
+                        raise UserError("Computer tool safety check was not acknowledged")
+
             results.append(
                 await ComputerAction.execute(
                     agent=agent,
@@ -643,6 +672,7 @@ class RunImpl:
                     hooks=hooks,
                     context_wrapper=context_wrapper,
                     config=config,
+                    acknowledged_safety_checks=acknowledged,
                 )
             )
 
@@ -996,6 +1026,7 @@ class ComputerAction:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
+        acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
         output_func = (
             cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
@@ -1034,6 +1065,7 @@ class ComputerAction:
                     "image_url": image_url,
                 },
                 type="computer_call_output",
+                acknowledged_safety_checks=acknowledged_safety_checks,
             ),
         )
 

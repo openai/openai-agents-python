@@ -17,6 +17,7 @@ from openai.types.responses import (
     WebSearchToolParam,
     response_create_params,
 )
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
@@ -74,6 +75,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -86,6 +88,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=False,
+                    prompt=prompt,
                 )
 
                 if _debug.DONT_LOG_MODEL_DATA:
@@ -93,7 +96,13 @@ class OpenAIResponsesModel(Model):
                 else:
                     logger.debug(
                         "LLM resp:\n"
-                        f"{json.dumps([x.model_dump() for x in response.output], indent=2)}\n"
+                        f"""{
+                            json.dumps(
+                                [x.model_dump() for x in response.output],
+                                indent=2,
+                                ensure_ascii=False,
+                            )
+                        }\n"""
                     )
 
                 usage = (
@@ -141,6 +150,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -156,6 +166,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=True,
+                    prompt=prompt,
                 )
 
                 final_response: Response | None = None
@@ -192,6 +203,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
 
     @overload
@@ -205,6 +217,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
 
     async def _fetch_response(
@@ -217,6 +230,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True] | Literal[False] = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
 
@@ -232,13 +246,17 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
+        include: list[ResponseIncludable] = converted_tools.includes
+        if model_settings.response_include is not None:
+            include = list({*include, *model_settings.response_include})
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2)}\n"
+                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
@@ -250,8 +268,9 @@ class OpenAIResponsesModel(Model):
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
-            include=converted_tools.includes,
+            include=include,
             tools=converted_tools.tools,
+            prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
             truncation=self._non_null_or_not_given(model_settings.truncation),
@@ -266,6 +285,7 @@ class OpenAIResponsesModel(Model):
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
             metadata=self._non_null_or_not_given(model_settings.metadata),
+            **(model_settings.extra_args or {}),
         )
 
     def _get_client(self) -> AsyncOpenAI:

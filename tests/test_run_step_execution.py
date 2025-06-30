@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -13,7 +14,6 @@ from agents import (
     RunContextWrapper,
     RunHooks,
     RunItem,
-    Runner,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -26,6 +26,9 @@ from agents._run_impl import (
     RunImpl,
     SingleStepResult,
 )
+from agents.run import AgentRunner
+from agents.tool import function_tool
+from agents.tool_context import ToolContext
 
 from .test_responses import (
     get_final_output_message,
@@ -159,6 +162,42 @@ async def test_multiple_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_multiple_tool_calls_with_tool_context():
+    async def _fake_tool(context: ToolContext[str], value: str) -> str:
+        return f"{value}-{context.tool_call_id}"
+
+    tool = function_tool(_fake_tool, name_override="fake_tool", failure_error_function=None)
+
+    agent = Agent(
+        name="test",
+        tools=[tool],
+    )
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("fake_tool", json.dumps({"value": "123"}), call_id="1"),
+            get_function_tool_call("fake_tool", json.dumps({"value": "456"}), call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+    assert result.original_input == "hello"
+
+    # 4 items: new message, 2 tool calls, 2 tool call outputs
+    assert len(result.generated_items) == 4
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+    items = result.generated_items
+    assert_item_is_function_tool_call(items[0], "fake_tool", json.dumps({"value": "123"}))
+    assert_item_is_function_tool_call(items[1], "fake_tool", json.dumps({"value": "456"}))
+    assert_item_is_function_tool_call_output(items[2], "123-1")
+    assert_item_is_function_tool_call_output(items[3], "456-2")
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_handoff_output_leads_to_handoff_next_step():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")
@@ -285,8 +324,8 @@ async def get_execute_result(
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
-    output_schema = Runner._get_output_schema(agent)
-    handoffs = Runner._get_handoffs(agent)
+    output_schema = AgentRunner._get_output_schema(agent)
+    handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
 
     processed_response = RunImpl.process_model_response(
         agent=agent,

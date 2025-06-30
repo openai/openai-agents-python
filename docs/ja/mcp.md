@@ -23,13 +23,20 @@ Agents SDK は MCP をサポートしており、これにより幅広い MCP �
 たとえば、[公式 MCP filesystem サーバー](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem)を利用する場合は次のようになります。
 
 ```python
+from agents.run_context import RunContextWrapper
+
 async with MCPServerStdio(
     params={
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
     }
 ) as server:
-    tools = await server.list_tools()
+    # 注意：実際には通常は MCP サーバーをエージェントに追加し、
+    # フレームワークがツール一覧の取得を自動的に処理するようにします。
+    # list_tools() への直接呼び出しには run_context と agent パラメータが必要です。
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test", instructions="test")
+    tools = await server.list_tools(run_context, agent)
 ```
 
 ## MCP サーバーの利用
