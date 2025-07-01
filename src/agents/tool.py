@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
+from openai.types.responses.response_computer_tool_call import (
+    PendingSafetyCheck,
+    ResponseComputerToolCall,
+)
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 from openai.types.responses.web_search_tool_param import UserLocation
@@ -142,9 +146,29 @@ class ComputerTool:
     as well as implements the computer actions like click, screenshot, etc.
     """
 
+    on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
+    """Optional callback to acknowledge computer tool safety checks."""
+
     @property
     def name(self):
         return "computer_use_preview"
+
+
+@dataclass
+class ComputerToolSafetyCheckData:
+    """Information about a computer tool safety check."""
+
+    ctx_wrapper: RunContextWrapper[Any]
+    """The run context."""
+
+    agent: Agent[Any]
+    """The agent performing the computer action."""
+
+    tool_call: ResponseComputerToolCall
+    """The computer tool call."""
+
+    safety_check: PendingSafetyCheck
+    """The pending safety check to acknowledge."""
 
 
 @dataclass
