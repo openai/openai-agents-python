@@ -1252,6 +1252,14 @@ class AgentRunner:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+        # If the agent has hooks, we need to call them before and after the LLM call
+        if agent.hooks:
+            await agent.hooks.on_llm_start(
+                context_wrapper,
+                agent,
+                system_prompt,
+                input
+            )
 
         new_response = await model.get_response(
             system_instructions=filtered.instructions,
@@ -1266,6 +1274,13 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             prompt=prompt_config,
         )
+        # If the agent has hooks, we need to call them after the LLM call
+        if agent.hooks:
+            await agent.hooks.on_llm_end(
+                context_wrapper,
+                agent,
+                new_response
+            )
 
         context_wrapper.usage.add(new_response.usage)
 
