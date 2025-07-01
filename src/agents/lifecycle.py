@@ -1,5 +1,5 @@
-from typing import Any, Generic
-
+from typing import Any, Generic,List
+from .items import ModelResponse, TResponseInputItem
 from .agent import Agent
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool
