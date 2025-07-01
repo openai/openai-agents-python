@@ -1,20 +1,45 @@
-from typing import Any, Generic
+from typing import Any, Generic, List
 
 from typing_extensions import TypeVar
 
 from .agent import Agent, AgentBase
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool
+from .items import TResponseInputItem, ModelResponse 
+
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
-
 
 class RunHooksBase(Generic[TContext, TAgent]):
     """A class that receives callbacks on various lifecycle events in an agent run. Subclass and
     override the methods you need.
     """
 
-    async def on_agent_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        system_prompt: str | None,
+        input_items: List[TResponseInputItem]
+    ) -> None:
+        """Called just before invoking the LLM for this agent."""
+        pass
+
+    async def on_llm_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        response: ModelResponse
+    ) -> None:
+        """Called immediately after the LLM call returns for this agent."""
+        pass
+    
+
+       
+
+    async def on_agent_start(
+        self, context: RunContextWrapper[TContext], agent: TAgent
+    ) -> None:
         """Called before the agent is invoked. Called each time the current agent changes."""
         pass
 
