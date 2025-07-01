@@ -1,6 +1,7 @@
-from typing import Any, Generic,List
-from .items import ModelResponse, TResponseInputItem
+from typing import Any, Generic
+
 from .agent import Agent
+from .items import ModelResponse, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool
 
@@ -10,28 +11,24 @@ class RunHooks(Generic[TContext]):
     override the methods you need.
     """
 
-    #Two new hook methods added to the RunHooks class to handle LLM start and end events.
-    #These methods allow you to perform actions just before and after the LLM call for an agent.
-    #This is useful for logging, monitoring, or modifying the context before and after the LLM call.
+    # Two new hook methods added to the RunHooks class to handle LLM start and end events.
+    # These methods allow you to perform actions just before and after the LLM call for an agent.
+    # This is useful for logging, monitoring, or modifying the context before and after the LLM call
     async def on_llm_start(
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         system_prompt: str | None,
-        input_items: List[TResponseInputItem]
+        input_items: list[TResponseInputItem],
     ) -> None:
         """Called just before invoking the LLM for this agent."""
         pass
 
     async def on_llm_end(
-        self,
-        context: RunContextWrapper[TContext],
-        agent: Agent[TContext],
-        response: ModelResponse
+        self, context: RunContextWrapper[TContext], agent: Agent[TContext], response: ModelResponse
     ) -> None:
         """Called immediately after the LLM call returns for this agent."""
         pass
-    
 
     async def on_agent_start(
         self, context: RunContextWrapper[TContext], agent: Agent[TContext]
