@@ -274,3 +274,17 @@ def test_backend_span_exporter_close(mock_client):
 
     # Ensure underlying http client is closed
     mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_endpoint_from_env(mock_client):
+    with patch.dict(os.environ, {"OPENAI_BASE_URL": "https://example.com/v1"}):
+        exporter = BackendSpanExporter(api_key="test_key")
+        assert exporter.endpoint == "https://example.com/v1/traces/ingest"
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_custom_endpoint_respected(mock_client):
+    with patch.dict(os.environ, {"OPENAI_BASE_URL": "https://example.com/v1"}):
+        exporter = BackendSpanExporter(api_key="test_key", endpoint="https://foo.invalid/trace")
+        assert exporter.endpoint == "https://foo.invalid/trace"
