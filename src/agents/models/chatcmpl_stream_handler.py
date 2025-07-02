@@ -276,7 +276,7 @@ class ChatCmplStreamHandler:
                     state.function_calls[tc_delta.index].name += (
                         tc_function.name if tc_function else ""
                     ) or ""
-                    state.function_calls[tc_delta.index].call_id += tc_delta.id or ""
+                    state.function_calls[tc_delta.index].call_id = tc_delta.id or ""
 
         if state.reasoning_content_index_and_output:
             yield ResponseReasoningSummaryPartDoneEvent(
