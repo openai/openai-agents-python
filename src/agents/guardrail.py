@@ -241,7 +241,9 @@ def input_guardrail(
     def decorator(
         f: _InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co],
     ) -> InputGuardrail[TContext_co]:
-        return InputGuardrail(guardrail_function=f, name=name)
+        
+        # The function name should be the name of the guardrail if no name is defined
+        return InputGuardrail(guardrail_function=f, name=name if name else f._name_)
 
     if func is not None:
         # Decorator was used without parentheses
