@@ -299,3 +299,118 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     assert output_events[2].delta == "arg1arg2"
     assert output_events[3].type == "response.output_item.done"
     assert output_events[4].type == "response.completed"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_yields_real_time_function_call_arguments(monkeypatch) -> None:
+    """
+    Validate that LiteLLM `stream_response` also emits function call arguments in real-time
+    as they are received, ensuring consistent behavior across model providers.
+    """
+    # Simulate realistic chunks: name first, then arguments incrementally
+    tool_call_delta1 = ChoiceDeltaToolCall(
+        index=0,
+        id="litellm-call-456",
+        function=ChoiceDeltaToolCallFunction(name="generate_code", arguments=""),
+        type="function",
+    )
+    tool_call_delta2 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='{"language": "'),
+        type="function",
+    )
+    tool_call_delta3 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='python", "task": "'),
+        type="function",
+    )
+    tool_call_delta4 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='hello world"}'),
+        type="function",
+    )
+
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta1]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta2]))],
+    )
+    chunk3 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta3]))],
+    )
+    chunk4 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta4]))],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2, chunk3, chunk4):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(LitellmModel, "_fetch_response", patched_fetch_response)
+    model = LitellmProvider().get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    # Extract events by type
+    function_args_delta_events = [
+        e for e in output_events if e.type == "response.function_call_arguments.delta"
+    ]
+    output_item_added_events = [e for e in output_events if e.type == "response.output_item.added"]
+
+    # Verify we got real-time streaming (3 argument delta events)
+    assert len(function_args_delta_events) == 3
+    assert len(output_item_added_events) == 1
+
+    # Verify the deltas were streamed correctly
+    expected_deltas = ['{"language": "', 'python", "task": "', 'hello world"}']
+    for i, delta_event in enumerate(function_args_delta_events):
+        assert delta_event.delta == expected_deltas[i]
+
+    # Verify function call metadata
+    added_event = output_item_added_events[0]
+    assert isinstance(added_event.item, ResponseFunctionToolCall)
+    assert added_event.item.name == "generate_code"
+    assert added_event.item.call_id == "litellm-call-456"
