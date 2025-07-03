@@ -785,9 +785,9 @@ class AgentRunner:
     ) -> SingleStepResult:
         if should_run_agent_start_hooks:
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                hooks.on_agent_start(context=context_wrapper, agent=agent),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    agent.hooks.on_start(context=context_wrapper, agent=agent)
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),
@@ -889,9 +889,9 @@ class AgentRunner:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                hooks.on_agent_start(context=context_wrapper, agent=agent),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    agent.hooks.on_start(context=context_wrapper, agent=agent)
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),

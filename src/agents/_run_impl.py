@@ -553,9 +553,9 @@ class RunImpl:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(tool_context, agent, func_tool),
+                        hooks.on_tool_start(context=tool_context, agent=agent, tool=func_tool),
                         (
-                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                            agent.hooks.on_tool_start(context=tool_context, agent=agent, tool=func_tool)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
@@ -563,9 +563,9 @@ class RunImpl:
                     )
 
                     await asyncio.gather(
-                        hooks.on_tool_end(tool_context, agent, func_tool, result),
+                        hooks.on_tool_end(context=tool_context, agent=agent, tool=func_tool, result=result),
                         (
-                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
+                            agent.hooks.on_tool_end(context=tool_context, agent=agent, tool=func_tool, result=result)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
@@ -874,8 +874,8 @@ class RunImpl:
         final_output: Any,
     ):
         await asyncio.gather(
-            hooks.on_agent_end(context_wrapper, agent, final_output),
-            agent.hooks.on_end(context_wrapper, agent, final_output)
+            hooks.on_agent_end(context=context_wrapper, agent=agent, output=final_output),
+            agent.hooks.on_end(context=context_wrapper, agent=agent, output=final_output)
             if agent.hooks
             else _coro.noop_coroutine(),
         )
@@ -1035,9 +1035,9 @@ class ComputerAction:
         )
 
         _, _, output = await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+            hooks.on_tool_start(context=context_wrapper, agent=agent, tool=action.computer_tool),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                agent.hooks.on_tool_start(context=context_wrapper, agent=agent, tool=action.computer_tool)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1045,9 +1045,9 @@ class ComputerAction:
         )
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+            hooks.on_tool_end(context=context_wrapper, agent=agent, tool=action.computer_tool, result=output),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
+                agent.hooks.on_tool_end(context=context_wrapper, agent=agent, tool=action.computer_tool, result=output)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1138,9 +1138,9 @@ class LocalShellAction:
         config: RunConfig,
     ) -> RunItem:
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+            hooks.on_tool_start(context=context_wrapper, agent=agent, tool=call.local_shell_tool),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                agent.hooks.on_tool_start(context=context_wrapper, agent=agent, tool=call.local_shell_tool)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1157,9 +1157,9 @@ class LocalShellAction:
             result = output
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+            hooks.on_tool_end(context=context_wrapper, agent=agent, tool=call.local_shell_tool, result=result),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                agent.hooks.on_tool_end(context=context_wrapper, agent=agent, tool=call.local_shell_tool, result=result)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
