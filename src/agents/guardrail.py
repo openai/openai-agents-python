@@ -310,7 +310,8 @@ def output_guardrail(
     def decorator(
         f: _OutputGuardrailFuncSync[TContext_co] | _OutputGuardrailFuncAsync[TContext_co],
     ) -> OutputGuardrail[TContext_co]:
-        return OutputGuardrail(guardrail_function=f, name=name)
+        #Updating default name None to the function name of guardrail_function if no name is provided.
+        return OutputGuardrail(guardrail_function=f, name=name if name else f.__name__)
 
     if func is not None:
         # Decorator was used without parentheses
