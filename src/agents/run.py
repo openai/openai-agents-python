@@ -338,7 +338,18 @@ class AgentRunner:
             group_id=run_config.group_id,
             metadata=run_config.trace_metadata,
             disabled=run_config.tracing_disabled,
-        ):
+        ) as trace_ctx:
+            if trace_ctx.trace:
+                # Store run_config in trace context for access by sub-agents
+                # Prefer storing in metadata if available
+                if (
+                    hasattr(trace_ctx.trace, "metadata")
+                    and isinstance(trace_ctx.trace.metadata, dict)
+                ):
+                    trace_ctx.trace.metadata["run_config"] = run_config
+                else:
+                    trace_ctx.trace._run_config = run_config  # type: ignore[attr-defined]
+
             current_turn = 0
             original_input: str | list[TResponseInputItem] = copy.deepcopy(input)
             generated_items: list[RunItem] = []
