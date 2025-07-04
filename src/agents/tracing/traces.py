@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import abc
 import contextvars
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..logger import logger
 from . import util
 from .processor_interface import TracingProcessor
 from .scope import Scope
 
+if TYPE_CHECKING:
+    from ..run import RunConfig
 
 class Trace:
     """
@@ -66,7 +68,6 @@ class Trace:
         """
         pass
 
-
 class NoOpTrace(Trace):
     """
     A no-op trace that will not be recorded.
@@ -75,16 +76,15 @@ class NoOpTrace(Trace):
     def __init__(self):
         self._started = False
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
+        self._run_config: RunConfig | None = None
 
     def __enter__(self) -> Trace:
         if self._started:
             if not self._prev_context_token:
                 logger.error("Trace already started but no context token set")
             return self
-
         self._started = True
         self.start(mark_as_current=True)
-
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -110,9 +110,7 @@ class NoOpTrace(Trace):
     def export(self) -> dict[str, Any] | None:
         return None
 
-
 NO_OP_TRACE = NoOpTrace()
-
 
 class TraceImpl(Trace):
     """
@@ -127,6 +125,7 @@ class TraceImpl(Trace):
         "_prev_context_token",
         "_processor",
         "_started",
+        "_run_config",
     )
 
     def __init__(
@@ -144,6 +143,7 @@ class TraceImpl(Trace):
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
         self._processor = processor
         self._started = False
+        self._run_config: RunConfig | None = None
 
     @property
     def trace_id(self) -> str:
@@ -156,19 +156,15 @@ class TraceImpl(Trace):
     def start(self, mark_as_current: bool = False):
         if self._started:
             return
-
         self._started = True
         self._processor.on_trace_start(self)
-
         if mark_as_current:
             self._prev_context_token = Scope.set_current_trace(self)
 
     def finish(self, reset_current: bool = False):
         if not self._started:
             return
-
         self._processor.on_trace_end(self)
-
         if reset_current and self._prev_context_token is not None:
             Scope.reset_current_trace(self._prev_context_token)
             self._prev_context_token = None
@@ -178,7 +174,6 @@ class TraceImpl(Trace):
             if not self._prev_context_token:
                 logger.error("Trace already started but no context token set")
             return self
-
         self.start(mark_as_current=True)
         return self
 
