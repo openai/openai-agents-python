@@ -428,3 +428,17 @@ def test_assistant_messages_in_history():
     assert messages[1]["content"] == "Hello?"
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "What was my Name?"
+
+
+def test_items_to_messages_ignores_reasoning_item() -> None:
+    """
+    A `reasoning` item in the input should be ignored, resulting in an empty
+    message list if it's the only item.
+    """
+    reasoning_item: TResponseInputItem = {
+        "type": "reasoning",
+        "reasoning": "Thinking about what to do...",  # type: ignore
+    }
+    messages = Converter.items_to_messages([reasoning_item])
+    assert len(messages) == 0
+
