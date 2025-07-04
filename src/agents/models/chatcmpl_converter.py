@@ -302,7 +302,11 @@ class Converter:
             return current_assistant_msg
 
         for item in items:
-            # 1) Check easy input message
+                        # 1) Ignore reasoning items, which are not sent to the LLM.
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                continue
+
+            # 2) Check easy input message
             if easy_msg := cls.maybe_easy_input_message(item):
                 role = easy_msg["role"]
                 content = easy_msg["content"]
