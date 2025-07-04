@@ -19,6 +19,7 @@ from openai.types.chat import (
     ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
+from openai.types.chat.chat_completion_content_part_param import File, FileFile
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.responses import (
@@ -27,6 +28,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
     ResponseInputContentParam,
+    ResponseInputFileParam,
     ResponseInputImageParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
@@ -251,7 +253,19 @@ class Converter:
                     )
                 )
             elif isinstance(c, dict) and c.get("type") == "input_file":
-                raise UserError(f"File uploads are not supported for chat completions {c}")
+                casted_file_param = cast(ResponseInputFileParam, c)
+                if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
+                    raise UserError(
+                        f"Only file_data is supported for input_file {casted_file_param}"
+                    )
+                out.append(
+                    File(
+                        type="file",
+                        file=FileFile(
+                            file_data=casted_file_param["file_data"],
+                        ),
+                    )
+                )
             else:
                 raise UserError(f"Unknown content: {c}")
         return out
