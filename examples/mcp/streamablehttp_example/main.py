@@ -46,6 +46,12 @@ async def main():
     ) as server:
         trace_id = gen_trace_id()
         with trace(workflow_name="Streamable HTTP Example", trace_id=trace_id):
+            # List available prompts
+            prompts = await server.list_prompts()
+            print(f"Prompts list -> {prompts}")
+            system_prompt = await server.get_prompt("system_prompt")
+            instructions = system_prompt.messages[0].content.text
+            print(f"instructions -> {instructions}")
             print(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}\n")
             await run(server)
 
