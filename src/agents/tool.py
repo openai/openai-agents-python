@@ -30,7 +30,6 @@ from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-
     from .agent import Agent
 
 ToolParams = ParamSpec("ToolParams")

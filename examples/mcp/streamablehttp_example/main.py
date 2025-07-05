@@ -10,10 +10,10 @@ from agents.mcp import MCPServer, MCPServerStreamableHttp
 from agents.model_settings import ModelSettings
 
 
-async def run(mcp_server: MCPServer):
+async def run(mcp_server: MCPServer, instructions):
     agent = Agent(
         name="Assistant",
-        instructions="Use the tools to answer the questions.",
+        instructions=instructions,
         mcp_servers=[mcp_server],
         model_settings=ModelSettings(tool_choice="required"),
     )
@@ -46,8 +46,14 @@ async def main():
     ) as server:
         trace_id = gen_trace_id()
         with trace(workflow_name="Streamable HTTP Example", trace_id=trace_id):
+            # List available prompts
+            prompts = await server.list_prompts()
+            print(f"Prompts list -> {prompts}")
+            system_prompt = await server.get_prompt("system_prompt")
+            instructions = system_prompt.messages[0].content.text
+            print(f"instructions -> {instructions}")
             print(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}\n")
-            await run(server)
+            await run(server, instructions)
 
 
 if __name__ == "__main__":

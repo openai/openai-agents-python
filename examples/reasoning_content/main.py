@@ -44,7 +44,7 @@ async def stream_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
-        prompt=None
+        prompt=None,
     ):
         if event.type == "response.reasoning_summary_text.delta":
             print(
@@ -82,7 +82,7 @@ async def get_response_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
-        prompt=None
+        prompt=None,
     )
 
     # Extract reasoning content and regular content from the response

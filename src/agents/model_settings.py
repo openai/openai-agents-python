@@ -17,9 +17,9 @@ from typing_extensions import TypeAlias
 class _OmitTypeAnnotation:
     @classmethod
     def __get_pydantic_core_schema__(
-            cls,
-            _source_type: Any,
-            _handler: GetCoreSchemaHandler,
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
     ) -> core_schema.CoreSchema:
         def validate_from_none(value: None) -> _Omit:
             return _Omit()
@@ -39,12 +39,13 @@ class _OmitTypeAnnotation:
                     from_none_schema,
                 ]
             ),
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                lambda instance: None
-            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
         )
+
+
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
+
 
 @dataclass
 class ModelSettings:
