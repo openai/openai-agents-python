@@ -64,7 +64,7 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_prompts(self) -> ListPromptsResult:
+    async def list_prompts(self) -> ListPromptsResult | None:
         """List the prompts available on the server."""
         pass
 
@@ -273,7 +273,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def list_prompts(
         self,
-    ) -> ListPromptsResult:
+    ) -> ListPromptsResult | None:
         """List the prompts available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
@@ -282,7 +282,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None = None
-    ) -> GetPromptResult:
+    ) -> GetPromptResult | None:
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
