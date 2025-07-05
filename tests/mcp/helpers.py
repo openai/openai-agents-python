@@ -104,7 +104,7 @@ class FakeMCPServer(MCPServer):
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None = None
     ) -> GetPromptResult | None:
-        if self.prompts:
+        if self.prompts.prompts:
             for prompt in self.prompts:
                 if prompt.name == name:
                     return prompt
