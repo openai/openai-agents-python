@@ -4,7 +4,7 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import CallToolResult, GetPromptResult, TextContent
+from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, TextContent
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -57,12 +57,12 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
-        prompts: list[GetPromptResult] | None = None,
+        prompts: ListPromptsResult | None = None,
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
-        self.prompts: list[GetPromptResult] = prompts or []
+        self.prompts: ListPromptsResult = prompts or []
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
@@ -98,7 +98,7 @@ class FakeMCPServer(MCPServer):
 
     async def list_prompts(
         self,
-    ) -> list[GetPromptResult]:
+    ) -> ListPromptsResult:
         return self.prompts
 
     async def get_prompt(
