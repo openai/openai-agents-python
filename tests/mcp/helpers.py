@@ -62,7 +62,7 @@ class FakeMCPServer(MCPServer):
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
-        self.prompts: ListPromptsResult = prompts or []
+        self.prompts: prompts
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
