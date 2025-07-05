@@ -98,7 +98,7 @@ class FakeMCPServer(MCPServer):
 
     async def list_prompts(
         self,
-    ) -> ListPromptsResult:
+    ) -> ListPromptsResult | None:
         return self.prompts
 
     async def get_prompt(

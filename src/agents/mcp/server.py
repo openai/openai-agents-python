@@ -71,7 +71,7 @@ class MCPServer(abc.ABC):
     @abc.abstractmethod
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None = None
-    ) -> GetPromptResult:
+    ) -> GetPromptResult | None:
         """Returns an existing prompt from the server."""
         pass
 
