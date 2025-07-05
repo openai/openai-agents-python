@@ -64,16 +64,13 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_prompts(
-            self
-    ) -> list[GetPromptResult]:
+    async def list_prompts(self) -> list[GetPromptResult]:
         """List the prompts available on the server."""
         pass
 
     @abc.abstractmethod
     async def get_prompt(
-            self, name: str,
-            arguments: dict[str, str] | None = None
+        self, name: str, arguments: dict[str, str] | None = None
     ) -> GetPromptResult:
         """Returns an existing prompt from the server."""
         pass
@@ -133,9 +130,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
     def _apply_static_tool_filter(
-        self,
-        tools: list[MCPTool],
-        static_filter: ToolFilterStatic
+        self, tools: list[MCPTool], static_filter: ToolFilterStatic
     ) -> list[MCPTool]:
         """Apply static tool filtering based on allowlist and blocklist."""
         filtered_tools = tools
@@ -286,8 +281,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         return await self.session.list_prompts()
 
     async def get_prompt(
-            self, name: str,
-            arguments: dict[str, str] | None = None
+        self, name: str, arguments: dict[str, str] | None = None
     ) -> GetPromptResult:
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")

@@ -28,6 +28,7 @@ def get_current_weather(city: str) -> str:
     response = requests.get(f"{endpoint}/{city}")
     return response.text
 
+
 @mcp.prompt()
 def system_prompt():
     return "Use the tools to answer the questions."
