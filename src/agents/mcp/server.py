@@ -13,7 +13,7 @@ from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_cli
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult
+from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -64,7 +64,7 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_prompts(self) -> list[GetPromptResult]:
+    async def list_prompts(self) -> ListPromptsResult:
         """List the prompts available on the server."""
         pass
 
@@ -273,7 +273,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def list_prompts(
         self,
-    ) -> list[GetPromptResult]:
+    ) -> ListPromptsResult:
         """List the prompts available on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
