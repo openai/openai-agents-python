@@ -108,6 +108,7 @@ class FakeMCPServer(MCPServer):
             for prompt in self.prompts:
                 if prompt.name == name:
                     return prompt
+        return None
 
     @property
     def name(self) -> str:
