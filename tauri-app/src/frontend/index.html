@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Management</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>AI Agent Management</h1>
+        </header>
+        <main>
+            <section id="agent-creation">
+                <h2>Create Agent</h2>
+                <form id="create-agent-form">
+                    <label for="agent-name">Agent Name:</label>
+                    <input type="text" id="agent-name" name="agent-name" required>
+                    
+                    <label for="agent-instructions">Instructions:</label>
+                    <textarea id="agent-instructions" name="agent-instructions" required></textarea>
+                    
+                    <label for="agent-model">Model:</label>
+                    <input type="text" id="agent-model" name="agent-model" required>
+                    
+                    <label for="agent-tools">Tools:</label>
+                    <input type="text" id="agent-tools" name="agent-tools" required>
+                    
+                    <label for="agent-context">Context:</label>
+                    <textarea id="agent-context" name="agent-context" required></textarea>
+                    
+                    <label for="agent-output-types">Output Types:</label>
+                    <input type="text" id="agent-output-types" name="agent-output-types" required>
+                    
+                    <label for="agent-handoffs">Handoffs:</label>
+                    <input type="text" id="agent-handoffs" name="agent-handoffs" required>
+                    
+                    <label for="agent-guardrails">Guardrails:</label>
+                    <input type="text" id="agent-guardrails" name="agent-guardrails" required>
+                    
+                    <label for="agent-cloning">Cloning:</label>
+                    <input type="text" id="agent-cloning" name="agent-cloning" required>
+                    
+                    <button type="submit">Create Agent</button>
+                </form>
+            </section>
+            <section id="agent-management">
+                <h2>Manage Agents</h2>
+                <div id="agents-list">
+                    <!-- List of agents will be dynamically populated here -->
+                </div>
+            </section>
+        </main>
+        <footer>
+            <p>&copy; 2023 AI Agent Management</p>
+        </footer>
+    </div>
+    <script src="main.js"></script>
+    <script src="agent_hooks.js"></script>
+    <script src="agent_management.js"></script>
+</body>
+</html>
