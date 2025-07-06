@@ -52,9 +52,12 @@ from .run import RunConfig, Runner
 from .run_context import RunContextWrapper, TContext
 from .stream_events import (
     AgentUpdatedStreamEvent,
+    NotifyStreamEvent,
     RawResponsesStreamEvent,
     RunItemStreamEvent,
     StreamEvent,
+    ToolStreamEndEvent,
+    ToolStreamStartEvent,
 )
 from .tool import (
     CodeInterpreterTool,
@@ -70,10 +73,12 @@ from .tool import (
     MCPToolApprovalFunction,
     MCPToolApprovalFunctionResult,
     MCPToolApprovalRequest,
+    StreamingTool,
     Tool,
     WebSearchTool,
     default_tool_error_function,
     function_tool,
+    streaming_tool,
 )
 from .tracing import (
     AgentSpanData,
@@ -219,8 +224,12 @@ __all__ = [
     "RunItemStreamEvent",
     "AgentUpdatedStreamEvent",
     "StreamEvent",
+    "NotifyStreamEvent",
+    "ToolStreamStartEvent",
+    "ToolStreamEndEvent",
     "FunctionTool",
     "FunctionToolResult",
+    "StreamingTool",
     "ComputerTool",
     "FileSearchTool",
     "CodeInterpreterTool",
@@ -235,6 +244,7 @@ __all__ = [
     "MCPToolApprovalRequest",
     "MCPToolApprovalFunctionResult",
     "function_tool",
+    "streaming_tool",
     "Usage",
     "add_trace_processor",
     "agent_span",

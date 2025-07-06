@@ -67,7 +67,13 @@ from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import ModelTracing
 from .run_context import RunContextWrapper, TContext
-from .stream_events import RunItemStreamEvent, StreamEvent
+from .stream_events import (
+    NotifyStreamEvent,
+    RunItemStreamEvent,
+    StreamEvent,
+    ToolStreamEndEvent,
+    ToolStreamStartEvent,
+)
 from .tool import (
     ComputerTool,
     ComputerToolSafetyCheckData,
@@ -77,6 +83,7 @@ from .tool import (
     LocalShellCommandRequest,
     LocalShellTool,
     MCPToolApprovalRequest,
+    StreamingTool,
     Tool,
 )
 from .tool_context import ToolContext
@@ -92,6 +99,7 @@ from .tracing import (
 from .util import _coro, _error_tracing
 
 if TYPE_CHECKING:
+    from .result import RunResultStreaming
     from .run import RunConfig
 
 
@@ -134,6 +142,12 @@ class ToolRunFunction:
 
 
 @dataclass
+class ToolRunStreamingFunction:
+    tool_call: ResponseFunctionToolCall
+    streaming_tool: StreamingTool
+
+
+@dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
     computer_tool: ComputerTool
@@ -156,6 +170,7 @@ class ProcessedResponse:
     new_items: list[RunItem]
     handoffs: list[ToolRunHandoff]
     functions: list[ToolRunFunction]
+    streaming_functions: list[ToolRunStreamingFunction]
     computer_actions: list[ToolRunComputerAction]
     local_shell_calls: list[ToolRunLocalShellCall]
     tools_used: list[str]  # Names of all tools used, including hosted tools
@@ -168,6 +183,7 @@ class ProcessedResponse:
             [
                 self.handoffs,
                 self.functions,
+                self.streaming_functions,
                 self.computer_actions,
                 self.local_shell_calls,
                 self.mcp_approval_requests,
@@ -242,6 +258,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
+        streamed_result: RunResultStreaming[TContext] | None = None,
     ) -> SingleStepResult:
         # Make a copy of the generated items
         pre_step_items = list(pre_step_items)
@@ -250,23 +267,63 @@ class RunImpl:
         new_step_items.extend(processed_response.new_items)
 
         # First, lets run the tool calls - function tools and computer actions
-        function_results, computer_results = await asyncio.gather(
-            cls.execute_function_tool_calls(
-                agent=agent,
-                tool_runs=processed_response.functions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            cls.execute_computer_actions(
-                agent=agent,
-                actions=processed_response.computer_actions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-        )
-        new_step_items.extend([result.run_item for result in function_results])
+        tasks = []
+        # These are indexes into the tasks list, so we can pull out the results later
+        func_tools_task_idx = -1
+        streaming_tools_task_idx = -1
+        computer_tools_task_idx = -1
+
+        if processed_response.functions:
+            func_tools_task_idx = len(tasks)
+            tasks.append(
+                cls.execute_function_tool_calls(
+                    agent=agent,
+                    tool_runs=processed_response.functions,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                )
+            )
+        if processed_response.streaming_functions:
+            if not streamed_result:
+                raise AgentsException(
+                    "Streaming functions were called, but no streaming result was provided."
+                )
+            streaming_tools_task_idx = len(tasks)
+            tasks.append(
+                cls.execute_streaming_tool_calls(
+                    agent=agent,
+                    tool_runs=processed_response.streaming_functions,
+                    context_wrapper=context_wrapper,
+                    streamed_result=streamed_result,
+                    config=run_config,
+                )
+            )
+        if processed_response.computer_actions:
+            computer_tools_task_idx = len(tasks)
+            tasks.append(
+                cls.execute_computer_actions(
+                    agent=agent,
+                    actions=processed_response.computer_actions,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                )
+            )
+
+        all_results = await asyncio.gather(*tasks)
+
+        tool_results: list[FunctionToolResult] = []
+        computer_results: list[RunItem] = []
+
+        if func_tools_task_idx != -1:
+            tool_results.extend(all_results[func_tools_task_idx])
+        if streaming_tools_task_idx != -1:
+            tool_results.extend(all_results[streaming_tools_task_idx])
+        if computer_tools_task_idx != -1:
+            computer_results.extend(all_results[computer_tools_task_idx])
+
+        new_step_items.extend([result.run_item for result in tool_results])
         new_step_items.extend(computer_results)
 
         # Next, run the MCP approval requests
@@ -295,7 +352,7 @@ class RunImpl:
         # Next, we'll check if the tool use should result in a final output
         check_tool_use = await cls._check_for_final_output_from_tools(
             agent=agent,
-            tool_results=function_results,
+            tool_results=tool_results,
             context_wrapper=context_wrapper,
             config=run_config,
         )
@@ -394,21 +451,20 @@ class RunImpl:
 
         run_handoffs = []
         functions = []
+        streaming_functions = []
         computer_actions = []
         local_shell_calls = []
         mcp_approval_requests = []
         tools_used: list[str] = []
+
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
-        function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
         computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
-        local_shell_tool = next(
-            (tool for tool in all_tools if isinstance(tool, LocalShellTool)), None
-        )
         hosted_mcp_server_map = {
             tool.tool_config["server_label"]: tool
             for tool in all_tools
             if isinstance(tool, HostedMCPTool)
         }
+        tool_map = {tool.get_name(): tool for tool in all_tools}
 
         for output in response.output:
             if isinstance(output, ResponseOutputMessage):
@@ -426,10 +482,7 @@ class RunImpl:
                 tools_used.append("computer_use")
                 if not computer_tool:
                     _error_tracing.attach_error_to_current_span(
-                        SpanError(
-                            message="Computer tool not found",
-                            data={},
-                        )
+                        SpanError(message="Computer tool not found", data={})
                     )
                     raise ModelBehaviorError(
                         "Model produced computer action without a computer tool."
@@ -442,24 +495,10 @@ class RunImpl:
                 if output.server_label not in hosted_mcp_server_map:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
-                            message="MCP server label not found",
-                            data={"server_label": output.server_label},
-                        )
+                        message="MCP server label not found",
+                        data={"server_label": output.server_label}
                     )
-                    raise ModelBehaviorError(f"MCP server label {output.server_label} not found")
-                else:
-                    server = hosted_mcp_server_map[output.server_label]
-                    if server.on_approval_request:
-                        mcp_approval_requests.append(
-                            ToolRunMCPApprovalRequest(
-                                request_item=output,
-                                mcp_tool=server,
-                            )
-                        )
-                    else:
-                        logger.warning(
-                            f"MCP server {output.server_label} has no on_approval_request hook"
-                        )
+                    )
             elif isinstance(output, McpListTools):
                 items.append(MCPListToolsItem(raw_item=output, agent=agent))
             elif isinstance(output, McpCall):
@@ -474,65 +513,158 @@ class RunImpl:
             elif isinstance(output, LocalShellCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 tools_used.append("local_shell")
-                if not local_shell_tool:
+                tool = tool_map.get(output.name)
+                if not tool or not isinstance(tool, LocalShellTool):
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
-                            message="Local shell tool not found",
-                            data={},
-                        )
+                        message="Local shell tool not found",
+                        data={"tool_name": output.name}
+                    )
                     )
                     raise ModelBehaviorError(
-                        "Model produced local shell call without a local shell tool."
+                        f"Local shell tool {output.name} not found in agent {agent.name}"
                     )
                 local_shell_calls.append(
-                    ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    ToolRunLocalShellCall(tool_call=output, local_shell_tool=tool)
                 )
+            elif isinstance(output, ResponseFunctionToolCall):
+                tools_used.append(output.name)
+                if output.name in handoff_map:
+                    items.append(HandoffCallItem(raw_item=output, agent=agent))
+                    handoff = ToolRunHandoff(
+                        tool_call=output,
+                        handoff=handoff_map[output.name],
+                    )
+                    run_handoffs.append(handoff)
+                else:
+                    tool = tool_map.get(output.name)
+                    if not tool:
+                        _error_tracing.attach_error_to_current_span(
+                            SpanError(message="Tool not found", data={"tool_name": output.name})
+                        )
+                        raise ModelBehaviorError(
+                            f"Tool {output.name} not found in agent {agent.name}"
+                        )
 
-            elif not isinstance(output, ResponseFunctionToolCall):
+                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    if isinstance(tool, FunctionTool):
+                        functions.append(
+                            ToolRunFunction(
+                                tool_call=output,
+                                function_tool=tool,
+                            )
+                        )
+                    elif isinstance(tool, StreamingTool):
+                        streaming_functions.append(
+                            ToolRunStreamingFunction(tool_call=output, streaming_tool=tool)
+                        )
+                    else:
+                        raise ModelBehaviorError(
+                            f"Tool {output.name} is not a supported type: {type(tool)}"
+                        )
+            else:
                 logger.warning(f"Unexpected output type, ignoring: {type(output)}")
                 continue
-
-            # At this point we know it's a function tool call
-            if not isinstance(output, ResponseFunctionToolCall):
-                continue
-
-            tools_used.append(output.name)
-
-            # Handoffs
-            if output.name in handoff_map:
-                items.append(HandoffCallItem(raw_item=output, agent=agent))
-                handoff = ToolRunHandoff(
-                    tool_call=output,
-                    handoff=handoff_map[output.name],
-                )
-                run_handoffs.append(handoff)
-            # Regular function tool call
-            else:
-                if output.name not in function_map:
-                    _error_tracing.attach_error_to_current_span(
-                        SpanError(
-                            message="Tool not found",
-                            data={"tool_name": output.name},
-                        )
-                    )
-                    raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
-                items.append(ToolCallItem(raw_item=output, agent=agent))
-                functions.append(
-                    ToolRunFunction(
-                        tool_call=output,
-                        function_tool=function_map[output.name],
-                    )
-                )
 
         return ProcessedResponse(
             new_items=items,
             handoffs=run_handoffs,
             functions=functions,
+            streaming_functions=streaming_functions,
             computer_actions=computer_actions,
             local_shell_calls=local_shell_calls,
             tools_used=tools_used,
             mcp_approval_requests=mcp_approval_requests,
         )
+
+    @classmethod
+    async def execute_streaming_tool_calls(
+        cls,
+        *,
+        agent: Agent[TContext],
+        tool_runs: list[ToolRunStreamingFunction],
+        context_wrapper: RunContextWrapper[TContext],
+        streamed_result: RunResultStreaming,
+        config: RunConfig,
+    ) -> list[FunctionToolResult]:
+        async def run_single_streaming_tool(
+            run: ToolRunStreamingFunction,
+        ) -> FunctionToolResult:
+            tool = run.streaming_tool
+            tool_call = run.tool_call
+            tool_name = tool.name
+            arguments = tool_call.arguments
+            tool_call_id = tool_call.id
+
+            if not tool_call_id:
+                raise AgentsException("Streaming tool call is missing an ID.")
+
+            # Emit ToolCallStreamEvent
+            streamed_result._event_queue.put_nowait(
+                RunItemStreamEvent(
+                    name="tool_called",
+                    item=ToolCallItem(raw_item=tool_call, agent=agent),
+                )
+            )
+
+            final_output: Any = None
+            with function_span(tool_name) as span_fn:
+                if config.trace_include_sensitive_data:
+                    span_fn.span_data.input = arguments
+
+                try:
+                    async_gen = tool.on_invoke_tool(
+                        context_wrapper, arguments, tool_call_id
+                    )
+                    while True:
+                        try:
+                            event = await async_gen.__anext__()
+                            if isinstance(event, str):
+                                final_output = event
+                                break
+                            if isinstance(
+                                event, (ToolStreamStartEvent, ToolStreamEndEvent, NotifyStreamEvent)
+                            ) and event.tool_call_id is None:
+                                event.tool_call_id = tool_call_id
+                            streamed_result._event_queue.put_nowait(event)
+                        except StopAsyncIteration:
+                            # According to the design, only `yield str` produces a final result.
+                            # StopAsyncIteration just signals the end of the stream.
+                            break
+                except Exception as e:
+                    logger.error(f"Error executing streaming tool '{tool_name}': {e}")
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message=f"Error in streaming tool '{tool_name}'",
+                            data={"error": str(e)},
+                        )
+                    )
+                    raise
+
+                if config.trace_include_sensitive_data:
+                    span_fn.span_data.output = final_output
+
+            safe_final_output = str(final_output) if final_output is not None else ""
+            tool_output_item = ToolCallOutputItem(
+                output=final_output,
+                raw_item=ItemHelpers.tool_call_output_item(
+                    tool_call, safe_final_output
+                ),
+                agent=agent,
+            )
+
+            streamed_result._event_queue.put_nowait(
+                RunItemStreamEvent(
+                    name="tool_output",
+                    item=tool_output_item,
+                )
+            )
+
+            return FunctionToolResult(
+                tool=tool, output=final_output, run_item=tool_output_item
+            )
+
+        return await asyncio.gather(*[run_single_streaming_tool(run) for run in tool_runs])
 
     @classmethod
     async def execute_function_tool_calls(

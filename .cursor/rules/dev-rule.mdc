@@ -1,0 +1,15 @@
+---
+alwaysApply: true
+---
+这个项目是 oepnai-agents-sdk 的私人 fork 版本，用以增强各种实用功能
+**项目开发始终遵循最小修改原则**，以最大程度保持与原版代码的兼容度
+项目采用 uv 进行开发管理，**所有的代码运行与单例测试都采用 uv run 开头**
+如果功能开发完毕，遵循下列操作规范：
+(After making changes) lint/test
+
+```
+make tests  # run tests
+make mypy   # run typechecker
+make lint   # run linter
+```
+git 规范始终遵循最佳实践，开发新功能时总是先新建分支，然后lint/test通过之后，提交 PR，我会在 main 分支进行合并

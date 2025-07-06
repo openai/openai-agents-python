@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 from typing_extensions import TypeAlias
 
-from .agent import Agent
 from .items import RunItem, TResponseStreamEvent
+
+if TYPE_CHECKING:
+    from .agent import Agent
 
 
 @dataclass
@@ -48,6 +50,57 @@ class RunItemStreamEvent:
 
 
 @dataclass
+class NotifyStreamEvent:
+    """An event for notification purposes that does not affect the run history."""
+
+    data: str
+    """The notification message."""
+
+    is_delta: bool = False
+    """If True, the data is a delta and should be appended to the previous data."""
+
+    tag: str | None = None
+    """A tag for the notification, used for UI purposes."""
+
+    tool_name: str | None = None
+    """The name of the tool that generated the event."""
+
+    tool_call_id: str | None = None
+    """The ID of the tool call that generated the event."""
+
+    type: Literal["notify_stream_event"] = "notify_stream_event"
+
+
+@dataclass
+class ToolStreamStartEvent:
+    """Event that notifies that a tool stream is starting."""
+
+    tool_name: str
+    """The name of the tool that is starting."""
+
+    tool_call_id: str
+    """The ID of the tool call that is starting."""
+
+    input_args: dict[str, Any]
+    """The input arguments to the tool."""
+
+    type: Literal["tool_stream_start"] = "tool_stream_start"
+
+
+@dataclass
+class ToolStreamEndEvent:
+    """Event that notifies that a tool stream is ending."""
+
+    tool_name: str
+    """The name of the tool that is ending."""
+
+    tool_call_id: str
+    """The ID of the tool call that is ending."""
+
+    type: Literal["tool_stream_end"] = "tool_stream_end"
+
+
+@dataclass
 class AgentUpdatedStreamEvent:
     """Event that notifies that there is a new agent running."""
 
@@ -57,5 +110,12 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = Union[RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent]
+StreamEvent: TypeAlias = Union[
+    RawResponsesStreamEvent,
+    RunItemStreamEvent,
+    AgentUpdatedStreamEvent,
+    NotifyStreamEvent,
+    ToolStreamStartEvent,
+    ToolStreamEndEvent,
+]
 """A streaming event from an agent."""

@@ -866,6 +866,7 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            streamed_result=streamed_result,
         )
 
         RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
@@ -933,6 +934,7 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            streamed_result=None,
         )
 
     @classmethod
@@ -950,6 +952,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        streamed_result: RunResultStreaming[TContext] | None = None,
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -961,7 +964,7 @@ class AgentRunner:
 
         tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
 
-        return await RunImpl.execute_tools_and_side_effects(
+        turn_result = await RunImpl.execute_tools_and_side_effects(
             agent=agent,
             original_input=original_input,
             pre_step_items=pre_step_items,
@@ -971,7 +974,10 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            streamed_result=streamed_result,
         )
+
+        return turn_result
 
     @classmethod
     async def _run_input_guardrails(

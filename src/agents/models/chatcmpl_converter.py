@@ -42,7 +42,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
-from ..tool import FunctionTool, Tool
+from ..tool import FunctionTool, StreamingTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
 
@@ -302,7 +302,7 @@ class Converter:
             return current_assistant_msg
 
         for item in items:
-                        # 1) Ignore reasoning items, which are not sent to the LLM.
+            # 1) Ignore reasoning items, which are not sent to the LLM.
             if isinstance(item, dict) and item.get("type") == "reasoning":
                 continue
 
@@ -455,7 +455,7 @@ class Converter:
 
     @classmethod
     def tool_to_openai(cls, tool: Tool) -> ChatCompletionToolParam:
-        if isinstance(tool, FunctionTool):
+        if isinstance(tool, (FunctionTool, StreamingTool)):
             return {
                 "type": "function",
                 "function": {

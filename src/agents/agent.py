@@ -20,7 +20,13 @@ from .model_settings import ModelSettings
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
-from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
+from .tool import (
+    FunctionTool,
+    FunctionToolResult,
+    Tool,
+    function_tool,
+    streaming_tool,
+)
 from .util import _transforms
 from .util._types import MaybeAwaitable
 
@@ -197,9 +203,10 @@ class Agent(Generic[TContext]):
 
     def as_tool(
         self,
-        tool_name: str | None,
-        tool_description: str | None,
+        tool_name: str | None = None,
+        tool_description: str | None = None,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+        streaming: bool = False,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -217,24 +224,56 @@ class Agent(Generic[TContext]):
                 provided, the last message from the agent will be used.
         """
 
-        @function_tool(
-            name_override=tool_name or _transforms.transform_string_function_style(self.name),
-            description_override=tool_description or "",
-        )
-        async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
+        from .run import Runner
 
-            output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
+        tool_name = tool_name or _transforms.transform_string_function_style(self.name)
+        tool_description = tool_description or ""
+
+        if not streaming:
+
+            @function_tool(
+                name_override=tool_name,
+                description_override=tool_description,
             )
-            if custom_output_extractor:
-                return await custom_output_extractor(output)
+            async def run_agent(context: RunContextWrapper, input: str) -> str:
+                output = await Runner.run(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                )
+                if custom_output_extractor:
+                    return await custom_output_extractor(output)
 
-            return ItemHelpers.text_message_outputs(output.new_items)
+                return ItemHelpers.text_message_outputs(output.new_items)
 
-        return run_agent
+            return run_agent
+        else:
+
+            @streaming_tool(  # type: ignore[arg-type]
+                name_override=tool_name,
+                description_override=tool_description,
+            )
+            async def run_agent_streamed(
+                context: RunContextWrapper, input: str
+            ):  # 暂时去掉返回类型注解以避免类型系统复杂性
+                result = Runner.run_streamed(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                )
+                async for event in result.stream_events():
+                    yield event
+
+                final_output = ""
+                if custom_output_extractor:
+                    final_output = await custom_output_extractor(result)  # type: ignore
+                else:
+                    final_output = ItemHelpers.text_message_outputs(result.new_items)
+
+                # 根据设计文档，最后一个yield必须是字符串作为最终结果
+                yield final_output
+
+            return run_agent_streamed
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
         """Get the system prompt for the agent."""

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable
+from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
@@ -24,6 +24,12 @@ from .function_schema import DocstringStyle, function_schema
 from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .stream_events import (
+    NotifyStreamEvent,
+    StreamEvent,
+    ToolStreamEndEvent,
+    ToolStreamStartEvent,
+)
 from .tool_context import ToolContext
 from .tracing import SpanError
 from .util import _error_tracing
@@ -45,10 +51,19 @@ ToolFunction = Union[
     ToolFunctionWithToolContext[ToolParams],
 ]
 
+StreamingToolFunctionWithoutContext = Callable[ToolParams, AsyncGenerator[StreamEvent, str]]
+StreamingToolFunctionWithContext = Callable[
+    Concatenate[RunContextWrapper[Any], ToolParams], AsyncGenerator[StreamEvent, str]
+]
+
+StreamingToolFunction = Union[
+    StreamingToolFunctionWithoutContext[ToolParams], StreamingToolFunctionWithContext[ToolParams]
+]
+
 
 @dataclass
 class FunctionToolResult:
-    tool: FunctionTool
+    tool: Union[FunctionTool, StreamingTool]
     """The tool that was run."""
 
     output: Any
@@ -56,6 +71,42 @@ class FunctionToolResult:
 
     run_item: RunItem
     """The run item that was produced as a result of the tool call."""
+
+
+@dataclass
+class StreamingTool:
+    """
+    A tool whose invocation returns a stream of events, rather than a single final output.
+    This is useful for streaming the execution of sub-agents to the caller.
+    """
+
+    name: str
+    """The name of the tool, as shown to the LLM."""
+
+    description: str
+    """A description of the tool, as shown to the LLM."""
+
+    params_json_schema: dict[str, Any]
+    """The JSON schema for the tool's parameters."""
+
+    def get_name(self) -> str:
+        """返回工具的名称。"""
+        return self.name
+
+    on_invoke_tool: Callable[
+        [RunContextWrapper[Any], str, str], AsyncGenerator[StreamEvent, str]
+    ]
+    """
+    A function that invokes the tool, which returns an async generator.
+    The generator should `yield` StreamEvent objects as intermediate events,
+    and finally `yield "..."` to return a string as the final output of the tool.
+    """
+
+    strict_json_schema: bool = True
+    """Whether the JSON schema is in strict mode."""
+
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    """Whether the tool is enabled."""
 
 
 @dataclass
@@ -272,6 +323,7 @@ class LocalShellTool:
 
 Tool = Union[
     FunctionTool,
+    StreamingTool,
     FileSearchTool,
     WebSearchTool,
     ComputerTool,
@@ -464,3 +516,145 @@ def function_tool(
         return _create_function_tool(real_func)
 
     return decorator
+
+
+@overload
+def streaming_tool(
+    func: StreamingToolFunction[...],
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    enable_bracketing: bool = False,
+) -> StreamingTool:
+    """Overload for usage as @streaming_tool (no parentheses)."""
+    ...
+
+
+@overload
+def streaming_tool(
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    enable_bracketing: bool = False,
+) -> Callable[[StreamingToolFunction[...]], StreamingTool]:
+    """Overload for usage as @streaming_tool(...)."""
+    ...
+
+
+def streaming_tool(
+    func: StreamingToolFunction[...] | None = None,
+    *,
+    name_override: str | None = None,
+    description_override: str | None = None,
+    docstring_style: DocstringStyle | None = None,
+    use_docstring_info: bool = True,
+    strict_mode: bool = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    enable_bracketing: bool = True,
+) -> StreamingTool | Callable[[StreamingToolFunction[...]], StreamingTool]:
+    """
+    Decorator to create a StreamingTool from an async generator function.
+    The decorated function must be an async generator 
+    (async def a_func(...) -> AsyncIterator[StreamEvent]).
+    It should `yield` StreamEvent objects as intermediate events, 
+    and finally `yield "..."` to return a string as the final output.
+    """
+
+    def _create_streaming_tool(the_func: StreamingToolFunction[...]) -> StreamingTool:
+        schema = function_schema(
+            func=the_func,
+            name_override=name_override,
+            description_override=description_override,
+            docstring_style=docstring_style,
+            use_docstring_info=use_docstring_info,
+            strict_json_schema=strict_mode,
+        )
+
+        async def _on_invoke_tool_impl(
+            ctx: RunContextWrapper[Any], input_str: str, tool_call_id: str
+        ) -> AsyncGenerator[StreamEvent, str]:
+            """
+            The actual implementation of the tool invocation.
+            This is a separate function so that we can wrap it in a span.
+            """
+            try:
+                json_data: dict[str, Any] = json.loads(input_str) if input_str else {}
+            except Exception as e:
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Invalid JSON input for tool {schema.name}")
+                else:
+                    logger.debug(f"Invalid JSON input for tool {schema.name}: {input_str}")
+                raise ModelBehaviorError(
+                    f"Invalid JSON input for tool {schema.name}: {input_str}"
+                ) from e
+
+            try:
+                parsed = (
+                    schema.params_pydantic_model(**json_data)
+                    if json_data
+                    else schema.params_pydantic_model()
+                )
+            except ValidationError as e:
+                raise ModelBehaviorError(f"Invalid JSON input for tool: {e}") from e
+
+            args, kwargs = schema.to_call_args(parsed)
+
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.debug(f"Invoking tool {schema.name}")
+            else:
+                logger.debug(f"Invoking tool {schema.name} with input {input_str}")
+
+            try:
+                if enable_bracketing:
+                    yield ToolStreamStartEvent(
+                        tool_name=schema.name,
+                        tool_call_id=tool_call_id,
+                        input_args=kwargs,
+                    )
+
+                if schema.takes_context:
+                    generator = the_func(ctx, *args, **kwargs)
+                else:
+                    generator = the_func(*args, **kwargs)
+
+                async for event in generator:
+                    if isinstance(event, str):
+                        if enable_bracketing:
+                            yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
+                        yield event
+                        return
+
+                    if isinstance(event, NotifyStreamEvent):
+                        event.tool_name = schema.name
+                        event.tool_call_id = tool_call_id
+                    yield event
+
+            except Exception:
+                if enable_bracketing:
+                    yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
+                raise
+            else:
+                if enable_bracketing:
+                    yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
+
+        return StreamingTool(
+            name=schema.name,
+            description=schema.description or "",
+            params_json_schema=schema.params_json_schema,
+            on_invoke_tool=_on_invoke_tool_impl,
+            strict_json_schema=strict_mode,
+            is_enabled=is_enabled,
+        )
+
+    if func:
+        return _create_streaming_tool(func)
+    else:
+        return _create_streaming_tool
