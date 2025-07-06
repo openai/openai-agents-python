@@ -13,7 +13,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any, TypedDict
 
-from agents import Agent, Runner, streaming_tool, NotifyStreamEvent, StreamEvent
+from agents import Agent, NotifyStreamEvent, StreamEvent, streaming_tool
 from agents.tool import StreamingTool
 
 
@@ -273,10 +273,10 @@ async def demo_key_concepts():
     for concept, code, description in concepts:
         print(f"{concept:<12} {code:<35} {description}")
 
-    print(f"\n🎯 核心原则:")
-    print(f"  1. 严格分离'过程展示'与'最终结果'")
-    print(f"  2. NotifyStreamEvent = 过程，字符串 = 结果")
-    print(f"  3. 最后的yield必须是字符串")
+    print("\n🎯 核心原则:")
+    print("  1. 严格分离'过程展示'与'最终结果'")
+    print("  2. NotifyStreamEvent = 过程，字符串 = 结果")
+    print("  3. 最后的yield必须是字符串")
 
 
 if __name__ == "__main__":

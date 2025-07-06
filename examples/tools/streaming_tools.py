@@ -12,10 +12,10 @@
 - 最终结果：yield "字符串结果" - 作为最后一个yield，影响对话历史
 """
 import asyncio
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any, Union
 
-from agents import Agent, Runner, streaming_tool, NotifyStreamEvent, StreamEvent
-
+from agents import Agent, NotifyStreamEvent, Runner, StreamEvent, streaming_tool
 
 # ============================================================================
 # 场景一：多阶段进度更新
@@ -222,7 +222,7 @@ async def traditional_file_analyzer(file_path: str) -> AsyncGenerator[StreamEven
         ("📈 生成报告", "reporting")
     ]
 
-    results = {}
+    results: dict[str, Union[int, float, list[str]]] = {}
     for step_name, tag in analysis_steps:
         yield NotifyStreamEvent(data=step_name, tag=tag)
         await asyncio.sleep(0.4)
@@ -238,11 +238,13 @@ async def traditional_file_analyzer(file_path: str) -> AsyncGenerator[StreamEven
     yield NotifyStreamEvent(data="✅ 分析完成!", tag="success")
 
     # 返回分析结果
+    keywords = results['keywords']
+    assert isinstance(keywords, list), "keywords should be a list"
     yield f"""文件分析完成: {file_path}
 📊 统计结果:
 - 词汇数量: {results['word_count']}
 - 平均句长: {results['avg_sentence_length']}
-- 关键词: {', '.join(results['keywords'])}"""
+- 关键词: {', '.join(keywords)}"""
 
 
 # ============================================================================
@@ -373,9 +375,9 @@ async def demo_core_scenarios():
                     print(f"  [{event_count:2d}] 🔄 {event.data}")
                 else:
                     print(f"  [{event_count:2d}] 📝 {event.data}")
-            elif event.type == "tool_stream_start":
+            elif event.type == "tool_stream_start_event":
                 print(f"  [{event_count:2d}] 🚀 [开始] {event.tool_name}")
-            elif event.type == "tool_stream_end":
+            elif event.type == "tool_stream_end_event":
                 print(f"  [{event_count:2d}] 🏁 [结束] {event.tool_name}")
 
         print(f"\n💡 最终结果: {result.final_output}")
@@ -408,11 +410,11 @@ async def demo_agent_as_tool():
         event_count += 1
         indent = "  " * indent_level
 
-        if event.type == "tool_stream_start":
+        if event.type == "tool_stream_start_event":
             print(f"{indent}[{event_count:2d}] 🚀 开始调用: {event.tool_name}")
             if event.tool_name == "run_file_analysis":
                 indent_level += 1
-        elif event.type == "tool_stream_end":
+        elif event.type == "tool_stream_end_event":
             if hasattr(event, 'tool_name') and event.tool_name == "run_file_analysis":
                 indent_level = max(0, indent_level - 1)
             print(f"{indent}[{event_count:2d}] 🏁 结束调用: {event.tool_name}")

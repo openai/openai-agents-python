@@ -7,14 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import pytest
 
 from agents import Agent, Runner, function_tool, streaming_tool
+from agents.exceptions import ModelBehaviorError
 from agents.run_context import RunContextWrapper
-from agents.stream_events import NotifyStreamEvent, StreamEvent, ToolStreamEndEvent, ToolStreamStartEvent
-from agents.tool_context import ToolContext
+from agents.stream_events import (
+    NotifyStreamEvent,
+    StreamEvent,
+    ToolStreamEndEvent,
+    ToolStreamStartEvent,
+)
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
@@ -25,13 +31,13 @@ class TestStreamingToolDecorator:
 
     def test_streaming_tool_creation(self):
         """测试 streaming_tool 装饰器能正确创建 StreamingTool 对象"""
-        
+
         @streaming_tool
         async def simple_tool(message: str) -> AsyncGenerator[StreamEvent | str, Any]:
             """一个简单的流式工具"""
             yield NotifyStreamEvent(data=f"处理消息: {message}")
             yield f"完成处理: {message}"
-        
+
         # 验证工具属性
         assert simple_tool.name == "simple_tool"
         assert simple_tool.description == "一个简单的流式工具"
@@ -40,14 +46,14 @@ class TestStreamingToolDecorator:
 
     def test_streaming_tool_with_custom_name_and_description(self):
         """测试自定义名称和描述的 streaming_tool"""
-        
+
         @streaming_tool(
             name_override="custom_tool",
             description_override="自定义描述"
         )
         async def original_name(data: str) -> AsyncGenerator[StreamEvent | str, Any]:
             yield f"处理: {data}"
-        
+
         assert original_name.name == "custom_tool"
         assert original_name.description == "自定义描述"
 
@@ -126,7 +132,9 @@ class TestStreamingToolDecorator:
         ctx = RunContextWrapper(context=None)
 
         events = []
-        async for event in bracketed_tool.on_invoke_tool(ctx, '{"data": "测试数据"}', "bracket_test"):
+        async for event in bracketed_tool.on_invoke_tool(
+            ctx, '{"data": "测试数据"}', "bracket_test"
+        ):
             events.append(event)
 
         # 应该有开始事件、通知事件、结束事件、最终结果
@@ -178,7 +186,9 @@ class TestStreamingToolDecorator:
         # 测试错误情况
         with pytest.raises(ValueError, match="故意的错误"):
             events = []
-            async for event in error_tool.on_invoke_tool(ctx, '{"should_fail": true}', "error_test"):
+            async for event in error_tool.on_invoke_tool(
+                ctx, '{"should_fail": true}', "error_test"
+            ):
                 events.append(event)
 
         # 即使出错，也应该收到开始事件和通知事件
@@ -192,7 +202,7 @@ class TestStreamingToolEvents:
 
     def test_notify_stream_event_creation(self):
         """测试 NotifyStreamEvent 的创建和属性"""
-        
+
         # 基本创建
         event = NotifyStreamEvent(data="测试消息")
         assert event.data == "测试消息"
@@ -201,7 +211,7 @@ class TestStreamingToolEvents:
         assert event.tool_name is None
         assert event.tool_call_id is None
         assert event.type == "notify_stream_event"
-        
+
         # 带所有参数的创建
         event_full = NotifyStreamEvent(
             data="增量消息",
@@ -218,14 +228,14 @@ class TestStreamingToolEvents:
 
     def test_tool_stream_start_event_creation(self):
         """测试 ToolStreamStartEvent 的创建和属性"""
-        
+
         input_args = {"param1": "value1", "param2": 42}
         event = ToolStreamStartEvent(
             tool_name="test_tool",
             tool_call_id="call_456",
             input_args=input_args
         )
-        
+
         assert event.tool_name == "test_tool"
         assert event.tool_call_id == "call_456"
         assert event.input_args == input_args
@@ -233,12 +243,12 @@ class TestStreamingToolEvents:
 
     def test_tool_stream_end_event_creation(self):
         """测试 ToolStreamEndEvent 的创建和属性"""
-        
+
         event = ToolStreamEndEvent(
             tool_name="test_tool",
             tool_call_id="call_789"
         )
-        
+
         assert event.tool_name == "test_tool"
         assert event.tool_call_id == "call_789"
         assert event.type == "tool_stream_end_event"
@@ -321,7 +331,9 @@ class TestStreamingToolIntegration:
         ctx = RunContextWrapper(context=None)
 
         events = []
-        async for event in typewriter_tool.on_invoke_tool(ctx, '{"text": "Hello"}', "typewriter_test"):
+        async for event in typewriter_tool.on_invoke_tool(
+            ctx, '{"text": "Hello"}', "typewriter_test"
+        ):
             events.append(event)
 
         # 应该有: 开始消息 + 5个字符的增量事件 + 最终结果
@@ -362,7 +374,9 @@ class TestStreamingToolIntegration:
         ctx = RunContextWrapper(context=None)
 
         events = []
-        async for event in context_tool.on_invoke_tool(ctx, '{"message": "测试消息"}', "context_test"):
+        async for event in context_tool.on_invoke_tool(
+            ctx, '{"message": "测试消息"}', "context_test"
+        ):
             events.append(event)
 
         assert len(events) == 2
@@ -389,7 +403,9 @@ class TestStreamingToolIntegration:
         ctx = RunContextWrapper(context=None)
 
         events = []
-        async for event in tagged_tool.on_invoke_tool(ctx, '{"operation": "测试操作"}', "tagged_test"):
+        async for event in tagged_tool.on_invoke_tool(
+            ctx, '{"operation": "测试操作"}', "tagged_test"
+        ):
             events.append(event)
 
         assert len(events) == 4
@@ -527,7 +543,9 @@ class TestStreamingToolAdvanced:
 
         # 测试成功情况
         events = []
-        async for event in error_prone_tool.on_invoke_tool(ctx, '{"should_fail": "false"}', "error_test"):
+        async for event in error_prone_tool.on_invoke_tool(
+            ctx, '{"should_fail": "false"}', "error_test"
+        ):
             events.append(event)
 
         assert len(events) == 3
@@ -541,7 +559,9 @@ class TestStreamingToolAdvanced:
         # 测试失败情况
         with pytest.raises(RuntimeError, match="工具执行失败"):
             events = []
-            async for event in error_prone_tool.on_invoke_tool(ctx, '{"should_fail": "true"}', "error_test"):
+            async for event in error_prone_tool.on_invoke_tool(
+                ctx, '{"should_fail": "true"}', "error_test"
+            ):
                 events.append(event)
 
         # 即使出错，也应该收到开始执行的通知
@@ -581,9 +601,11 @@ class TestStreamingToolAdvanced:
         assert "验证通过: 测试-42-True" in events[1]
 
         # 测试缺少必需参数的情况
-        with pytest.raises(Exception):  # 应该抛出参数验证错误
+        with pytest.raises(ModelBehaviorError):  # 应该抛出参数验证错误
             events = []
-            async for event in validated_tool.on_invoke_tool(ctx, '{"required_str": "测试"}', "validation_test"):
+            async for event in validated_tool.on_invoke_tool(
+                ctx, '{"required_str": "测试"}', "validation_test"
+            ):
                 events.append(event)
 
     @pytest.mark.asyncio
@@ -591,7 +613,9 @@ class TestStreamingToolAdvanced:
         """测试 streaming_tool 的并发执行"""
 
         @streaming_tool(enable_bracketing=False)
-        async def concurrent_tool(delay: float, name: str) -> AsyncGenerator[StreamEvent | str, Any]:
+        async def concurrent_tool(
+            delay: float, name: str
+        ) -> AsyncGenerator[StreamEvent | str, Any]:
             """支持并发的工具"""
             yield NotifyStreamEvent(data=f"{name} 开始执行")
             await asyncio.sleep(delay)
@@ -633,11 +657,15 @@ class TestStreamingToolAdvanced:
         assert len(events2) == 3
 
         # 验证工具1的事件
-        assert any("工具1 开始执行" in str(e.data) for e in events1 if isinstance(e, NotifyStreamEvent))
+        assert any(
+            "工具1 开始执行" in str(e.data) for e in events1 if isinstance(e, NotifyStreamEvent)
+        )
         assert any("工具1 完成" in str(e) for e in events1 if isinstance(e, str))
 
         # 验证工具2的事件
-        assert any("工具2 开始执行" in str(e.data) for e in events2 if isinstance(e, NotifyStreamEvent))
+        assert any(
+            "工具2 开始执行" in str(e.data) for e in events2 if isinstance(e, NotifyStreamEvent)
+        )
         assert any("工具2 完成" in str(e) for e in events2 if isinstance(e, str))
 
     def test_streaming_tool_vs_function_tool_api_consistency(self):
@@ -651,7 +679,9 @@ class TestStreamingToolAdvanced:
 
         # 创建一个对应的 streaming_tool
         @streaming_tool
-        async def streaming_version(message: str, count: int = 1) -> AsyncGenerator[StreamEvent | str, Any]:
+        async def streaming_version(
+            message: str, count: int = 1
+        ) -> AsyncGenerator[StreamEvent | str, Any]:
             """流式版本的工具"""
             yield NotifyStreamEvent(data=f"开始处理 {count} 次")
             yield f"处理了 {count} 次: {message}"
@@ -665,7 +695,9 @@ class TestStreamingToolAdvanced:
         streaming_schema = streaming_version.params_json_schema
 
         # 两者都应该有相同的参数
-        assert set(regular_schema["properties"].keys()) == set(streaming_schema["properties"].keys())
+        assert set(regular_schema["properties"].keys()) == set(
+            streaming_schema["properties"].keys()
+        )
         assert regular_schema["required"] == streaming_schema["required"]
 
         # 验证参数类型一致
