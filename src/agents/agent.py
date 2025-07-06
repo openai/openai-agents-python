@@ -207,6 +207,7 @@ class Agent(Generic[TContext]):
         tool_description: str | None = None,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         streaming: bool = False,
+        enable_bracketing: bool = True,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -222,6 +223,9 @@ class Agent(Generic[TContext]):
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
                 provided, the last message from the agent will be used.
+            streaming: Whether to create a streaming tool that yields events during execution.
+            enable_bracketing: Whether to emit ToolStreamStartEvent and ToolStreamEndEvent for
+                clear process orchestration. Only applies when streaming=True.
         """
 
         from .run import Runner
@@ -252,6 +256,7 @@ class Agent(Generic[TContext]):
             @streaming_tool(
                 name_override=tool_name,
                 description_override=tool_description,
+                enable_bracketing=enable_bracketing,
             )
             async def run_agent_streamed(
                 context: RunContextWrapper, input: str

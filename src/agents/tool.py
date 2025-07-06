@@ -646,6 +646,7 @@ def streaming_tool(
 
                 async for event in generator:
                     if isinstance(event, str):
+                        # 根据设计文档，ToolStreamEndEvent 必须在最终的 yield str 之前发出
                         if enable_bracketing:
                             yield ToolStreamEndEvent(
                                 tool_name=schema.name, tool_call_id=tool_call_id
@@ -658,13 +659,15 @@ def streaming_tool(
                         event.tool_call_id = tool_call_id
                     yield event
 
+                # 如果生成器正常结束但没有产生字符串结果，仍需发送结束事件
+                if enable_bracketing:
+                    yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
+
             except Exception:
+                # 异常情况下也要确保发送结束事件
                 if enable_bracketing:
                     yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
                 raise
-            else:
-                if enable_bracketing:
-                    yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
 
         return StreamingTool(
             name=schema.name,

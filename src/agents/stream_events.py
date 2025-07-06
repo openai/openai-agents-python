@@ -84,7 +84,7 @@ class ToolStreamStartEvent:
     input_args: dict[str, Any]
     """The input arguments to the tool."""
 
-    type: Literal["tool_stream_start"] = "tool_stream_start"
+    type: Literal["tool_stream_start_event"] = "tool_stream_start_event"
 
 
 @dataclass
@@ -97,7 +97,7 @@ class ToolStreamEndEvent:
     tool_call_id: str
     """The ID of the tool call that is ending."""
 
-    type: Literal["tool_stream_end"] = "tool_stream_end"
+    type: Literal["tool_stream_end_event"] = "tool_stream_end_event"
 
 
 @dataclass
