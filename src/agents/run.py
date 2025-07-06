@@ -269,7 +269,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
-    ) -> RunResultStreaming:
+    ) -> RunResultStreaming[TContext]:
         """Run a workflow starting at the given agent in streaming mode. The returned result object
         contains a method you can use to stream semantic events as they are generated.
         The agent will run in a loop until a final output is generated. The loop runs like so:
@@ -505,7 +505,7 @@ class AgentRunner:
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
         **kwargs: Unpack[RunOptions[TContext]],
-    ) -> RunResultStreaming:
+    ) -> RunResultStreaming[TContext]:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = kwargs.get("hooks")
@@ -574,7 +574,7 @@ class AgentRunner:
         guardrails: list[InputGuardrail[TContext]],
         input: str | list[TResponseInputItem],
         context: RunContextWrapper[TContext],
-        streamed_result: RunResultStreaming,
+        streamed_result: RunResultStreaming[TContext],
         parent_span: Span[Any],
     ):
         queue = streamed_result._input_guardrail_queue
@@ -614,7 +614,7 @@ class AgentRunner:
     async def _start_streaming(
         cls,
         starting_input: str | list[TResponseInputItem],
-        streamed_result: RunResultStreaming,
+        streamed_result: RunResultStreaming[TContext],
         starting_agent: Agent[TContext],
         max_turns: int,
         hooks: RunHooks[TContext],
@@ -773,7 +773,7 @@ class AgentRunner:
     @classmethod
     async def _run_single_turn_streamed(
         cls,
-        streamed_result: RunResultStreaming,
+        streamed_result: RunResultStreaming[TContext],
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],

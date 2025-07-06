@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI
 from starlette.responses import StreamingResponse
@@ -22,7 +23,7 @@ async def stream():
 
 
 class StreamHandler:
-    def __init__(self, result: RunResultStreaming):
+    def __init__(self, result: RunResultStreaming[Any]):
         self.result = result
 
     async def stream_events(self) -> AsyncIterator[str]:

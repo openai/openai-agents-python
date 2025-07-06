@@ -249,7 +249,7 @@ class Agent(Generic[TContext]):
             return run_agent
         else:
 
-            @streaming_tool(  # type: ignore[arg-type]
+            @streaming_tool(
                 name_override=tool_name,
                 description_override=tool_description,
             )

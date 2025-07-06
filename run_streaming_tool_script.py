@@ -1,6 +1,6 @@
 import asyncio
-from collections.abc import AsyncIterator
-
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -36,22 +36,28 @@ print("✅ 客户端配置完成。")
 
 # --- 测试工具定义 ---
 
-# 1. 基础流式工具（修改：移除参数，硬编码测试值）
+# 1. 基础流式工具（恢复参数版本）
 @streaming_tool
-async def basic_streaming_tool() -> AsyncIterator[StreamEvent]:  # type: ignore
-    """一个简单的流式工具，用于测试基本功能。"""
-    input_str = "世界"  # 硬编码
-    yield NotifyStreamEvent(data=f"你好，{input_str}！")
+async def basic_streaming_tool(target: str) -> AsyncGenerator[StreamEvent | str, Any]:
+    """一个简单的流式工具，用于测试基本功能。
+
+    Args:
+        target: 要问候的目标
+    """
+    yield NotifyStreamEvent(data=f"你好，{target}！")
     await asyncio.sleep(0.01)
     yield NotifyStreamEvent(data="...流式传输完成。")
-    yield f"工具最终输出：问候已发送给 {input_str}"
+    yield f"问候已发送给 {target}"
 
 
-# 2. 模拟打字机效果的工具（修改：移除参数，硬编码测试值）
+# 2. 模拟打字机效果的工具（恢复参数版本）
 @streaming_tool
-async def typewriter_tool() -> AsyncIterator[StreamEvent]:  # type: ignore
-    """一个模拟打字机效果的工具。"""
-    text = "你好"  # 硬编码
+async def typewriter_tool(text: str) -> AsyncGenerator[StreamEvent | str, Any]:
+    """一个模拟打字机效果的工具。
+
+    Args:
+        text: 要以打字机效果输出的文本
+    """
     yield NotifyStreamEvent(data="正在生成内容：")
     await asyncio.sleep(0.01)
     for char in text:
@@ -60,20 +66,23 @@ async def typewriter_tool() -> AsyncIterator[StreamEvent]:  # type: ignore
     yield f"打字机效果完成：{text}"
 
 
-# 3. 编排与自动括号工具（修改：移除参数，硬编码测试值）
+# 3. 编排与自动括号工具（恢复参数版本）
 child_agent = Agent(
     name="子任务专家",
-    instructions="简单地回复'子任务完成'",
+    instructions="你是一个网络诊断专家。当收到诊断任务时，提供简洁的诊断步骤，最后说'子任务完成'。",
     model=MODEL_NAME,
 )
 
 @streaming_tool(enable_bracketing=True)
-async def orchestrator_tool() -> AsyncIterator[StreamEvent]:  # type: ignore
-    """一个编排工具，调用子Agent并流式传输其事件。"""
-    task = "诊断网络"  # 硬编码
+async def orchestrator_tool(task_description: str) -> AsyncGenerator[StreamEvent | str, Any]:
+    """一个编排工具，调用子Agent并流式传输其事件。
+
+    Args:
+        task_description: 要委派给子Agent的任务描述
+    """
     yield NotifyStreamEvent(data=f"收到父任务，正在委派给 {child_agent.name}...")
 
-    result = Runner.run_streamed(starting_agent=child_agent, input=task)
+    result = Runner.run_streamed(starting_agent=child_agent, input=task_description)
     async for event in result.stream_events():
         yield event
 
@@ -82,9 +91,9 @@ async def orchestrator_tool() -> AsyncIterator[StreamEvent]:  # type: ignore
     yield f"父任务完成，子任务报告：{final_output}"
 
 
-# 4. 可选上下文参数工具（修改：移除参数）
+# 4. 可选上下文参数工具（保持无参数，因为这是测试上下文注入）
 @streaming_tool
-async def context_aware_tool(ctx: RunContextWrapper) -> AsyncIterator[StreamEvent]:  # type: ignore
+async def context_aware_tool(ctx: RunContextWrapper) -> AsyncGenerator[StreamEvent | str, Any]:
     """一个验证可选上下文参数是否正确注入的工具。"""
     is_context_present = isinstance(ctx, RunContextWrapper)
     yield NotifyStreamEvent(data=f"上下文存在: {is_context_present}")
@@ -142,48 +151,48 @@ async def main():
 
     # --- 执行测试 ---
 
-    # 案例 1: 基础流式测试（修改：简化指令）
+    # 案例 1: 基础流式测试（恢复参数传递）
     basic_agent = Agent(
         name="基础测试代理",
-        instructions="你的任务是调用 `basic_streaming_tool` 工具。",
+        instructions="你的任务是调用 `basic_streaming_tool` 工具，传入 '世界' 作为目标参数。",
         model=MODEL_NAME,
         tools=[basic_streaming_tool],
     )
     await run_test_case(
         case_name="基础流式传输",
         agent=basic_agent,
-        user_input="请开始基础测试",
+        user_input="请向世界问好",
         expected_substring="问候已发送给 世界",
     )
 
-    # 案例 2: 打字机效果测试（修改：简化指令）
+    # 案例 2: 打字机效果测试（恢复参数传递）
     typewriter_agent = Agent(
         name="打字机测试代理",
-        instructions="你的任务是调用 `typewriter_tool` 工具。",
+        instructions="你的任务是调用 `typewriter_tool` 工具，传入用户指定的文本。",
         model=MODEL_NAME,
         tools=[typewriter_tool],
     )
     await run_test_case(
         case_name="打字机效果 (is_delta=True)",
         agent=typewriter_agent,
-        user_input="请开始打字机测试",
+        user_input="请用打字机效果输出'你好'",
         expected_substring="你好",
     )
 
-    # 案例 3: 编排与自动括号测试（修改：简化指令，引导模型直接输出）
+    # 案例 3: 编排与自动括号测试（恢复参数传递）
     orchestrator_agent = Agent(
         name="编排测试代理",
         instructions=(
-            "调用 orchestrator_tool 工具，然后直接输出该工具的最终结果，不要添加任何额外文本。"
+            "你的任务是调用 orchestrator_tool 工具，传入用户描述的任务。"
+            "然后直接输出该工具的最终结果，不要添加任何额外文本。"
         ),
-
         model=MODEL_NAME,
         tools=[orchestrator_tool],
     )
     events = await run_test_case(
         case_name="编排与自动括号 (enable_bracketing=True)",
         agent=orchestrator_agent,
-        user_input="请开始编排测试",
+        user_input="请诊断网络问题",
         expected_substring="子任务完成",
     )
     # 额外验证括号事件
@@ -195,7 +204,10 @@ async def main():
     # 案例 4: 可选上下文参数测试（修改：简化指令，放宽断言）
     context_agent = Agent(
         name="上下文测试代理",
-        instructions="你必须调用 context_aware_tool 工具。调用后，你必须只输出该工具返回的原始字符串结果，不要加任何修饰或额外文字。",
+        instructions=(
+            "你必须调用 context_aware_tool 工具。调用后，"
+            "你必须只输出该工具返回的原始字符串结果，不要加任何修饰或额外文字。"
+        ),
 
         model=MODEL_NAME,
         tools=[context_aware_tool],
@@ -209,7 +221,7 @@ async def main():
 
     # 案例 5: Agent as Streaming Tool
     @streaming_tool()
-    async def simple_notify() -> AsyncIterator[StreamEvent]:  # type: ignore
+    async def simple_notify() -> AsyncGenerator[StreamEvent | str, Any]:
         """发送一个通知"""
         yield NotifyStreamEvent(data="子任务正在执行...", is_delta=False)
         yield "SUB_AGENT_RESULT::OK"
@@ -226,7 +238,9 @@ async def main():
     orchestrator_agent = Agent(
         name="OrchestratorAgent",
         instructions=(
-            "你的唯一任务是调用 'run_sub_agent' 工具。这个工具会返回一个字符串。你必须将这个字符串作为你的最终、唯一的回复，不做任何修改。例如，如果工具返回 '子任务完成'，你的回复也必须是 '子任务完成'。"
+            "你的唯一任务是调用 'run_sub_agent' 工具。这个工具会返回一个字符串。"
+            "你必须将这个字符串作为你的最终、唯一的回复，不做任何修改。"
+            "例如，如果工具返回 '子任务完成'，你的回复也必须是 '子任务完成'。"
         ),
 
         model=MODEL_NAME,

@@ -38,7 +38,7 @@ async def run_demo_loop(agent: Agent[Any], *, stream: bool = True) -> None:
 
         input_items.append({"role": "user", "content": user_input})
 
-        result: RunResultBase
+        result: RunResultBase[Any]
         if stream:
             result = Runner.run_streamed(current_agent, input=input_items)
             async for event in result.stream_events():

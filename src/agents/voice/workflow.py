@@ -35,7 +35,7 @@ class VoiceWorkflowBase(abc.ABC):
 
 class VoiceWorkflowHelper:
     @classmethod
-    async def stream_text_from(cls, result: RunResultStreaming) -> AsyncIterator[str]:
+    async def stream_text_from(cls, result: RunResultStreaming[Any]) -> AsyncIterator[str]:
         """Wraps a `RunResultStreaming` object and yields text events from the stream."""
         async for event in result.stream_events():
             if (

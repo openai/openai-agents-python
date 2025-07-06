@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -12,7 +12,7 @@ def _indent(text: str, indent_level: int) -> str:
     return "\n".join(f"{indent_string}{line}" for line in text.splitlines())
 
 
-def _final_output_str(result: "RunResultBase") -> str:
+def _final_output_str(result: "RunResultBase[Any]") -> str:
     if result.final_output is None:
         return "None"
     elif isinstance(result.final_output, str):
@@ -50,7 +50,7 @@ def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
     return output
 
 
-def pretty_print_run_result_streaming(result: "RunResultStreaming") -> str:
+def pretty_print_run_result_streaming(result: "RunResultStreaming[Any]") -> str:
     output = "RunResultStreaming:"
     output += f'\n- Current agent: Agent(name="{result.current_agent.name}", ...)'
     output += f"\n- Current turn: {result.current_turn}"

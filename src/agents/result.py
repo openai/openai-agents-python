@@ -4,9 +4,7 @@ import abc
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
-
-from typing_extensions import TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from ._run_impl import QueueCompleteSentinel
 from .agent import Agent
@@ -33,10 +31,11 @@ if TYPE_CHECKING:
     from .agent import Agent
 
 T = TypeVar("T")
+TContext = TypeVar("TContext")
 
 
 @dataclass
-class RunResultBase(abc.ABC):
+class RunResultBase(abc.ABC, Generic[TContext]):
     input: str | list[TResponseInputItem]
     """The original input items i.e. the items before run() was called. This may be a mutated
     version of the input, if there are handoff input filters that mutate the input.
@@ -59,7 +58,7 @@ class RunResultBase(abc.ABC):
     output_guardrail_results: list[OutputGuardrailResult]
     """Guardrail results for the final output of the agent."""
 
-    context_wrapper: RunContextWrapper[Any]
+    context_wrapper: RunContextWrapper[TContext]
     """The context wrapper for the agent run."""
 
     @property
@@ -102,7 +101,7 @@ class RunResultBase(abc.ABC):
 
 
 @dataclass
-class RunResult(RunResultBase):
+class RunResult(RunResultBase[Any]):
     _last_agent: Agent[Any]
 
     @property
@@ -115,7 +114,7 @@ class RunResult(RunResultBase):
 
 
 @dataclass
-class RunResultStreaming(RunResultBase):
+class RunResultStreaming(RunResultBase[TContext], Generic[TContext]):
     """The result of an agent run in streaming mode. You can use the `stream_events` method to
     receive semantic events as they are generated.
 

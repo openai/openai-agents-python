@@ -51,9 +51,9 @@ ToolFunction = Union[
     ToolFunctionWithToolContext[ToolParams],
 ]
 
-StreamingToolFunctionWithoutContext = Callable[ToolParams, AsyncGenerator[StreamEvent, str]]
+StreamingToolFunctionWithoutContext = Callable[ToolParams, AsyncGenerator[StreamEvent | str, Any]]
 StreamingToolFunctionWithContext = Callable[
-    Concatenate[RunContextWrapper[Any], ToolParams], AsyncGenerator[StreamEvent, str]
+    Concatenate[RunContextWrapper[Any], ToolParams], AsyncGenerator[StreamEvent | str, Any]
 ]
 
 StreamingToolFunction = Union[
@@ -63,7 +63,7 @@ StreamingToolFunction = Union[
 
 @dataclass
 class FunctionToolResult:
-    tool: Union[FunctionTool, StreamingTool]
+    tool: FunctionTool | StreamingTool
     """The tool that was run."""
 
     output: Any
@@ -89,24 +89,30 @@ class StreamingTool:
     params_json_schema: dict[str, Any]
     """The JSON schema for the tool's parameters."""
 
-    def get_name(self) -> str:
-        """返回工具的名称。"""
-        return self.name
+
 
     on_invoke_tool: Callable[
-        [RunContextWrapper[Any], str, str], AsyncGenerator[StreamEvent, str]
+        [RunContextWrapper[Any], str, str], AsyncGenerator[StreamEvent | str, Any]
     ]
-    """
-    A function that invokes the tool, which returns an async generator.
+    """A function that invokes the tool, which returns an async generator. The params passed are:
+    1. The tool run context.
+    2. The arguments from the LLM, as a JSON string.
+    3. The tool call ID for event context tracking.
+
     The generator should `yield` StreamEvent objects as intermediate events,
     and finally `yield "..."` to return a string as the final output of the tool.
+    In case of errors, you can either raise an Exception (which will cause the run to fail) or
+    yield appropriate error events before yielding the final error message.
     """
 
     strict_json_schema: bool = True
-    """Whether the JSON schema is in strict mode."""
+    """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
+    as it increases the likelihood of correct JSON input."""
 
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
-    """Whether the tool is enabled."""
+    """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
+    and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
+    based on your context/state."""
 
 
 @dataclass
@@ -528,7 +534,7 @@ def streaming_tool(
     use_docstring_info: bool = True,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    enable_bracketing: bool = False,
+    enable_bracketing: bool = True,
 ) -> StreamingTool:
     """Overload for usage as @streaming_tool (no parentheses)."""
     ...
@@ -543,7 +549,7 @@ def streaming_tool(
     use_docstring_info: bool = True,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-    enable_bracketing: bool = False,
+    enable_bracketing: bool = True,
 ) -> Callable[[StreamingToolFunction[...]], StreamingTool]:
     """Overload for usage as @streaming_tool(...)."""
     ...
@@ -562,9 +568,9 @@ def streaming_tool(
 ) -> StreamingTool | Callable[[StreamingToolFunction[...]], StreamingTool]:
     """
     Decorator to create a StreamingTool from an async generator function.
-    The decorated function must be an async generator 
+    The decorated function must be an async generator
     (async def a_func(...) -> AsyncIterator[StreamEvent]).
-    It should `yield` StreamEvent objects as intermediate events, 
+    It should `yield` StreamEvent objects as intermediate events,
     and finally `yield "..."` to return a string as the final output.
     """
 
@@ -580,7 +586,7 @@ def streaming_tool(
 
         async def _on_invoke_tool_impl(
             ctx: RunContextWrapper[Any], input_str: str, tool_call_id: str
-        ) -> AsyncGenerator[StreamEvent, str]:
+        ) -> AsyncGenerator[StreamEvent | str, Any]:
             """
             The actual implementation of the tool invocation.
             This is a separate function so that we can wrap it in a span.
@@ -614,10 +620,23 @@ def streaming_tool(
 
             try:
                 if enable_bracketing:
+                    # 合并 args 和 kwargs 为完整的参数字典，用于显示
+                    combined_args = {}
+                    # 将位置参数按照函数签名映射到参数名
+                    param_names = [
+                        name for i, (name, param) in enumerate(schema.signature.parameters.items())
+                        if not (schema.takes_context and i == 0)  # 跳过上下文参数
+                    ]
+                    for i, arg_value in enumerate(args):
+                        if i < len(param_names):
+                            combined_args[param_names[i]] = arg_value
+                    # 添加关键字参数
+                    combined_args.update(kwargs)
+
                     yield ToolStreamStartEvent(
                         tool_name=schema.name,
                         tool_call_id=tool_call_id,
-                        input_args=kwargs,
+                        input_args=combined_args,
                     )
 
                 if schema.takes_context:
@@ -628,7 +647,9 @@ def streaming_tool(
                 async for event in generator:
                     if isinstance(event, str):
                         if enable_bracketing:
-                            yield ToolStreamEndEvent(tool_name=schema.name, tool_call_id=tool_call_id)
+                            yield ToolStreamEndEvent(
+                                tool_name=schema.name, tool_call_id=tool_call_id
+                            )
                         yield event
                         return
 

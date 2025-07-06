@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -267,7 +267,7 @@ class RunImpl:
         new_step_items.extend(processed_response.new_items)
 
         # First, lets run the tool calls - function tools and computer actions
-        tasks = []
+        tasks: list[Coroutine[Any, Any, list[FunctionToolResult] | list[RunItem]]] = []
         # These are indexes into the tasks list, so we can pull out the results later
         func_tools_task_idx = -1
         streaming_tools_task_idx = -1
@@ -317,11 +317,16 @@ class RunImpl:
         computer_results: list[RunItem] = []
 
         if func_tools_task_idx != -1:
-            tool_results.extend(all_results[func_tools_task_idx])
+            func_results = cast(list[FunctionToolResult], all_results[func_tools_task_idx])
+            tool_results.extend(func_results)
         if streaming_tools_task_idx != -1:
-            tool_results.extend(all_results[streaming_tools_task_idx])
+            streaming_results = cast(
+                list[FunctionToolResult], all_results[streaming_tools_task_idx]
+            )
+            tool_results.extend(streaming_results)
         if computer_tools_task_idx != -1:
-            computer_results.extend(all_results[computer_tools_task_idx])
+            comp_results = cast(list[RunItem], all_results[computer_tools_task_idx])
+            computer_results.extend(comp_results)
 
         new_step_items.extend([result.run_item for result in tool_results])
         new_step_items.extend(computer_results)
@@ -454,7 +459,7 @@ class RunImpl:
         streaming_functions = []
         computer_actions = []
         local_shell_calls = []
-        mcp_approval_requests = []
+        mcp_approval_requests: list[ToolRunMCPApprovalRequest] = []
         tools_used: list[str] = []
 
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
@@ -464,7 +469,7 @@ class RunImpl:
             for tool in all_tools
             if isinstance(tool, HostedMCPTool)
         }
-        tool_map = {tool.get_name(): tool for tool in all_tools}
+        tool_map = {tool.name: tool for tool in all_tools}
 
         for output in response.output:
             if isinstance(output, ResponseOutputMessage):
@@ -513,16 +518,16 @@ class RunImpl:
             elif isinstance(output, LocalShellCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 tools_used.append("local_shell")
-                tool = tool_map.get(output.name)
+                tool = tool_map.get("local_shell")
                 if not tool or not isinstance(tool, LocalShellTool):
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
                         message="Local shell tool not found",
-                        data={"tool_name": output.name}
+                        data={"tool_name": "local_shell"}
                     )
                     )
                     raise ModelBehaviorError(
-                        f"Local shell tool {output.name} not found in agent {agent.name}"
+                        f"Local shell tool local_shell not found in agent {agent.name}"
                     )
                 local_shell_calls.append(
                     ToolRunLocalShellCall(tool_call=output, local_shell_tool=tool)
@@ -584,7 +589,7 @@ class RunImpl:
         agent: Agent[TContext],
         tool_runs: list[ToolRunStreamingFunction],
         context_wrapper: RunContextWrapper[TContext],
-        streamed_result: RunResultStreaming,
+        streamed_result: RunResultStreaming[TContext],
         config: RunConfig,
     ) -> list[FunctionToolResult]:
         async def run_single_streaming_tool(
