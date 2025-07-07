@@ -65,7 +65,7 @@ async def main():
             # Function call started
             if event.data.type == "response.output_item.added":
                 if getattr(event.data.item, "type", None) == "function_call":
-                    function_name = event.data.item.name
+                    function_name = getattr(event.data.item, "name", "unknown")
                     print(f"📞 Function call streaming started: {function_name}()")
                     print("📝 Arguments building...")
 
