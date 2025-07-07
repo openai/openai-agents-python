@@ -61,7 +61,7 @@ async def demo_single_function_call():
         if event.type == "raw_response_event":
             # Function call started
             if event.data.type == "response.output_item.added":
-                if hasattr(event.data.item, 'name'):
+                if getattr(event.data.item, "type", None) == "function_call":
                     function_name = event.data.item.name
                     print(f"📞 Function call streaming started: {function_name}()")
                     print("📝 Arguments building...")
@@ -148,7 +148,7 @@ async def demo_multiple_function_calls():
         if event.type == "raw_response_event":
             # Function call started
             if event.data.type == "response.output_item.added":
-                if hasattr(event.data.item, 'name') and hasattr(event.data.item, 'call_id'):
+                if getattr(event.data.item, "type", None) == "function_call":
                     output_index = event.data.output_index
                     function_name = event.data.item.name
                     call_id = event.data.item.call_id
