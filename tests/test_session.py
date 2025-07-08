@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner, SQLiteSession, TResponseInputItem
 from agents.exceptions import UserError
 
 from .fake_model import FakeModel
@@ -193,7 +193,7 @@ async def test_sqlite_session_memory_direct():
         session = SQLiteSession(session_id, db_path)
 
         # Test adding and retrieving items
-        items = [
+        items: list[TResponseInputItem] = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
         ]
@@ -202,10 +202,10 @@ async def test_sqlite_session_memory_direct():
         retrieved = await session.get_items()
 
         assert len(retrieved) == 2
-        assert retrieved[0]["role"] == "user"
-        assert retrieved[0]["content"] == "Hello"
-        assert retrieved[1]["role"] == "assistant"
-        assert retrieved[1]["content"] == "Hi there!"
+        assert retrieved[0].get("role") == "user"
+        assert retrieved[0].get("content") == "Hello"
+        assert retrieved[1].get("role") == "assistant"
+        assert retrieved[1].get("content") == "Hi there!"
 
         # Test clearing session
         await session.clear_session()
@@ -228,7 +228,7 @@ async def test_sqlite_session_memory_pop_item():
         assert popped is None
 
         # Add items
-        items = [
+        items: list[TResponseInputItem] = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
             {"role": "user", "content": "How are you?"},
@@ -243,25 +243,25 @@ async def test_sqlite_session_memory_pop_item():
         # Pop the most recent item
         popped = await session.pop_item()
         assert popped is not None
-        assert popped["role"] == "user"
-        assert popped["content"] == "How are you?"
+        assert popped.get("role") == "user"
+        assert popped.get("content") == "How are you?"
 
         # Verify item was removed
         retrieved_after_pop = await session.get_items()
         assert len(retrieved_after_pop) == 2
-        assert retrieved_after_pop[-1]["content"] == "Hi there!"
+        assert retrieved_after_pop[-1].get("content") == "Hi there!"
 
         # Pop another item
         popped2 = await session.pop_item()
         assert popped2 is not None
-        assert popped2["role"] == "assistant"
-        assert popped2["content"] == "Hi there!"
+        assert popped2.get("role") == "assistant"
+        assert popped2.get("content") == "Hi there!"
 
         # Pop the last item
         popped3 = await session.pop_item()
         assert popped3 is not None
-        assert popped3["role"] == "user"
-        assert popped3["content"] == "Hello"
+        assert popped3.get("role") == "user"
+        assert popped3.get("content") == "Hello"
 
         # Try to pop from empty session again
         popped4 = await session.pop_item()
@@ -286,10 +286,10 @@ async def test_session_memory_pop_different_sessions():
         session_2 = SQLiteSession(session_2_id, db_path)
 
         # Add items to both sessions
-        items_1 = [
+        items_1: list[TResponseInputItem] = [
             {"role": "user", "content": "Session 1 message"},
         ]
-        items_2 = [
+        items_2: list[TResponseInputItem] = [
             {"role": "user", "content": "Session 2 message 1"},
             {"role": "user", "content": "Session 2 message 2"},
         ]
@@ -300,17 +300,17 @@ async def test_session_memory_pop_different_sessions():
         # Pop from session 2
         popped = await session_2.pop_item()
         assert popped is not None
-        assert popped["content"] == "Session 2 message 2"
+        assert popped.get("content") == "Session 2 message 2"
 
         # Verify session 1 is unaffected
         session_1_items = await session_1.get_items()
         assert len(session_1_items) == 1
-        assert session_1_items[0]["content"] == "Session 1 message"
+        assert session_1_items[0].get("content") == "Session 1 message"
 
         # Verify session 2 has one item left
         session_2_items = await session_2.get_items()
         assert len(session_2_items) == 1
-        assert session_2_items[0]["content"] == "Session 2 message 1"
+        assert session_2_items[0].get("content") == "Session 2 message 1"
 
         session_1.close()
         session_2.close()
@@ -325,7 +325,7 @@ async def test_sqlite_session_get_items_with_limit():
         session = SQLiteSession(session_id, db_path)
 
         # Add multiple items
-        items = [
+        items: list[TResponseInputItem] = [
             {"role": "user", "content": "Message 1"},
             {"role": "assistant", "content": "Response 1"},
             {"role": "user", "content": "Message 2"},
@@ -339,28 +339,28 @@ async def test_sqlite_session_get_items_with_limit():
         # Test getting all items (default behavior)
         all_items = await session.get_items()
         assert len(all_items) == 6
-        assert all_items[0]["content"] == "Message 1"
-        assert all_items[-1]["content"] == "Response 3"
+        assert all_items[0].get("content") == "Message 1"
+        assert all_items[-1].get("content") == "Response 3"
 
         # Test getting latest 2 items
         latest_2 = await session.get_items(limit=2)
         assert len(latest_2) == 2
-        assert latest_2[0]["content"] == "Message 3"
-        assert latest_2[1]["content"] == "Response 3"
+        assert latest_2[0].get("content") == "Message 3"
+        assert latest_2[1].get("content") == "Response 3"
 
         # Test getting latest 4 items
         latest_4 = await session.get_items(limit=4)
         assert len(latest_4) == 4
-        assert latest_4[0]["content"] == "Message 2"
-        assert latest_4[1]["content"] == "Response 2"
-        assert latest_4[2]["content"] == "Message 3"
-        assert latest_4[3]["content"] == "Response 3"
+        assert latest_4[0].get("content") == "Message 2"
+        assert latest_4[1].get("content") == "Response 2"
+        assert latest_4[2].get("content") == "Message 3"
+        assert latest_4[3].get("content") == "Response 3"
 
         # Test getting more items than available
         latest_10 = await session.get_items(limit=10)
         assert len(latest_10) == 6  # Should return all available items
-        assert latest_10[0]["content"] == "Message 1"
-        assert latest_10[-1]["content"] == "Response 3"
+        assert latest_10[0].get("content") == "Message 1"
+        assert latest_10[-1].get("content") == "Response 3"
 
         # Test getting 0 items
         latest_0 = await session.get_items(limit=0)

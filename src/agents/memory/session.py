@@ -139,9 +139,7 @@ class SQLiteSession(SessionABC):
         # For file databases, we use thread-local connections for better concurrency
         self._is_memory_db = str(db_path) == ":memory:"
         if self._is_memory_db:
-            self._shared_connection = sqlite3.connect(
-                ":memory:", check_same_thread=False
-            )
+            self._shared_connection = sqlite3.connect(":memory:", check_same_thread=False)
             self._shared_connection.execute("PRAGMA journal_mode=WAL")
             self._init_db_for_connection(self._shared_connection)
         else:
@@ -164,6 +162,9 @@ class SQLiteSession(SessionABC):
                     check_same_thread=False,
                 )
                 self._local.connection.execute("PRAGMA journal_mode=WAL")
+            assert isinstance(self._local.connection, sqlite3.Connection), (
+                f"Expected sqlite3.Connection, got {type(self._local.connection)}"
+            )
             return self._local.connection
 
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
@@ -277,9 +278,7 @@ class SQLiteSession(SessionABC):
                 )
 
                 # Add items
-                message_data = [
-                    (self.session_id, json.dumps(item)) for item in items
-                ]
+                message_data = [(self.session_id, json.dumps(item)) for item in items]
                 conn.executemany(
                     f"""
                     INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)

@@ -329,7 +329,6 @@ class AgentRunner:
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        session: Session | None = None,
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -337,6 +336,7 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        session = kwargs.get("session")
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:
@@ -501,7 +501,6 @@ class AgentRunner:
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        session: Session | None = None,
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -509,6 +508,8 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        session = kwargs.get("session")
+
         return asyncio.get_event_loop().run_until_complete(
             self.run(
                 starting_agent,
@@ -526,7 +527,6 @@ class AgentRunner:
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem],
-        session: Session | None = None,
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
@@ -534,6 +534,8 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        session = kwargs.get("session")
+
         if hooks is None:
             hooks = RunHooks[Any]()
         if run_config is None:

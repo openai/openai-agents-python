@@ -132,9 +132,7 @@ def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
     _config.set_default_openai_key(key, use_for_tracing)
 
 
-def set_default_openai_client(
-    client: AsyncOpenAI, use_for_tracing: bool = True
-) -> None:
+def set_default_openai_client(client: AsyncOpenAI, use_for_tracing: bool = True) -> None:
     """Set the default OpenAI client to use for LLM requests and/or tracing. If provided, this
     client will be used instead of the default OpenAI client.
 
