@@ -29,8 +29,9 @@ async def test_list_resource_templates():
 
 @pytest.mark.asyncio
 async def test_read_resource():
+    """Test getting a resource"""
     server = FakeMCPServer()
     server.add_resource_template(uri="docs://{section}/search", name="Docs Search")
 
-    result = await server.get_prompt("docs://{section}/search")
+    result = await server.read_resource("docs://{section}/search")
     assert result.name == "Docs Search"
