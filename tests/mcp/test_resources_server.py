@@ -1,6 +1,8 @@
 import pytest
 from pydantic import AnyUrl
 
+from agents import Agent, Runner
+
 from .helpers import FakeMCPServer
 
 
@@ -43,3 +45,27 @@ async def test_read_resource_not_found():
     uri = "docs://api/reference"
     with pytest.raises(KeyError, match=f"Resource {uri} not found"):
         await server.read_resource(AnyUrl(uri))
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_agent_with_resources(streaming: bool):
+    """Test agent with resources"""
+    server = FakeMCPServer()
+
+    agent = Agent(
+        name="Assistant",
+        instructions="Answer users queries using the available resources",
+        mcp_servers=[server],
+    )
+
+    message = "What's the process to access the APIs? What are the available endpoints?"
+    if streaming:
+        streaming_result = Runner.run_streamed(agent, input=message)
+        async for _ in streaming_result.stream_events():
+            pass
+        final_result = streaming_result.final_output
+    else:
+        result = await Runner.run(agent, input=message)
+        final_result = result.final_output
+
+    assert final_result is not None
