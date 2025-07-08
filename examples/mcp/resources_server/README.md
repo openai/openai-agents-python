@@ -1,29 +1,19 @@
-# MCP Prompt Server Example
+# MCP Resources Server Example
+This example shows the absolute basics of working with an MCP resources server by discovering what resources exist and reading one of them.
 
-This example uses a local MCP prompt server in [server.py](server.py).
+The local MCP Resources Server is defined in [server.py](server.py).
 
 Run the example via:
 
 ```
-uv run python examples/mcp/prompt_server/main.py
+uv run python examples/mcp/resources_server/main.py
 ```
 
-## Details
+## What the code does
 
-The example uses the `MCPServerStreamableHttp` class from `agents.mcp`. The server runs in a sub-process at `http://localhost:8000/mcp` and provides user-controlled prompts that generate agent instructions.
+The example uses the `MCPServerStreamableHttp` class from `agents.mcp`. The server runs in a sub-process at `http://localhost:8000/mcp` and provides resources that can be exposed to agents.
+The example demonstrates three main functions:
 
-The server exposes prompts like `generate_code_review_instructions` that take parameters such as focus area and programming language. The agent calls these prompts to dynamically generate its system instructions based on user-provided parameters.
-
-## Workflow
-
-The example demonstrates two key functions:
-
-1. **`show_available_prompts`** - Lists all available prompts on the MCP server, showing users what prompts they can select from. This demonstrates the discovery aspect of MCP prompts.
-
-2. **`demo_code_review`** - Shows the complete user-controlled prompt workflow:
-   - Calls `generate_code_review_instructions` with specific parameters (focus: "security vulnerabilities", language: "python")
-   - Uses the generated instructions to create an Agent with specialized code review capabilities
-   - Runs the agent against vulnerable sample code (command injection via `os.system`)
-   - The agent analyzes the code and provides security-focused feedback using available tools
-
-This pattern allows users to dynamically configure agent behavior through MCP prompts rather than hardcoded instructions. 
+1. **`list_resources`** - Lists all available resources in the MCP server.
+2. **`list_resource_templates`** - Lists all available resources templates in the MCP server.
+3. **`read_resource`** - Read a specific resource from the MCP server.
