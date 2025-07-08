@@ -14,3 +14,14 @@ async def test_list_resources():
     assert len(result.resources) == 1
     assert result.resources[0].uri == AnyUrl("docs://api/reference")
     assert result.resources[0].name == "reference"
+
+@pytest.mark.asyncio
+async def test_list_resource_templates():
+    """Test listing available resource templates"""
+    server = FakeMCPServer()
+    server.add_resource_template(uri="docs://{section}/search", name="Docs Search")
+
+    result = await server.list_resource_templates()
+    assert len(result.resourceTemplates) == 1
+    assert result.resourceTemplates[0].uri == "docs://{section}/search"
+    assert result.resourceTemplates[0].name == "Docs Search"
