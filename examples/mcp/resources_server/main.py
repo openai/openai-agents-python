@@ -10,23 +10,27 @@ from agents import gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
 from mcp.types import EmptyResult, ListResourcesResult, ReadResourceResult
 
+
 async def list_resources(mcp_server: MCPServer) -> ListResourcesResult:
-    """List available resources """
+    """List available resources"""
     resources_result = await mcp_server.list_resources()
     print("\n### Resources ###")
     for resource in resources_result.resources:
         print(f"name: {resource.name}, description: {resource.description}")
 
+
 async def list_resource_templates(mcp_server: MCPServer) -> ListResourcesResult:
-    """List available resources templates """
+    """List available resources templates"""
     resources_templates_result = await mcp_server.list_resource_templates()
     print("\n### Resource Templates ###")
     for resource in resources_templates_result.resourceTemplates:
         print(f"name: {resource.name}, description: {resource.description}")
 
+
 async def read_resource(mcp_server: MCPServer, uri: AnyUrl) -> ReadResourceResult:
     resource = await mcp_server.read_resource(uri)
     print(resource.contents[0].text)
+
 
 async def main():
     async with MCPServerStreamableHttp(
@@ -40,6 +44,7 @@ async def main():
             await list_resources(server)
             await list_resource_templates(server)
             await read_resource(server, AnyUrl("docs://api/reference"))
+
 
 if __name__ == "__main__":
     if not shutil.which("uv"):

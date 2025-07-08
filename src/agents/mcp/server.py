@@ -16,13 +16,12 @@ from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_clie
 from mcp.shared.message import SessionMessage
 from mcp.types import (
     CallToolResult,
-    EmptyResult,
     GetPromptResult,
     InitializeResult,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
-    ReadResourceResult
+    ReadResourceResult,
 )
 from typing_extensions import NotRequired, TypedDict
 
@@ -88,25 +87,22 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def list_resources(
-            self, cursor: str | None = None
-    ) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         """List the resources available on the server."""
         pass
 
     @abc.abstractmethod
     async def list_resource_templates(
-            self, cursor: str | None = None
+        self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
         """List the resources templates available on the server."""
         pass
 
     @abc.abstractmethod
-    async def read_resource(
-            self, uri: AnyUrl
-    ) -> ReadResourceResult:
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Read a specific resource given its uri."""
         pass
+
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
@@ -323,25 +319,21 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         return await self.session.get_prompt(name, arguments)
 
-    async def list_resources(
-            self, cursor: str | None = None
-    ) -> ListResourcesResult:
+    async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         """List the resources available on the server."""
         self._ensure_session()
 
         return await self.session.list_resources(cursor)
 
     async def list_resource_templates(
-            self, cursor: str | None = None
+        self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
         """List the resources templates available on the server."""
         self._ensure_session()
 
         return await self.session.list_resource_templates(cursor)
 
-    async def read_resource(
-            self, uri: AnyUrl
-    ) -> ReadResourceResult:
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Read a specific resource given its uri."""
         self._ensure_session()
 

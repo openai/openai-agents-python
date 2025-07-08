@@ -39,6 +39,7 @@ CHANGELOG_MD = """
 * Fixed edge-case bug in /reports endpoint
 """
 
+
 # ──────────────────────────────────────────────────────────────────────
 # 1. Static resources
 # ──────────────────────────────────────────────────────────────────────
@@ -101,6 +102,7 @@ def docs_search(section: str) -> str:
     }
     return database.get(section, "Section not found.")
 
+
 if __name__ == "__main__":
     # Initialize and run the server
-    mcp.run(transport='streamable-http')
+    mcp.run(transport="streamable-http")
