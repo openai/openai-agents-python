@@ -28,7 +28,8 @@ async def list_resource_templates(mcp_server: MCPServer):
 
 async def read_resource(mcp_server: MCPServer, uri: AnyUrl):
     resource: ReadResourceResult = await mcp_server.read_resource(uri)
-    print(resource.contents[0].text)
+    print("\n### Resource Content ###")
+    print(resource.contents[0])
 
 async def main():
     async with MCPServerStreamableHttp(
