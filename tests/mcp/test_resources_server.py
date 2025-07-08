@@ -41,5 +41,5 @@ async def test_read_resource_not_found():
     server = FakeMCPServer()
 
     uri = AnyUrl("docs://api/reference")
-    with pytest.raises(ValueError, match=f"Resource {uri} not found"):
+    with pytest.raises(KeyError, match=f"Resource {uri} not found"):
         await server.read_resource(uri)
