@@ -58,7 +58,7 @@ async def test_agent_with_resources(streaming: bool):
         mcp_servers=[server],
     )
 
-    message = "What's the process to access the APIs? What are the available endpoints?"
+    message = "What's the process to access the APIs?"
     if streaming:
         streaming_result = Runner.run_streamed(agent, input=message)
         async for _ in streaming_result.stream_events():
