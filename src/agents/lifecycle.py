@@ -1,16 +1,14 @@
-from typing import Any, Generic, List
+from typing import Any, Generic, Optional
 
 from typing_extensions import TypeVar
 
 from .agent import Agent, AgentBase
+from .items import ModelResponse, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool
-from .items import TResponseInputItem, ModelResponse 
-
- 
-
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
+
 
 class RunHooksBase(Generic[TContext, TAgent]):
     """A class that receives callbacks on various lifecycle events in an agent run. Subclass and
@@ -20,9 +18,9 @@ class RunHooksBase(Generic[TContext, TAgent]):
     async def on_llm_start(
         self,
         context: RunContextWrapper[TContext],
-        agent: TAgent,
-        system_prompt: str | None,
-        input_items: List[TResponseInputItem]
+        agent: Agent[TContext],
+        system_prompt: Optional[str],
+        input_items: list[TResponseInputItem],
     ) -> None:
         """Called just before invoking the LLM for this agent."""
         pass
@@ -30,14 +28,11 @@ class RunHooksBase(Generic[TContext, TAgent]):
     async def on_llm_end(
         self,
         context: RunContextWrapper[TContext],
-        agent: TAgent,
-        response: ModelResponse
+        agent: Agent[TContext],
+        response: ModelResponse,
     ) -> None:
         """Called immediately after the LLM call returns for this agent."""
         pass
-    
-
-       
 
     async def on_agent_start(
         self, context: RunContextWrapper[TContext], agent: TAgent
@@ -131,6 +126,25 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         result: str,
     ) -> None:
         """Called after a tool is invoked."""
+        pass
+
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        system_prompt: Optional[str],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        """Called immediately before the agent issues an LLM call."""
+        pass
+
+    async def on_llm_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        response: ModelResponse,
+    ) -> None:
+        """Called immediately after the agent receives the LLM response."""
         pass
 
 
