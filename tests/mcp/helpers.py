@@ -137,7 +137,7 @@ class FakeMCPServer(MCPServer):
             if resource.uri == uri:
                 return ReadResourceResult(**resource.model_dump(), contents=[])
 
-        raise KeyError
+        raise KeyError(f"Resource {uri} not found")
 
     def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
         """Add a resource to the fake server"""
