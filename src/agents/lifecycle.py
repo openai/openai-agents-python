@@ -1,4 +1,4 @@
-from typing import Any, Generic
+from typing import Any, Generic, Optional
 
 from .agent import Agent
 from .items import ModelResponse, TResponseInputItem
@@ -18,7 +18,7 @@ class RunHooks(Generic[TContext]):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        system_prompt: str | None,
+        system_prompt: Optional[str],
         input_items: list[TResponseInputItem],
     ) -> None:
         """Called just before invoking the LLM for this agent."""
@@ -122,4 +122,23 @@ class AgentHooks(Generic[TContext]):
         result: str,
     ) -> None:
         """Called after a tool is invoked."""
+        pass
+
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        system_prompt: Optional[str],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        """Called immediately before the agent issues an LLM call."""
+        pass
+
+    async def on_llm_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        response: ModelResponse,
+    ) -> None:
+        """Called immediately after the agent receives the LLM response."""
         pass
