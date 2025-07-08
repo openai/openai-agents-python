@@ -3,8 +3,6 @@ import json
 import shutil
 from typing import Any
 
-from pydantic import AnyUrl
-
 from mcp import Tool as MCPTool
 from mcp.types import (
     CallToolResult,
@@ -12,9 +10,11 @@ from mcp.types import (
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
+    PromptMessage,
     ReadResourceResult,
-    TextContent
+    TextContent,
 )
+from pydantic import AnyUrl
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -120,7 +120,8 @@ class FakeMCPServer(MCPServer):
         """Return empty list of resources for fake server"""
         return ListResourcesResult(resources=[])
 
-    async def list_resource_templates(self, run_context=None, agent=None) -> ListResourceTemplatesResult:
+    async def list_resource_templates(self, run_context=None, agent=None) \
+            -> ListResourceTemplatesResult:
         """Return empty list of resources templates for fake server"""
         return ListResourceTemplatesResult(resourceTemplates=[])
 

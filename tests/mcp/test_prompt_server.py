@@ -1,6 +1,8 @@
 from typing import Any
 
 import pytest
+from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
+from pydantic import AnyUrl
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer
@@ -65,6 +67,19 @@ class FakeMCPPromptServer(MCPServer):
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None):
         raise NotImplementedError("This fake server doesn't support tools")
+
+    async def list_resources(self, run_context=None, agent=None) -> ListResourcesResult:
+        """Return empty list of resources for fake server"""
+        return ListResourcesResult(resources=[])
+
+    async def list_resource_templates(self, run_context=None, agent=None) \
+            -> ListResourceTemplatesResult:
+        """Return empty list of resources templates for fake server"""
+        return ListResourceTemplatesResult(resourceTemplates=[])
+
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
+        """Return a fake resource read for fake server"""
+        return ReadResourceResult(contents=[])
 
     @property
     def name(self) -> str:
