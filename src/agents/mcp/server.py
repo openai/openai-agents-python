@@ -139,10 +139,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         self.tool_filter = tool_filter
 
-    def _ensure_session(self) -> None:
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
-
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
@@ -277,7 +273,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         agent: Agent[Any] | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
@@ -299,7 +296,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.call_tool(tool_name, arguments)
 
@@ -307,7 +305,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
     ) -> ListPromptsResult:
         """List the prompts available on the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.list_prompts()
 
@@ -315,13 +314,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.get_prompt(name, arguments)
 
     async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         """List the resources available on the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.list_resources(cursor)
 
@@ -329,13 +330,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
         """List the resources templates available on the server."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.list_resource_templates(cursor)
 
     async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Read a specific resource given its uri."""
-        self._ensure_session()
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
         return await self.session.read_resource(uri)
 
