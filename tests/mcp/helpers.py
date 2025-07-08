@@ -140,7 +140,7 @@ class FakeMCPServer(MCPServer):
     def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
         self.resources.resources.append(Resource(uri=uri, description=description, name=name))
 
-    def add_resource_template(self, uri: AnyUrl, name: str, description: str | None = None):
+    def add_resource_template(self, uri: str, name: str, description: str | None = None):
         self.resources_templates.resourceTemplates.append(
             ResourceTemplate(uriTemplate=uri, description=description, name=name)
         )
