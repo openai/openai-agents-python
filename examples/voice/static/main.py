@@ -12,7 +12,7 @@ from agents.voice import (
     VoicePipeline,
 )
 
-from .util import AudioPlayer, record_audio
+from util import AudioPlayer, record_audio
 
 """
 This is a simple example that uses a recorded audio buffer. Run it via:
