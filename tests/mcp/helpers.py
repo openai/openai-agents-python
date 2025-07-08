@@ -136,14 +136,7 @@ class FakeMCPServer(MCPServer):
         """Return a fake resource read for fake server"""
         for resource in self.resources:
             if resource.uri == uri:
-                dummy_contents = [
-                    TextResourceContents(type="text", text="dummy payload")
-                ]
-                resource = ReadResourceResult(
-                    **resource.model_dump(exclude_none=True),
-                    contents=dummy_contents
-                )
-                return resource
+                return ReadResourceResult(*resource.model_dump())
 
         raise KeyError
 
