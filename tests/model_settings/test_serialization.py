@@ -47,6 +47,7 @@ def test_all_fields_serialization() -> None:
         store=False,
         include_usage=False,
         response_include=["reasoning.encrypted_content"],
+        top_logprobs=1,
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
@@ -135,8 +136,8 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.temperature == 0.5
     assert resolved.top_p == 0.9
 
-def test_pydantic_serialization() -> None:
 
+def test_pydantic_serialization() -> None:
     """Tests whether ModelSettings can be serialized with Pydantic."""
 
     # First, lets create a ModelSettings instance
@@ -153,6 +154,7 @@ def test_pydantic_serialization() -> None:
         metadata={"foo": "bar"},
         store=False,
         include_usage=False,
+        top_logprobs=1,
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
