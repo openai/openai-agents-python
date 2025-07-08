@@ -69,16 +69,14 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
-        resources: ListResourcesResult | None = None,
-        resources_templates: ListResourceTemplatesResult | None = None,
+        resources: list[Resource] | None = None,
+        resources_templates: list[ResourceTemplate] | None = None,
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
-        self.resources = (resources or
-                          ListResourcesResult(resources=[]))
-        self.resources_templates = (resources_templates or
-                                    ListResourceTemplatesResult(resourceTemplates=[]))
+        self.resources = resources or []
+        self.resources_templates = resources_templates or []
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
@@ -126,22 +124,22 @@ class FakeMCPServer(MCPServer):
 
     async def list_resources(self, run_context=None, agent=None) -> ListResourcesResult:
         """Return empty list of resources for fake server"""
-        return ListResourcesResult(resources=[])
+        return ListResourcesResult(resources=self.resources)
 
     async def list_resource_templates(self, run_context=None, agent=None) \
             -> ListResourceTemplatesResult:
         """Return empty list of resources templates for fake server"""
-        return ListResourceTemplatesResult(resourceTemplates=[])
+        return ListResourceTemplatesResult(resourceTemplates=self.resources_templates)
 
     async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Return a fake resource read for fake server"""
         return ReadResourceResult(contents=[])
 
     def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
-        self.resources.resources.append(Resource(uri=uri, description=description, name=name))
+        self.resources.append(Resource(uri=uri, description=description, name=name))
 
     def add_resource_template(self, uri: str, name: str, description: str | None = None):
-        self.resources_templates.resourceTemplates.append(
+        self.resources_templates.append(
             ResourceTemplate(uriTemplate=uri, description=description, name=name)
         )
 
