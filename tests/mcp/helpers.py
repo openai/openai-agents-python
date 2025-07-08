@@ -69,12 +69,16 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
-        resources: ListResourcesResult = ListResourcesResult(resources=[]),
-        resources_templates: ListResourceTemplatesResult = ListResourceTemplatesResult(resourceTemplates=[]),
+        resources: ListResourcesResult | None = None,
+        resources_templates: ListResourceTemplatesResult | None = None,
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
+        if not resources:
+            resources = ListResourcesResult(resources=[])
+        if not resources_templates:
+            resources_templates = ListResourceTemplatesResult(resourceTemplates=[])
         self.resources = resources
         self.resources_templates = resources_templates
         self.tools: list[MCPTool] = tools or []
