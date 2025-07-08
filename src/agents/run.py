@@ -394,15 +394,26 @@ class AgentRunner:
                     )
 
                     if current_turn == 1:
-                        input_guardrail_results, turn_result = await asyncio.gather(
+                        # Separate blocking and non-blocking guardrails
+                        all_guardrails = starting_agent.input_guardrails + (
+                            run_config.input_guardrails or []
+                        )
+                        blocking_guardrails, non_blocking_guardrails = (
+                            self._separate_blocking_guardrails(all_guardrails)
+                        )
+
+                        # Start all guardrails and model call in parallel
+                        all_guardrails_task = asyncio.create_task(
                             self._run_input_guardrails(
                                 starting_agent,
-                                starting_agent.input_guardrails
-                                + (run_config.input_guardrails or []),
+                                all_guardrails,
                                 copy.deepcopy(input),
                                 context_wrapper,
-                            ),
-                            self._run_single_turn(
+                            )
+                        )
+
+                        model_response_task = asyncio.create_task(
+                            self._get_model_response_only(
                                 agent=current_agent,
                                 all_tools=all_tools,
                                 original_input=original_input,
@@ -413,8 +424,52 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 previous_response_id=previous_response_id,
-                            ),
+                            )
                         )
+
+                        # Get model response first (runs in parallel with guardrails)
+                        model_response, output_schema, handoffs = await model_response_task
+
+                        # Now handle tool execution based on blocking behavior
+                        if blocking_guardrails:
+                            # Wait for all guardrails to complete before executing tools
+                            input_guardrail_results = await all_guardrails_task
+
+                            # Now execute tools after guardrails complete
+                            turn_result = await self._execute_tools_from_model_response(
+                                agent=current_agent,
+                                all_tools=all_tools,
+                                original_input=original_input,
+                                generated_items=generated_items,
+                                new_response=model_response,
+                                output_schema=output_schema,
+                                handoffs=handoffs,
+                                hooks=hooks,
+                                context_wrapper=context_wrapper,
+                                run_config=run_config,
+                                tool_use_tracker=tool_use_tracker,
+                            )
+                        else:
+                            # No blocking guardrails - execute tools in parallel with remaining guardrails
+                            tool_execution_task = asyncio.create_task(
+                                self._execute_tools_from_model_response(
+                                    agent=current_agent,
+                                    all_tools=all_tools,
+                                    original_input=original_input,
+                                    generated_items=generated_items,
+                                    new_response=model_response,
+                                    output_schema=output_schema,
+                                    handoffs=handoffs,
+                                    hooks=hooks,
+                                    context_wrapper=context_wrapper,
+                                    run_config=run_config,
+                                    tool_use_tracker=tool_use_tracker,
+                                )
+                            )
+
+                            input_guardrail_results, turn_result = await asyncio.gather(
+                                all_guardrails_task, tool_execution_task
+                            )
                     else:
                         turn_result = await self._run_single_turn(
                             agent=current_agent,
@@ -971,6 +1026,107 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+        )
+
+    @classmethod
+    def _separate_blocking_guardrails(
+        cls,
+        guardrails: list[InputGuardrail[TContext]],
+    ) -> tuple[list[InputGuardrail[TContext]], list[InputGuardrail[TContext]]]:
+        """Separate guardrails into blocking and non-blocking lists."""
+        blocking = []
+        non_blocking = []
+
+        for guardrail in guardrails:
+            if guardrail.block_tool_calls:
+                blocking.append(guardrail)
+            else:
+                non_blocking.append(guardrail)
+
+        return blocking, non_blocking
+
+    @classmethod
+    async def _get_model_response_only(
+        cls,
+        *,
+        agent: Agent[TContext],
+        all_tools: list[Tool],
+        original_input: str | list[TResponseInputItem],
+        generated_items: list[RunItem],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        should_run_agent_start_hooks: bool,
+        tool_use_tracker: AgentToolUseTracker,
+        previous_response_id: str | None,
+    ) -> tuple[ModelResponse, AgentOutputSchemaBase | None, list[Handoff]]:
+        """Get model response without executing tools. Returns model response and processed metadata."""
+        # Ensure we run the hooks before anything else
+        if should_run_agent_start_hooks:
+            await asyncio.gather(
+                hooks.on_agent_start(context_wrapper, agent),
+                (
+                    agent.hooks.on_start(context_wrapper, agent)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        system_prompt, prompt_config = await asyncio.gather(
+            agent.get_system_prompt(context_wrapper),
+            agent.get_prompt(context_wrapper),
+        )
+
+        output_schema = cls._get_output_schema(agent)
+        handoffs = await cls._get_handoffs(agent, context_wrapper)
+        input = ItemHelpers.input_to_new_input_list(original_input)
+        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+
+        new_response = await cls._get_new_response(
+            agent,
+            system_prompt,
+            input,
+            output_schema,
+            all_tools,
+            handoffs,
+            context_wrapper,
+            run_config,
+            tool_use_tracker,
+            previous_response_id,
+            prompt_config,
+        )
+
+        return new_response, output_schema, handoffs
+
+    @classmethod
+    async def _execute_tools_from_model_response(
+        cls,
+        *,
+        agent: Agent[TContext],
+        all_tools: list[Tool],
+        original_input: str | list[TResponseInputItem],
+        generated_items: list[RunItem],
+        new_response: ModelResponse,
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        tool_use_tracker: AgentToolUseTracker,
+    ) -> SingleStepResult:
+        """Execute tools and side effects from a model response."""
+        return await cls._get_single_step_result_from_response(
+            agent=agent,
+            original_input=original_input,
+            pre_step_items=generated_items,
+            new_response=new_response,
+            output_schema=output_schema,
+            all_tools=all_tools,
+            handoffs=handoffs,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_use_tracker=tool_use_tracker,
         )
 
     @classmethod

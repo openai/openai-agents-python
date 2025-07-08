@@ -96,6 +96,12 @@ class InputGuardrail(Generic[TContext]):
     function's name.
     """
 
+    block_tool_calls: bool = True
+    """Whether this guardrail should block tool calls until it completes. If any input guardrail
+    has this set to True, tool execution will be delayed until all blocking guardrails finish.
+    Defaults to True for backwards compatibility and safety.
+    """
+
     def get_name(self) -> str:
         if self.name:
             return self.name
@@ -208,6 +214,7 @@ def input_guardrail(
 def input_guardrail(
     *,
     name: str | None = None,
+    block_tool_calls: bool = True,
 ) -> Callable[
     [_InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co]],
     InputGuardrail[TContext_co],
@@ -220,6 +227,7 @@ def input_guardrail(
     | None = None,
     *,
     name: str | None = None,
+    block_tool_calls: bool = True,
 ) -> (
     InputGuardrail[TContext_co]
     | Callable[
@@ -234,14 +242,14 @@ def input_guardrail(
         @input_guardrail
         def my_sync_guardrail(...): ...
 
-        @input_guardrail(name="guardrail_name")
+        @input_guardrail(name="guardrail_name", block_tool_calls=False)
         async def my_async_guardrail(...): ...
     """
 
     def decorator(
         f: _InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co],
     ) -> InputGuardrail[TContext_co]:
-        return InputGuardrail(guardrail_function=f, name=name)
+        return InputGuardrail(guardrail_function=f, name=name, block_tool_calls=block_tool_calls)
 
     if func is not None:
         # Decorator was used without parentheses
