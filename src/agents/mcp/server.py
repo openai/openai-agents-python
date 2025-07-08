@@ -108,21 +108,6 @@ class MCPServer(abc.ABC):
         """Read a specific resource given its uri."""
         pass
 
-    @abc.abstractmethod
-    async def subscribe_resource(
-            self, uri: AnyUrl
-    ) -> EmptyResult:
-        """Subscribe to a specific resource given its uri."""
-        pass
-
-    @abc.abstractmethod
-    async def unsubscribe_resource(
-            self, uri: AnyUrl
-    ) -> EmptyResult:
-        """Unsubscribe from a specific resource given its uri."""
-        pass
-
-
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
 
@@ -361,22 +346,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._ensure_session()
 
         return await self.session.read_resource(uri)
-
-    async def subscribe_resource(
-            self, uri: AnyUrl
-    ) -> EmptyResult:
-        """Subscribe to a specific resource given its uri."""
-        self._ensure_session()
-
-        return await self.session.subscribe_resource(uri)
-
-    async def unsubscribe_resource(
-            self, uri: AnyUrl
-    ) -> EmptyResult:
-        """Unsubscribe from a specific resource given its uri."""
-        self._ensure_session()
-
-        return await self.session.unsubscribe_resource(uri)
 
     async def cleanup(self):
         """Cleanup the server."""
