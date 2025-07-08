@@ -1,8 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
-
 mcp = FastMCP("Resources Server")
-
 
 API_REFERENCE_MD = """
 # Company API Reference
@@ -39,7 +37,6 @@ CHANGELOG_MD = """
 * Fixed edge-case bug in /reports endpoint
 """
 
-
 # ──────────────────────────────────────────────────────────────────────
 # 1. Static resources
 # ──────────────────────────────────────────────────────────────────────
@@ -54,7 +51,6 @@ CHANGELOG_MD = """
 def api_reference() -> str:
     return API_REFERENCE_MD
 
-
 @mcp.resource(
     "docs://guides/getting-started",
     name="Getting Started Guide",
@@ -65,7 +61,6 @@ def api_reference() -> str:
 )
 def getting_started() -> str:
     return GETTING_STARTED_MD
-
 
 # ──────────────────────────────────────────────────────────────────────
 # 2. Dynamic (async) resource
@@ -80,7 +75,6 @@ def getting_started() -> str:
 )
 async def latest_changelog() -> str:
     return CHANGELOG_MD
-
 
 # ──────────────────────────────────────────────────────────────────────
 # 3. Template resource
@@ -101,7 +95,6 @@ def docs_search(section: str) -> str:
         "changelog": CHANGELOG_MD,
     }
     return database.get(section, "Section not found.")
-
 
 if __name__ == "__main__":
     # Initialize and run the server
