@@ -12,22 +12,22 @@ from agents import gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
 
 
-async def list_resources(mcp_server: MCPServer) -> ListResourcesResult:
+async def list_resources(mcp_server: MCPServer):
     """List available resources"""
-    resources_result = await mcp_server.list_resources()
+    resources_result: ListResourcesResult = await mcp_server.list_resources()
     print("\n### Resources ###")
     for resource in resources_result.resources:
         print(f"name: {resource.name}, description: {resource.description}")
 
-async def list_resource_templates(mcp_server: MCPServer) -> ListResourcesResult:
+async def list_resource_templates(mcp_server: MCPServer):
     """List available resources templates"""
-    resources_templates_result = await mcp_server.list_resource_templates()
+    resources_templates_result: ListResourcesResult = await mcp_server.list_resource_templates()
     print("\n### Resource Templates ###")
     for resource in resources_templates_result.resourceTemplates:
         print(f"name: {resource.name}, description: {resource.description}")
 
-async def read_resource(mcp_server: MCPServer, uri: AnyUrl) -> ReadResourceResult:
-    resource = await mcp_server.read_resource(uri)
+async def read_resource(mcp_server: MCPServer, uri: AnyUrl):
+    resource: ReadResourceResult = await mcp_server.read_resource(uri)
     print(resource.contents[0].text)
 
 async def main():
