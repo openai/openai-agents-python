@@ -12,6 +12,8 @@ from mcp.types import (
     ListResourceTemplatesResult,
     PromptMessage,
     ReadResourceResult,
+    Resource,
+    ResourceTemplate,
     TextContent,
 )
 from pydantic import AnyUrl
@@ -67,10 +69,14 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
+        resources: ListResourcesResult = ListResourcesResult(resources=[]),
+        resources_templates: ListResourceTemplatesResult = ListResourceTemplatesResult(resourceTemplates=[]),
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
+        self.resources = resources
+        self.resources_templates = resources_templates
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
@@ -128,6 +134,12 @@ class FakeMCPServer(MCPServer):
     async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Return a fake resource read for fake server"""
         return ReadResourceResult(contents=[])
+
+    def add_resource(self, uri: AnyUrl, description: str | None = None):
+        self.resources.append(Resource(uri=uri, description=description))
+
+    def add_resource_template(self, uri: AnyUrl, description: str | None = None):
+        self.resources_templates.append(ResourceTemplate(uriTemplate=uri, description=description))
 
     @property
     def name(self) -> str:
