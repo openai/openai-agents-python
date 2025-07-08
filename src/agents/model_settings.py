@@ -42,11 +42,14 @@ class _OmitTypeAnnotation:
             serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
         )
 
+@dataclass
+class MCPToolChoice:
+    server_label: str
+    name: str
 
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
-ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, None]
-
+ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
 
 @dataclass
 class ModelSettings:
