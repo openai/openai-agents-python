@@ -130,9 +130,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
     def _apply_static_tool_filter(
-            self,
-            tools: list[MCPTool],
-            static_filter: ToolFilterStatic
+        self,
+        tools: list[MCPTool],
+        static_filter: ToolFilterStatic
     ) -> list[MCPTool]:
         """Apply static tool filtering based on allowlist and blocklist."""
         filtered_tools = tools
