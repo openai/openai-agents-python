@@ -15,7 +15,6 @@ from mcp.types import (
     Resource,
     ResourceTemplate,
     TextContent,
-    TextResourceContents,
 )
 from pydantic import AnyUrl
 
