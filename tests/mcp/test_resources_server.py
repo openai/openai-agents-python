@@ -11,6 +11,6 @@ async def test_list_resources():
     server.add_resource(uri=AnyUrl("docs://api/reference"), name="reference")
 
     result = await server.list_resources()
-    assert len(result) == 1
+    assert len(result.resources) == 1
     assert result.resources[0].uri == AnyUrl("docs://api/reference")
     assert result.resources[0].name == "reference"
