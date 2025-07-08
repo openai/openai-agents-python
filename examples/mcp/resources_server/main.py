@@ -5,11 +5,12 @@ import subprocess
 import time
 from typing import Any
 
+from mcp.types import ListResourcesResult, ReadResourceResult
 from pydantic import AnyUrl
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
-from mcp.types import EmptyResult, ListResourcesResult, ReadResourceResult
+
 
 async def list_resources(mcp_server: MCPServer) -> ListResourcesResult:
     """List available resources"""
