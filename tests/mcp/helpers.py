@@ -9,11 +9,11 @@ from mcp import Tool as MCPTool
 from mcp.types import (
     CallToolResult,
     GetPromptResult,
-    InitializeResult,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
     ReadResourceResult,
+    TextContent
 )
 
 from agents.mcp import MCPServer
