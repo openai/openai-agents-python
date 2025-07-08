@@ -6,6 +6,7 @@ import inspect
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
+from pydantic import AnyUrl
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -13,7 +14,16 @@ from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_cli
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import (
+    CallToolResult,
+    EmptyResult,
+    GetPromptResult,
+    InitializeResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    ReadResourceResult
+)
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -77,6 +87,41 @@ class MCPServer(abc.ABC):
         """Get a specific prompt from the server."""
         pass
 
+    @abc.abstractmethod
+    async def list_resources(
+            self, cursor: str | None = None
+    ) -> ListResourcesResult:
+        """List the resources available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def list_resource_templates(
+            self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resources templates available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def read_resource(
+            self, uri: AnyUrl
+    ) -> ReadResourceResult:
+        """Read a specific resource given its uri."""
+        pass
+
+    @abc.abstractmethod
+    async def subscribe_resource(
+            self, uri: AnyUrl
+    ) -> EmptyResult:
+        """Subscribe to a specific resource given its uri."""
+        pass
+
+    @abc.abstractmethod
+    async def unsubscribe_resource(
+            self, uri: AnyUrl
+    ) -> EmptyResult:
+        """Unsubscribe from a specific resource given its uri."""
+        pass
+
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
@@ -112,6 +157,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
+
+    def _ensure_session(self) -> None:
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call connect() first.")
 
     async def _apply_tool_filter(
         self,
@@ -247,8 +296,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         agent: Agent[Any] | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        self._ensure_session()
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
@@ -270,8 +318,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        self._ensure_session()
 
         return await self.session.call_tool(tool_name, arguments)
 
@@ -279,8 +326,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
     ) -> ListPromptsResult:
         """List the prompts available on the server."""
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        self._ensure_session()
 
         return await self.session.list_prompts()
 
@@ -288,10 +334,49 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        self._ensure_session()
 
         return await self.session.get_prompt(name, arguments)
+
+    async def list_resources(
+            self, cursor: str | None = None
+    ) -> ListResourcesResult:
+        """List the resources available on the server."""
+        self._ensure_session()
+
+        return await self.session.list_resources(cursor)
+
+    async def list_resource_templates(
+            self, cursor: str | None = None
+    ) -> ListResourceTemplatesResult:
+        """List the resources templates available on the server."""
+        self._ensure_session()
+
+        return await self.session.list_resource_templates(cursor)
+
+    async def read_resource(
+            self, uri: AnyUrl
+    ) -> ReadResourceResult:
+        """Read a specific resource given its uri."""
+        self._ensure_session()
+
+        return await self.session.read_resource(uri)
+
+    async def subscribe_resource(
+            self, uri: AnyUrl
+    ) -> EmptyResult:
+        """Subscribe to a specific resource given its uri."""
+        self._ensure_session()
+
+        return await self.session.subscribe_resource(uri)
+
+    async def unsubscribe_resource(
+            self, uri: AnyUrl
+    ) -> EmptyResult:
+        """Unsubscribe from a specific resource given its uri."""
+        self._ensure_session()
+
+        return await self.session.unsubscribe_resource(uri)
 
     async def cleanup(self):
         """Cleanup the server."""
