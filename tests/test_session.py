@@ -1,9 +1,10 @@
 """Tests for session memory functionality."""
 
-import pytest
+import asyncio
 import tempfile
 from pathlib import Path
-import asyncio
+
+import pytest
 
 from agents import Agent, Runner, SQLiteSession
 from agents.exceptions import UserError
@@ -104,9 +105,7 @@ async def test_session_memory_with_explicit_instance_parametrized(runner_method)
 
         # First turn
         model.set_next_output([get_text_message("Hello")])
-        result1 = await run_agent_async(
-            runner_method, agent, "Hi there", session=session
-        )
+        result1 = await run_agent_async(runner_method, agent, "Hi there", session=session)
         assert result1.final_output == "Hello"
 
         # Second turn
@@ -136,9 +135,7 @@ async def test_session_memory_disabled_parametrized(runner_method):
 
     # Second turn - should NOT have conversation history
     model.set_next_output([get_text_message("I don't remember")])
-    result2 = await run_agent_async(
-        runner_method, agent, "Do you remember what I said?"
-    )
+    result2 = await run_agent_async(runner_method, agent, "Do you remember what I said?")
     assert result2.final_output == "I don't remember"
 
     # Verify that the input to the second turn is just the current message
@@ -149,7 +146,8 @@ async def test_session_memory_disabled_parametrized(runner_method):
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
 async def test_session_memory_different_sessions_parametrized(runner_method):
-    """Test that different session IDs maintain separate conversation histories across all runner methods."""
+    """Test that different session IDs maintain separate conversation histories across all runner
+    methods."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_memory.db"
 
@@ -161,9 +159,7 @@ async def test_session_memory_different_sessions_parametrized(runner_method):
         session_1 = SQLiteSession(session_id_1, db_path)
 
         model.set_next_output([get_text_message("I like cats")])
-        result1 = await run_agent_async(
-            runner_method, agent, "I like cats", session=session_1
-        )
+        result1 = await run_agent_async(runner_method, agent, "I like cats", session=session_1)
         assert result1.final_output == "I like cats"
 
         # Session 2 - different session
@@ -171,9 +167,7 @@ async def test_session_memory_different_sessions_parametrized(runner_method):
         session_2 = SQLiteSession(session_id_2, db_path)
 
         model.set_next_output([get_text_message("I like dogs")])
-        result2 = await run_agent_async(
-            runner_method, agent, "I like dogs", session=session_2
-        )
+        result2 = await run_agent_async(runner_method, agent, "I like dogs", session=session_2)
         assert result2.final_output == "I like dogs"
 
         # Back to Session 1 - should remember cats, not dogs
@@ -378,7 +372,9 @@ async def test_sqlite_session_get_items_with_limit():
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
 async def test_session_memory_rejects_both_session_and_list_input(runner_method):
-    """Test that passing both a session and list input raises a UserError across all runner methods."""
+    """Test that passing both a session and list input raises a UserError across all runner
+    methods.
+    """
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_validation.db"
         session_id = "test_validation_parametrized"
@@ -398,9 +394,7 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
             await run_agent_async(runner_method, agent, list_input, session=session)
 
         # Verify the error message explains the issue
-        assert "Cannot provide both a session and a list of input items" in str(
-            exc_info.value
-        )
+        assert "Cannot provide both a session and a list of input items" in str(exc_info.value)
         assert "manually manage conversation history" in str(exc_info.value)
 
         session.close()

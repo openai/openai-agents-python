@@ -661,7 +661,7 @@ class AgentRunner:
         try:
             # Prepare input with session if enabled
             prepared_input = await AgentRunner._prepare_input_with_session(starting_input, session)
-            
+
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
 
@@ -778,7 +778,9 @@ class AgentRunner:
                             output_guardrail_results=streamed_result.output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-                        await AgentRunner._save_result_to_session(session, starting_input, temp_result)
+                        await AgentRunner._save_result_to_session(
+                            session, starting_input, temp_result
+                        )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
@@ -1197,8 +1199,9 @@ class AgentRunner:
         if isinstance(input, list):
             raise UserError(
                 "Cannot provide both a session and a list of input items. "
-                "When using session memory, provide only a string input to append to the conversation, "
-                "or use session=None and provide a list to manually manage conversation history."
+                "When using session memory, provide only a string input to append to the "
+                "conversation, or use session=None and provide a list to manually manage "
+                "conversation history."
             )
 
         # Get previous conversation history
