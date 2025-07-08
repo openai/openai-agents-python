@@ -5,7 +5,7 @@ import subprocess
 import time
 from typing import Any
 
-from mcp.types import ListResourcesResult, ReadResourceResult
+from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
 from pydantic import AnyUrl
 
 from agents import gen_trace_id, trace
@@ -21,7 +21,7 @@ async def list_resources(mcp_server: MCPServer):
 
 async def list_resource_templates(mcp_server: MCPServer):
     """List available resources templates"""
-    resources_templates_result: ListResourcesResult = await mcp_server.list_resource_templates()
+    resources_templates_result: ListResourceTemplatesResult = await mcp_server.list_resource_templates()
     print("\n### Resource Templates ###")
     for resource in resources_templates_result.resourceTemplates:
         print(f"name: {resource.name}, description: {resource.description}")
