@@ -6,7 +6,6 @@ import inspect
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from pydantic import AnyUrl
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -23,6 +22,7 @@ from mcp.types import (
     ListResourceTemplatesResult,
     ReadResourceResult,
 )
+from pydantic import AnyUrl
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
