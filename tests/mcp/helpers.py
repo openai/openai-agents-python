@@ -75,12 +75,10 @@ class FakeMCPServer(MCPServer):
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
-        if not resources:
-            resources = ListResourcesResult(resources=[])
-        if not resources_templates:
-            resources_templates = ListResourceTemplatesResult(resourceTemplates=[])
-        self.resources = resources
-        self.resources_templates = resources_templates
+        self.resources = (resources or
+                          ListResourcesResult(resources=[]))
+        self.resources_templates = (resources_templates or
+                                    ListResourceTemplatesResult(resourceTemplates=[]))
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
@@ -139,11 +137,13 @@ class FakeMCPServer(MCPServer):
         """Return a fake resource read for fake server"""
         return ReadResourceResult(contents=[])
 
-    def add_resource(self, uri: AnyUrl, description: str | None = None):
-        self.resources.append(Resource(uri=uri, description=description))
+    def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
+        self.resources.resources.append(Resource(uri=uri, description=description, name=name))
 
-    def add_resource_template(self, uri: AnyUrl, description: str | None = None):
-        self.resources_templates.append(ResourceTemplate(uriTemplate=uri, description=description))
+    def add_resource_template(self, uri: AnyUrl, name: str, description: str | None = None):
+        self.resources_templates.resourceTemplates.append(
+            ResourceTemplate(uriTemplate=uri, description=description, name=name)
+        )
 
     @property
     def name(self) -> str:
