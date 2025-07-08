@@ -23,5 +23,5 @@ async def test_list_resource_templates():
 
     result = await server.list_resource_templates()
     assert len(result.resourceTemplates) == 1
-    assert result.resourceTemplates[0].uri == "docs://{section}/search"
+    assert result.resourceTemplates[0].uriTemplate == "docs://{section}/search"
     assert result.resourceTemplates[0].name == "Docs Search"
