@@ -12,7 +12,6 @@ from mcp.types import (
     ListResourceTemplatesResult,
     PromptMessage,
     ReadResourceResult,
-    Resource,
     ResourceTemplate,
     TextContent,
 )
@@ -69,7 +68,7 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
-        resources: list[Resource] | None = None,
+        resources: list[ReadResourceResult] | None = None,
         resources_templates: list[ResourceTemplate] | None = None,
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
@@ -140,7 +139,7 @@ class FakeMCPServer(MCPServer):
         raise KeyError
 
     def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
-        self.resources.append(Resource(uri=uri, description=description, name=name))
+        self.resources.append(ReadResourceResult(uri=uri, description=description, name=name))
 
     def add_resource_template(self, uri: str, name: str, description: str | None = None):
         self.resources_templates.append(
