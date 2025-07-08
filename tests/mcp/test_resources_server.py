@@ -31,7 +31,16 @@ async def test_list_resource_templates():
 async def test_read_resource():
     """Test getting a resource"""
     server = FakeMCPServer()
-    server.add_resource(AnyUrl("docs://{section}/search"), name="Docs Search")
+    server.add_resource(AnyUrl("docs://api/reference"), name="Docs Search")
+
+    result = await server.read_resource(AnyUrl("docs://api/reference"))
+    assert result.name == "Docs Search"
+
+@pytest.mark.asyncio
+async def test_read_template_resource():
+    """Test getting a resource"""
+    server = FakeMCPServer()
+    server.add_resource_template(uri="docs://{section}/search", name="Docs Search")
 
     result = await server.read_resource(AnyUrl("docs://{section}/search"))
     assert result.name == "Docs Search"
