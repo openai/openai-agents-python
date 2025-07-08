@@ -20,8 +20,9 @@ async def test_list_resource_templates():
     """Test listing available resource templates"""
     server = FakeMCPServer()
     server.add_resource_template(uri="docs://{section}/search", name="Docs Search")
+    server.add_resource_template(uri="api://{router}/get", name="APIs Search")
 
     result = await server.list_resource_templates()
-    assert len(result.resourceTemplates) == 1
+    assert len(result.resourceTemplates) == 2
     assert result.resourceTemplates[0].uriTemplate == "docs://{section}/search"
     assert result.resourceTemplates[0].name == "Docs Search"

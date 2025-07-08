@@ -8,7 +8,7 @@ from typing import Any
 from mcp.types import ListResourcesResult, ListResourceTemplatesResult, ReadResourceResult
 from pydantic import AnyUrl
 
-from agents import gen_trace_id, trace
+from agents import Agent, Runner, gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
 
 
@@ -43,6 +43,18 @@ async def main():
             await list_resources(server)
             await list_resource_templates(server)
             await read_resource(server, AnyUrl("docs://api/reference"))
+
+        agent = Agent(
+            name="Assistant",
+            instructions="Answer users queries using the available resources",
+            mcp_servers=[server],
+        )
+
+        message = "What's the process to access the APIs? What are the available endpoints?"
+        print("\n" + "-" * 40)
+        print(f"Running: {message}")
+        result = await Runner.run(starting_agent=agent, input=message)
+        print(result.final_output)
 
 if __name__ == "__main__":
     if not shutil.which("uv"):
