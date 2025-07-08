@@ -26,3 +26,11 @@ async def test_list_resource_templates():
     assert len(result.resourceTemplates) == 2
     assert result.resourceTemplates[0].uriTemplate == "docs://{section}/search"
     assert result.resourceTemplates[0].name == "Docs Search"
+
+@pytest.mark.asyncio
+async def test_read_resource():
+    server = FakeMCPServer()
+    server.add_resource_template(uri="docs://{section}/search", name="Docs Search")
+
+    result = await server.get_prompt("docs://{section}/search")
+    assert result.name == "Docs Search"

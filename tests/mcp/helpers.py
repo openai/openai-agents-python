@@ -133,7 +133,11 @@ class FakeMCPServer(MCPServer):
 
     async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Return a fake resource read for fake server"""
-        return ReadResourceResult(contents=[])
+        for resource in self.resources:
+            if resource.uri == uri:
+                return resource
+
+        raise KeyError
 
     def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
         self.resources.append(Resource(uri=uri, description=description, name=name))
