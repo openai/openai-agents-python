@@ -280,7 +280,8 @@ class ChatCmplStreamHandler:
                     state.function_calls[tc_delta.index].name += (
                         tc_function.name if tc_function else ""
                     ) or ""
-                    state.function_calls[tc_delta.index].call_id = tc_delta.id or ""
+                    if tc_delta.id:
+                        state.function_calls[tc_delta.index].call_id = tc_delta.id
 
                     # Check if we have enough info to start streaming this function call
                     function_call = state.function_calls[tc_delta.index]
