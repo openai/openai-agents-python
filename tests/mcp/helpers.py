@@ -4,7 +4,7 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, PromptMessage, TextContent
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -93,6 +93,18 @@ class FakeMCPServer(MCPServer):
         return CallToolResult(
             content=[TextContent(text=self.tool_results[-1], type="text")],
         )
+
+    async def list_prompts(self, run_context=None, agent=None) -> ListPromptsResult:
+        """Return empty list of prompts for fake server"""
+        return ListPromptsResult(prompts=[])
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        """Return a simple prompt result for fake server"""
+        content = f"Fake prompt content for {name}"
+        message = PromptMessage(role="user", content=TextContent(type="text", text=content))
+        return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
 
     @property
     def name(self) -> str:

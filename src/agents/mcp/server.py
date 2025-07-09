@@ -13,7 +13,7 @@ from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_cli
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, InitializeResult
+from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -52,8 +52,8 @@ class MCPServer(abc.ABC):
     @abc.abstractmethod
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: Agent[Any] | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         pass
@@ -61,6 +61,20 @@ class MCPServer(abc.ABC):
     @abc.abstractmethod
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def list_prompts(
+        self,
+    ) -> ListPromptsResult:
+        """List the prompts available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        """Get a specific prompt from the server."""
         pass
 
 
@@ -118,9 +132,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
     def _apply_static_tool_filter(
-        self,
-        tools: list[MCPTool],
-        static_filter: ToolFilterStatic
+        self, tools: list[MCPTool], static_filter: ToolFilterStatic
     ) -> list[MCPTool]:
         """Apply static tool filtering based on allowlist and blocklist."""
         filtered_tools = tools
@@ -231,8 +243,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     async def list_tools(
         self,
-        run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: Agent[Any] | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
@@ -251,6 +263,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # Filter tools based on tool_filter
         filtered_tools = tools
         if self.tool_filter is not None:
+            if run_context is None or agent is None:
+                raise UserError("run_context and agent are required for dynamic tool filtering")
             filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
         return filtered_tools
 
@@ -260,6 +274,24 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.call_tool(tool_name, arguments)
+
+    async def list_prompts(
+        self,
+    ) -> ListPromptsResult:
+        """List the prompts available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        return await self.session.list_prompts()
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        """Get a specific prompt from the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        return await self.session.get_prompt(name, arguments)
 
     async def cleanup(self):
         """Cleanup the server."""

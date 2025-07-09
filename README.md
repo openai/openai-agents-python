@@ -171,9 +171,15 @@ make sync
 2. (After making changes) lint/test
 
 ```
+make check # run tests linter and typechecker
+```
+
+Or to run them individually:
+```
 make tests  # run tests
 make mypy   # run typechecker
 make lint   # run linter
+make format-check # run style checker
 ```
 
 ## Acknowledgements
