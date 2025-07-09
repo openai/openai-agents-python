@@ -205,9 +205,9 @@ class Agent(Generic[TContext]):
 
         This is different from handoffs in two ways:
         1. In handoffs, the new agent receives the conversation history. In this tool, the new agent
-        receives generated input.
+           receives generated input.
         2. In handoffs, the new agent takes over the conversation. In this tool, the new agent is
-        called as a tool, and the conversation is continued by the original agent.
+           called as a tool, and the conversation is continued by the original agent.
 
         Args:
             tool_name: The name of the tool. If not provided, the agent's name will be used.
@@ -223,13 +223,13 @@ class Agent(Generic[TContext]):
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
-            from .tracing import get_current_trace
+            from .tracing.scope import Scope
 
-            # Get the current run_config from the trace context if available
+            # Get the current run_config from context if available
             run_config = None
-            current_trace = get_current_trace()
-            if current_trace and hasattr(current_trace, '_run_config'):
-                run_config = current_trace._run_config
+            current_run_config = Scope.get_current_run_config()
+            if current_run_config and current_run_config.pass_run_config_to_sub_agents:
+                run_config = current_run_config
 
             output = await Runner.run(
                 starting_agent=self,
@@ -239,7 +239,6 @@ class Agent(Generic[TContext]):
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
-
             return ItemHelpers.text_message_outputs(output.new_items)
 
         return run_agent
