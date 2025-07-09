@@ -51,6 +51,7 @@ from .run_context import RunContextWrapper, TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
+from .tracing.scope import Scope
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
@@ -137,6 +138,11 @@ class RunConfig:
     An optional dictionary of additional metadata to include with the trace.
     """
 
+    pass_run_config_to_sub_agents: bool = False
+    """
+    Whether to pass this run configuration to sub-agents when using as_tool().
+    If True, sub-agents will inherit the parent's run configuration.
+    """
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -332,88 +338,99 @@ class AgentRunner:
 
         tool_use_tracker = AgentToolUseTracker()
 
-        with TraceCtxManager(
-            workflow_name=run_config.workflow_name,
-            trace_id=run_config.trace_id,
-            group_id=run_config.group_id,
-            metadata=run_config.trace_metadata,
-            disabled=run_config.tracing_disabled,
-        ) as trace_ctx:
-            if trace_ctx.trace:
-                # Store run_config in trace context for access by sub-agents
-                # Prefer storing in metadata if available
-                if (
-                    hasattr(trace_ctx.trace, "metadata")
-                    and isinstance(trace_ctx.trace.metadata, dict)
-                ):
-                    trace_ctx.trace.metadata["run_config"] = run_config
-                else:
-                    trace_ctx.trace._run_config = run_config  # type: ignore[attr-defined]
+        # Set the run_config context variable if enabled
+        run_config_token = None
+        if run_config.pass_run_config_to_sub_agents:
+            run_config_token = Scope.set_current_run_config(run_config)
 
-            current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(input)
-            generated_items: list[RunItem] = []
-            model_responses: list[ModelResponse] = []
+        try:
+            with TraceCtxManager(
+                workflow_name=run_config.workflow_name,
+                trace_id=run_config.trace_id,
+                group_id=run_config.group_id,
+                metadata=run_config.trace_metadata,
+                disabled=run_config.tracing_disabled,
+            ):
+                current_turn = 0
+                original_input: str | list[TResponseInputItem] = copy.deepcopy(input)
+                generated_items: list[RunItem] = []
+                model_responses: list[ModelResponse] = []
 
-            context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-                context=context,  # type: ignore
-            )
+                context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
+                    context=context,  # type: ignore
+                )
 
-            input_guardrail_results: list[InputGuardrailResult] = []
+                input_guardrail_results: list[InputGuardrailResult] = []
 
-            current_span: Span[AgentSpanData] | None = None
-            current_agent = starting_agent
-            should_run_agent_start_hooks = True
+                current_span: Span[AgentSpanData] | None = None
+                current_agent = starting_agent
+                should_run_agent_start_hooks = True
 
-            try:
-                while True:
-                    all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
+                try:
+                    while True:
+                        all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
 
-                    # Start an agent span if we don't have one. This span is ended if the current
-                    # agent changes, or if the agent loop ends.
-                    if current_span is None:
-                        handoff_names = [
-                            h.agent_name
-                            for h in await AgentRunner._get_handoffs(current_agent, context_wrapper)
-                        ]
-                        if output_schema := AgentRunner._get_output_schema(current_agent):
-                            output_type_name = output_schema.name()
+                        # Start an agent span if we don't have one. This span is ended if the
+                        # current agent changes, or if the agent loop ends.
+                        if current_span is None:
+                            handoff_names = [
+                                h.agent_name
+                                for h in await AgentRunner._get_handoffs(
+                                    current_agent, context_wrapper
+                                )
+                            ]
+                            if output_schema := AgentRunner._get_output_schema(current_agent):
+                                output_type_name = output_schema.name()
+                            else:
+                                output_type_name = "str"
+
+                            current_span = agent_span(
+                                name=current_agent.name,
+                                handoffs=handoff_names,
+                                output_type=output_type_name,
+                            )
+                            current_span.start(mark_as_current=True)
+                            current_span.span_data.tools = [t.name for t in all_tools]
+
+                        current_turn += 1
+                        if current_turn > max_turns:
+                            _error_tracing.attach_error_to_span(
+                                current_span,
+                                SpanError(
+                                    message="Max turns exceeded",
+                                    data={"max_turns": max_turns},
+                                ),
+                            )
+                            raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+
+                        logger.debug(
+                            f"Running agent {current_agent.name} (turn {current_turn})",
+                        )
+
+                        if current_turn == 1:
+                            input_guardrail_results, turn_result = await asyncio.gather(
+                                self._run_input_guardrails(
+                                    starting_agent,
+                                    starting_agent.input_guardrails
+                                    + (run_config.input_guardrails or []),
+                                    copy.deepcopy(input),
+                                    context_wrapper,
+                                ),
+                                self._run_single_turn(
+                                    agent=current_agent,
+                                    all_tools=all_tools,
+                                    original_input=original_input,
+                                    generated_items=generated_items,
+                                    hooks=hooks,
+                                    context_wrapper=context_wrapper,
+                                    run_config=run_config,
+                                    should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                    tool_use_tracker=tool_use_tracker,
+                                    previous_response_id=previous_response_id,
+                                ),
+                            )
                         else:
-                            output_type_name = "str"
-
-                        current_span = agent_span(
-                            name=current_agent.name,
-                            handoffs=handoff_names,
-                            output_type=output_type_name,
-                        )
-                        current_span.start(mark_as_current=True)
-                        current_span.span_data.tools = [t.name for t in all_tools]
-
-                    current_turn += 1
-                    if current_turn > max_turns:
-                        _error_tracing.attach_error_to_span(
-                            current_span,
-                            SpanError(
-                                message="Max turns exceeded",
-                                data={"max_turns": max_turns},
-                            ),
-                        )
-                        raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
-
-                    logger.debug(
-                        f"Running agent {current_agent.name} (turn {current_turn})",
-                    )
-
-                    if current_turn == 1:
-                        input_guardrail_results, turn_result = await asyncio.gather(
-                            self._run_input_guardrails(
-                                starting_agent,
-                                starting_agent.input_guardrails
-                                + (run_config.input_guardrails or []),
-                                copy.deepcopy(input),
-                                context_wrapper,
-                            ),
-                            self._run_single_turn(
+                            turn_result = await self._run_single_turn(
                                 agent=current_agent,
                                 all_tools=all_tools,
                                 original_input=original_input,
@@ -424,69 +441,61 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 previous_response_id=previous_response_id,
-                            ),
-                        )
-                    else:
-                        turn_result = await self._run_single_turn(
-                            agent=current_agent,
-                            all_tools=all_tools,
-                            original_input=original_input,
-                            generated_items=generated_items,
-                            hooks=hooks,
-                            context_wrapper=context_wrapper,
-                            run_config=run_config,
-                            should_run_agent_start_hooks=should_run_agent_start_hooks,
-                            tool_use_tracker=tool_use_tracker,
-                            previous_response_id=previous_response_id,
-                        )
-                    should_run_agent_start_hooks = False
+                            )
+                        should_run_agent_start_hooks = False
 
-                    model_responses.append(turn_result.model_response)
-                    original_input = turn_result.original_input
-                    generated_items = turn_result.generated_items
+                        model_responses.append(turn_result.model_response)
+                        original_input = turn_result.original_input
+                        generated_items = turn_result.generated_items
 
-                    if isinstance(turn_result.next_step, NextStepFinalOutput):
-                        output_guardrail_results = await self._run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            turn_result.next_step.output,
-                            context_wrapper,
-                        )
-                        return RunResult(
-                            input=original_input,
-                            new_items=generated_items,
-                            raw_responses=model_responses,
-                            final_output=turn_result.next_step.output,
-                            _last_agent=current_agent,
-                            input_guardrail_results=input_guardrail_results,
-                            output_guardrail_results=output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                        )
-                    elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                        if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            output_guardrail_results = await self._run_output_guardrails(
+                                current_agent.output_guardrails + (
+                                    run_config.output_guardrails or []
+                                ),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
+                            )
+                            return RunResult(
+                                input=original_input,
+                                new_items=generated_items,
+                                raw_responses=model_responses,
+                                final_output=turn_result.next_step.output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                            )
+                        elif isinstance(turn_result.next_step, NextStepHandoff):
+                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            current_span.finish(reset_current=True)
+                            current_span = None
+                            should_run_agent_start_hooks = True
+                        elif isinstance(turn_result.next_step, NextStepRunAgain):
+                            pass
+                        else:
+                            raise AgentsException(
+                                f"Unknown next step type: {type(turn_result.next_step)}"
+                            )
+                except AgentsException as exc:
+                    exc.run_data = RunErrorDetails(
+                        input=original_input,
+                        new_items=generated_items,
+                        raw_responses=model_responses,
+                        last_agent=current_agent,
+                        context_wrapper=context_wrapper,
+                        input_guardrail_results=input_guardrail_results,
+                        output_guardrail_results=[],
+                    )
+                    raise
+                finally:
+                    if current_span:
                         current_span.finish(reset_current=True)
-                        current_span = None
-                        should_run_agent_start_hooks = True
-                    elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
-                    else:
-                        raise AgentsException(
-                            f"Unknown next step type: {type(turn_result.next_step)}"
-                        )
-            except AgentsException as exc:
-                exc.run_data = RunErrorDetails(
-                    input=original_input,
-                    new_items=generated_items,
-                    raw_responses=model_responses,
-                    last_agent=current_agent,
-                    context_wrapper=context_wrapper,
-                    input_guardrail_results=input_guardrail_results,
-                    output_guardrail_results=[],
-                )
-                raise
-            finally:
-                if current_span:
-                    current_span.finish(reset_current=True)
+        finally:
+            # Always clean up the context variable
+            if run_config_token is not None:
+                Scope.reset_current_run_config(run_config_token)
 
     def run_sync(
         self,
@@ -527,56 +536,67 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
-        # If there's already a trace, we don't create a new one. In addition, we can't end the
-        # trace here, because the actual work is done in `stream_events` and this method ends
-        # before that.
-        new_trace = (
-            None
-            if get_current_trace()
-            else trace(
-                workflow_name=run_config.workflow_name,
-                trace_id=run_config.trace_id,
-                group_id=run_config.group_id,
-                metadata=run_config.trace_metadata,
-                disabled=run_config.tracing_disabled,
+        # Set the run_config context variable if enabled
+        run_config_token = None
+        if run_config.pass_run_config_to_sub_agents:
+            run_config_token = Scope.set_current_run_config(run_config)
+
+        try:
+            # If there's already a trace, we don't create a new one. In addition, we can't end the
+            # trace here, because the actual work is done in `stream_events` and this method ends
+            # before that.
+            new_trace = (
+                None
+                if get_current_trace()
+                else trace(
+                    workflow_name=run_config.workflow_name,
+                    trace_id=run_config.trace_id,
+                    group_id=run_config.group_id,
+                    metadata=run_config.trace_metadata,
+                    disabled=run_config.tracing_disabled,
+                )
             )
-        )
 
-        output_schema = AgentRunner._get_output_schema(starting_agent)
-        context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-            context=context  # type: ignore
-        )
+            output_schema = AgentRunner._get_output_schema(starting_agent)
+            context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
+                context=context  # type: ignore
+            )
 
-        streamed_result = RunResultStreaming(
-            input=copy.deepcopy(input),
-            new_items=[],
-            current_agent=starting_agent,
-            raw_responses=[],
-            final_output=None,
-            is_complete=False,
-            current_turn=0,
-            max_turns=max_turns,
-            input_guardrail_results=[],
-            output_guardrail_results=[],
-            _current_agent_output_schema=output_schema,
-            trace=new_trace,
-            context_wrapper=context_wrapper,
-        )
-
-        # Kick off the actual agent loop in the background and return the streamed result object.
-        streamed_result._run_impl_task = asyncio.create_task(
-            self._start_streaming(
-                starting_input=input,
-                streamed_result=streamed_result,
-                starting_agent=starting_agent,
+            streamed_result = RunResultStreaming(
+                input=copy.deepcopy(input),
+                new_items=[],
+                current_agent=starting_agent,
+                raw_responses=[],
+                final_output=None,
+                is_complete=False,
+                current_turn=0,
                 max_turns=max_turns,
-                hooks=hooks,
+                input_guardrail_results=[],
+                output_guardrail_results=[],
+                _current_agent_output_schema=output_schema,
+                trace=new_trace,
                 context_wrapper=context_wrapper,
-                run_config=run_config,
-                previous_response_id=previous_response_id,
             )
-        )
-        return streamed_result
+
+            # Kick off the actual agent loop in the background and return the
+            # streamed result object.
+            streamed_result._run_impl_task = asyncio.create_task(
+                self._start_streaming(
+                    starting_input=input,
+                    streamed_result=streamed_result,
+                    starting_agent=starting_agent,
+                    max_turns=max_turns,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    run_config=run_config,
+                    previous_response_id=previous_response_id,
+                )
+            )
+            return streamed_result
+        finally:
+            # Always reset the context variable
+            if run_config_token is not None:
+                Scope.reset_current_run_config(run_config_token)
 
     @classmethod
     async def _run_input_guardrails_with_queue(
