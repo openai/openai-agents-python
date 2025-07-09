@@ -67,7 +67,36 @@ class MCPConfig(TypedDict):
 
 
 @dataclass
-class Agent(Generic[TContext]):
+class AgentBase:
+    """Base class for `Agent` and `RealtimeAgent`."""
+
+    name: str
+    """The name of the agent."""
+
+    handoff_description: str | None = None
+    """A description of the agent. This is used when the agent is used as a handoff, so that an
+    LLM knows what it does and when to invoke it.
+    """
+
+    tools: list[Tool] = field(default_factory=list)
+    """A list of tools that the agent can use."""
+
+    mcp_servers: list[MCPServer] = field(default_factory=list)
+    """A list of [Model Context Protocol](https://modelcontextprotocol.io/) servers that
+    the agent can use. Every time the agent runs, it will include tools from these servers in the
+    list of available tools.
+
+    NOTE: You are expected to manage the lifecycle of these servers. Specifically, you must call
+    `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
+    longer needed.
+    """
+
+    mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
+    """Configuration for MCP servers."""
+
+
+@dataclass
+class Agent(AgentBase, Generic[TContext]):
     """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
 
     We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
@@ -76,10 +105,9 @@ class Agent(Generic[TContext]):
 
     Agents are generic on the context type. The context is a (mutable) object you create. It is
     passed to tool functions, handoffs, guardrails, etc.
-    """
 
-    name: str
-    """The name of the agent."""
+    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
+    """
 
     instructions: (
         str
@@ -103,11 +131,6 @@ class Agent(Generic[TContext]):
     usable with OpenAI models, using the Responses API.
     """
 
-    handoff_description: str | None = None
-    """A description of the agent. This is used when the agent is used as a handoff, so that an
-    LLM knows what it does and when to invoke it.
-    """
-
     handoffs: list[Agent[Any] | Handoff[TContext]] = field(default_factory=list)
     """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
     and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
@@ -124,22 +147,6 @@ class Agent(Generic[TContext]):
     model_settings: ModelSettings = field(default_factory=ModelSettings)
     """Configures model-specific tuning parameters (e.g. temperature, top_p).
     """
-
-    tools: list[Tool] = field(default_factory=list)
-    """A list of tools that the agent can use."""
-
-    mcp_servers: list[MCPServer] = field(default_factory=list)
-    """A list of [Model Context Protocol](https://modelcontextprotocol.io/) servers that
-    the agent can use. Every time the agent runs, it will include tools from these servers in the
-    list of available tools.
-
-    NOTE: You are expected to manage the lifecycle of these servers. Specifically, you must call
-    `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
-    longer needed.
-    """
-
-    mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
-    """Configuration for MCP servers."""
 
     input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
     """A list of checks that run in parallel to the agent's execution, before generating a
@@ -256,9 +263,7 @@ class Agent(Generic[TContext]):
         """Get the prompt for the agent."""
         return await PromptUtil.to_model_input(self.prompt, run_context, self)
 
-    async def get_mcp_tools(
-        self, run_context: RunContextWrapper[TContext]
-    ) -> list[Tool]:
+    async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         return await MCPUtil.get_all_function_tools(
