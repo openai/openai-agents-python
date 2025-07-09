@@ -213,6 +213,23 @@ tool = FunctionTool(
 )
 ```
 
+### Tool context
+
+When `on_invoke_tool` is called, it receives a `ToolContext` instance. The object contains:
+
+- `context` – the context object you passed to `Runner.run()`.
+- `usage` – usage information for the run so far.
+- `tool_name` – the name of the tool being invoked.
+- `tool_call_id` – the ID of the tool call.
+
+You can access these fields inside your tool function:
+
+```python
+async def run_function(ctx: ToolContext[Any], args: str) -> str:
+    print("Tool invoked:", ctx.tool_name)
+    ...
+```
+
 ### Automatic argument and docstring parsing
 
 As mentioned before, we automatically parse the function signature to extract the schema for the tool, and we parse the docstring to extract descriptions for the tool and for individual arguments. Some notes on that:
