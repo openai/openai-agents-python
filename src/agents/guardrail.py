@@ -242,7 +242,7 @@ def input_guardrail(
         f: _InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co],
     ) -> InputGuardrail[TContext_co]:
         return InputGuardrail(
-            guardrail_function=f, 
+            guardrail_function=f,
             # If not set, guardrail name uses the function’s name by default.
             name=name if name else f.__name__
         )
