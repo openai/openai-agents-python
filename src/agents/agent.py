@@ -222,12 +222,11 @@ class Agent(Generic[TContext]):
             description_override=tool_description or "",
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
-            from .tracing.scope import Scope
+            from .run import Runner, get_current_run_config
 
             # Get the current run_config from context if available
             run_config = None
-            current_run_config = Scope.get_current_run_config()
+            current_run_config = get_current_run_config()
             if current_run_config and current_run_config.pass_run_config_to_sub_agents:
                 run_config = current_run_config
 
