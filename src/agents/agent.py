@@ -79,7 +79,7 @@ class Agent(Generic[TContext]):
     """
 
     name: str
-    """The name of the agent."""
+    """The name of the agent. Must be a non-empty string."""
 
     instructions: (
         str
@@ -264,6 +264,13 @@ class Agent(Generic[TContext]):
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers, convert_schemas_to_strict, run_context, self
         )
+    
+    def __post_init__(self):
+        if not isinstance(self.name, str):
+            raise TypeError("name must be a string")
+        if not self.name.strip():
+            raise ValueError("name cannot be empty or contain only whitespace")
+
 
     async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
