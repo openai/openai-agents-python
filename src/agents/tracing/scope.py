@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 from ..logger import logger
 
 if TYPE_CHECKING:
-    from ..run import RunConfig
     from .spans import Span
     from .traces import Trace
 
@@ -17,9 +16,6 @@ _current_trace: contextvars.ContextVar["Trace | None"] = contextvars.ContextVar(
     "current_trace", default=None
 )
 
-_current_run_config: contextvars.ContextVar["RunConfig | None"] = contextvars.ContextVar(
-    "current_run_config", default=None
-)
 
 class Scope:
     """
@@ -51,17 +47,3 @@ class Scope:
     def reset_current_trace(cls, token: "contextvars.Token[Trace | None]") -> None:
         logger.debug("Resetting current trace")
         _current_trace.reset(token)
-
-    @classmethod
-    def get_current_run_config(cls) -> "RunConfig | None":
-        return _current_run_config.get()
-
-    @classmethod
-    def set_current_run_config(
-        cls, run_config: "RunConfig | None"
-    ) -> "contextvars.Token[RunConfig | None]":
-        return _current_run_config.set(run_config)
-
-    @classmethod
-    def reset_current_run_config(cls, token: "contextvars.Token[RunConfig | None]") -> None:
-        _current_run_config.reset(token)
