@@ -274,7 +274,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
         if self.cache_tools_list and not self._cache_dirty and self._tools_list:
