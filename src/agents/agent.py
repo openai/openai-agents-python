@@ -222,16 +222,22 @@ class Agent(Generic[TContext]):
             description_override=tool_description or "",
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
+            from .run import Runner, get_current_run_config
+
+            # Get the current run_config from context if available
+            run_config = None
+            current_run_config = get_current_run_config()
+            if current_run_config and current_run_config.pass_run_config_to_sub_agents:
+                run_config = current_run_config
 
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                run_config=run_config,
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
-
             return ItemHelpers.text_message_outputs(output.new_items)
 
         return run_agent
