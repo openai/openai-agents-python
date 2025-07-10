@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import inspect
 from dataclasses import dataclass, field
@@ -51,10 +52,13 @@ from .run_context import RunContextWrapper, TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
-from .tracing.scope import Scope
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
+
+_current_run_config: contextvars.ContextVar[RunConfig | None] = contextvars.ContextVar(
+    "current_run_config", default=None
+)
 
 DEFAULT_MAX_TURNS = 10
 
@@ -78,6 +82,21 @@ def get_default_agent_runner() -> AgentRunner:
     """
     global DEFAULT_AGENT_RUNNER
     return DEFAULT_AGENT_RUNNER
+
+
+def get_current_run_config() -> RunConfig | None:
+    """Get the current run config from context."""
+    return _current_run_config.get()
+
+
+def set_current_run_config(run_config: RunConfig | None) -> contextvars.Token[RunConfig | None]:
+    """Set the current run config in context."""
+    return _current_run_config.set(run_config)
+
+
+def reset_current_run_config(token: contextvars.Token[RunConfig | None]) -> None:
+    """Reset the current run config in context."""
+    _current_run_config.reset(token)
 
 
 @dataclass
@@ -341,7 +360,7 @@ class AgentRunner:
         # Set the run_config context variable if enabled
         run_config_token = None
         if run_config.pass_run_config_to_sub_agents:
-            run_config_token = Scope.set_current_run_config(run_config)
+            run_config_token = set_current_run_config(run_config)
 
         try:
             with TraceCtxManager(
@@ -495,7 +514,7 @@ class AgentRunner:
         finally:
             # Always clean up the context variable
             if run_config_token is not None:
-                Scope.reset_current_run_config(run_config_token)
+                reset_current_run_config(run_config_token)
 
     def run_sync(
         self,
@@ -539,7 +558,7 @@ class AgentRunner:
         # Set the run_config context variable if enabled
         run_config_token = None
         if run_config.pass_run_config_to_sub_agents:
-            run_config_token = Scope.set_current_run_config(run_config)
+            run_config_token = set_current_run_config(run_config)
 
         try:
             # If there's already a trace, we don't create a new one. In addition, we can't end the
@@ -596,7 +615,7 @@ class AgentRunner:
         finally:
             # Always reset the context variable
             if run_config_token is not None:
-                Scope.reset_current_run_config(run_config_token)
+                reset_current_run_config(run_config_token)
 
     @classmethod
     async def _run_input_guardrails_with_queue(
