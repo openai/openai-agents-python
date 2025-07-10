@@ -79,7 +79,11 @@ class Agent(Generic[TContext]):
     """
 
     name: str
-    """The name of the agent. Must be a non-empty string."""
+    """The name of the agent. Must be a non-empty string.
+    Raises:
+         TypeError: if not a string
+         ValueError: if empty or only whitespace
+    """
 
     instructions: (
         str
@@ -267,10 +271,10 @@ class Agent(Generic[TContext]):
     
     def __post_init__(self):
         if not isinstance(self.name, str):
-            raise TypeError("name must be a string")
+            raise TypeError(f"`name` must be a string, got {type(self.name).__name__!r}")
         if not self.name.strip():
-            raise ValueError("name cannot be empty or contain only whitespace")
-
+            raise ValueError("`name` cannot be empty or contain only whitespace")
+        
 
     async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
