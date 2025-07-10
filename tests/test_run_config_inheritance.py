@@ -5,8 +5,8 @@ from typing import cast
 import pytest
 
 from agents import Agent, RunConfig, Runner
+from agents.run import get_current_run_config, reset_current_run_config, set_current_run_config
 from agents.tool import function_tool
-from agents.tracing.scope import Scope
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
@@ -20,7 +20,7 @@ async def test_run_config_inheritance_enabled():
     @function_tool
     async def config_capture_tool() -> str:
         """Tool that captures the current run config"""
-        current_config = Scope.get_current_run_config()
+        current_config = get_current_run_config()
         inherited_configs.append(current_config)
         return "config_captured"
 
@@ -44,7 +44,9 @@ async def test_run_config_inheritance_enabled():
         instructions="You are a parent agent",
         model=FakeModel(),
         tools=[
-            sub_agent.as_tool(tool_name="sub_agent_tool", tool_description="Call the sub agent")
+            sub_agent.as_tool(
+                tool_name="sub_agent_tool", tool_description="Call the sub agent"
+            )
         ],
     )
 
@@ -58,7 +60,7 @@ async def test_run_config_inheritance_enabled():
 
     run_config = RunConfig(pass_run_config_to_sub_agents=True)
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
 
     await Runner.run(
         starting_agent=parent_agent,
@@ -66,7 +68,7 @@ async def test_run_config_inheritance_enabled():
         run_config=run_config,
     )
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
     assert len(inherited_configs) == 1
     assert inherited_configs[0] is run_config
     assert inherited_configs[0].pass_run_config_to_sub_agents is True
@@ -80,7 +82,7 @@ async def test_run_config_inheritance_disabled():
     @function_tool
     async def config_capture_tool() -> str:
         """Tool that captures the current run config"""
-        current_config = Scope.get_current_run_config()
+        current_config = get_current_run_config()
         inherited_configs.append(current_config)
         return "config_captured"
 
@@ -104,7 +106,9 @@ async def test_run_config_inheritance_disabled():
         instructions="You are a parent agent",
         model=FakeModel(),
         tools=[
-            sub_agent.as_tool(tool_name="sub_agent_tool", tool_description="Call the sub agent")
+            sub_agent.as_tool(
+                tool_name="sub_agent_tool", tool_description="Call the sub agent"
+            )
         ],
     )
 
@@ -124,7 +128,7 @@ async def test_run_config_inheritance_disabled():
         run_config=run_config,
     )
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
     assert len(inherited_configs) == 1
     assert inherited_configs[0] is None
 
@@ -143,7 +147,7 @@ async def test_context_variable_cleanup_on_error():
 
     run_config = RunConfig(pass_run_config_to_sub_agents=True)
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
 
     with pytest.raises(RuntimeError, match="Intentional test failure"):
         await Runner.run(
@@ -152,7 +156,7 @@ async def test_context_variable_cleanup_on_error():
             run_config=run_config,
         )
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
 
 
 @pytest.mark.asyncio
@@ -160,14 +164,14 @@ async def test_scope_methods_directly():
     """Test the Scope class methods directly for RunConfig management"""
     run_config = RunConfig(pass_run_config_to_sub_agents=True)
 
-    assert Scope.get_current_run_config() is None
+    assert get_current_run_config() is None
 
-    token = Scope.set_current_run_config(run_config)
-    assert Scope.get_current_run_config() is run_config
+    token = set_current_run_config(run_config)
+    assert get_current_run_config() is run_config
 
-    Scope.reset_current_run_config(token)
-    assert Scope.get_current_run_config() is None
+    reset_current_run_config(token)
+    assert get_current_run_config() is None
 
-    token = Scope.set_current_run_config(None)
-    assert Scope.get_current_run_config() is None
-    Scope.reset_current_run_config(token)
+    token = set_current_run_config(None)
+    assert get_current_run_config() is None
+    reset_current_run_config(token)
