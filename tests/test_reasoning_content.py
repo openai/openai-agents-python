@@ -27,12 +27,8 @@ from agents.models.openai_provider import OpenAIProvider
 # Helper functions to create test objects consistently
 def create_content_delta(content: str) -> dict[str, Any]:
     """Create a delta dictionary with regular content"""
-    return {
-        "content": content,
-        "role": None,
-        "function_call": None,
-        "tool_calls": None
-    }
+    return {"content": content, "role": None, "function_call": None, "tool_calls": None}
+
 
 def create_reasoning_delta(content: str) -> dict[str, Any]:
     """Create a delta dictionary with reasoning content. The Only difference is reasoning_content"""
@@ -41,7 +37,7 @@ def create_reasoning_delta(content: str) -> dict[str, Any]:
         "role": None,
         "function_call": None,
         "tool_calls": None,
-        "reasoning_content": content
+        "reasoning_content": content,
     }
 
 
@@ -188,7 +184,7 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         "index": 0,
         "finish_reason": "stop",
         "message": msg_with_reasoning,
-        "delta": None
+        "delta": None,
     }
 
     chat = ChatCompletion(
@@ -274,7 +270,7 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
-        prompt=None
+        prompt=None,
     ):
         output_events.append(event)
 
