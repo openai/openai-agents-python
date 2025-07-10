@@ -21,7 +21,7 @@ async def main():
         instructions="You are a helpful assistant.",
     )
 
-    result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
+    result = await Runner.run_streamed(agent, input="Please tell me 5 jokes.")
     async for event in result.stream_events():
         if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
             print(event.data.delta, end="", flush=True)
@@ -54,7 +54,7 @@ async def main():
         tools=[how_many_jokes],
     )
 
-    result = Runner.run_streamed(
+    result = await Runner.run_streamed(
         agent,
         input="Hello",
     )
