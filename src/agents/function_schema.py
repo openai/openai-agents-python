@@ -337,7 +337,8 @@ def function_schema(
     # 5. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
-        description=description_override or doc_info.description if doc_info else None,
+        # Ensure description_override takes precedence even if docstring info is disabled.
+        description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
         signature=sig,

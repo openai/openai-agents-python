@@ -4,7 +4,7 @@ The [Model context protocol](https://modelcontextprotocol.io/introduction) (aka 
 
 > MCP is an open protocol that standardizes how applications provide context to LLMs. Think of MCP like a USB-C port for AI applications. Just as USB-C provides a standardized way to connect your devices to various peripherals and accessories, MCP provides a standardized way to connect AI models to different data sources and tools.
 
-The Agents SDK has support for MCP. This enables you to use a wide range of MCP servers to provide tools to your Agents.
+The Agents SDK has support for MCP. This enables you to use a wide range of MCP servers to provide tools and prompts to your Agents.
 
 ## MCP servers
 
@@ -134,6 +134,38 @@ The `ToolFilterContext` provides access to:
 - `run_context`: The current run context
 - `agent`: The agent requesting the tools 
 - `server_name`: The name of the MCP server
+
+## Prompts
+
+MCP servers can also provide prompts that can be used to dynamically generate agent instructions. This allows you to create reusable instruction templates that can be customized with parameters.
+
+### Using prompts
+
+MCP servers that support prompts provide two key methods:
+
+- `list_prompts()`: Lists all available prompts on the server
+- `get_prompt(name, arguments)`: Gets a specific prompt with optional parameters
+
+```python
+# List available prompts
+prompts_result = await server.list_prompts()
+for prompt in prompts_result.prompts:
+    print(f"Prompt: {prompt.name} - {prompt.description}")
+
+# Get a specific prompt with parameters
+prompt_result = await server.get_prompt(
+    "generate_code_review_instructions",
+    {"focus": "security vulnerabilities", "language": "python"}
+)
+instructions = prompt_result.messages[0].content.text
+
+# Use the prompt-generated instructions with an Agent
+agent = Agent(
+    name="Code Reviewer",
+    instructions=instructions,  # Instructions from MCP prompt
+    mcp_servers=[server]
+)
+```
 
 ## Caching
 
