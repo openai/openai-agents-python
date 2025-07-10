@@ -53,7 +53,7 @@ class StreamingState:
     refusal_content_index_and_output: tuple[int, ResponseOutputRefusal] | None = None
     reasoning_content_index_and_output: tuple[int, ResponseReasoningItem] | None = None
     function_calls: dict[int, ResponseFunctionToolCall] = field(default_factory=dict)
-    # New fields for real-time function call streaming
+    # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
 
