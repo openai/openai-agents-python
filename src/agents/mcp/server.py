@@ -297,7 +297,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.call_tool(tool_name, arguments)
 
@@ -306,7 +306,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> ListPromptsResult:
         """List the prompts available on the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.list_prompts()
 
@@ -315,14 +315,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.get_prompt(name, arguments)
 
     async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
         """List the resources available on the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.list_resources(cursor)
 
@@ -331,14 +331,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> ListResourceTemplatesResult:
         """List the resources templates available on the server."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.list_resource_templates(cursor)
 
     async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Read a specific resource given its uri."""
         if not self.session:
-            raise UserError("Server not initialized. Make sure you call connect() first.")
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.read_resource(uri)
 
