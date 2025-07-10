@@ -549,7 +549,9 @@ class RunImpl:
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
                 tool_context = ToolContext.from_agent_context(
-                    context_wrapper, func_tool.name, tool_call.call_id
+                    context_wrapper,
+                    tool_call.call_id,
+                    tool_call=tool_call,
                 )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
