@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, fields
-from typing import Any
+from typing import Any, Optional
 
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -29,7 +29,7 @@ class ToolContext(RunContextWrapper[TContext]):
         cls,
         context: RunContextWrapper[TContext],
         tool_call_id: str,
-        tool_call: ResponseFunctionToolCall | None = None,
+        tool_call: Optional[ResponseFunctionToolCall] = None,
     ) -> "ToolContext":
         """
         Create a ToolContext from a RunContextWrapper.
