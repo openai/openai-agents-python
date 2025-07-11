@@ -102,6 +102,10 @@ print(f"Agent: {result.final_output}")
 
 # User wants to correct their question
 user_item = await session.pop_item()  # Remove user's question
+
+  #there is some naming issue user_item replace to assistant_item
+assistant_item  replace to user_item
+
 assistant_item = await session.pop_item()  # Remove agent's response
 
 # Ask a corrected question
