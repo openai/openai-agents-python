@@ -135,8 +135,8 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.temperature == 0.5
     assert resolved.top_p == 0.9
 
-def test_pydantic_serialization() -> None:
 
+def test_pydantic_serialization() -> None:
     """Tests whether ModelSettings can be serialized with Pydantic."""
 
     # First, lets create a ModelSettings instance
