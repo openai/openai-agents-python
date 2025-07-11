@@ -191,8 +191,8 @@ from agents import RunContextWrapper, FunctionTool
 
 
 
-def do_some_work(data: str) -> str:
-    return "done"
+def process_user_data(username: str, age: int) -> str:
+    return f"{username} is {age} years old ."
 
 
 class FunctionArgs(BaseModel):
@@ -202,7 +202,7 @@ class FunctionArgs(BaseModel):
 
 async def run_function(ctx: RunContextWrapper[Any], args: str) -> str:
     parsed = FunctionArgs.model_validate_json(args)
-    return do_some_work(data=f"{parsed.username} is {parsed.age} years old")
+    return process_user_data(parsed.username , parsed.age)
 
 
 tool = FunctionTool(
