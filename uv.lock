@@ -1496,6 +1496,9 @@ dependencies = [
 litellm = [
     { name = "litellm" },
 ]
+realtime = [
+    { name = "websockets" },
+]
 viz = [
     { name = "graphviz" },
 ]
@@ -1541,9 +1544,10 @@ requires-dist = [
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "types-requests", specifier = ">=2.0,<3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
+    { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm"]
+provides-extras = ["voice", "viz", "litellm", "realtime"]
 
 [package.metadata.requires-dev]
 dev = [
