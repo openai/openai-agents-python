@@ -439,3 +439,15 @@ def test_schema_with_mapping_raises_strict_mode_error():
 
     with pytest.raises(UserError):
         function_schema(func_with_mapping)
+
+
+def test_name_override_without_docstring() -> None:
+    """name_override should be used even when not parsing docstrings."""
+
+    def foo(x: int) -> int:
+        return x
+
+    fs = function_schema(foo, use_docstring_info=False, name_override="custom")
+
+    assert fs.name == "custom"
+    assert fs.params_json_schema.get("title") == "custom_args"

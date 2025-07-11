@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..logger import logger
-from .setup import GLOBAL_TRACE_PROVIDER
+from .setup import get_trace_provider
 from .span_data import (
     AgentSpanData,
     CustomSpanData,
@@ -56,13 +56,13 @@ def trace(
     Returns:
         The newly created trace object.
     """
-    current_trace = GLOBAL_TRACE_PROVIDER.get_current_trace()
+    current_trace = get_trace_provider().get_current_trace()
     if current_trace:
         logger.warning(
             "Trace already exists. Creating a new trace, but this is probably a mistake."
         )
 
-    return GLOBAL_TRACE_PROVIDER.create_trace(
+    return get_trace_provider().create_trace(
         name=workflow_name,
         trace_id=trace_id,
         group_id=group_id,
@@ -73,12 +73,12 @@ def trace(
 
 def get_current_trace() -> Trace | None:
     """Returns the currently active trace, if present."""
-    return GLOBAL_TRACE_PROVIDER.get_current_trace()
+    return get_trace_provider().get_current_trace()
 
 
 def get_current_span() -> Span[Any] | None:
     """Returns the currently active span, if present."""
-    return GLOBAL_TRACE_PROVIDER.get_current_span()
+    return get_trace_provider().get_current_span()
 
 
 def agent_span(
@@ -108,7 +108,7 @@ def agent_span(
     Returns:
         The newly created agent span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=AgentSpanData(name=name, handoffs=handoffs, tools=tools, output_type=output_type),
         span_id=span_id,
         parent=parent,
@@ -141,7 +141,7 @@ def function_span(
     Returns:
         The newly created function span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=FunctionSpanData(name=name, input=input, output=output),
         span_id=span_id,
         parent=parent,
@@ -183,7 +183,7 @@ def generation_span(
     Returns:
         The newly created generation span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=GenerationSpanData(
             input=input,
             output=output,
@@ -215,7 +215,7 @@ def response_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=ResponseSpanData(response=response),
         span_id=span_id,
         parent=parent,
@@ -246,7 +246,7 @@ def handoff_span(
     Returns:
         The newly created handoff span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=HandoffSpanData(from_agent=from_agent, to_agent=to_agent),
         span_id=span_id,
         parent=parent,
@@ -278,7 +278,7 @@ def custom_span(
     Returns:
         The newly created custom span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=CustomSpanData(name=name, data=data or {}),
         span_id=span_id,
         parent=parent,
@@ -306,7 +306,7 @@ def guardrail_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=GuardrailSpanData(name=name, triggered=triggered),
         span_id=span_id,
         parent=parent,
@@ -344,7 +344,7 @@ def transcription_span(
     Returns:
         The newly created speech-to-text span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=TranscriptionSpanData(
             input=input,
             input_format=input_format,
@@ -386,7 +386,7 @@ def speech_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=SpeechSpanData(
             model=model,
             input=input,
@@ -419,7 +419,7 @@ def speech_group_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=SpeechGroupSpanData(input=input),
         span_id=span_id,
         parent=parent,
@@ -447,7 +447,7 @@ def mcp_tools_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=MCPListToolsSpanData(server=server, result=result),
         span_id=span_id,
         parent=parent,

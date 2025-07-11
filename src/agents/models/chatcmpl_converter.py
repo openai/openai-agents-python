@@ -19,6 +19,7 @@ from openai.types.chat import (
     ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
+from openai.types.chat.chat_completion_content_part_param import File, FileFile
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.responses import (
@@ -27,14 +28,17 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
     ResponseInputContentParam,
+    ResponseInputFileParam,
     ResponseInputImageParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
     ResponseOutputMessageParam,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
+from openai.types.responses.response_reasoning_item import Summary
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
@@ -84,6 +88,16 @@ class Converter:
     @classmethod
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
+
+        # Handle reasoning content if available
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            items.append(
+                ResponseReasoningItem(
+                    id=FAKE_RESPONSES_ID,
+                    summary=[Summary(text=message.reasoning_content, type="summary_text")],
+                    type="reasoning",
+                )
+            )
 
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,
@@ -234,12 +248,24 @@ class Converter:
                         type="image_url",
                         image_url={
                             "url": casted_image_param["image_url"],
-                            "detail": casted_image_param["detail"],
+                            "detail": casted_image_param.get("detail", "auto"),
                         },
                     )
                 )
             elif isinstance(c, dict) and c.get("type") == "input_file":
-                raise UserError(f"File uploads are not supported for chat completions {c}")
+                casted_file_param = cast(ResponseInputFileParam, c)
+                if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
+                    raise UserError(
+                        f"Only file_data is supported for input_file {casted_file_param}"
+                    )
+                out.append(
+                    File(
+                        type="file",
+                        file=FileFile(
+                            file_data=casted_file_param["file_data"],
+                        ),
+                    )
+                )
             else:
                 raise UserError(f"Unknown content: {c}")
         return out

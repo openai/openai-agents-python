@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from mcp.types import ListToolsResult, Tool as MCPTool
 
+from agents import Agent
 from agents.mcp import MCPServerStdio
+from agents.run_context import RunContextWrapper
 
 from .helpers import DummyStreamsContextManager, tee
 
@@ -33,25 +35,29 @@ async def test_server_caching_works(
     mock_list_tools.return_value = ListToolsResult(tools=tools)
 
     async with server:
+        # Create test context and agent
+        run_context = RunContextWrapper(context=None)
+        agent = Agent(name="test_agent", instructions="Test agent")
+
         # Call list_tools() multiple times
-        tools = await server.list_tools()
-        assert tools == tools
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == tools
 
         assert mock_list_tools.call_count == 1, "list_tools() should have been called once"
 
         # Call list_tools() again, should return the cached value
-        tools = await server.list_tools()
-        assert tools == tools
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == tools
 
         assert mock_list_tools.call_count == 1, "list_tools() should not have been called again"
 
         # Invalidate the cache and call list_tools() again
         server.invalidate_tools_cache()
-        tools = await server.list_tools()
-        assert tools == tools
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == tools
 
         assert mock_list_tools.call_count == 2, "list_tools() should be called again"
 
         # Without invalidating the cache, calling list_tools() again should return the cached value
-        tools = await server.list_tools()
-        assert tools == tools
+        result_tools = await server.list_tools(run_context, agent)
+        assert result_tools == tools

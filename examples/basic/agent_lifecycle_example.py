@@ -101,12 +101,10 @@ Enter a max number: 250
 ### (Start Agent) 1: Agent Start Agent started
 ### (Start Agent) 2: Agent Start Agent started tool random_number
 ### (Start Agent) 3: Agent Start Agent ended tool random_number with result 37
-### (Start Agent) 4: Agent Start Agent started
-### (Start Agent) 5: Agent Start Agent handed off to Multiply Agent
+### (Start Agent) 4: Agent Start Agent handed off to Multiply Agent
 ### (Multiply Agent) 1: Agent Multiply Agent started
 ### (Multiply Agent) 2: Agent Multiply Agent started tool multiply_by_two
 ### (Multiply Agent) 3: Agent Multiply Agent ended tool multiply_by_two with result 74
-### (Multiply Agent) 4: Agent Multiply Agent started
-### (Multiply Agent) 5: Agent Multiply Agent ended with output number=74
+### (Multiply Agent) 4: Agent Multiply Agent ended with output number=74
 Done!
 """

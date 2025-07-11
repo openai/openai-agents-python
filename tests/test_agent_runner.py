@@ -745,3 +745,38 @@ async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
         pass
 
     assert model.last_turn_args.get("previous_response_id") == "resp-stream-test"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tool_addition_run() -> None:
+    """Test that tools can be added to an agent during a run."""
+    model = FakeModel()
+
+    executed: dict[str, bool] = {"called": False}
+
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+
+    @function_tool(name_override="tool2")
+    def tool2() -> str:
+        executed["called"] = True
+        return "result2"
+
+    @function_tool(name_override="add_tool")
+    async def add_tool() -> str:
+        agent.tools.append(tool2)
+        return "added"
+
+    agent.tools.append(add_tool)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("add_tool", json.dumps({}))],
+            [get_function_tool_call("tool2", json.dumps({}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="start")
+
+    assert executed["called"] is True
+    assert result.final_output == "done"

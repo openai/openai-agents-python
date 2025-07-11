@@ -14,6 +14,9 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseOutputMessage,
 )
+from openai.types.responses.response_code_interpreter_tool_call import (
+    ResponseCodeInterpreterToolCall,
+)
 from openai.types.responses.response_computer_tool_call import (
     ActionClick,
     ActionDoubleClick,
@@ -25,7 +28,17 @@ from openai.types.responses.response_computer_tool_call import (
     ActionType,
     ActionWait,
 )
-from openai.types.responses.response_input_param import ComputerCallOutput
+from openai.types.responses.response_input_item_param import (
+    ComputerCallOutputAcknowledgedSafetyCheck,
+)
+from openai.types.responses.response_input_param import ComputerCallOutput, McpApprovalResponse
+from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
+    McpApprovalRequest,
+    McpCall,
+    McpListTools,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from .agent import Agent, ToolsToFinalOutputResult
@@ -38,6 +51,9 @@ from .items import (
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
     MessageOutputItem,
     ModelResponse,
     ReasoningItem,
@@ -52,7 +68,18 @@ from .model_settings import ModelSettings
 from .models.interface import ModelTracing
 from .run_context import RunContextWrapper, TContext
 from .stream_events import RunItemStreamEvent, StreamEvent
-from .tool import ComputerTool, FunctionTool, FunctionToolResult, Tool
+from .tool import (
+    ComputerTool,
+    ComputerToolSafetyCheckData,
+    FunctionTool,
+    FunctionToolResult,
+    HostedMCPTool,
+    LocalShellCommandRequest,
+    LocalShellTool,
+    MCPToolApprovalRequest,
+    Tool,
+)
+from .tool_context import ToolContext
 from .tracing import (
     SpanError,
     Trace,
@@ -113,14 +140,28 @@ class ToolRunComputerAction:
 
 
 @dataclass
+class ToolRunMCPApprovalRequest:
+    request_item: McpApprovalRequest
+    mcp_tool: HostedMCPTool
+
+
+@dataclass
+class ToolRunLocalShellCall:
+    tool_call: LocalShellCall
+    local_shell_tool: LocalShellTool
+
+
+@dataclass
 class ProcessedResponse:
     new_items: list[RunItem]
     handoffs: list[ToolRunHandoff]
     functions: list[ToolRunFunction]
     computer_actions: list[ToolRunComputerAction]
+    local_shell_calls: list[ToolRunLocalShellCall]
     tools_used: list[str]  # Names of all tools used, including hosted tools
+    mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
 
-    def has_tools_to_run(self) -> bool:
+    def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
         # Hosted tools have already run, so there's nothing to do.
         return any(
@@ -128,6 +169,8 @@ class ProcessedResponse:
                 self.handoffs,
                 self.functions,
                 self.computer_actions,
+                self.local_shell_calls,
+                self.mcp_approval_requests,
             ]
         )
 
@@ -226,7 +269,16 @@ class RunImpl:
         new_step_items.extend([result.run_item for result in function_results])
         new_step_items.extend(computer_results)
 
-        # Second, check if there are any handoffs
+        # Next, run the MCP approval requests
+        if processed_response.mcp_approval_requests:
+            approval_results = await cls.execute_mcp_approval_requests(
+                agent=agent,
+                approval_requests=processed_response.mcp_approval_requests,
+                context_wrapper=context_wrapper,
+            )
+            new_step_items.extend(approval_results)
+
+        # Next, check if there are any handoffs
         if run_handoffs := processed_response.handoffs:
             return await cls.execute_handoffs(
                 agent=agent,
@@ -240,7 +292,7 @@ class RunImpl:
                 run_config=run_config,
             )
 
-        # Third, we'll check if the tool use should result in a final output
+        # Next, we'll check if the tool use should result in a final output
         check_tool_use = await cls._check_for_final_output_from_tools(
             agent=agent,
             tool_results=function_results,
@@ -295,7 +347,7 @@ class RunImpl:
             )
         elif (
             not output_schema or output_schema.is_plain_text()
-        ) and not processed_response.has_tools_to_run():
+        ) and not processed_response.has_tools_or_approvals_to_run():
             return await cls.execute_final_output(
                 agent=agent,
                 original_input=original_input,
@@ -343,10 +395,20 @@ class RunImpl:
         run_handoffs = []
         functions = []
         computer_actions = []
+        local_shell_calls = []
+        mcp_approval_requests = []
         tools_used: list[str] = []
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
         function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
         computer_tool = next((tool for tool in all_tools if isinstance(tool, ComputerTool)), None)
+        local_shell_tool = next(
+            (tool for tool in all_tools if isinstance(tool, LocalShellTool)), None
+        )
+        hosted_mcp_server_map = {
+            tool.tool_config["server_label"]: tool
+            for tool in all_tools
+            if isinstance(tool, HostedMCPTool)
+        }
 
         for output in response.output:
             if isinstance(output, ResponseOutputMessage):
@@ -375,6 +437,57 @@ class RunImpl:
                 computer_actions.append(
                     ToolRunComputerAction(tool_call=output, computer_tool=computer_tool)
                 )
+            elif isinstance(output, McpApprovalRequest):
+                items.append(MCPApprovalRequestItem(raw_item=output, agent=agent))
+                if output.server_label not in hosted_mcp_server_map:
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="MCP server label not found",
+                            data={"server_label": output.server_label},
+                        )
+                    )
+                    raise ModelBehaviorError(f"MCP server label {output.server_label} not found")
+                else:
+                    server = hosted_mcp_server_map[output.server_label]
+                    if server.on_approval_request:
+                        mcp_approval_requests.append(
+                            ToolRunMCPApprovalRequest(
+                                request_item=output,
+                                mcp_tool=server,
+                            )
+                        )
+                    else:
+                        logger.warning(
+                            f"MCP server {output.server_label} has no on_approval_request hook"
+                        )
+            elif isinstance(output, McpListTools):
+                items.append(MCPListToolsItem(raw_item=output, agent=agent))
+            elif isinstance(output, McpCall):
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                tools_used.append("mcp")
+            elif isinstance(output, ImageGenerationCall):
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                tools_used.append("image_generation")
+            elif isinstance(output, ResponseCodeInterpreterToolCall):
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                tools_used.append("code_interpreter")
+            elif isinstance(output, LocalShellCall):
+                items.append(ToolCallItem(raw_item=output, agent=agent))
+                tools_used.append("local_shell")
+                if not local_shell_tool:
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Local shell tool not found",
+                            data={},
+                        )
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced local shell call without a local shell tool."
+                    )
+                local_shell_calls.append(
+                    ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                )
+
             elif not isinstance(output, ResponseFunctionToolCall):
                 logger.warning(f"Unexpected output type, ignoring: {type(output)}")
                 continue
@@ -416,7 +529,9 @@ class RunImpl:
             handoffs=run_handoffs,
             functions=functions,
             computer_actions=computer_actions,
+            local_shell_calls=local_shell_calls,
             tools_used=tools_used,
+            mcp_approval_requests=mcp_approval_requests,
         )
 
     @classmethod
@@ -433,23 +548,24 @@ class RunImpl:
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
+                tool_context = ToolContext.from_agent_context(context_wrapper, tool_call.call_id)
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(context_wrapper, agent, func_tool),
+                        hooks.on_tool_start(tool_context, agent, func_tool),
                         (
-                            agent.hooks.on_tool_start(context_wrapper, agent, func_tool)
+                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
-                        func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
+                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
                     )
 
                     await asyncio.gather(
-                        hooks.on_tool_end(context_wrapper, agent, func_tool, result),
+                        hooks.on_tool_end(tool_context, agent, func_tool, result),
                         (
-                            agent.hooks.on_tool_end(context_wrapper, agent, func_tool, result)
+                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
@@ -490,6 +606,30 @@ class RunImpl:
         ]
 
     @classmethod
+    async def execute_local_shell_calls(
+        cls,
+        *,
+        agent: Agent[TContext],
+        calls: list[ToolRunLocalShellCall],
+        context_wrapper: RunContextWrapper[TContext],
+        hooks: RunHooks[TContext],
+        config: RunConfig,
+    ) -> list[RunItem]:
+        results: list[RunItem] = []
+        # Need to run these serially, because each call can affect the local shell state
+        for call in calls:
+            results.append(
+                await LocalShellAction.execute(
+                    agent=agent,
+                    call=call,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=config,
+                )
+            )
+        return results
+
+    @classmethod
     async def execute_computer_actions(
         cls,
         *,
@@ -502,6 +642,29 @@ class RunImpl:
         results: list[RunItem] = []
         # Need to run these serially, because each action can affect the computer state
         for action in actions:
+            acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
+            if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
+                acknowledged = []
+                for check in action.tool_call.pending_safety_checks:
+                    data = ComputerToolSafetyCheckData(
+                        ctx_wrapper=context_wrapper,
+                        agent=agent,
+                        tool_call=action.tool_call,
+                        safety_check=check,
+                    )
+                    maybe = action.computer_tool.on_safety_check(data)
+                    ack = await maybe if inspect.isawaitable(maybe) else maybe
+                    if ack:
+                        acknowledged.append(
+                            ComputerCallOutputAcknowledgedSafetyCheck(
+                                id=check.id,
+                                code=check.code,
+                                message=check.message,
+                            )
+                        )
+                    else:
+                        raise UserError("Computer tool safety check was not acknowledged")
+
             results.append(
                 await ComputerAction.execute(
                     agent=agent,
@@ -509,6 +672,7 @@ class RunImpl:
                     hooks=hooks,
                     context_wrapper=context_wrapper,
                     config=config,
+                    acknowledged_safety_checks=acknowledged,
                 )
             )
 
@@ -644,6 +808,40 @@ class RunImpl:
         )
 
     @classmethod
+    async def execute_mcp_approval_requests(
+        cls,
+        *,
+        agent: Agent[TContext],
+        approval_requests: list[ToolRunMCPApprovalRequest],
+        context_wrapper: RunContextWrapper[TContext],
+    ) -> list[RunItem]:
+        async def run_single_approval(approval_request: ToolRunMCPApprovalRequest) -> RunItem:
+            callback = approval_request.mcp_tool.on_approval_request
+            assert callback is not None, "Callback is required for MCP approval requests"
+            maybe_awaitable_result = callback(
+                MCPToolApprovalRequest(context_wrapper, approval_request.request_item)
+            )
+            if inspect.isawaitable(maybe_awaitable_result):
+                result = await maybe_awaitable_result
+            else:
+                result = maybe_awaitable_result
+            reason = result.get("reason", None)
+            raw_item: McpApprovalResponse = {
+                "approval_request_id": approval_request.request_item.id,
+                "approve": result["approve"],
+                "type": "mcp_approval_response",
+            }
+            if not result["approve"] and reason:
+                raw_item["reason"] = reason
+            return MCPApprovalResponseItem(
+                raw_item=raw_item,
+                agent=agent,
+            )
+
+        tasks = [run_single_approval(approval_request) for approval_request in approval_requests]
+        return await asyncio.gather(*tasks)
+
+    @classmethod
     async def execute_final_output(
         cls,
         *,
@@ -727,6 +925,11 @@ class RunImpl:
                 event = RunItemStreamEvent(item=item, name="tool_output")
             elif isinstance(item, ReasoningItem):
                 event = RunItemStreamEvent(item=item, name="reasoning_item_created")
+            elif isinstance(item, MCPApprovalRequestItem):
+                event = RunItemStreamEvent(item=item, name="mcp_approval_requested")
+            elif isinstance(item, MCPListToolsItem):
+                event = RunItemStreamEvent(item=item, name="mcp_list_tools")
+
             else:
                 logger.warning(f"Unexpected item type: {type(item)}")
                 event = None
@@ -823,6 +1026,7 @@ class ComputerAction:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
+        acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
         output_func = (
             cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
@@ -861,6 +1065,7 @@ class ComputerAction:
                     "image_url": image_url,
                 },
                 type="computer_call_output",
+                acknowledged_safety_checks=acknowledged_safety_checks,
             ),
         )
 
@@ -919,3 +1124,54 @@ class ComputerAction:
             await computer.wait()
 
         return await computer.screenshot()
+
+
+class LocalShellAction:
+    @classmethod
+    async def execute(
+        cls,
+        *,
+        agent: Agent[TContext],
+        call: ToolRunLocalShellCall,
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        config: RunConfig,
+    ) -> RunItem:
+        await asyncio.gather(
+            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+            (
+                agent.hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        request = LocalShellCommandRequest(
+            ctx_wrapper=context_wrapper,
+            data=call.tool_call,
+        )
+        output = call.local_shell_tool.executor(request)
+        if inspect.isawaitable(output):
+            result = await output
+        else:
+            result = output
+
+        await asyncio.gather(
+            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+            (
+                agent.hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        return ToolCallOutputItem(
+            agent=agent,
+            output=output,
+            raw_item={
+                "type": "local_shell_call_output",
+                "id": call.tool_call.call_id,
+                "output": result,
+                # "id": "out" + call.tool_call.id,  # TODO remove this, it should be optional
+            },
+        )

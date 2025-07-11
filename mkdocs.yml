@@ -57,8 +57,10 @@ plugins:
             - Documentation:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
+                - repl.md
                 - tools.md
                 - mcp.md
                 - handoffs.md
@@ -71,6 +73,7 @@ plugins:
                     - models/litellm.md
                 - config.md
                 - visualization.md
+                - release.md
                 - Voice agents:
                     - voice/quickstart.md
                     - voice/pipeline.md
@@ -80,6 +83,8 @@ plugins:
                     - ref/index.md
                     - ref/agent.md
                     - ref/run.md
+                    - ref/memory.md
+                    - ref/repl.md
                     - ref/tool.md
                     - ref/result.md
                     - ref/stream_events.md
@@ -137,8 +142,10 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
+                - repl.md
                 - tools.md
                 - mcp.md
                 - handoffs.md

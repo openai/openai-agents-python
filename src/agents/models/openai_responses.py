@@ -10,12 +10,14 @@ from openai.types import ChatModel
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseIncludable,
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
     WebSearchToolParam,
     response_create_params,
 )
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
@@ -23,7 +25,17 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
-from ..tool import ComputerTool, FileSearchTool, FunctionTool, Tool, WebSearchTool
+from ..tool import (
+    CodeInterpreterTool,
+    ComputerTool,
+    FileSearchTool,
+    FunctionTool,
+    HostedMCPTool,
+    ImageGenerationTool,
+    LocalShellTool,
+    Tool,
+    WebSearchTool,
+)
 from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..version import __version__
@@ -35,13 +47,6 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
-
-# From the Responses API
-IncludeLiteral = Literal[
-    "file_search_call.results",
-    "message.input_image.image_url",
-    "computer_call_output.output.image_url",
-]
 
 
 class OpenAIResponsesModel(Model):
@@ -70,6 +75,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -82,6 +88,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=False,
+                    prompt=prompt,
                 )
 
                 if _debug.DONT_LOG_MODEL_DATA:
@@ -89,7 +96,13 @@ class OpenAIResponsesModel(Model):
                 else:
                     logger.debug(
                         "LLM resp:\n"
-                        f"{json.dumps([x.model_dump() for x in response.output], indent=2)}\n"
+                        f"""{
+                            json.dumps(
+                                [x.model_dump() for x in response.output],
+                                indent=2,
+                                ensure_ascii=False,
+                            )
+                        }\n"""
                     )
 
                 usage = (
@@ -98,6 +111,8 @@ class OpenAIResponsesModel(Model):
                         input_tokens=response.usage.input_tokens,
                         output_tokens=response.usage.output_tokens,
                         total_tokens=response.usage.total_tokens,
+                        input_tokens_details=response.usage.input_tokens_details,
+                        output_tokens_details=response.usage.output_tokens_details,
                     )
                     if response.usage
                     else Usage()
@@ -135,6 +150,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -150,6 +166,7 @@ class OpenAIResponsesModel(Model):
                     handoffs,
                     previous_response_id,
                     stream=True,
+                    prompt=prompt,
                 )
 
                 final_response: Response | None = None
@@ -186,6 +203,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
 
     @overload
@@ -199,6 +217,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
 
     async def _fetch_response(
@@ -211,6 +230,7 @@ class OpenAIResponsesModel(Model):
         handoffs: list[Handoff],
         previous_response_id: str | None,
         stream: Literal[True] | Literal[False] = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
 
@@ -226,13 +246,17 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
+        include: list[ResponseIncludable] = converted_tools.includes
+        if model_settings.response_include is not None:
+            include = list({*include, *model_settings.response_include})
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2)}\n"
+                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
@@ -244,8 +268,9 @@ class OpenAIResponsesModel(Model):
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
-            include=converted_tools.includes,
+            include=include,
             tools=converted_tools.tools,
+            prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
             truncation=self._non_null_or_not_given(model_settings.truncation),
@@ -260,6 +285,7 @@ class OpenAIResponsesModel(Model):
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
             metadata=self._non_null_or_not_given(model_settings.metadata),
+            **(model_settings.extra_args or {}),
         )
 
     def _get_client(self) -> AsyncOpenAI:
@@ -271,7 +297,7 @@ class OpenAIResponsesModel(Model):
 @dataclass
 class ConvertedTools:
     tools: list[ToolParam]
-    includes: list[IncludeLiteral]
+    includes: list[ResponseIncludable]
 
 
 class Converter:
@@ -298,6 +324,18 @@ class Converter:
         elif tool_choice == "computer_use_preview":
             return {
                 "type": "computer_use_preview",
+            }
+        elif tool_choice == "image_generation":
+            return {
+                "type": "image_generation",
+            }
+        elif tool_choice == "code_interpreter":
+            return {
+                "type": "code_interpreter",
+            }
+        elif tool_choice == "mcp":
+            return {
+                "type": "mcp",
             }
         else:
             return {
@@ -328,7 +366,7 @@ class Converter:
         handoffs: list[Handoff[Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
-        includes: list[IncludeLiteral] = []
+        includes: list[ResponseIncludable] = []
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
@@ -346,7 +384,7 @@ class Converter:
         return ConvertedTools(tools=converted_tools, includes=includes)
 
     @classmethod
-    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, IncludeLiteral | None]:
+    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
@@ -357,7 +395,7 @@ class Converter:
                 "type": "function",
                 "description": tool.description,
             }
-            includes: IncludeLiteral | None = None
+            includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
             ws: WebSearchToolParam = {
                 "type": "web_search_preview",
@@ -387,7 +425,20 @@ class Converter:
                 "display_height": tool.computer.dimensions[1],
             }
             includes = None
-
+        elif isinstance(tool, HostedMCPTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, ImageGenerationTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, CodeInterpreterTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, LocalShellTool):
+            converted_tool = {
+                "type": "local_shell",
+            }
+            includes = None
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")
 

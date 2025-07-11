@@ -18,6 +18,7 @@ from agents import (
     RunContextWrapper,
     Runner,
     UserError,
+    function_tool,
     handoff,
 )
 from agents.items import RunItem
@@ -684,3 +685,39 @@ async def test_streaming_events():
     assert len(agent_data) == 2, "should have 2 agent updated events"
     assert agent_data[0].new_agent == agent_2, "should have started with agent_2"
     assert agent_data[1].new_agent == agent_1, "should have handed off to agent_1"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tool_addition_run_streamed() -> None:
+    model = FakeModel()
+
+    executed: dict[str, bool] = {"called": False}
+
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+
+    @function_tool(name_override="tool2")
+    def tool2() -> str:
+        executed["called"] = True
+        return "result2"
+
+    @function_tool(name_override="add_tool")
+    async def add_tool() -> str:
+        agent.tools.append(tool2)
+        return "added"
+
+    agent.tools.append(add_tool)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("add_tool", json.dumps({}))],
+            [get_function_tool_call("tool2", json.dumps({}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="start")
+    async for _ in result.stream_events():
+        pass
+
+    assert executed["called"] is True
+    assert result.final_output == "done"

@@ -101,6 +101,7 @@ To customize this default setup, to send traces to alternative or additional bac
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
+-   [Future AGI](https://docs.futureagi.com/future-agi/products/observability/auto-instrumentation/openai_agents)
 -   [MLflow (self-hosted/OSS](https://mlflow.org/docs/latest/tracing/integrations/openai-agent)
 -   [MLflow (Databricks hosted](https://docs.databricks.com/aws/en/mlflow/mlflow-tracing#-automatic-tracing)
 -   [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk)
@@ -114,3 +115,5 @@ To customize this default setup, to send traces to alternative or additional bac
 -   [Langfuse](https://langfuse.com/docs/integrations/openaiagentssdk/openai-agents)
 -   [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/openai-agents-sdk)
 -   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
+-   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agent-integration)
+-   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)

@@ -1,7 +1,9 @@
 import pytest
 
+from agents import Agent
 from agents.exceptions import UserError
 from agents.mcp.server import _MCPServerWithClientSession
+from agents.run_context import RunContextWrapper
 
 
 class CrashingClientSessionServer(_MCPServerWithClientSession):
@@ -35,8 +37,11 @@ async def test_server_errors_cause_error_and_cleanup_called():
 async def test_not_calling_connect_causes_error():
     server = CrashingClientSessionServer()
 
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
     with pytest.raises(UserError):
-        await server.list_tools()
+        await server.list_tools(run_context, agent)
 
     with pytest.raises(UserError):
         await server.call_tool("foo", {})

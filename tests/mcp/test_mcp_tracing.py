@@ -45,6 +45,10 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
+                        "type": "mcp_tools",
+                        "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                    },
+                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -54,10 +58,6 @@ async def test_mcp_tracing():
                         },
                         "children": [
                             {
-                                "type": "mcp_tools",
-                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
-                            },
-                            {
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_1",
@@ -66,8 +66,12 @@ async def test_mcp_tracing():
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },
+                            {
+                                "type": "mcp_tools",
+                                "data": {"server": "fake_mcp_server", "result": ["test_tool_1"]},
+                            },
                         ],
-                    }
+                    },
                 ],
             }
         ]
@@ -101,6 +105,13 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
+                        "type": "mcp_tools",
+                        "data": {
+                            "server": "fake_mcp_server",
+                            "result": ["test_tool_1", "test_tool_2"],
+                        },
+                    },
+                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -109,13 +120,6 @@ async def test_mcp_tracing():
                             "output_type": "str",
                         },
                         "children": [
-                            {
-                                "type": "mcp_tools",
-                                "data": {
-                                    "server": "fake_mcp_server",
-                                    "result": ["test_tool_1", "test_tool_2"],
-                                },
-                            },
                             {
                                 "type": "function",
                                 "data": {
@@ -133,8 +137,15 @@ async def test_mcp_tracing():
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2"],
+                                },
+                            },
                         ],
-                    }
+                    },
                 ],
             }
         ]
@@ -166,6 +177,13 @@ async def test_mcp_tracing():
                 "workflow_name": "Agent workflow",
                 "children": [
                     {
+                        "type": "mcp_tools",
+                        "data": {
+                            "server": "fake_mcp_server",
+                            "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
+                        },
+                    },
+                    {
                         "type": "agent",
                         "data": {
                             "name": "test",
@@ -175,13 +193,6 @@ async def test_mcp_tracing():
                         },
                         "children": [
                             {
-                                "type": "mcp_tools",
-                                "data": {
-                                    "server": "fake_mcp_server",
-                                    "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
-                                },
-                            },
-                            {
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_3",
@@ -190,8 +201,15 @@ async def test_mcp_tracing():
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },
+                            {
+                                "type": "mcp_tools",
+                                "data": {
+                                    "server": "fake_mcp_server",
+                                    "result": ["test_tool_1", "test_tool_2", "test_tool_3"],
+                                },
+                            },
                         ],
-                    }
+                    },
                 ],
             }
         ]

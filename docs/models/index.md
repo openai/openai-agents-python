@@ -93,6 +93,22 @@ english_agent = Agent(
 )
 ```
 
+Also, when you use OpenAI's Responses API, [there are a few other optional parameters](https://platform.openai.com/docs/api-reference/responses/create) (e.g., `user`, `service_tier`, and so on). If they are not available at the top level, you can use `extra_args` to pass them as well.
+
+```python
+from agents import Agent, ModelSettings
+
+english_agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+    model="gpt-4o",
+    model_settings=ModelSettings(
+        temperature=0.1,
+        extra_args={"service_tier": "flex", "user": "user_12345"},
+    ),
+)
+```
+
 ## Common issues with using other LLM providers
 
 ### Tracing client error 401

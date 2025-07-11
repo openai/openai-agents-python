@@ -20,7 +20,7 @@ This example shows how to use guardrails.
 Guardrails are checks that run in parallel to the agent's execution.
 They can be used to do things like:
 - Check if input messages are off-topic
-- Check that output messages don't violate any policies
+- Check that input messages don't violate any policies
 - Take over control of the agent's execution if an unexpected input is detected
 
 In this example, we'll setup an input guardrail that trips if the user is asking to do math homework.

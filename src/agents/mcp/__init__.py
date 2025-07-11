@@ -5,11 +5,20 @@ try:
         MCPServerSseParams,
         MCPServerStdio,
         MCPServerStdioParams,
+        MCPServerStreamableHttp,
+        MCPServerStreamableHttpParams,
     )
 except ImportError:
     pass
 
-from .util import MCPUtil
+from .util import (
+    MCPUtil,
+    ToolFilter,
+    ToolFilterCallable,
+    ToolFilterContext,
+    ToolFilterStatic,
+    create_static_tool_filter,
+)
 
 __all__ = [
     "MCPServer",
@@ -17,5 +26,12 @@ __all__ = [
     "MCPServerSseParams",
     "MCPServerStdio",
     "MCPServerStdioParams",
+    "MCPServerStreamableHttp",
+    "MCPServerStreamableHttpParams",
     "MCPUtil",
+    "ToolFilter",
+    "ToolFilterCallable",
+    "ToolFilterContext",
+    "ToolFilterStatic",
+    "create_static_tool_filter",
 ]

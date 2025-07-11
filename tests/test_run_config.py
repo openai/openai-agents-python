@@ -60,7 +60,7 @@ async def test_run_config_model_name_override_takes_precedence() -> None:
 async def test_run_config_model_override_object_takes_precedence() -> None:
     """
     When a concrete Model instance is set on the RunConfig, then that instance should be
-    returned by Runner._get_model regardless of the agent's model.
+    returned by AgentRunner._get_model regardless of the agent's model.
     """
     fake_model = FakeModel(initial_output=[get_text_message("override-object")])
     agent = Agent(name="test", model="agent-model")
