@@ -22,7 +22,7 @@ from ..run_context import RunContextWrapper
 from .util import ToolFilter, ToolFilterCallable, ToolFilterContext, ToolFilterStatic
 
 if TYPE_CHECKING:
-    from ..agent import Agent
+    from ..agent import AgentBase
 
 
 class MCPServer(abc.ABC):
@@ -53,7 +53,7 @@ class MCPServer(abc.ABC):
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         pass
@@ -117,7 +117,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
         tools: list[MCPTool],
         run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        agent: AgentBase,
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
         if self.tool_filter is None:
@@ -153,7 +153,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
         tools: list[MCPTool],
         run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        agent: AgentBase,
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
 
@@ -244,7 +244,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
