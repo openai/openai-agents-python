@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import textwrap
 import asyncio
 from dataclasses import dataclass
 from typing import Literal
@@ -69,7 +70,8 @@ async def main() -> None:
 
             input_items.append({"content": f"Feedback: {result.feedback}", "role": "user"})
 
-    print(f"Final story outline: {latest_outline}")
+    print("Final story outline:")
+    print(textwrap.indent(latest_outline, "  "))
 
 
 if __name__ == "__main__":
