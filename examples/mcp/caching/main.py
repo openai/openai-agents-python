@@ -12,16 +12,18 @@ from agents.mcp import MCPServerStreamableHttp
 async def run(mcp_server: MCPServerStreamableHttp):
     print(f"Cached tools before invoking tool_list")
     print(mcp_server._tools_list)
-    await mcp_server.list_tools()
+
     print(f"Cached tools names after invoking list_tools")
+    await mcp_server.list_tools()
     cached_tools_list = mcp_server._tools_list
     for tool in cached_tools_list:
         print(f"name: {tool.name}")
 
     print(f"Cached prompts before invoking list_prompts")
     print(mcp_server._prompts_list)
-    await mcp_server.list_prompts()
+
     print(f"\nCached prompts after invoking list_prompts")
+    await mcp_server.list_prompts()
     cached_prompts_list = mcp_server._prompts_list
     for prompt in cached_prompts_list.prompts:
         print(f"name: {prompt.name}")
