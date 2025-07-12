@@ -44,6 +44,7 @@ old_version_tests:
 
 .PHONY: build-docs
 build-docs:
+	uv run docs/scripts/generate_ref_files.py
 	uv run mkdocs build
 
 .PHONY: build-full-docs
