@@ -576,6 +576,7 @@ class AgentRunner:
             trace=new_trace,
             context_wrapper=context_wrapper,
         )
+        context_wrapper._event_queue = streamed_result._event_queue
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
