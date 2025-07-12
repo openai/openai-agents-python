@@ -1,20 +1,17 @@
-"""Minimal realtime session implementation for voice agents."""
-
 from __future__ import annotations
 
-import abc
 import asyncio
-from collections.abc import Awaitable
-from typing import Any, Callable, Literal
+from collections.abc import AsyncIterator
+from typing import Any
 
-from typing_extensions import TypeAlias, assert_never
+from typing_extensions import assert_never
 
 from ..handoffs import Handoff
-from ..run_context import RunContextWrapper
+from ..run_context import RunContextWrapper, TContext
 from ..tool import FunctionTool
 from ..tool_context import ToolContext
 from .agent import RealtimeAgent
-from .config import APIKeyOrKeyFunc, RealtimeSessionConfig, RealtimeUserInput
+from .config import RealtimeUserInput
 from .events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -23,253 +20,176 @@ from .events import (
     RealtimeAudioInterrupted,
     RealtimeError,
     RealtimeEventInfo,
-    RealtimeHandoffEvent,  # noqa: F401
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
-    RealtimeRawTransportEvent,
+    RealtimeRawModelEvent,
     RealtimeSessionEvent,
     RealtimeToolEnd,
     RealtimeToolStart,
 )
 from .items import InputAudio, InputText, RealtimeItem
-from .openai_realtime import OpenAIRealtimeWebSocketTransport
-from .transport import (
-    RealtimeModelName,
-    RealtimeSessionTransport,
-    RealtimeTransportConnectionOptions,
-    RealtimeTransportListener,
-)
-from .transport_events import (
-    RealtimeTransportEvent,
-    RealtimeTransportInputAudioTranscriptionCompletedEvent,
-    RealtimeTransportToolCallEvent,
+from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
+from .model_events import (
+    RealtimeModelEvent,
+    RealtimeModelInputAudioTranscriptionCompletedEvent,
+    RealtimeModelToolCallEvent,
 )
 
 
-class RealtimeSessionListener(abc.ABC):
-    """A listener for realtime session events."""
+class RealtimeSession(RealtimeModelListener):
+    """A connection to a realtime model. It streams events from the model to you, and allows you to
+    send messages and audio to the model.
 
-    @abc.abstractmethod
-    async def on_event(self, event: RealtimeSessionEvent) -> None:
-        """Called when an event is emitted by the realtime session."""
-        pass
+    Example:
+        ```python
+        runner = RealtimeRunner(agent)
+        async with await runner.run() as session:
+            # Send messages
+            await session.send_message("Hello")
+            await session.send_audio(audio_bytes)
 
-
-RealtimeSessionListenerFunc: TypeAlias = Callable[[RealtimeSessionEvent], Awaitable[None]]
-"""A function that can be used as a listener for realtime session events."""
-
-
-class _RealtimeFuncListener(RealtimeSessionListener):
-    """A listener that wraps a function."""
-
-    def __init__(self, func: RealtimeSessionListenerFunc) -> None:
-        self._func = func
-
-    async def on_event(self, event: RealtimeSessionEvent) -> None:
-        """Call the wrapped function with the event."""
-        await self._func(event)
-
-
-class RealtimeSession(RealtimeTransportListener):
-    """A `RealtimeSession` is the equivalent of `Runner` for realtime agents. It automatically
-    handles multiple turns by maintaining a persistent connection with the underlying transport
-    layer.
-
-    The session manages the local history copy, executes tools, runs guardrails and facilitates
-    handoffs between agents.
-
-    Since this code runs on your server, it uses WebSockets by default. You can optionally create
-    your own custom transport layer by implementing the `RealtimeSessionTransport` interface.
+            # Stream events
+            async for event in session:
+                if event.type == "audio":
+                    # Handle audio event
+                    pass
+        ```
     """
 
     def __init__(
         self,
-        starting_agent: RealtimeAgent,
-        *,
-        context: Any | None = None,
-        transport: Literal["websocket"] | RealtimeSessionTransport = "websocket",
-        api_key: APIKeyOrKeyFunc | None = None,
-        model: RealtimeModelName | None = None,
-        config: RealtimeSessionConfig | None = None,
-        # TODO (rm) Add guardrail support
-        # TODO (rm) Add tracing support
-        # TODO (rm) Add history audio storage config
+        model: RealtimeModel,
+        agent: RealtimeAgent,
+        context: TContext | None,
+        model_config: RealtimeModelConfig | None = None,
     ) -> None:
-        """Initialize the realtime session.
+        """Initialize the session.
 
         Args:
-            starting_agent: The agent to start the session with.
-            context: The context to use for the session.
-            transport: The transport to use for the session. Defaults to using websockets.
-            api_key: The API key to use for the session.
-            model: The model to use. Must be a realtime model.
-            config: Override parameters to use.
+            model: The model to use.
+            agent: The current agent.
+            context_wrapper: The context wrapper.
+            event_info: Event info object.
+            history: The conversation history.
+            model_config: Model configuration.
         """
-        self._current_agent = starting_agent
+        self._model = model
+        self._current_agent = agent
         self._context_wrapper = RunContextWrapper(context)
         self._event_info = RealtimeEventInfo(context=self._context_wrapper)
-        self._override_config = config
         self._history: list[RealtimeItem] = []
-        self._model = model
-        self._api_key = api_key
-
-        self._listeners: list[RealtimeSessionListener] = []
-
-        if transport == "websocket":
-            self._transport: RealtimeSessionTransport = OpenAIRealtimeWebSocketTransport()
-        else:
-            self._transport = transport
+        self._model_config = model_config or {}
+        self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
+        self._closed = False
 
     async def __aenter__(self) -> RealtimeSession:
-        """Async context manager entry."""
-        await self.connect()
-        return self
+        """Start the session by connecting to the model. After this, you will be able to stream
+        events from the model and send messages and audio to the model.
+        """
+        # Add ourselves as a listener
+        self._model.add_listener(self)
 
-    async def __aexit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
-        """Async context manager exit."""
-        await self.end()
+        # Connect to the model
+        await self._model.connect(self._model_config)
 
-    async def connect(self) -> None:
-        """Start the session: connect to the model and start the connection."""
-        self._transport.add_listener(self)
-
-        config = await self.create_session_config(
-            overrides=self._override_config,
-        )
-
-        options: RealtimeTransportConnectionOptions = {
-            "initial_session_config": config,
-        }
-
-        if config.get("api_key") is not None:
-            options["api_key"] = config["api_key"]
-        elif self._api_key is not None:
-            options["api_key"] = self._api_key
-
-        if config.get("model") is not None:
-            options["model"] = config["model"]
-        elif self._model is not None:
-            options["model"] = self._model
-
-        await self._transport.connect(options)
-
-        await self._emit_event(
+        # Emit initial history update
+        await self._put_event(
             RealtimeHistoryUpdated(
                 history=self._history,
                 info=self._event_info,
             )
         )
 
-    async def end(self) -> None:
-        """End the session: disconnect from the model and close the connection."""
-        pass
+        return self
 
-    def add_listener(self, listener: RealtimeSessionListener | RealtimeSessionListenerFunc) -> None:
-        """Add a listener to the session."""
-        if isinstance(listener, RealtimeSessionListener):
-            self._listeners.append(listener)
-        else:
-            self._listeners.append(_RealtimeFuncListener(listener))
+    async def enter(self) -> RealtimeSession:
+        """Enter the async context manager. We strongly recommend using the async context manager
+        pattern instead of this method. If you use this, you need to manually call `close()` when
+        you are done.
+        """
+        return await self.__aenter__()
 
-    def remove_listener(
-        self, listener: RealtimeSessionListener | RealtimeSessionListenerFunc
-    ) -> None:
-        """Remove a listener from the session."""
-        if isinstance(listener, RealtimeSessionListener):
-            self._listeners.remove(listener)
-        else:
-            for x in self._listeners:
-                if isinstance(x, _RealtimeFuncListener) and x._func == listener:
-                    self._listeners.remove(x)
-                    break
+    async def __aexit__(self, _exc_type: Any, _exc_val: Any, _exc_tb: Any) -> None:
+        """End the session."""
+        await self.close()
 
-    async def create_session_config(
-        self, overrides: RealtimeSessionConfig | None = None
-    ) -> RealtimeSessionConfig:
-        """Create the session config."""
-        agent = self._current_agent
-        instructions, tools = await asyncio.gather(
-            agent.get_system_prompt(self._context_wrapper),
-            agent.get_all_tools(self._context_wrapper),
-        )
-        config = RealtimeSessionConfig()
+    async def __aiter__(self) -> AsyncIterator[RealtimeSessionEvent]:
+        """Iterate over events from the session."""
+        while not self._closed:
+            try:
+                event = await self._event_queue.get()
+                yield event
+            except asyncio.CancelledError:
+                break
 
-        if self._model is not None:
-            config["model"] = self._model
-        if instructions is not None:
-            config["instructions"] = instructions
-        if tools is not None:
-            config["tools"] = [tool for tool in tools if isinstance(tool, FunctionTool)]
-
-        if overrides:
-            config.update(overrides)
-
-        return config
+    async def close(self) -> None:
+        """Close the session."""
+        self._closed = True
+        self._model.remove_listener(self)
+        await self._model.close()
 
     async def send_message(self, message: RealtimeUserInput) -> None:
         """Send a message to the model."""
-        await self._transport.send_message(message)
+        await self._model.send_message(message)
 
     async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
         """Send a raw audio chunk to the model."""
-        await self._transport.send_audio(audio, commit=commit)
+        await self._model.send_audio(audio, commit=commit)
 
     async def interrupt(self) -> None:
         """Interrupt the model."""
-        await self._transport.interrupt()
+        await self._model.interrupt()
 
-    async def on_event(self, event: RealtimeTransportEvent) -> None:
-        """Called when an event is emitted by the realtime transport."""
-        await self._emit_event(RealtimeRawTransportEvent(data=event, info=self._event_info))
+    async def on_event(self, event: RealtimeModelEvent) -> None:
+        await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
 
         if event.type == "error":
-            await self._emit_event(RealtimeError(info=self._event_info, error=event.error))
+            await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
             await self._handle_tool_call(event)
         elif event.type == "audio":
-            await self._emit_event(RealtimeAudio(info=self._event_info, audio=event))
+            await self._put_event(RealtimeAudio(info=self._event_info, audio=event))
         elif event.type == "audio_interrupted":
-            await self._emit_event(RealtimeAudioInterrupted(info=self._event_info))
+            await self._put_event(RealtimeAudioInterrupted(info=self._event_info))
         elif event.type == "audio_done":
-            await self._emit_event(RealtimeAudioEnd(info=self._event_info))
+            await self._put_event(RealtimeAudioEnd(info=self._event_info))
         elif event.type == "conversation.item.input_audio_transcription.completed":
-            self._history = self._get_new_history(self._history, event)
-            await self._emit_event(
+            self._history = RealtimeSession._get_new_history(self._history, event)
+            await self._put_event(
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
             )
         elif event.type == "transcript_delta":
             # TODO (rm) Add guardrails
             pass
         elif event.type == "item_updated":
-            is_new = any(item.item_id == event.item.item_id for item in self._history)
+            is_new = not any(item.item_id == event.item.item_id for item in self._history)
             self._history = self._get_new_history(self._history, event.item)
             if is_new:
                 new_item = next(
                     item for item in self._history if item.item_id == event.item.item_id
                 )
-                await self._emit_event(RealtimeHistoryAdded(info=self._event_info, item=new_item))
+                await self._put_event(RealtimeHistoryAdded(info=self._event_info, item=new_item))
             else:
-                await self._emit_event(
+                await self._put_event(
                     RealtimeHistoryUpdated(info=self._event_info, history=self._history)
                 )
-            pass
         elif event.type == "item_deleted":
             deleted_id = event.item_id
             self._history = [item for item in self._history if item.item_id != deleted_id]
-            await self._emit_event(
+            await self._put_event(
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
             )
         elif event.type == "connection_status":
             pass
         elif event.type == "turn_started":
-            await self._emit_event(
+            await self._put_event(
                 RealtimeAgentStartEvent(
                     agent=self._current_agent,
                     info=self._event_info,
                 )
             )
         elif event.type == "turn_ended":
-            await self._emit_event(
+            await self._put_event(
                 RealtimeAgentEndEvent(
                     agent=self._current_agent,
                     info=self._event_info,
@@ -280,17 +200,18 @@ class RealtimeSession(RealtimeTransportListener):
         else:
             assert_never(event)
 
-    async def _emit_event(self, event: RealtimeSessionEvent) -> None:
-        """Emit an event to the listeners."""
-        await asyncio.gather(*[listener.on_event(event) for listener in self._listeners])
+    async def _put_event(self, event: RealtimeSessionEvent) -> None:
+        """Put an event into the queue."""
+        await self._event_queue.put(event)
 
-    async def _handle_tool_call(self, event: RealtimeTransportToolCallEvent) -> None:
+    async def _handle_tool_call(self, event: RealtimeModelToolCallEvent) -> None:
+        """Handle a tool call event."""
         all_tools = await self._current_agent.get_all_tools(self._context_wrapper)
         function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
         handoff_map = {tool.name: tool for tool in all_tools if isinstance(tool, Handoff)}
 
         if event.name in function_map:
-            await self._emit_event(
+            await self._put_event(
                 RealtimeToolStart(
                     info=self._event_info,
                     tool=function_map[event.name],
@@ -302,9 +223,9 @@ class RealtimeSession(RealtimeTransportListener):
             tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
             result = await func_tool.on_invoke_tool(tool_context, event.arguments)
 
-            await self._transport.send_tool_output(event, str(result), True)
+            await self._model.send_tool_output(event, str(result), True)
 
-            await self._emit_event(
+            await self._put_event(
                 RealtimeToolEnd(
                     info=self._event_info,
                     tool=func_tool,
@@ -319,13 +240,14 @@ class RealtimeSession(RealtimeTransportListener):
             # TODO (rm) Add error handling
             pass
 
+    @classmethod
     def _get_new_history(
-        self,
+        cls,
         old_history: list[RealtimeItem],
-        event: RealtimeTransportInputAudioTranscriptionCompletedEvent | RealtimeItem,
+        event: RealtimeModelInputAudioTranscriptionCompletedEvent | RealtimeItem,
     ) -> list[RealtimeItem]:
         # Merge transcript into placeholder input_audio message.
-        if isinstance(event, RealtimeTransportInputAudioTranscriptionCompletedEvent):
+        if isinstance(event, RealtimeModelInputAudioTranscriptionCompletedEvent):
             new_history: list[RealtimeItem] = []
             for item in old_history:
                 if item.item_id == event.item_id and item.type == "message" and item.role == "user":
@@ -355,7 +277,7 @@ class RealtimeSession(RealtimeTransportListener):
             new_history[existing_index] = event
             return new_history
         # Otherwise, insert it after the previous_item_id if that is set
-        elif item.previous_item_id:
+        elif event.previous_item_id:
             # Insert the new item after the previous item
             previous_index = next(
                 (i for i, item in enumerate(old_history) if item.item_id == event.previous_item_id),
@@ -365,5 +287,6 @@ class RealtimeSession(RealtimeTransportListener):
                 new_history = old_history.copy()
                 new_history.insert(previous_index + 1, event)
                 return new_history
+
         # Otherwise, add it to the end
         return old_history + [event]

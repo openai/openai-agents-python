@@ -11,7 +11,7 @@ RealtimeConnectionStatus: TypeAlias = Literal["connecting", "connected", "discon
 
 
 @dataclass
-class RealtimeTransportErrorEvent:
+class RealtimeModelErrorEvent:
     """Represents a transport‑layer error."""
 
     error: Any
@@ -20,7 +20,7 @@ class RealtimeTransportErrorEvent:
 
 
 @dataclass
-class RealtimeTransportToolCallEvent:
+class RealtimeModelToolCallEvent:
     """Model attempted a tool/function call."""
 
     name: str
@@ -34,7 +34,7 @@ class RealtimeTransportToolCallEvent:
 
 
 @dataclass
-class RealtimeTransportAudioEvent:
+class RealtimeModelAudioEvent:
     """Raw audio bytes emitted by the model."""
 
     data: bytes
@@ -44,21 +44,21 @@ class RealtimeTransportAudioEvent:
 
 
 @dataclass
-class RealtimeTransportAudioInterruptedEvent:
+class RealtimeModelAudioInterruptedEvent:
     """Audio interrupted."""
 
     type: Literal["audio_interrupted"] = "audio_interrupted"
 
 
 @dataclass
-class RealtimeTransportAudioDoneEvent:
+class RealtimeModelAudioDoneEvent:
     """Audio done."""
 
     type: Literal["audio_done"] = "audio_done"
 
 
 @dataclass
-class RealtimeTransportInputAudioTranscriptionCompletedEvent:
+class RealtimeModelInputAudioTranscriptionCompletedEvent:
     """Input audio transcription completed."""
 
     item_id: str
@@ -70,7 +70,7 @@ class RealtimeTransportInputAudioTranscriptionCompletedEvent:
 
 
 @dataclass
-class RealtimeTransportTranscriptDelta:
+class RealtimeModelTranscriptDeltaEvent:
     """Partial transcript update."""
 
     item_id: str
@@ -81,7 +81,7 @@ class RealtimeTransportTranscriptDelta:
 
 
 @dataclass
-class RealtimeTransportItemUpdatedEvent:
+class RealtimeModelItemUpdatedEvent:
     """Item added to the history or updated."""
 
     item: RealtimeItem
@@ -90,7 +90,7 @@ class RealtimeTransportItemUpdatedEvent:
 
 
 @dataclass
-class RealtimeTransportItemDeletedEvent:
+class RealtimeModelItemDeletedEvent:
     """Item deleted from the history."""
 
     item_id: str
@@ -99,7 +99,7 @@ class RealtimeTransportItemDeletedEvent:
 
 
 @dataclass
-class RealtimeTransportConnectionStatusEvent:
+class RealtimeModelConnectionStatusEvent:
     """Connection status changed."""
 
     status: RealtimeConnectionStatus
@@ -108,21 +108,21 @@ class RealtimeTransportConnectionStatusEvent:
 
 
 @dataclass
-class RealtimeTransportTurnStartedEvent:
+class RealtimeModelTurnStartedEvent:
     """Triggered when the model starts generating a response for a turn."""
 
     type: Literal["turn_started"] = "turn_started"
 
 
 @dataclass
-class RealtimeTransportTurnEndedEvent:
+class RealtimeModelTurnEndedEvent:
     """Triggered when the model finishes generating a response for a turn."""
 
     type: Literal["turn_ended"] = "turn_ended"
 
 
 @dataclass
-class RealtimeTransportOtherEvent:
+class RealtimeModelOtherEvent:
     """Used as a catchall for vendor-specific events."""
 
     data: Any
@@ -133,18 +133,18 @@ class RealtimeTransportOtherEvent:
 # TODO (rm) Add usage events
 
 
-RealtimeTransportEvent: TypeAlias = Union[
-    RealtimeTransportErrorEvent,
-    RealtimeTransportToolCallEvent,
-    RealtimeTransportAudioEvent,
-    RealtimeTransportAudioInterruptedEvent,
-    RealtimeTransportAudioDoneEvent,
-    RealtimeTransportInputAudioTranscriptionCompletedEvent,
-    RealtimeTransportTranscriptDelta,
-    RealtimeTransportItemUpdatedEvent,
-    RealtimeTransportItemDeletedEvent,
-    RealtimeTransportConnectionStatusEvent,
-    RealtimeTransportTurnStartedEvent,
-    RealtimeTransportTurnEndedEvent,
-    RealtimeTransportOtherEvent,
+RealtimeModelEvent: TypeAlias = Union[
+    RealtimeModelErrorEvent,
+    RealtimeModelToolCallEvent,
+    RealtimeModelAudioEvent,
+    RealtimeModelAudioInterruptedEvent,
+    RealtimeModelAudioDoneEvent,
+    RealtimeModelInputAudioTranscriptionCompletedEvent,
+    RealtimeModelTranscriptDeltaEvent,
+    RealtimeModelItemUpdatedEvent,
+    RealtimeModelItemDeletedEvent,
+    RealtimeModelConnectionStatusEvent,
+    RealtimeModelTurnStartedEvent,
+    RealtimeModelTurnEndedEvent,
+    RealtimeModelOtherEvent,
 ]

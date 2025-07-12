@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import inspect
 from typing import (
     Any,
-    Callable,
     Literal,
     Union,
 )
@@ -11,8 +9,20 @@ from typing import (
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from ..model_settings import ToolChoice
-from ..tool import FunctionTool
-from ..util._types import MaybeAwaitable
+from ..tool import Tool
+
+RealtimeModelName: TypeAlias = Union[
+    Literal[
+        "gpt-4o-realtime-preview",
+        "gpt-4o-mini-realtime-preview",
+        "gpt-4o-realtime-preview-2025-06-03",
+        "gpt-4o-realtime-preview-2024-12-17",
+        "gpt-4o-realtime-preview-2024-10-01",
+        "gpt-4o-mini-realtime-preview-2024-12-17",
+    ],
+    str,
+]
+"""The name of a realtime model."""
 
 
 class RealtimeClientMessage(TypedDict):
@@ -20,7 +30,7 @@ class RealtimeClientMessage(TypedDict):
     other_data: NotRequired[dict[str, Any]]
 
 
-class UserInputText(TypedDict):
+class RealtimeUserInputText(TypedDict):
     type: Literal["input_text"]
     text: str
 
@@ -28,7 +38,7 @@ class UserInputText(TypedDict):
 class RealtimeUserInputMessage(TypedDict):
     type: Literal["message"]
     role: Literal["user"]
-    content: list[UserInputText]
+    content: list[RealtimeUserInputText]
 
 
 RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]
@@ -55,9 +65,11 @@ class RealtimeTurnDetectionConfig(TypedDict):
     threshold: NotRequired[float]
 
 
-class RealtimeSessionConfig(TypedDict):
-    api_key: NotRequired[APIKeyOrKeyFunc]
-    model: NotRequired[str]
+class RealtimeSessionModelSettings(TypedDict):
+    """Model settings for a realtime model session."""
+
+    model_name: NotRequired[RealtimeModelName]
+
     instructions: NotRequired[str]
     modalities: NotRequired[list[Literal["text", "audio"]]]
     voice: NotRequired[str]
@@ -68,24 +80,13 @@ class RealtimeSessionConfig(TypedDict):
     turn_detection: NotRequired[RealtimeTurnDetectionConfig]
 
     tool_choice: NotRequired[ToolChoice]
-    tools: NotRequired[list[FunctionTool]]
+    tools: NotRequired[list[Tool]]
 
 
-APIKeyOrKeyFunc = str | Callable[[], MaybeAwaitable[str]]
-"""Either an API key or a function that returns an API key."""
-
-
-async def get_api_key(key: APIKeyOrKeyFunc | None) -> str | None:
-    """Get the API key from the key or key function."""
-    if key is None:
-        return None
-    elif isinstance(key, str):
-        return key
-
-    result = key()
-    if inspect.isawaitable(result):
-        return await result
-    return result
+class RealtimeRunConfig(TypedDict):
+    model_settings: NotRequired[RealtimeSessionModelSettings]
 
     # TODO (rm) Add tracing support
     # tracing: NotRequired[RealtimeTracingConfig | None]
+    # TODO (rm) Add guardrail support
+    # TODO (rm) Add history audio storage config
