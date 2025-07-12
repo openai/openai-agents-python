@@ -91,18 +91,19 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """
         Args:
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
-            cached and only fetched from the server once. If `False`, the tools list will be
-            fetched from the server on each call to `list_tools()`. The cache can be invalidated
-            by calling `invalidate_tools_cache()`. You should set this to `True` if you know the
-            server will not change its tools list, because it can drastically improve latency
-            (by avoiding a round-trip to the server every time).
+                cached and only fetched from the server once. If `False`, the tools list will be
+                fetched from the server on each call to `list_tools()`. The cache can be invalidated
+                by calling `invalidate_tools_cache()`. You should set this to `True` if you know the
+                server will not change its tools list, because it can drastically improve latency
+                (by avoiding a round-trip to the server every time).
 
-            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
-            cached and only fetched from the server once. If `False`, the prompts list will be
-            fetched from the server on each call to `list_prompts()`. The cache can be invalidated
-            by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
-            server will not change its prompts list, because it can drastically improve latency
-            (by avoiding a round-trip to the server every time).
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list
+                will be cached and only fetched from the server once. If `False`, the prompts
+                list will be fetched from the server on each call to `list_prompts()`.
+                The cache can be invalidated by calling `invalidate_prompts_cache()`.
+                You should set this to `True` if you know the server will not change
+                its prompts list, because it can drastically improve latency
+                (by avoiding a round-trip to the server every time).
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
@@ -387,11 +388,12 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
 
-            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
-                cached and only fetched from the server once. If `False`, the prompts list will be
-                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
-                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
-                server will not change its prompts list, because it can drastically improve latency
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list
+                will be cached and only fetched from the server once. If `False`, the prompts
+                list will be fetched from the server on each call to `list_prompts()`.
+                The cache can be invalidated by calling `invalidate_prompts_cache()`.
+                You should set this to `True` if you know the server will not change
+                its prompts list, because it can drastically improve latency
                 (by avoiding a round-trip to the server every time).
 
             name: A readable name for the server. If not provided, we'll create one from the
@@ -480,11 +482,12 @@ class MCPServerSse(_MCPServerWithClientSession):
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
 
-            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
-                cached and only fetched from the server once. If `False`, the prompts list will be
-                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
-                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
-                server will not change its prompts list, because it can drastically improve latency
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list
+                will be cached and only fetched from the server once. If `False`, the prompts
+                list will be fetched from the server on each call to `list_prompts()`.
+                The cache can be invalidated by calling `invalidate_prompts_cache()`.
+                You should set this to `True` if you know the server will not change
+                its prompts list, because it can drastically improve latency
                 (by avoiding a round-trip to the server every time).
 
             name: A readable name for the server. If not provided, we'll create one from the
@@ -575,11 +578,12 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
 
-            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
-                cached and only fetched from the server once. If `False`, the prompts list will be
-                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
-                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
-                server will not change its prompts list, because it can drastically improve latency
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list
+                will be cached and only fetched from the server once. If `False`, the prompts
+                list will be fetched from the server on each call to `list_prompts()`.
+                The cache can be invalidated by calling `invalidate_prompts_cache()`.
+                You should set this to `True` if you know the server will not change
+                its prompts list, because it can drastically improve latency
                 (by avoiding a round-trip to the server every time).
 
             name: A readable name for the server. If not provided, we'll create one from the

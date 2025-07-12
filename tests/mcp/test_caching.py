@@ -69,8 +69,8 @@ async def test_server_caching_tools_works(
 async def test_server_caching_prompts_works(
     mock_list_prompts: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
-    """Test that if we turn caching on, the list of prompts is cached and not fetched from the server
-    on each call to `list_prompts()`.
+    """Test that if we turn caching on, the list of prompts is cached and not fetched
+    from the server on each call to `list_prompts()`.
     """
     server = MCPServerStdio(
         params={
@@ -98,15 +98,18 @@ async def test_server_caching_prompts_works(
         result_prompts = await server.list_prompts()
         assert result_prompts == prompts
 
-        assert mock_list_prompts.call_count == 1, "list_prompts() should not have been called again"
+        assert mock_list_prompts.call_count == 1, ("list_prompts() "
+                                                   "should not have been called again")
 
         # Invalidate the cache and call list_prompts() again
         server.invalidate_prompts_cache()
         result_prompts = await server.list_prompts()
         assert result_prompts == prompts
 
-        assert mock_list_prompts.call_count == 2, "list_prompts() should be called again"
+        assert mock_list_prompts.call_count == 2, ("list_prompts() "
+                                                   "should be called again")
 
-        # Without invalidating the cache, calling list_prompts() again should return the cached value
+        # Without invalidating the cache, calling list_prompts()
+        # again should return the cached value
         result_prompts = await server.list_prompts()
         assert result_prompts == prompts
