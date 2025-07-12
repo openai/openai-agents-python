@@ -40,7 +40,7 @@ class AirlineAgentContext(BaseModel):
 )
 async def faq_lookup_tool(question: str) -> str:
     question_lower = question.lower()
-    if any(keyword in question_lower for keyword in ["bag", "baggage", "luggage", "carry-on","hand luggage","hand carry"]):
+    if any(keyword in question_lower for keyword in ["bag", "baggage", "luggage", "carry-on", "hand luggage", "hand carry"]):
         return (
             "You are allowed to bring one bag on the plane. "
             "It must be under 50 pounds and 22 inches x 14 inches x 9 inches."
