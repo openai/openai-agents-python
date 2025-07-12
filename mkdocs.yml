@@ -92,6 +92,7 @@ plugins:
                     - ref/lifecycle.md
                     - ref/items.md
                     - ref/run_context.md
+                    - ref/tool_context.md
                     - ref/usage.md
                     - ref/exceptions.md
                     - ref/guardrail.md
