@@ -65,7 +65,7 @@ async def test_server_caching_tools_works(
 @pytest.mark.asyncio
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
-@patch("mcp.client.session.ClientSession.list_tools")
+@patch("mcp.client.session.ClientSession.list_prompts")
 async def test_server_caching_prompts_works(
     mock_list_prompts: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
