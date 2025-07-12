@@ -5,7 +5,7 @@ import subprocess
 import time
 from typing import Any
 
-from mcp.types import ListPromptsResult
+from mcp.types import ListPromptsResult, MCPTool
 
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStreamableHttp
@@ -18,8 +18,12 @@ async def run(mcp_server: MCPServerStreamableHttp):
     print("Cached tools names after invoking list_tools")
     await mcp_server.list_tools()
     cached_tools_list = mcp_server._tools_list
-    for tool in cached_tools_list:
-        print(f"name: {tool.name}")
+    if cached_tools_list:
+        for tool in cached_tools_list:
+            print(f"name: {tool.name}")
+
+    else:
+        print("Failed to cache list_prompts")
 
     print("Cached prompts before invoking list_prompts")
     print(mcp_server._prompts_list)
