@@ -38,6 +38,7 @@ class _TestFilterServer(_MCPServerWithClientSession):
         # Initialize parent class properly to avoid type errors
         super().__init__(
             cache_tools_list=False,
+            cache_prompts_list=False,
             client_session_timeout_seconds=None,
             tool_filter=tool_filter,
         )

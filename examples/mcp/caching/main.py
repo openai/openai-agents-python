@@ -22,7 +22,7 @@ async def run(mcp_server: MCPServerStreamableHttp):
     print("Cached prompts before invoking list_prompts")
     print(mcp_server._prompts_list)
 
-    print("\nCached prompts after invoking list_prompts")
+    print("Cached prompts after invoking list_prompts")
     await mcp_server.list_prompts()
     cached_prompts_list = mcp_server._prompts_list
     for prompt in cached_prompts_list.prompts:
