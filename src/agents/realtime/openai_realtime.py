@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import websockets
 from openai.types.beta.realtime.conversation_item import ConversationItem
@@ -23,6 +23,7 @@ from ..exceptions import UserError
 from ..logger import logger
 from .config import (
     RealtimeClientMessage,
+    RealtimeModelTracingConfig,
     RealtimeSessionModelSettings,
     RealtimeUserInput,
 )
@@ -73,6 +74,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._audio_length_ms: float = 0.0
         self._ongoing_response: bool = False
         self._current_audio_content_index: int | None = None
+        self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -83,6 +85,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         self.model = model_settings.get("model_name", self.model)
         api_key = await get_api_key(options.get("api_key"))
+
+        if "tracing" in model_settings:
+            self._tracing_config = model_settings["tracing"]
+        else:
+            self._tracing_config = "auto"
 
         if not api_key:
             raise UserError("API key is required but was not provided.")
@@ -95,6 +102,15 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         }
         self._websocket = await websockets.connect(url, additional_headers=headers)
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
+
+    async def _send_tracing_config(
+        self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
+    ) -> None:
+        """Update tracing configuration via session.update event."""
+        if tracing_config is not None:
+            await self.send_event(
+                {"type": "session.update", "other_data": {"session": {"tracing": tracing_config}}}
+            )
 
     def add_listener(self, listener: RealtimeModelListener) -> None:
         """Add a listener to the model."""
@@ -343,8 +359,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._ongoing_response = False
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
-            # TODO (rm) tracing stuff here
-            pass
+            await self._send_tracing_config(self._tracing_config)
         elif parsed.type == "error":
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
