@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import textwrap
 import asyncio
+import textwrap
 from dataclasses import dataclass
 from typing import Literal
 
