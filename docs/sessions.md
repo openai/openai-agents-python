@@ -101,8 +101,8 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 
 # User wants to correct their question
-user_item = await session.pop_item()  # Remove user's question
 assistant_item = await session.pop_item()  # Remove agent's response
+user_item = await session.pop_item()  # Remove user's question
 
 # Ask a corrected question
 result = await Runner.run(
