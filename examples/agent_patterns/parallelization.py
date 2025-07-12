@@ -20,6 +20,8 @@ translation_picker = Agent(
 
 async def main():
     msg = input("Hi! Enter a message, and we'll translate it to Spanish.\n\n")
+    if not msg.strip():
+        raise ValueError("Input message cannot be empty.")
 
     # Ensure the entire workflow is a single trace
     with trace("Parallel translation"):
@@ -37,7 +39,6 @@ async def main():
                 msg,
             ),
         )
-
         outputs = [
             ItemHelpers.text_message_outputs(res_1.new_items),
             ItemHelpers.text_message_outputs(res_2.new_items),
