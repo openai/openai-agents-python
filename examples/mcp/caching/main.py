@@ -5,8 +5,6 @@ import subprocess
 import time
 from typing import Any
 
-from mcp.types import ListPromptsResult, MCPTool
-
 from agents import gen_trace_id, trace
 from agents.mcp import MCPServerStreamableHttp
 
@@ -31,7 +29,7 @@ async def run(mcp_server: MCPServerStreamableHttp):
     print("Cached prompts after invoking list_prompts")
     await mcp_server.list_prompts()
     cached_prompts_list = mcp_server._prompts_list
-    if isinstance(cached_prompts_list, ListPromptsResult):
+    if cached_prompts_list:
         for prompt in cached_prompts_list.prompts:
             print(f"name: {prompt.name}")
     else:
