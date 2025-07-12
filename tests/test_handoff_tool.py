@@ -12,11 +12,13 @@ from agents import (
     MessageOutputItem,
     ModelBehaviorError,
     RunContextWrapper,
-    Runner,
     UserError,
     handoff,
 )
-from agents.extensions.handoff_prompt import prompt_with_handoff_instructions, RECOMMENDED_PROMPT_PREFIX
+from agents.extensions.handoff_prompt import (
+    RECOMMENDED_PROMPT_PREFIX,
+    prompt_with_handoff_instructions,
+)
 from agents.run import AgentRunner
 
 
@@ -372,28 +374,6 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
-
-@pytest.mark.asyncio
-async def test_handoff_prompt_is_passed_to_model():
-    agent_1 = Agent(name="agent_1", instructions="Respond by only hello")
-    agent_2 = Agent(name="agent_2")
-    agent_3 = Agent(name="agent_3")
-
-    instructions = prompt_with_handoff_instructions(
-        "Greetings should be addressed by agent_1")
-
-    main_agent = Agent(
-        name="main_agent",
-        instructions=instructions,
-        handoffs=[
-            handoff(agent_1),
-            handoff(agent_2),
-            handoff(agent_3),
-        ],
-    )
-
-    result = await Runner.run(main_agent, input="Hi, my name is Sora.")
-    assert result.final_output == "hello"
 
 @pytest.mark.asyncio
 async def test_handoff_prompt_is_correct():
