@@ -1,7 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.types import ListToolsResult, Tool as MCPTool
+from mcp.types import ListPromptsResult, ListToolsResult, Prompt, Tool as MCPTool
 
 from agents import Agent
 from agents.mcp import MCPServerStdio
@@ -14,7 +14,7 @@ from .helpers import DummyStreamsContextManager, tee
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
 @patch("mcp.client.session.ClientSession.list_tools")
-async def test_server_caching_works(
+async def test_server_caching_tools_works(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
     """Test that if we turn caching on, the list of tools is cached and not fetched from the server
@@ -61,3 +61,52 @@ async def test_server_caching_works(
         # Without invalidating the cache, calling list_tools() again should return the cached value
         result_tools = await server.list_tools(run_context, agent)
         assert result_tools == tools
+
+@pytest.mark.asyncio
+@patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
+@patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
+@patch("mcp.client.session.ClientSession.list_tools")
+async def test_server_caching_prompts_works(
+    mock_list_prompts: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
+):
+    """Test that if we turn caching on, the list of prompts is cached and not fetched from the server
+    on each call to `list_prompts()`.
+    """
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_prompts_list=True,
+    )
+
+    prompts = [
+        Prompt(name="prompt1"),
+        Prompt(name="prompt2"),
+    ]
+
+    mock_list_prompts.return_value = ListPromptsResult(prompts=prompts)
+
+    async with server:
+
+        # Call list_prompts() multiple times
+        result_prompts = await server.list_prompts()
+        assert result_prompts == prompts
+
+        assert mock_list_prompts.call_count == 1, "list_prompts() should have been called once"
+
+        # Call list_prompts() again, should return the cached value
+        result_prompts = await server.list_prompts()
+        assert result_prompts == prompts
+
+        assert mock_list_prompts.call_count == 1, "list_prompts() should not have been called again"
+
+        # Invalidate the cache and call list_prompts() again
+        server.invalidate_prompts_cache()
+        result_prompts = await server.list_prompts()
+        assert result_prompts == prompts
+
+        assert mock_list_prompts.call_count == 2, "list_prompts() should be called again"
+
+        # Without invalidating the cache, calling list_prompts() again should return the cached value
+        result_prompts = await server.list_prompts()
+        assert result_prompts == prompts
