@@ -84,19 +84,20 @@ async def test_server_caching_prompts_works(
         Prompt(name="prompt2"),
     ]
 
-    mock_list_prompts.return_value = ListPromptsResult(prompts=prompts)
+    list_prompts = ListPromptsResult(prompts=prompts)
+    mock_list_prompts.return_value = list_prompts
 
     async with server:
 
         # Call list_prompts() multiple times
         result_prompts = await server.list_prompts()
-        assert result_prompts == prompts
+        assert result_prompts == list_prompts
 
         assert mock_list_prompts.call_count == 1, "list_prompts() should have been called once"
 
         # Call list_prompts() again, should return the cached value
         result_prompts = await server.list_prompts()
-        assert result_prompts == prompts
+        assert result_prompts == list_prompts
 
         assert mock_list_prompts.call_count == 1, ("list_prompts() "
                                                    "should not have been called again")
@@ -104,7 +105,7 @@ async def test_server_caching_prompts_works(
         # Invalidate the cache and call list_prompts() again
         server.invalidate_prompts_cache()
         result_prompts = await server.list_prompts()
-        assert result_prompts == prompts
+        assert result_prompts == list_prompts
 
         assert mock_list_prompts.call_count == 2, ("list_prompts() "
                                                    "should be called again")
@@ -112,4 +113,4 @@ async def test_server_caching_prompts_works(
         # Without invalidating the cache, calling list_prompts()
         # again should return the cached value
         result_prompts = await server.list_prompts()
-        assert result_prompts == prompts
+        assert result_prompts == list_prompts
