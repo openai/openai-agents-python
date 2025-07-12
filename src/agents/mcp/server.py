@@ -305,7 +305,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             self._cache_dirty_prompts = False
             # Fetch the prompts from the server
             self._prompts_list = await self.session.list_prompts()
-            prompts = self._tools_list
+            prompts = self._prompts_list
 
         return prompts
 
