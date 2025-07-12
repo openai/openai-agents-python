@@ -84,6 +84,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     def __init__(
         self,
         cache_tools_list: bool,
+        cache_prompts_list: bool,
         client_session_timeout_seconds: float | None,
         tool_filter: ToolFilter = None,
     ):
@@ -96,6 +97,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             server will not change its tools list, because it can drastically improve latency
             (by avoiding a round-trip to the server every time).
 
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
+            cached and only fetched from the server once. If `False`, the prompts list will be
+            fetched from the server on each call to `list_prompts()`. The cache can be invalidated
+            by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
+            server will not change its prompts list, because it can drastically improve latency
+            (by avoiding a round-trip to the server every time).
+
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
         """
@@ -103,13 +111,16 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
         self.cache_tools_list = cache_tools_list
+        self.cache_prompts_list = cache_prompts_list
         self.server_initialize_result: InitializeResult | None = None
 
         self.client_session_timeout_seconds = client_session_timeout_seconds
 
-        # The cache is always dirty at startup, so that we fetch tools at least once
-        self._cache_dirty = True
+        # The cache is always dirty at startup, so that we fetch tools and prompts at least once
+        self._cache_dirty_tools = True
         self._tools_list: list[MCPTool] | None = None
+        self._cache_dirty_prompts = True
+        self._prompts_list: ListPromptsResult | None = None
 
         self.tool_filter = tool_filter
 
@@ -213,7 +224,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def invalidate_tools_cache(self):
         """Invalidate the tools cache."""
-        self._cache_dirty = True
+        self._cache_dirty_tools = True
+
+    def invalidate_prompts_cache(self):
+        """Invalidate the prompts cache."""
+        self._cache_dirty_prompts = True
 
     async def connect(self):
         """Connect to the server."""
@@ -251,11 +266,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         # Return from cache if caching is enabled, we have tools, and the cache is not dirty
-        if self.cache_tools_list and not self._cache_dirty and self._tools_list:
+        if self.cache_tools_list and not self._cache_dirty_tools and self._tools_list:
             tools = self._tools_list
         else:
             # Reset the cache dirty to False
-            self._cache_dirty = False
+            self._cache_dirty_tools = False
             # Fetch the tools from the server
             self._tools_list = (await self.session.list_tools()).tools
             tools = self._tools_list
@@ -282,7 +297,16 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
-        return await self.session.list_prompts()
+        if self.cache_prompts_list and not self._cache_dirty_prompts and self._prompts_list:
+            prompts = self._prompts_list
+        else:
+            # Reset the cache dirty to False
+            self._cache_dirty_prompts = False
+            # Fetch the prompts from the server
+            self._prompts_list = await self.session.list_prompts()
+            prompts = self._tools_list
+
+        return prompts
 
     async def get_prompt(
         self, name: str, arguments: dict[str, Any] | None = None
@@ -343,6 +367,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         self,
         params: MCPServerStdioParams,
         cache_tools_list: bool = False,
+        cache_prompts_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
@@ -354,21 +379,31 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 start the server, the args to pass to the command, the environment variables to
                 set for the server, the working directory to use when spawning the process, and
                 the text encoding used when sending/receiving messages to the server.
+
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
                 cached and only fetched from the server once. If `False`, the tools list will be
                 fetched from the server on each call to `list_tools()`. The cache can be
                 invalidated by calling `invalidate_tools_cache()`. You should set this to `True`
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
+
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
+                cached and only fetched from the server once. If `False`, the prompts list will be
+                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
+                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
+                server will not change its prompts list, because it can drastically improve latency
+                (by avoiding a round-trip to the server every time).
+
             name: A readable name for the server. If not provided, we'll create one from the
                 command.
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
+            cache_tools_list=cache_tools_list,
+            cache_prompts_list=cache_prompts_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
         )
 
         self.params = StdioServerParameters(
@@ -426,6 +461,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         self,
         params: MCPServerSseParams,
         cache_tools_list: bool = False,
+        cache_prompts_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
@@ -444,6 +480,13 @@ class MCPServerSse(_MCPServerWithClientSession):
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
 
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
+                cached and only fetched from the server once. If `False`, the prompts list will be
+                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
+                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
+                server will not change its prompts list, because it can drastically improve latency
+                (by avoiding a round-trip to the server every time).
+
             name: A readable name for the server. If not provided, we'll create one from the
                 URL.
 
@@ -451,9 +494,10 @@ class MCPServerSse(_MCPServerWithClientSession):
             tool_filter: The tool filter to use for filtering tools.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
+            cache_tools_list=cache_tools_list,
+            cache_prompts_list=cache_prompts_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
         )
 
         self.params = params
@@ -511,6 +555,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         self,
         params: MCPServerStreamableHttpParams,
         cache_tools_list: bool = False,
+        cache_prompts_list: bool = False,
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
@@ -530,6 +575,13 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 if you know the server will not change its tools list, because it can drastically
                 improve latency (by avoiding a round-trip to the server every time).
 
+            cache_prompts_list: Whether to cache the prompts list. If `True`, the prompts list will be
+                cached and only fetched from the server once. If `False`, the prompts list will be
+                fetched from the server on each call to `list_prompts()`. The cache can be invalidated
+                by calling `invalidate_prompts_cache()`. You should set this to `True` if you know the
+                server will not change its prompts list, because it can drastically improve latency
+                (by avoiding a round-trip to the server every time).
+
             name: A readable name for the server. If not provided, we'll create one from the
                 URL.
 
@@ -537,9 +589,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             tool_filter: The tool filter to use for filtering tools.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
+            cache_tools_list=cache_tools_list,
+            cache_prompts_list=cache_prompts_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
         )
 
         self.params = params
