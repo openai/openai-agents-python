@@ -186,6 +186,7 @@ def generate_func_documentation(
 
 def function_schema(
     func: Callable[..., Any],
+    enforce_type_annotations: bool = False,
     docstring_style: DocstringStyle | None = None,
     name_override: str | None = None,
     description_override: str | None = None,
@@ -198,6 +199,8 @@ def function_schema(
 
     Args:
         func: The function to extract the schema from.
+        enforce_type_annotations: If True, raises a ValueError for any unannotated parameters.
+            If False (default), unannotated parameters are assumed to be of type `Any`.
         docstring_style: The style of the docstring to use for parsing. If not provided, we will
             attempt to auto-detect the style.
         name_override: If provided, use this name instead of the function's `__name__`.
@@ -266,9 +269,14 @@ def function_schema(
         ann = type_hints.get(name, param.annotation)
         default = param.default
 
-        # If there's no type hint, assume `Any`
+        # Raise an error for unannotated parameters if enforcement is on
         if ann == inspect._empty:
-            ann = Any
+            if enforce_type_annotations:
+                raise ValueError(
+                    f"Parameter '{name}' must be type-annotated. Example: def func({name}: str)"
+                )
+            else:
+                ann = Any  # Fallback only if enforcement is off
 
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
