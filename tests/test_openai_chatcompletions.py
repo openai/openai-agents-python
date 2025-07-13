@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 import pytest
-from openai import NOT_GIVEN
+from openai import NOT_GIVEN, AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -13,7 +13,10 @@ from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
     Function,
 )
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import (
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -30,6 +33,7 @@ from agents import (
     OpenAIProvider,
     generation_span,
 )
+from agents.models.chatcmpl_helpers import ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
@@ -50,7 +54,13 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         model="fake",
         object="chat.completion",
         choices=[choice],
-        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            # completion_tokens_details left blank to test default
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=3),
+        ),
     )
 
     async def patched_fetch_response(self, *args, **kwargs):
@@ -66,6 +76,8 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     )
     # Should have produced exactly one output message with one text part
     assert isinstance(resp, ModelResponse)
@@ -79,7 +91,9 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens == 7
     assert resp.usage.output_tokens == 5
     assert resp.usage.total_tokens == 12
-    assert resp.referenceable_id is None
+    assert resp.usage.input_tokens_details.cached_tokens == 3
+    assert resp.usage.output_tokens_details.reasoning_tokens == 0
+    assert resp.response_id is None
 
 
 @pytest.mark.allow_call_model_methods
@@ -114,6 +128,8 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     )
     assert len(resp.output) == 1
     assert isinstance(resp.output[0], ResponseOutputMessage)
@@ -124,6 +140,8 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
     assert resp.usage.requests == 0
     assert resp.usage.input_tokens == 0
     assert resp.usage.output_tokens == 0
+    assert resp.usage.input_tokens_details.cached_tokens == 0
+    assert resp.usage.output_tokens_details.reasoning_tokens == 0
 
 
 @pytest.mark.allow_call_model_methods
@@ -163,6 +181,8 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     )
     # Expect a message item followed by a function tool call item.
     assert len(resp.output) == 2
@@ -172,6 +192,41 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     assert fn_call_item.call_id == "call-id"
     assert fn_call_item.name == "do_thing"
     assert fn_call_item.arguments == "{'x':1}"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_no_message(monkeypatch) -> None:
+    """If the model returns no message, get_response should return an empty output."""
+    msg = ChatCompletionMessage(role="assistant", content="ignored")
+    choice = Choice(index=0, finish_reason="content_filter", message=msg)
+    choice.message = None  # type: ignore[assignment]
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
+    )
+    assert resp.output == []
 
 
 @pytest.mark.asyncio
@@ -226,6 +281,7 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     # Ensure expected args were passed through to OpenAI client.
     kwargs = completions.kwargs
     assert kwargs["stream"] is False
+    assert kwargs["store"] is NOT_GIVEN
     assert kwargs["model"] == "gpt-4"
     assert kwargs["messages"][0]["role"] == "system"
     assert kwargs["messages"][0]["content"] == "sys"
@@ -279,7 +335,8 @@ async def test_fetch_response_stream(monkeypatch) -> None:
         )
     # Check OpenAI client was called for streaming
     assert completions.kwargs["stream"] is True
-    assert completions.kwargs["stream_options"] == {"include_usage": True}
+    assert completions.kwargs["store"] is NOT_GIVEN
+    assert completions.kwargs["stream_options"] is NOT_GIVEN
     # Response is a proper openai Response
     assert isinstance(response, Response)
     assert response.id == FAKE_RESPONSES_ID
@@ -288,3 +345,39 @@ async def test_fetch_response_stream(monkeypatch) -> None:
     assert response.output == []
     # We returned the async iterator produced by our dummy.
     assert hasattr(stream, "__aiter__")
+
+
+def test_store_param():
+    """Should default to True for OpenAI API calls, and False otherwise."""
+
+    model_settings = ModelSettings()
+    client = AsyncOpenAI()
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
+        "Should default to True for OpenAI API calls"
+    )
+
+    model_settings = ModelSettings(store=False)
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is False, (
+        "Should respect explicitly set store=False"
+    )
+
+    model_settings = ModelSettings(store=True)
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
+        "Should respect explicitly set store=True"
+    )
+
+    client = AsyncOpenAI(base_url="http://www.notopenai.com")
+    model_settings = ModelSettings()
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is None, (
+        "Should default to None for non-OpenAI API calls"
+    )
+
+    model_settings = ModelSettings(store=False)
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is False, (
+        "Should respect explicitly set store=False"
+    )
+
+    model_settings = ModelSettings(store=True)
+    assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
+        "Should respect explicitly set store=True"
+    )

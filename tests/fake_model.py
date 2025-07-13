@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
-from openai.types.responses import Response, ResponseCompletedEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseUsage
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from agents.agent_output import AgentOutputSchema
+from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
 from agents.items import (
     ModelResponse,
@@ -31,6 +33,11 @@ class FakeModel(Model):
             [initial_output] if initial_output else []
         )
         self.tracing_enabled = tracing_enabled
+        self.last_turn_args: dict[str, Any] = {}
+        self.hardcoded_usage: Usage | None = None
+
+    def set_hardcoded_usage(self, usage: Usage):
+        self.hardcoded_usage = usage
 
     def set_next_output(self, output: list[TResponseOutputItem] | Exception):
         self.turn_outputs.append(output)
@@ -49,10 +56,22 @@ class FakeModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        prompt: Any | None,
     ) -> ModelResponse:
+        self.last_turn_args = {
+            "system_instructions": system_instructions,
+            "input": input,
+            "model_settings": model_settings,
+            "tools": tools,
+            "output_schema": output_schema,
+            "previous_response_id": previous_response_id,
+        }
+
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
 
@@ -70,8 +89,8 @@ class FakeModel(Model):
 
             return ModelResponse(
                 output=output,
-                usage=Usage(),
-                referenceable_id=None,
+                usage=self.hardcoded_usage or Usage(),
+                response_id=None,
             )
 
     async def stream_response(
@@ -80,10 +99,21 @@ class FakeModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        prompt: Any | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        self.last_turn_args = {
+            "system_instructions": system_instructions,
+            "input": input,
+            "model_settings": model_settings,
+            "tools": tools,
+            "output_schema": output_schema,
+            "previous_response_id": previous_response_id,
+        }
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
             if isinstance(output, Exception):
@@ -100,11 +130,16 @@ class FakeModel(Model):
 
             yield ResponseCompletedEvent(
                 type="response.completed",
-                response=get_response_obj(output),
+                response=get_response_obj(output, usage=self.hardcoded_usage),
+                sequence_number=0,
             )
 
 
-def get_response_obj(output: list[TResponseOutputItem], response_id: str | None = None) -> Response:
+def get_response_obj(
+    output: list[TResponseOutputItem],
+    response_id: str | None = None,
+    usage: Usage | None = None,
+) -> Response:
     return Response(
         id=response_id or "123",
         created_at=123,
@@ -115,4 +150,11 @@ def get_response_obj(output: list[TResponseOutputItem], response_id: str | None 
         tools=[],
         top_p=None,
         parallel_tool_calls=False,
+        usage=ResponseUsage(
+            input_tokens=usage.input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            total_tokens=usage.total_tokens if usage else 0,
+            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        ),
     )

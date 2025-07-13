@@ -23,8 +23,8 @@ story_outline_generator = Agent(
 
 @dataclass
 class EvaluationFeedback:
-    score: Literal["pass", "needs_improvement", "fail"]
     feedback: str
+    score: Literal["pass", "needs_improvement", "fail"]
 
 
 evaluator = Agent[None](
@@ -32,7 +32,7 @@ evaluator = Agent[None](
     instructions=(
         "You evaluate a story outline and decide if it's good enough."
         "If it's not good enough, you provide feedback on what needs to be improved."
-        "Never give it a pass on the first try."
+        "Never give it a pass on the first try. After 5 attempts, you can give it a pass if story outline is good enough - do not go for perfection"
     ),
     output_type=EvaluationFeedback,
 )

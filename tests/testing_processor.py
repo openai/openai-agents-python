@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Any, Literal
 
 from agents.tracing import Span, Trace, TracingProcessor
@@ -77,3 +78,55 @@ def fetch_traces() -> list[Trace]:
 
 def fetch_events() -> list[TestSpanProcessorEvent]:
     return SPAN_PROCESSOR_TESTING._events
+
+
+def assert_no_spans():
+    spans = fetch_ordered_spans()
+    if spans:
+        raise AssertionError(f"Expected 0 spans, got {len(spans)}")
+
+
+def assert_no_traces():
+    traces = fetch_traces()
+    if traces:
+        raise AssertionError(f"Expected 0 traces, got {len(traces)}")
+    assert_no_spans()
+
+
+def fetch_normalized_spans(
+    keep_span_id: bool = False, keep_trace_id: bool = False
+) -> list[dict[str, Any]]:
+    nodes: dict[tuple[str, str | None], dict[str, Any]] = {}
+    traces = []
+    for trace_obj in fetch_traces():
+        trace = trace_obj.export()
+        assert trace
+        assert trace.pop("object") == "trace"
+        assert trace["id"].startswith("trace_")
+        if not keep_trace_id:
+            del trace["id"]
+        trace = {k: v for k, v in trace.items() if v is not None}
+        nodes[(trace_obj.trace_id, None)] = trace
+        traces.append(trace)
+
+    assert traces, "Use assert_no_traces() to check for empty traces"
+
+    for span_obj in fetch_ordered_spans():
+        span = span_obj.export()
+        assert span
+        assert span.pop("object") == "trace.span"
+        assert span["id"].startswith("span_")
+        if not keep_span_id:
+            del span["id"]
+        assert datetime.fromisoformat(span.pop("started_at"))
+        assert datetime.fromisoformat(span.pop("ended_at"))
+        parent_id = span.pop("parent_id")
+        assert "type" not in span
+        span_data = span.pop("span_data")
+        span = {"type": span_data.pop("type")} | {k: v for k, v in span.items() if v is not None}
+        span_data = {k: v for k, v in span_data.items() if v is not None}
+        if span_data:
+            span["data"] = span_data
+        nodes[(span_obj.trace_id, span_obj.span_id)] = span
+        nodes[(span.pop("trace_id"), parent_id)].setdefault("children", []).append(span)
+    return traces

@@ -5,6 +5,7 @@ import queue
 import random
 import threading
 import time
+from functools import cached_property
 from typing import Any
 
 import httpx
@@ -50,9 +51,9 @@ class BackendSpanExporter(TracingExporter):
             base_delay: Base delay (in seconds) for the first backoff.
             max_delay: Maximum delay (in seconds) for backoff growth.
         """
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
-        self.organization = organization or os.environ.get("OPENAI_ORG_ID")
-        self.project = project or os.environ.get("OPENAI_PROJECT_ID")
+        self._api_key = api_key
+        self._organization = organization
+        self._project = project
         self.endpoint = endpoint
         self.max_retries = max_retries
         self.base_delay = base_delay
@@ -68,7 +69,21 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
+        # We're specifically setting the underlying cached property as well
+        self._api_key = api_key
         self.api_key = api_key
+
+    @cached_property
+    def api_key(self):
+        return self._api_key or os.environ.get("OPENAI_API_KEY")
+
+    @cached_property
+    def organization(self):
+        return self._organization or os.environ.get("OPENAI_ORG_ID")
+
+    @cached_property
+    def project(self):
+        return self._project or os.environ.get("OPENAI_PROJECT_ID")
 
     def export(self, items: list[Trace | Span[Any]]) -> None:
         if not items:
@@ -87,6 +102,12 @@ class BackendSpanExporter(TracingExporter):
             "OpenAI-Beta": "traces=v1",
         }
 
+        if self.organization:
+            headers["OpenAI-Organization"] = self.organization
+
+        if self.project:
+            headers["OpenAI-Project"] = self.project
+
         # Exponential backoff loop
         attempt = 0
         delay = self.base_delay
@@ -102,18 +123,22 @@ class BackendSpanExporter(TracingExporter):
 
                 # If the response is a client error (4xx), we wont retry
                 if 400 <= response.status_code < 500:
-                    logger.error(f"Tracing client error {response.status_code}: {response.text}")
+                    logger.error(
+                        f"[non-fatal] Tracing client error {response.status_code}: {response.text}"
+                    )
                     return
 
                 # For 5xx or other unexpected codes, treat it as transient and retry
-                logger.warning(f"Server error {response.status_code}, retrying.")
+                logger.warning(
+                    f"[non-fatal] Tracing: server error {response.status_code}, retrying."
+                )
             except httpx.RequestError as exc:
                 # Network or other I/O error, we'll retry
-                logger.warning(f"Request failed: {exc}")
+                logger.warning(f"[non-fatal] Tracing: request failed: {exc}")
 
             # If we reach here, we need to retry or give up
             if attempt >= self.max_retries:
-                logger.error("Max retries reached, giving up on this batch.")
+                logger.error("[non-fatal] Tracing: max retries reached, giving up on this batch.")
                 return
 
             # Exponential backoff + jitter
@@ -163,11 +188,27 @@ class BatchTraceProcessor(TracingProcessor):
         # Track when we next *must* perform a scheduled export
         self._next_export_time = time.time() + self._schedule_delay
 
-        self._shutdown_event = threading.Event()
-        self._worker_thread = threading.Thread(target=self._run, daemon=True)
-        self._worker_thread.start()
+        # We lazily start the background worker thread the first time a span/trace is queued.
+        self._worker_thread: threading.Thread | None = None
+        self._thread_start_lock = threading.Lock()
+
+    def _ensure_thread_started(self) -> None:
+        # Fast path without holding the lock
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+
+        # Double-checked locking to avoid starting multiple threads
+        with self._thread_start_lock:
+            if self._worker_thread and self._worker_thread.is_alive():
+                return
+
+            self._worker_thread = threading.Thread(target=self._run, daemon=True)
+            self._worker_thread.start()
 
     def on_trace_start(self, trace: Trace) -> None:
+        # Ensure the background worker is running before we enqueue anything.
+        self._ensure_thread_started()
+
         try:
             self._queue.put_nowait(trace)
         except queue.Full:
@@ -182,6 +223,9 @@ class BatchTraceProcessor(TracingProcessor):
         pass
 
     def on_span_end(self, span: Span[Any]) -> None:
+        # Ensure the background worker is running before we enqueue anything.
+        self._ensure_thread_started()
+
         try:
             self._queue.put_nowait(span)
         except queue.Full:
@@ -192,7 +236,13 @@ class BatchTraceProcessor(TracingProcessor):
         Called when the application stops. We signal our thread to stop, then join it.
         """
         self._shutdown_event.set()
-        self._worker_thread.join(timeout=timeout)
+
+        # Only join if we ever started the background thread; otherwise flush synchronously.
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=timeout)
+        else:
+            # No background thread: process any remaining items synchronously.
+            self._export_batches(force=True)
 
     def force_flush(self):
         """

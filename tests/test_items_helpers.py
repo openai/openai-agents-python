@@ -11,7 +11,10 @@ from openai.types.responses.response_file_search_tool_call_param import (
 )
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
-from openai.types.responses.response_function_web_search import ResponseFunctionWebSearch
+from openai.types.responses.response_function_web_search import (
+    ActionSearch,
+    ResponseFunctionWebSearch,
+)
 from openai.types.responses.response_function_web_search_param import ResponseFunctionWebSearchParam
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -168,7 +171,7 @@ def test_to_input_items_for_message() -> None:
     message = ResponseOutputMessage(
         id="m1", content=[content], role="assistant", status="completed", type="message"
     )
-    resp = ModelResponse(output=[message], usage=Usage(), referenceable_id=None)
+    resp = ModelResponse(output=[message], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     # The dict should contain exactly the primitive values of the message
@@ -193,7 +196,7 @@ def test_to_input_items_for_function_call() -> None:
     tool_call = ResponseFunctionToolCall(
         id="f1", arguments="{}", call_id="c1", name="func", type="function_call"
     )
-    resp = ModelResponse(output=[tool_call], usage=Usage(), referenceable_id=None)
+    resp = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     expected: ResponseFunctionToolCallParam = {
@@ -211,7 +214,7 @@ def test_to_input_items_for_file_search_call() -> None:
     fs_call = ResponseFileSearchToolCall(
         id="fs1", queries=["query"], status="completed", type="file_search_call"
     )
-    resp = ModelResponse(output=[fs_call], usage=Usage(), referenceable_id=None)
+    resp = ModelResponse(output=[fs_call], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     expected: ResponseFileSearchToolCallParam = {
@@ -225,14 +228,20 @@ def test_to_input_items_for_file_search_call() -> None:
 
 def test_to_input_items_for_web_search_call() -> None:
     """A web search tool call output should produce the same dict as a web search input."""
-    ws_call = ResponseFunctionWebSearch(id="w1", status="completed", type="web_search_call")
-    resp = ModelResponse(output=[ws_call], usage=Usage(), referenceable_id=None)
+    ws_call = ResponseFunctionWebSearch(
+        id="w1",
+        action=ActionSearch(type="search", query="query"),
+        status="completed",
+        type="web_search_call",
+    )
+    resp = ModelResponse(output=[ws_call], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     expected: ResponseFunctionWebSearchParam = {
         "id": "w1",
         "status": "completed",
         "type": "web_search_call",
+        "action": {"type": "search", "query": "query"},
     }
     assert input_items[0] == expected
 
@@ -248,7 +257,7 @@ def test_to_input_items_for_computer_call_click() -> None:
         pending_safety_checks=[],
         status="completed",
     )
-    resp = ModelResponse(output=[comp_call], usage=Usage(), referenceable_id=None)
+    resp = ModelResponse(output=[comp_call], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     converted_dict = input_items[0]
@@ -268,7 +277,7 @@ def test_to_input_items_for_reasoning() -> None:
     """A reasoning output should produce the same dict as a reasoning input item."""
     rc = Summary(text="why", type="summary_text")
     reasoning = ResponseReasoningItem(id="rid1", summary=[rc], type="reasoning")
-    resp = ModelResponse(output=[reasoning], usage=Usage(), referenceable_id=None)
+    resp = ModelResponse(output=[reasoning], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
     converted_dict = input_items[0]

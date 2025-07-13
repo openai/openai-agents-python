@@ -1,7 +1,8 @@
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, Handoff, RunContextWrapper, Runner, handoff
+from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
+from agents.run import AgentRunner
 
 
 @pytest.mark.asyncio
@@ -42,7 +43,7 @@ async def test_handoff_with_agents():
         handoffs=[agent_1, agent_2],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -77,7 +78,7 @@ async def test_handoff_with_handoff_obj():
         ],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -111,7 +112,7 @@ async def test_handoff_with_handoff_obj_and_agent():
         handoffs=[handoff(agent_1), agent_2],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -159,9 +160,10 @@ async def test_agent_final_output():
         output_type=Foo,
     )
 
-    schema = Runner._get_output_schema(agent)
+    schema = AgentRunner._get_output_schema(agent)
+    assert isinstance(schema, AgentOutputSchema)
     assert schema is not None
     assert schema.output_type == Foo
-    assert schema.strict_json_schema is True
+    assert schema.is_strict_json_schema() is True
     assert schema.json_schema() is not None
     assert not schema.is_plain_text()

@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Union, overload
 
 from typing_extensions import TypeVar
 
-from ._utils import MaybeAwaitable
 from .exceptions import UserError
 from .items import TResponseInputItem
 from .run_context import RunContextWrapper, TContext
+from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent

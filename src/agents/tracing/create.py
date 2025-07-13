@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..logger import logger
-from .setup import GLOBAL_TRACE_PROVIDER
+from .setup import get_trace_provider
 from .span_data import (
     AgentSpanData,
     CustomSpanData,
@@ -12,7 +12,11 @@ from .span_data import (
     GenerationSpanData,
     GuardrailSpanData,
     HandoffSpanData,
+    MCPListToolsSpanData,
     ResponseSpanData,
+    SpeechGroupSpanData,
+    SpeechSpanData,
+    TranscriptionSpanData,
 )
 from .spans import Span
 from .traces import Trace
@@ -52,13 +56,13 @@ def trace(
     Returns:
         The newly created trace object.
     """
-    current_trace = GLOBAL_TRACE_PROVIDER.get_current_trace()
+    current_trace = get_trace_provider().get_current_trace()
     if current_trace:
         logger.warning(
             "Trace already exists. Creating a new trace, but this is probably a mistake."
         )
 
-    return GLOBAL_TRACE_PROVIDER.create_trace(
+    return get_trace_provider().create_trace(
         name=workflow_name,
         trace_id=trace_id,
         group_id=group_id,
@@ -69,12 +73,12 @@ def trace(
 
 def get_current_trace() -> Trace | None:
     """Returns the currently active trace, if present."""
-    return GLOBAL_TRACE_PROVIDER.get_current_trace()
+    return get_trace_provider().get_current_trace()
 
 
 def get_current_span() -> Span[Any] | None:
     """Returns the currently active span, if present."""
-    return GLOBAL_TRACE_PROVIDER.get_current_span()
+    return get_trace_provider().get_current_span()
 
 
 def agent_span(
@@ -104,7 +108,7 @@ def agent_span(
     Returns:
         The newly created agent span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=AgentSpanData(name=name, handoffs=handoffs, tools=tools, output_type=output_type),
         span_id=span_id,
         parent=parent,
@@ -137,7 +141,7 @@ def function_span(
     Returns:
         The newly created function span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=FunctionSpanData(name=name, input=input, output=output),
         span_id=span_id,
         parent=parent,
@@ -179,9 +183,13 @@ def generation_span(
     Returns:
         The newly created generation span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=GenerationSpanData(
-            input=input, output=output, model=model, model_config=model_config, usage=usage
+            input=input,
+            output=output,
+            model=model,
+            model_config=model_config,
+            usage=usage,
         ),
         span_id=span_id,
         parent=parent,
@@ -207,7 +215,7 @@ def response_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=ResponseSpanData(response=response),
         span_id=span_id,
         parent=parent,
@@ -238,7 +246,7 @@ def handoff_span(
     Returns:
         The newly created handoff span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=HandoffSpanData(from_agent=from_agent, to_agent=to_agent),
         span_id=span_id,
         parent=parent,
@@ -270,7 +278,7 @@ def custom_span(
     Returns:
         The newly created custom span.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=CustomSpanData(name=name, data=data or {}),
         span_id=span_id,
         parent=parent,
@@ -298,8 +306,149 @@ def guardrail_span(
             trace/span as the parent.
         disabled: If True, we will return a Span but the Span will not be recorded.
     """
-    return GLOBAL_TRACE_PROVIDER.create_span(
+    return get_trace_provider().create_span(
         span_data=GuardrailSpanData(name=name, triggered=triggered),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def transcription_span(
+    model: str | None = None,
+    input: str | None = None,
+    input_format: str | None = "pcm",
+    output: str | None = None,
+    model_config: Mapping[str, Any] | None = None,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[TranscriptionSpanData]:
+    """Create a new transcription span. The span will not be started automatically, you should
+    either do `with transcription_span() ...` or call `span.start()` + `span.finish()` manually.
+
+    Args:
+        model: The name of the model used for the speech-to-text.
+        input: The audio input of the speech-to-text transcription, as a base64 encoded string of
+            audio bytes.
+        input_format: The format of the audio input (defaults to "pcm").
+        output: The output of the speech-to-text transcription.
+        model_config: The model configuration (hyperparameters) used.
+        span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
+            recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
+            correctly formatted.
+        parent: The parent span or trace. If not provided, we will automatically use the current
+            trace/span as the parent.
+        disabled: If True, we will return a Span but the Span will not be recorded.
+
+    Returns:
+        The newly created speech-to-text span.
+    """
+    return get_trace_provider().create_span(
+        span_data=TranscriptionSpanData(
+            input=input,
+            input_format=input_format,
+            output=output,
+            model=model,
+            model_config=model_config,
+        ),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def speech_span(
+    model: str | None = None,
+    input: str | None = None,
+    output: str | None = None,
+    output_format: str | None = "pcm",
+    model_config: Mapping[str, Any] | None = None,
+    first_content_at: str | None = None,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[SpeechSpanData]:
+    """Create a new speech span. The span will not be started automatically, you should either do
+    `with speech_span() ...` or call `span.start()` + `span.finish()` manually.
+
+    Args:
+        model: The name of the model used for the text-to-speech.
+        input: The text input of the text-to-speech.
+        output: The audio output of the text-to-speech as base64 encoded string of PCM audio bytes.
+        output_format: The format of the audio output (defaults to "pcm").
+        model_config: The model configuration (hyperparameters) used.
+        first_content_at: The time of the first byte of the audio output.
+        span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
+            recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
+            correctly formatted.
+        parent: The parent span or trace. If not provided, we will automatically use the current
+            trace/span as the parent.
+        disabled: If True, we will return a Span but the Span will not be recorded.
+    """
+    return get_trace_provider().create_span(
+        span_data=SpeechSpanData(
+            model=model,
+            input=input,
+            output=output,
+            output_format=output_format,
+            model_config=model_config,
+            first_content_at=first_content_at,
+        ),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def speech_group_span(
+    input: str | None = None,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[SpeechGroupSpanData]:
+    """Create a new speech group span. The span will not be started automatically, you should
+    either do `with speech_group_span() ...` or call `span.start()` + `span.finish()` manually.
+
+    Args:
+        input: The input text used for the speech request.
+        span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
+            recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
+            correctly formatted.
+        parent: The parent span or trace. If not provided, we will automatically use the current
+            trace/span as the parent.
+        disabled: If True, we will return a Span but the Span will not be recorded.
+    """
+    return get_trace_provider().create_span(
+        span_data=SpeechGroupSpanData(input=input),
+        span_id=span_id,
+        parent=parent,
+        disabled=disabled,
+    )
+
+
+def mcp_tools_span(
+    server: str | None = None,
+    result: list[str] | None = None,
+    span_id: str | None = None,
+    parent: Trace | Span[Any] | None = None,
+    disabled: bool = False,
+) -> Span[MCPListToolsSpanData]:
+    """Create a new MCP list tools span. The span will not be started automatically, you should
+    either do `with mcp_tools_span() ...` or call `span.start()` + `span.finish()` manually.
+
+    Args:
+        server: The name of the MCP server.
+        result: The result of the MCP list tools call.
+        span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
+            recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
+            correctly formatted.
+        parent: The parent span or trace. If not provided, we will automatically use the current
+            trace/span as the parent.
+        disabled: If True, we will return a Span but the Span will not be recorded.
+    """
+    return get_trace_provider().create_span(
+        span_data=MCPListToolsSpanData(server=server, result=result),
         span_id=span_id,
         parent=parent,
         disabled=disabled,

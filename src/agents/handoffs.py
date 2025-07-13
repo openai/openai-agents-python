@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
@@ -8,12 +9,13 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
 from pydantic import TypeAdapter
 from typing_extensions import TypeAlias, TypeVar
 
-from . import _utils
 from .exceptions import ModelBehaviorError, UserError
 from .items import RunItem, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .strict_schema import ensure_strict_json_schema
 from .tracing.spans import SpanError
+from .util import _error_tracing, _json, _transforms
+from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -98,13 +100,17 @@ class Handoff(Generic[TContext]):
     True, as it increases the likelihood of correct JSON input.
     """
 
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    """Whether the handoff is enabled. Either a bool or a Callable that takes the run context and
+    agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
+    a handoff based on your context/state."""
+
     def get_transfer_message(self, agent: Agent[Any]) -> str:
-        base = f"{{'assistant': '{agent.name}'}}"
-        return base
+        return json.dumps({"assistant": agent.name})
 
     @classmethod
     def default_tool_name(cls, agent: Agent[Any]) -> str:
-        return _utils.transform_string_function_style(f"transfer_to_{agent.name}")
+        return _transforms.transform_string_function_style(f"transfer_to_{agent.name}")
 
     @classmethod
     def default_tool_description(cls, agent: Agent[Any]) -> str:
@@ -121,6 +127,7 @@ def handoff(
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext]: ...
 
 
@@ -133,6 +140,7 @@ def handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext]: ...
 
 
@@ -144,6 +152,7 @@ def handoff(
     tool_description_override: str | None = None,
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext]: ...
 
 
@@ -154,6 +163,7 @@ def handoff(
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
     input_type: type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext]:
     """Create a handoff from an agent.
 
@@ -166,9 +176,12 @@ def handoff(
         input_type: the type of the input to the handoff. If provided, the input will be validated
             against this type. Only relevant if you pass a function that takes an input.
         input_filter: a function that filters the inputs that are passed to the next agent.
+        is_enabled: Whether the handoff is enabled. Can be a bool or a callable that takes the run
+            context and agent and returns whether the handoff is enabled. Disabled handoffs are
+            hidden from the LLM at runtime.
     """
     assert (on_handoff and input_type) or not (on_handoff and input_type), (
-        "You must provide either both on_input and input_type, or neither"
+        "You must provide either both on_handoff and input_type, or neither"
     )
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
@@ -192,7 +205,7 @@ def handoff(
     ) -> Agent[Any]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Handoff function expected non-null input, but got None",
                         data={"details": "input_json is None"},
@@ -200,7 +213,7 @@ def handoff(
                 )
                 raise ModelBehaviorError("Handoff function expected non-null input, but got None")
 
-            validated_input = _utils.validate_json(
+            validated_input = _json.validate_json(
                 json_str=input_json,
                 type_adapter=type_adapter,
                 partial=False,
@@ -233,4 +246,5 @@ def handoff(
         on_invoke_handoff=_invoke_handoff,
         input_filter=input_filter,
         agent_name=agent.name,
+        is_enabled=is_enabled,
     )

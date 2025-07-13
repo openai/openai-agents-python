@@ -1,19 +1,58 @@
+import abc
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict, get_args, get_origin
 
-from . import _utils
 from .exceptions import ModelBehaviorError, UserError
 from .strict_schema import ensure_strict_json_schema
 from .tracing import SpanError
+from .util import _error_tracing, _json
 
 _WRAPPER_DICT_KEY = "response"
 
 
+class AgentOutputSchemaBase(abc.ABC):
+    """An object that captures the JSON schema of the output, as well as validating/parsing JSON
+    produced by the LLM into the output type.
+    """
+
+    @abc.abstractmethod
+    def is_plain_text(self) -> bool:
+        """Whether the output type is plain text (versus a JSON object)."""
+        pass
+
+    @abc.abstractmethod
+    def name(self) -> str:
+        """The name of the output type."""
+        pass
+
+    @abc.abstractmethod
+    def json_schema(self) -> dict[str, Any]:
+        """Returns the JSON schema of the output. Will only be called if the output type is not
+        plain text.
+        """
+        pass
+
+    @abc.abstractmethod
+    def is_strict_json_schema(self) -> bool:
+        """Whether the JSON schema is in strict mode. Strict mode constrains the JSON schema
+        features, but guarantees valid JSON. See here for details:
+        https://platform.openai.com/docs/guides/structured-outputs#supported-schemas
+        """
+        pass
+
+    @abc.abstractmethod
+    def validate_json(self, json_str: str) -> Any:
+        """Validate a JSON string against the output type. You must return the validated object,
+        or raise a `ModelBehaviorError` if the JSON is invalid.
+        """
+        pass
+
+
 @dataclass(init=False)
-class AgentOutputSchema:
+class AgentOutputSchema(AgentOutputSchemaBase):
     """An object that captures the JSON schema of the output, as well as validating/parsing JSON
     produced by the LLM into the output type.
     """
@@ -32,7 +71,7 @@ class AgentOutputSchema:
     _output_schema: dict[str, Any]
     """The JSON schema of the output."""
 
-    strict_json_schema: bool
+    _strict_json_schema: bool
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input.
     """
@@ -45,7 +84,7 @@ class AgentOutputSchema:
                 setting this to True, as it increases the likelihood of correct JSON input.
         """
         self.output_type = output_type
-        self.strict_json_schema = strict_json_schema
+        self._strict_json_schema = strict_json_schema
 
         if output_type is None or output_type is str:
             self._is_wrapped = False
@@ -70,12 +109,23 @@ class AgentOutputSchema:
             self._type_adapter = TypeAdapter(output_type)
             self._output_schema = self._type_adapter.json_schema()
 
-        if self.strict_json_schema:
-            self._output_schema = ensure_strict_json_schema(self._output_schema)
+        if self._strict_json_schema:
+            try:
+                self._output_schema = ensure_strict_json_schema(self._output_schema)
+            except UserError as e:
+                raise UserError(
+                    "Strict JSON schema is enabled, but the output type is not valid. "
+                    "Either make the output type strict, or pass output_schema_strict=False to "
+                    "your Agent()"
+                ) from e
 
     def is_plain_text(self) -> bool:
         """Whether the output type is plain text (versus a JSON object)."""
         return self.output_type is None or self.output_type is str
+
+    def is_strict_json_schema(self) -> bool:
+        """Whether the JSON schema is in strict mode."""
+        return self._strict_json_schema
 
     def json_schema(self) -> dict[str, Any]:
         """The JSON schema of the output type."""
@@ -83,14 +133,14 @@ class AgentOutputSchema:
             raise UserError("Output type is plain text, so no JSON schema is available")
         return self._output_schema
 
-    def validate_json(self, json_str: str, partial: bool = False) -> Any:
+    def validate_json(self, json_str: str) -> Any:
         """Validate a JSON string against the output type. Returns the validated object, or raises
         a `ModelBehaviorError` if the JSON is invalid.
         """
-        validated = _utils.validate_json(json_str, self._type_adapter, partial)
+        validated = _json.validate_json(json_str, self._type_adapter, partial=False)
         if self._is_wrapped:
             if not isinstance(validated, dict):
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Invalid JSON",
                         data={"details": f"Expected a dict, got {type(validated)}"},
@@ -101,7 +151,7 @@ class AgentOutputSchema:
                 )
 
             if _WRAPPER_DICT_KEY not in validated:
-                _utils.attach_error_to_current_span(
+                _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Invalid JSON",
                         data={"details": f"Could not find key {_WRAPPER_DICT_KEY} in JSON"},
@@ -113,7 +163,7 @@ class AgentOutputSchema:
             return validated[_WRAPPER_DICT_KEY]
         return validated
 
-    def output_type_name(self) -> str:
+    def name(self) -> str:
         """The name of the output type."""
         return _type_to_str(self.output_type)
 

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, create_model
 from .exceptions import UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
+from .tool_context import ToolContext
 
 
 @dataclass
@@ -33,6 +34,9 @@ class FuncSchema:
     """The signature of the function."""
     takes_context: bool = False
     """Whether the function takes a RunContextWrapper argument (must be the first argument)."""
+    strict_json_schema: bool = True
+    """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
+    as it increases the likelihood of correct JSON input."""
 
     def to_call_args(self, data: BaseModel) -> tuple[list[Any], dict[str, Any]]:
         """
@@ -128,7 +132,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
-    # Supresses warnings about missing annotations for params
+    # Suppresses warnings about missing annotations for params
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
     logger.setLevel(logging.ERROR)
@@ -219,7 +223,8 @@ def function_schema(
         doc_info = None
         param_descs = {}
 
-    func_name = name_override or doc_info.name if doc_info else func.__name__
+    # Ensure name_override takes precedence even if docstring info is disabled.
+    func_name = name_override or (doc_info.name if doc_info else func.__name__)
 
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)
@@ -234,21 +239,21 @@ def function_schema(
         ann = type_hints.get(first_name, first_param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
+            if origin is RunContextWrapper or origin is ToolContext:
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
         else:
             filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper.
+    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
+            if origin is RunContextWrapper or origin is ToolContext:
                 raise UserError(
-                    f"RunContextWrapper param found at non-first position in function"
+                    f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"
                 )
         filtered_params.append((name, param))
@@ -332,9 +337,11 @@ def function_schema(
     # 5. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
-        description=description_override or doc_info.description if doc_info else None,
+        # Ensure description_override takes precedence even if docstring info is disabled.
+        description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
         signature=sig,
         takes_context=takes_context,
+        strict_json_schema=strict_json_schema,
     )

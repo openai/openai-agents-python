@@ -8,7 +8,11 @@ from openai.types.chat.chat_completion_chunk import (
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
 )
-from openai.types.completion_usage import CompletionUsage
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
@@ -46,7 +50,13 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         model="fake",
         object="chat.completion.chunk",
         choices=[Choice(index=0, delta=ChoiceDelta(content="llo"))],
-        usage=CompletionUsage(completion_tokens=5, prompt_tokens=7, total_tokens=12),
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        ),
     )
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
@@ -79,6 +89,8 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # We expect a response.created, then a response.output_item.added, content part added,
@@ -111,6 +123,8 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.input_tokens == 7
     assert completed_resp.usage.output_tokens == 5
     assert completed_resp.usage.total_tokens == 12
+    assert completed_resp.usage.input_tokens_details.cached_tokens == 2
+    assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
 
 
 @pytest.mark.allow_call_model_methods
@@ -168,6 +182,8 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # Expect sequence similar to text: created, output_item.added, content part added,
@@ -255,6 +271,8 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
         output_schema=None,
         handoffs=[],
         tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        prompt=None,
     ):
         output_events.append(event)
     # Sequence should be: response.created, then after loop we expect function call-related events:

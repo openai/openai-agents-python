@@ -34,6 +34,19 @@ class OpenAIProvider(ModelProvider):
         project: str | None = None,
         use_responses: bool | None = None,
     ) -> None:
+        """Create a new OpenAI provider.
+
+        Args:
+            api_key: The API key to use for the OpenAI client. If not provided, we will use the
+                default API key.
+            base_url: The base URL to use for the OpenAI client. If not provided, we will use the
+                default base URL.
+            openai_client: An optional OpenAI client to use. If not provided, we will create a new
+                OpenAI client using the api_key and base_url.
+            organization: The organization to use for the OpenAI client.
+            project: The project to use for the OpenAI client.
+            use_responses: Whether to use the OpenAI responses API.
+        """
         if openai_client is not None:
             assert api_key is None and base_url is None, (
                 "Don't provide api_key or base_url if you provide openai_client"

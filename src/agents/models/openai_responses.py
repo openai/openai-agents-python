@@ -10,20 +10,33 @@ from openai.types import ChatModel
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseIncludable,
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
     WebSearchToolParam,
     response_create_params,
 )
+from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
-from ..agent_output import AgentOutputSchema
+from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
-from ..tool import ComputerTool, FileSearchTool, FunctionTool, Tool, WebSearchTool
+from ..model_settings import MCPToolChoice
+from ..tool import (
+    CodeInterpreterTool,
+    ComputerTool,
+    FileSearchTool,
+    FunctionTool,
+    HostedMCPTool,
+    ImageGenerationTool,
+    LocalShellTool,
+    Tool,
+    WebSearchTool,
+)
 from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..version import __version__
@@ -35,13 +48,6 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
-
-# From the Responses API
-IncludeLiteral = Literal[
-    "file_search_call.results",
-    "message.input_image.image_url",
-    "computer_call_output.output.image_url",
-]
 
 
 class OpenAIResponsesModel(Model):
@@ -66,9 +72,11 @@ class OpenAIResponsesModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -79,15 +87,23 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
+                    previous_response_id,
                     stream=False,
+                    prompt=prompt,
                 )
 
                 if _debug.DONT_LOG_MODEL_DATA:
-                    logger.debug("LLM responsed")
+                    logger.debug("LLM responded")
                 else:
                     logger.debug(
                         "LLM resp:\n"
-                        f"{json.dumps([x.model_dump() for x in response.output], indent=2)}\n"
+                        f"""{
+                            json.dumps(
+                                [x.model_dump() for x in response.output],
+                                indent=2,
+                                ensure_ascii=False,
+                            )
+                        }\n"""
                     )
 
                 usage = (
@@ -96,6 +112,8 @@ class OpenAIResponsesModel(Model):
                         input_tokens=response.usage.input_tokens,
                         output_tokens=response.usage.output_tokens,
                         total_tokens=response.usage.total_tokens,
+                        input_tokens_details=response.usage.input_tokens_details,
+                        output_tokens_details=response.usage.output_tokens_details,
                     )
                     if response.usage
                     else Usage()
@@ -120,7 +138,7 @@ class OpenAIResponsesModel(Model):
         return ModelResponse(
             output=response.output,
             usage=usage,
-            referenceable_id=response.id,
+            response_id=response.id,
         )
 
     async def stream_response(
@@ -129,9 +147,11 @@ class OpenAIResponsesModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
+        previous_response_id: str | None,
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -145,7 +165,9 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
+                    previous_response_id,
                     stream=True,
+                    prompt=prompt,
                 )
 
                 final_response: Response | None = None
@@ -178,9 +200,11 @@ class OpenAIResponsesModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
 
     @overload
@@ -190,9 +214,11 @@ class OpenAIResponsesModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
 
     async def _fetch_response(
@@ -201,38 +227,51 @@ class OpenAIResponsesModel(Model):
         input: str | list[TResponseInputItem],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchema | None,
+        output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
+        previous_response_id: str | None,
         stream: Literal[True] | Literal[False] = False,
+        prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
 
         parallel_tool_calls = (
-            True if model_settings.parallel_tool_calls and tools and len(tools) > 0 else NOT_GIVEN
+            True
+            if model_settings.parallel_tool_calls and tools and len(tools) > 0
+            else False
+            if model_settings.parallel_tool_calls is False
+            else NOT_GIVEN
         )
 
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
+        include: list[ResponseIncludable] = converted_tools.includes
+        if model_settings.response_include is not None:
+            include = list({*include, *model_settings.response_include})
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2)}\n"
+                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
+                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
+                f"Previous response id: {previous_response_id}\n"
             )
 
         return await self._client.responses.create(
+            previous_response_id=self._non_null_or_not_given(previous_response_id),
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
-            include=converted_tools.includes,
+            include=include,
             tools=converted_tools.tools,
+            prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
             truncation=self._non_null_or_not_given(model_settings.truncation),
@@ -240,8 +279,14 @@ class OpenAIResponsesModel(Model):
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            extra_headers=_HEADERS,
+            extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
+            extra_query=model_settings.extra_query,
+            extra_body=model_settings.extra_body,
             text=response_format,
+            store=self._non_null_or_not_given(model_settings.store),
+            reasoning=self._non_null_or_not_given(model_settings.reasoning),
+            metadata=self._non_null_or_not_given(model_settings.metadata),
+            **(model_settings.extra_args or {}),
         )
 
     def _get_client(self) -> AsyncOpenAI:
@@ -253,16 +298,22 @@ class OpenAIResponsesModel(Model):
 @dataclass
 class ConvertedTools:
     tools: list[ToolParam]
-    includes: list[IncludeLiteral]
+    includes: list[ResponseIncludable]
 
 
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | None
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> response_create_params.ToolChoice | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
+        elif isinstance(tool_choice, MCPToolChoice):
+            return {
+                "server_label": tool_choice.server_label,
+                "type": "mcp",
+                "name": tool_choice.name,
+            }
         elif tool_choice == "required":
             return "required"
         elif tool_choice == "auto":
@@ -281,6 +332,18 @@ class Converter:
             return {
                 "type": "computer_use_preview",
             }
+        elif tool_choice == "image_generation":
+            return {
+                "type": "image_generation",
+            }
+        elif tool_choice == "code_interpreter":
+            return {
+                "type": "code_interpreter",
+            }
+        elif tool_choice == "mcp":
+            # Note that this is still here for backwards compatibility,
+            # but migrating to MCPToolChoice is recommended.
+            return { "type": "mcp" }  # type: ignore [typeddict-item]
         else:
             return {
                 "type": "function",
@@ -289,7 +352,7 @@ class Converter:
 
     @classmethod
     def get_response_format(
-        cls, output_schema: AgentOutputSchema | None
+        cls, output_schema: AgentOutputSchemaBase | None
     ) -> ResponseTextConfigParam | NotGiven:
         if output_schema is None or output_schema.is_plain_text():
             return NOT_GIVEN
@@ -299,7 +362,7 @@ class Converter:
                     "type": "json_schema",
                     "name": "final_output",
                     "schema": output_schema.json_schema(),
-                    "strict": output_schema.strict_json_schema,
+                    "strict": output_schema.is_strict_json_schema(),
                 }
             }
 
@@ -310,7 +373,7 @@ class Converter:
         handoffs: list[Handoff[Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
-        includes: list[IncludeLiteral] = []
+        includes: list[ResponseIncludable] = []
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
@@ -328,7 +391,7 @@ class Converter:
         return ConvertedTools(tools=converted_tools, includes=includes)
 
     @classmethod
-    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, IncludeLiteral | None]:
+    def _convert_tool(cls, tool: Tool) -> tuple[ToolParam, ResponseIncludable | None]:
         """Returns converted tool and includes"""
 
         if isinstance(tool, FunctionTool):
@@ -339,7 +402,7 @@ class Converter:
                 "type": "function",
                 "description": tool.description,
             }
-            includes: IncludeLiteral | None = None
+            includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
             ws: WebSearchToolParam = {
                 "type": "web_search_preview",
@@ -369,7 +432,20 @@ class Converter:
                 "display_height": tool.computer.dimensions[1],
             }
             includes = None
-
+        elif isinstance(tool, HostedMCPTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, ImageGenerationTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, CodeInterpreterTool):
+            converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, LocalShellTool):
+            converted_tool = {
+                "type": "local_shell",
+            }
+            includes = None
         else:
             raise UserError(f"Unknown tool type: {type(tool)}, tool")
 

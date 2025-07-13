@@ -14,13 +14,17 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     ModelBehaviorError,
+    ModelSettings,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
+    RunConfig,
     RunContextWrapper,
     Runner,
     UserError,
     handoff,
 )
+from agents.agent import ToolsToFinalOutputResult
+from agents.tool import FunctionToolResult, function_tool
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -552,3 +556,227 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+@function_tool
+def test_tool_one():
+    return Foo(bar="tool_one_result")
+
+
+@function_tool
+def test_tool_two():
+    return "tool_two_result"
+
+
+@pytest.mark.asyncio
+async def test_tool_use_behavior_first_output():
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result"), test_tool_one, test_tool_two],
+        tool_use_behavior="stop_on_first_tool",
+        output_type=Foo,
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("test_tool_one", None),
+                get_function_tool_call("test_tool_two", None),
+            ],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == Foo(bar="tool_one_result"), (
+        "should have used the first tool result"
+    )
+
+
+def custom_tool_use_behavior(
+    context: RunContextWrapper[Any], results: list[FunctionToolResult]
+) -> ToolsToFinalOutputResult:
+    if "test_tool_one" in [result.tool.name for result in results]:
+        return ToolsToFinalOutputResult(is_final_output=True, final_output="the_final_output")
+    else:
+        return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
+
+@pytest.mark.asyncio
+async def test_tool_use_behavior_custom_function():
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result"), test_tool_one, test_tool_two],
+        tool_use_behavior=custom_tool_use_behavior,
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("test_tool_two", None),
+            ],
+            # Second turn: a message and tool call
+            [
+                get_text_message("a_message"),
+                get_function_tool_call("test_tool_one", None),
+                get_function_tool_call("test_tool_two", None),
+            ],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert len(result.raw_responses) == 2, "should have two model responses"
+    assert result.final_output == "the_final_output", "should have used the custom function"
+
+
+@pytest.mark.asyncio
+async def test_model_settings_override():
+    model = FakeModel()
+    agent = Agent(
+        name="test", model=model, model_settings=ModelSettings(temperature=1.0, max_tokens=1000)
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_text_message("a_message"),
+            ],
+        ]
+    )
+
+    await Runner.run(
+        agent,
+        input="user_message",
+        run_config=RunConfig(model_settings=ModelSettings(0.5)),
+    )
+
+    # temperature is overridden by Runner.run, but max_tokens is not
+    assert model.last_turn_args["model_settings"].temperature == 0.5
+    assert model.last_turn_args["model_settings"].max_tokens == 1000
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_passed_between_runs():
+    """Test that previous_response_id is passed to the model on subsequent runs."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(name="test", model=model)
+
+    assert model.last_turn_args.get("previous_response_id") is None
+    await Runner.run(agent, input="test", previous_response_id="resp-non-streamed-test")
+    assert model.last_turn_args.get("previous_response_id") == "resp-non-streamed-test"
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_previous_response_id_passed_between_runs():
+    """Test that previous_response_id is passed to the model on subsequent runs."""
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
+            # Second turn: text message
+            [get_text_message("done")],
+        ]
+    )
+
+    assert model.last_turn_args.get("previous_response_id") is None
+    await Runner.run(agent, input="test", previous_response_id="resp-test-123")
+    assert model.last_turn_args.get("previous_response_id") == "resp-test-123"
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_passed_between_runs_streamed():
+    """Test that previous_response_id is passed to the model on subsequent streamed runs."""
+    model = FakeModel()
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(
+        name="test",
+        model=model,
+    )
+
+    assert model.last_turn_args.get("previous_response_id") is None
+    result = Runner.run_streamed(agent, input="test", previous_response_id="resp-stream-test")
+    async for _ in result.stream_events():
+        pass
+
+    assert model.last_turn_args.get("previous_response_id") == "resp-stream-test"
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
+    """Test that previous_response_id is passed to the model on subsequent streamed runs."""
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("foo", json.dumps({"a": "b"}))],
+            # Second turn: text message
+            [get_text_message("done")],
+        ]
+    )
+
+    assert model.last_turn_args.get("previous_response_id") is None
+    result = Runner.run_streamed(agent, input="test", previous_response_id="resp-stream-test")
+    async for _ in result.stream_events():
+        pass
+
+    assert model.last_turn_args.get("previous_response_id") == "resp-stream-test"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tool_addition_run() -> None:
+    """Test that tools can be added to an agent during a run."""
+    model = FakeModel()
+
+    executed: dict[str, bool] = {"called": False}
+
+    agent = Agent(name="test", model=model, tool_use_behavior="run_llm_again")
+
+    @function_tool(name_override="tool2")
+    def tool2() -> str:
+        executed["called"] = True
+        return "result2"
+
+    @function_tool(name_override="add_tool")
+    async def add_tool() -> str:
+        agent.tools.append(tool2)
+        return "added"
+
+    agent.tools.append(add_tool)
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("add_tool", json.dumps({}))],
+            [get_function_tool_call("tool2", json.dumps({}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="start")
+
+    assert executed["called"] is True
+    assert result.final_output == "done"

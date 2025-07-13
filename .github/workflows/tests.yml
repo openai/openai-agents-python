@@ -5,8 +5,10 @@ on:
     branches:
       - main
   pull_request:
-    branches:
-      - main
+    # All PRs, including stacked PRs
+
+env:
+  UV_FROZEN: "1"
 
 jobs:
   lint:
@@ -50,8 +52,8 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: make sync
-      - name: Run tests
-        run: make tests
+      - name: Run tests with coverage
+        run: make coverage
 
   build-docs:
     runs-on: ubuntu-latest

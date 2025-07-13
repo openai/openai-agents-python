@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -13,7 +14,6 @@ from agents import (
     RunContextWrapper,
     RunHooks,
     RunItem,
-    Runner,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -26,6 +26,9 @@ from agents._run_impl import (
     RunImpl,
     SingleStepResult,
 )
+from agents.run import AgentRunner
+from agents.tool import function_tool
+from agents.tool_context import ToolContext
 
 from .test_responses import (
     get_final_output_message,
@@ -43,7 +46,7 @@ async def test_empty_response_is_final_output():
     response = ModelResponse(
         output=[],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent, response)
 
@@ -59,7 +62,7 @@ async def test_plaintext_agent_no_tool_calls_is_final_output():
     response = ModelResponse(
         output=[get_text_message("hello_world")],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent, response)
 
@@ -79,7 +82,7 @@ async def test_plaintext_agent_no_tool_calls_multiple_messages_is_final_output()
             get_text_message("bye"),
         ],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(
         agent,
@@ -105,7 +108,7 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
     response = ModelResponse(
         output=[get_text_message("hello_world"), get_function_tool_call("test", "")],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent, response)
 
@@ -140,7 +143,7 @@ async def test_multiple_tool_calls():
             get_function_tool_call("test_2"),
         ],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
 
     result = await get_execute_result(agent, response)
@@ -159,6 +162,42 @@ async def test_multiple_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_multiple_tool_calls_with_tool_context():
+    async def _fake_tool(context: ToolContext[str], value: str) -> str:
+        return f"{value}-{context.tool_call_id}"
+
+    tool = function_tool(_fake_tool, name_override="fake_tool", failure_error_function=None)
+
+    agent = Agent(
+        name="test",
+        tools=[tool],
+    )
+    response = ModelResponse(
+        output=[
+            get_function_tool_call("fake_tool", json.dumps({"value": "123"}), call_id="1"),
+            get_function_tool_call("fake_tool", json.dumps({"value": "456"}), call_id="2"),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+    assert result.original_input == "hello"
+
+    # 4 items: new message, 2 tool calls, 2 tool call outputs
+    assert len(result.generated_items) == 4
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+    items = result.generated_items
+    assert_item_is_function_tool_call(items[0], "fake_tool", json.dumps({"value": "123"}))
+    assert_item_is_function_tool_call(items[1], "fake_tool", json.dumps({"value": "456"}))
+    assert_item_is_function_tool_call_output(items[2], "123-1")
+    assert_item_is_function_tool_call_output(items[3], "456-2")
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_handoff_output_leads_to_handoff_next_step():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")
@@ -166,7 +205,7 @@ async def test_handoff_output_leads_to_handoff_next_step():
     response = ModelResponse(
         output=[get_text_message("Hello, world!"), get_handoff_tool_call(agent_1)],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent_3, response)
 
@@ -186,7 +225,7 @@ async def test_final_output_without_tool_runs_again():
     response = ModelResponse(
         output=[get_function_tool_call("tool_1")],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent, response)
 
@@ -203,7 +242,7 @@ async def test_final_output_leads_to_final_output_next_step():
             get_final_output_message(Foo(bar="123").model_dump_json()),
         ],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent, response)
 
@@ -222,7 +261,7 @@ async def test_handoff_and_final_output_leads_to_handoff_next_step():
             get_handoff_tool_call(agent_1),
         ],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent_3, response)
 
@@ -241,7 +280,7 @@ async def test_multiple_final_output_leads_to_final_output_next_step():
             get_final_output_message(Foo(bar="456").model_dump_json()),
         ],
         usage=Usage(),
-        referenceable_id=None,
+        response_id=None,
     )
     result = await get_execute_result(agent_3, response)
 
@@ -285,11 +324,12 @@ async def get_execute_result(
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
-    output_schema = Runner._get_output_schema(agent)
-    handoffs = Runner._get_handoffs(agent)
+    output_schema = AgentRunner._get_output_schema(agent)
+    handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
 
     processed_response = RunImpl.process_model_response(
         agent=agent,
+        all_tools=await agent.get_all_tools(context_wrapper or RunContextWrapper(None)),
         response=response,
         output_schema=output_schema,
         handoffs=handoffs,

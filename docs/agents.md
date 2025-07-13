@@ -6,6 +6,7 @@ Agents are the core building block in your apps. An agent is a large language mo
 
 The most common properties of an agent you'll configure are:
 
+-   `name`: A required string that identifies your agent.
 -   `instructions`: also known as a developer message or system prompt.
 -   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
 -   `tools`: Tools that the agent can use to achieve its tasks.
@@ -32,11 +33,11 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 ```python
 @dataclass
 class UserContext:
-  uid: str
-  is_pro_user: bool
+    uid: str
+    is_pro_user: bool
 
-  async def fetch_purchases() -> list[Purchase]:
-     return ...
+    async def fetch_purchases() -> list[Purchase]:
+        return ...
 
 agent = Agent[UserContext](
     ...,
@@ -130,3 +131,18 @@ robot_agent = pirate_agent.clone(
     instructions="Write like a robot",
 )
 ```
+
+## Forcing tool use
+
+Supplying a list of tools doesn't always mean the LLM will use a tool. You can force tool use by setting [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice]. Valid values are:
+
+1. `auto`, which allows the LLM to decide whether or not to use a tool.
+2. `required`, which requires the LLM to use a tool (but it can intelligently decide which tool).
+3. `none`, which requires the LLM to _not_ use a tool.
+4. Setting a specific string e.g. `my_tool`, which requires the LLM to use that specific tool.
+
+!!! note
+
+    To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call. This behavior is configurable via [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]. The infinite loop is because tool results are sent to the LLM, which then generates another tool call because of `tool_choice`, ad infinitum.
+
+    If you want the Agent to completely stop after a tool call (rather than continuing with auto mode), you can set [`Agent.tool_use_behavior="stop_on_first_tool"`] which will directly use the tool output as the final response without further LLM processing.

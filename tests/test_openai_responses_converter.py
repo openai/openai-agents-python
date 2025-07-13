@@ -92,7 +92,7 @@ def test_get_response_format_plain_text_and_json_schema():
     assert inner.get("name") == "final_output"
     assert isinstance(inner.get("schema"), dict)
     # Should include a strict flag matching the schema's strictness setting.
-    assert inner.get("strict") == out_schema.strict_json_schema
+    assert inner.get("strict") == out_schema.is_strict_json_schema()
 
 
 def test_convert_tools_basic_types_and_includes():
