@@ -114,9 +114,9 @@ class AgentOutputSchema(AgentOutputSchemaBase):
                 self._output_schema = ensure_strict_json_schema(self._output_schema)
             except UserError as e:
                 raise UserError(
-                  "Strict JSON schema is enabled, but the output type is not valid. "
-                  "Either use a dataclass, Pydantic model, or TypedDict, "
-                  "or wrap your type with AgentOutputSchema(your_type, strict_json_schema=False)"
+                    "Strict JSON schema is enabled, but the output type is not valid. "
+                    "Either use a dataclass, Pydantic model, or TypedDict, "
+                    "or wrap your type with AgentOutputSchema(your_type, strict_json_schema=False)"
                 ) from e
 
     def is_plain_text(self) -> bool:
