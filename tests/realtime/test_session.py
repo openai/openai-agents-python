@@ -3,8 +3,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
+from agents.realtime.config import RealtimeRunConfig
 from agents.realtime.events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -12,6 +14,7 @@ from agents.realtime.events import (
     RealtimeAudioEnd,
     RealtimeAudioInterrupted,
     RealtimeError,
+    RealtimeGuardrailTripped,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
@@ -963,3 +966,194 @@ class TestToolCallExecution:
         # Verify result
         sent_call, sent_output, _ = mock_model.sent_tool_outputs[0]
         assert sent_output == "result2"
+
+
+class TestGuardrailFunctionality:
+    """Test suite for output guardrail functionality in RealtimeSession"""
+
+    @pytest.fixture
+    def triggered_guardrail(self):
+        """Creates a guardrail that always triggers"""
+        def guardrail_func(context, agent, output):
+            return GuardrailFunctionOutput(
+                output_info={"reason": "test trigger"},
+                tripwire_triggered=True
+            )
+        return OutputGuardrail(guardrail_function=guardrail_func, name="triggered_guardrail")
+
+    @pytest.fixture
+    def safe_guardrail(self):
+        """Creates a guardrail that never triggers"""
+        def guardrail_func(context, agent, output):
+            return GuardrailFunctionOutput(
+                output_info={"reason": "safe content"},
+                tripwire_triggered=False
+            )
+        return OutputGuardrail(guardrail_function=guardrail_func, name="safe_guardrail")
+
+    @pytest.mark.asyncio
+    async def test_transcript_delta_triggers_guardrail_at_threshold(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        """Test that guardrails run when transcript delta reaches debounce threshold"""
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [triggered_guardrail],
+            "guardrails_settings": {"debounce_text_length": 10}
+        }
+
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        # Send transcript delta that exceeds threshold (10 chars)
+        transcript_event = RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="this is more than ten characters", response_id="resp_1"
+        )
+
+        await session.on_event(transcript_event)
+
+        # Should have triggered guardrail and interrupted
+        assert session._interrupted_by_guardrail is True
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_guardrail" in mock_model.sent_messages[0]
+
+        # Should have emitted guardrail_tripped event
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_transcript_delta_multiple_thresholds_same_item(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        """Test guardrails run at 1x, 2x, 3x thresholds for same item_id"""
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [triggered_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5}
+        }
+
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        # First delta - reaches 1x threshold (5 chars)
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="12345", response_id="resp_1"
+        ))
+
+        # Second delta - reaches 2x threshold (10 chars total)
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="67890", response_id="resp_1"
+        ))
+
+        # Should only trigger once due to interrupted_by_guardrail flag
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+
+    @pytest.mark.asyncio
+    async def test_transcript_delta_different_items_tracked_separately(
+        self, mock_model, mock_agent, safe_guardrail
+    ):
+        """Test that different item_ids are tracked separately for debouncing"""
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [safe_guardrail],
+            "guardrails_settings": {"debounce_text_length": 10}
+        }
+
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        # Add text to item_1 (8 chars - below threshold)
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="12345678", response_id="resp_1"
+        ))
+
+        # Add text to item_2 (8 chars - below threshold)
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_2", delta="abcdefgh", response_id="resp_2"
+        ))
+
+        # Neither should trigger guardrails yet
+        assert mock_model.interrupts_called == 0
+
+        # Add more text to item_1 (total 12 chars - above threshold)
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="90ab", response_id="resp_1"
+        ))
+
+        # item_1 should have triggered guardrail run (but not interrupted since safe)
+        assert session._item_guardrail_run_counts["item_1"] == 1
+        assert (
+            "item_2" not in session._item_guardrail_run_counts
+            or session._item_guardrail_run_counts["item_2"] == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_turn_ended_clears_guardrail_state(
+        self, mock_model, mock_agent, triggered_guardrail
+    ):
+        """Test that turn_ended event clears guardrail state for next turn"""
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [triggered_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5}
+        }
+
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        # Trigger guardrail
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="trigger", response_id="resp_1"
+        ))
+
+        assert session._interrupted_by_guardrail is True
+        assert len(session._item_transcripts) == 1
+
+        # End turn
+        await session.on_event(RealtimeModelTurnEndedEvent())
+
+        # State should be cleared
+        assert session._interrupted_by_guardrail is False
+        assert len(session._item_transcripts) == 0
+        assert len(session._item_guardrail_run_counts) == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_guardrails_all_triggered(
+        self, mock_model, mock_agent
+    ):
+        """Test that all triggered guardrails are included in the event"""
+        def create_triggered_guardrail(name):
+            def guardrail_func(context, agent, output):
+                return GuardrailFunctionOutput(
+                    output_info={"name": name},
+                    tripwire_triggered=True
+                )
+            return OutputGuardrail(guardrail_function=guardrail_func, name=name)
+
+        guardrail1 = create_triggered_guardrail("guardrail_1")
+        guardrail2 = create_triggered_guardrail("guardrail_2")
+
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [guardrail1, guardrail2],
+            "guardrails_settings": {"debounce_text_length": 5}
+        }
+
+        session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
+
+        await session.on_event(RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="trigger", response_id="resp_1"
+        ))
+
+        # Should have interrupted and sent message with both guardrail names
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        message = mock_model.sent_messages[0]
+        assert "guardrail_1" in message and "guardrail_2" in message
+
+        # Should have emitted event with both guardrail results
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
+        assert len(guardrail_events) == 1
+        assert len(guardrail_events[0].guardrail_results) == 2

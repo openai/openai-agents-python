@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from typing_extensions import assert_never
 
+from ..agent import Agent
 from ..handoffs import Handoff
 from ..run_context import RunContextWrapper, TContext
 from ..tool import FunctionTool
 from ..tool_context import ToolContext
 from .agent import RealtimeAgent
-from .config import RealtimeUserInput
+from .config import RealtimeRunConfig, RealtimeUserInput
 from .events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -20,6 +21,7 @@ from .events import (
     RealtimeAudioInterrupted,
     RealtimeError,
     RealtimeEventInfo,
+    RealtimeGuardrailTripped,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
@@ -62,16 +64,16 @@ class RealtimeSession(RealtimeModelListener):
         agent: RealtimeAgent,
         context: TContext | None,
         model_config: RealtimeModelConfig | None = None,
+        run_config: RealtimeRunConfig | None = None,
     ) -> None:
         """Initialize the session.
 
         Args:
             model: The model to use.
             agent: The current agent.
-            context_wrapper: The context wrapper.
-            event_info: Event info object.
-            history: The conversation history.
+            context: The context object.
             model_config: Model configuration.
+            run_config: Runtime configuration including guardrails.
         """
         self._model = model
         self._current_agent = agent
@@ -79,8 +81,17 @@ class RealtimeSession(RealtimeModelListener):
         self._event_info = RealtimeEventInfo(context=self._context_wrapper)
         self._history: list[RealtimeItem] = []
         self._model_config = model_config or {}
+        self._run_config = run_config or {}
         self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
         self._closed = False
+
+        # Guardrails state tracking
+        self._interrupted_by_guardrail = False
+        self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
+        self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
+        self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
+            "debounce_text_length", 100
+        )
 
     async def __aenter__(self) -> RealtimeSession:
         """Start the session by connecting to the model. After this, you will be able to stream
@@ -159,8 +170,22 @@ class RealtimeSession(RealtimeModelListener):
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
             )
         elif event.type == "transcript_delta":
-            # TODO (rm) Add guardrails
-            pass
+            # Accumulate transcript text for guardrail debouncing per item_id
+            item_id = event.item_id
+            if item_id not in self._item_transcripts:
+                self._item_transcripts[item_id] = ""
+                self._item_guardrail_run_counts[item_id] = 0
+
+            self._item_transcripts[item_id] += event.delta
+
+            # Check if we should run guardrails based on debounce threshold
+            current_length = len(self._item_transcripts[item_id])
+            threshold = self._debounce_text_length
+            next_run_threshold = (self._item_guardrail_run_counts[item_id] + 1) * threshold
+
+            if current_length >= next_run_threshold:
+                self._item_guardrail_run_counts[item_id] += 1
+                await self._run_output_guardrails(self._item_transcripts[item_id])
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
             self._history = self._get_new_history(self._history, event.item)
@@ -189,6 +214,11 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "turn_ended":
+            # Clear guardrail state for next turn
+            self._item_transcripts.clear()
+            self._item_guardrail_run_counts.clear()
+            self._interrupted_by_guardrail = False
+
             await self._put_event(
                 RealtimeAgentEndEvent(
                     agent=self._current_agent,
@@ -290,3 +320,49 @@ class RealtimeSession(RealtimeModelListener):
 
         # Otherwise, add it to the end
         return old_history + [event]
+
+    async def _run_output_guardrails(self, text: str) -> bool:
+        """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
+        output_guardrails = self._run_config.get("output_guardrails", [])
+        if not output_guardrails or self._interrupted_by_guardrail:
+            return False
+
+        triggered_results = []
+
+        for guardrail in output_guardrails:
+            try:
+                result = await guardrail.run(
+                    # TODO (rm) Remove this cast, it's wrong
+                    self._context_wrapper,
+                    cast(Agent[Any], self._current_agent),
+                    text,
+                )
+                if result.output.tripwire_triggered:
+                    triggered_results.append(result)
+            except Exception:
+                # Continue with other guardrails if one fails
+                continue
+
+        if triggered_results:
+            # Mark as interrupted to prevent multiple interrupts
+            self._interrupted_by_guardrail = True
+
+            # Emit guardrail tripped event
+            await self._put_event(
+                RealtimeGuardrailTripped(
+                    guardrail_results=triggered_results,
+                    message=text,
+                    info=self._event_info,
+                )
+            )
+
+            # Interrupt the model
+            await self._model.interrupt()
+
+            # Send guardrail triggered message
+            guardrail_names = [result.guardrail.get_name() for result in triggered_results]
+            await self._model.send_message(f"guardrail triggered: {', '.join(guardrail_names)}")
+
+            return True
+
+        return False

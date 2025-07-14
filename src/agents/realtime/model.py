@@ -38,6 +38,7 @@ class RealtimeModelConfig(TypedDict):
     """
 
     initial_model_settings: NotRequired[RealtimeSessionModelSettings]
+    """The initial model settings to use when connecting."""
 
 
 class RealtimeModel(abc.ABC):
