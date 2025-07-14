@@ -2,7 +2,6 @@ import asyncio
 import uuid
 
 from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
-from typing import Literal
 from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace
 
 """
