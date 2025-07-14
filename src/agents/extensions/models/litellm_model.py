@@ -371,6 +371,7 @@ class LitellmConverter:
             annotations=cls.convert_annotations_to_openai(message),
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
+            reasoning_content=message.reasoning_content,
         )
 
     @classmethod
