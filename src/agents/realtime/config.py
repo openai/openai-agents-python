@@ -8,6 +8,7 @@ from typing import (
 
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
+from ..guardrail import OutputGuardrail
 from ..model_settings import ToolChoice
 from ..tool import Tool
 
@@ -82,11 +83,43 @@ class RealtimeSessionModelSettings(TypedDict):
     tool_choice: NotRequired[ToolChoice]
     tools: NotRequired[list[Tool]]
 
+    tracing: NotRequired[RealtimeModelTracingConfig | None]
+
+
+class RealtimeGuardrailsSettings(TypedDict):
+    """Settings for output guardrails in realtime sessions."""
+
+    debounce_text_length: NotRequired[int]
+    """
+    The minimum number of characters to accumulate before running guardrails on transcript
+    deltas. Defaults to 100. Guardrails run every time the accumulated text reaches
+    1x, 2x, 3x, etc. times this threshold.
+    """
+
+
+class RealtimeModelTracingConfig(TypedDict):
+    """Configuration for tracing in realtime model sessions."""
+
+    workflow_name: NotRequired[str]
+    """The workflow name to use for tracing."""
+
+    group_id: NotRequired[str]
+    """A group identifier to use for tracing, to link multiple traces together."""
+
+    metadata: NotRequired[dict[str, Any]]
+    """Additional metadata to include with the trace."""
+
 
 class RealtimeRunConfig(TypedDict):
     model_settings: NotRequired[RealtimeSessionModelSettings]
 
-    # TODO (rm) Add tracing support
-    # tracing: NotRequired[RealtimeTracingConfig | None]
-    # TODO (rm) Add guardrail support
+    output_guardrails: NotRequired[list[OutputGuardrail[Any]]]
+    """List of output guardrails to run on the agent's responses."""
+
+    guardrails_settings: NotRequired[RealtimeGuardrailsSettings]
+    """Settings for guardrail execution."""
+
+    tracing_disabled: NotRequired[bool]
+    """Whether tracing is disabled for this run."""
+
     # TODO (rm) Add history audio storage config

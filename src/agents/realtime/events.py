@@ -5,6 +5,7 @@ from typing import Any, Literal, Union
 
 from typing_extensions import TypeAlias
 
+from ..guardrail import OutputGuardrailResult
 from ..run_context import RunContextWrapper
 from ..tool import Tool
 from .agent import RealtimeAgent
@@ -181,7 +182,20 @@ class RealtimeHistoryAdded:
     type: Literal["history_added"] = "history_added"
 
 
-# TODO (rm) Add guardrails
+@dataclass
+class RealtimeGuardrailTripped:
+    """A guardrail has been tripped and the agent has been interrupted."""
+
+    guardrail_results: list[OutputGuardrailResult]
+    """The results from all triggered guardrails."""
+
+    message: str
+    """The message that was being generated when the guardrail was triggered."""
+
+    info: RealtimeEventInfo
+    """Common info for all events, such as the context."""
+
+    type: Literal["guardrail_tripped"] = "guardrail_tripped"
 
 RealtimeSessionEvent: TypeAlias = Union[
     RealtimeAgentStartEvent,
@@ -196,5 +210,6 @@ RealtimeSessionEvent: TypeAlias = Union[
     RealtimeError,
     RealtimeHistoryUpdated,
     RealtimeHistoryAdded,
+    RealtimeGuardrailTripped,
 ]
 """An event emitted by the realtime session."""

@@ -69,6 +69,7 @@ class RealtimeRunner:
         """
         model_settings = await self._get_model_settings(
             agent=self._starting_agent,
+            disable_tracing=self._config.get("tracing_disabled", False) if self._config else False,
             initial_settings=model_config.get("initial_model_settings") if model_config else None,
             overrides=self._config.get("model_settings") if self._config else None,
         )
@@ -82,6 +83,7 @@ class RealtimeRunner:
             agent=self._starting_agent,
             context=context,
             model_config=model_config,
+            run_config=self._config,
         )
 
         return session
@@ -89,6 +91,7 @@ class RealtimeRunner:
     async def _get_model_settings(
         self,
         agent: RealtimeAgent,
+        disable_tracing: bool,
         context: TContext | None = None,
         initial_settings: RealtimeSessionModelSettings | None = None,
         overrides: RealtimeSessionModelSettings | None = None,
@@ -108,5 +111,8 @@ class RealtimeRunner:
 
         if overrides:
             model_settings.update(overrides)
+
+        if disable_tracing:
+            model_settings["tracing"] = None
 
         return model_settings
