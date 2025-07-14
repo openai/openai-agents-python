@@ -186,12 +186,12 @@ def generate_func_documentation(
 
 def function_schema(
     func: Callable[..., Any],
-    enforce_type_annotations: bool = False,
     docstring_style: DocstringStyle | None = None,
     name_override: str | None = None,
     description_override: str | None = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
+    enforce_type_annotations: bool = False,
 ) -> FuncSchema:
     """
     Given a python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -199,8 +199,6 @@ def function_schema(
 
     Args:
         func: The function to extract the schema from.
-        enforce_type_annotations: If True, raises a ValueError for any unannotated parameters.
-            If False (default), unannotated parameters are assumed to be of type `Any`.
         docstring_style: The style of the docstring to use for parsing. If not provided, we will
             attempt to auto-detect the style.
         name_override: If provided, use this name instead of the function's `__name__`.
@@ -212,6 +210,8 @@ def function_schema(
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
             recommend setting this to True, as it increases the likelihood of the LLM providing
             correct JSON input.
+        enforce_type_annotations: If True, raises a ValueError for any unannotated parameters.
+            If False (default), unannotated parameters are assumed to be of type `Any`.
 
     Returns:
         A `FuncSchema` object containing the function's name, description, parameter descriptions,
