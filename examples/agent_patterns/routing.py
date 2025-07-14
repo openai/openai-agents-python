@@ -63,6 +63,9 @@ async def main():
 
         user_msg = input("Enter a message: ")
         inputs.append({"content": user_msg, "role": "user"})
+        if user_msg.lower().strip() == "exit":
+            print("")
+            break
         agent = result.current_agent
 
 
