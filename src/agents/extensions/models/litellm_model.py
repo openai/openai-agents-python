@@ -11,11 +11,12 @@ from agents.exceptions import ModelBehaviorError
 
 try:
     import litellm
-except ImportError as _e:
+except ImportError:
+    # fixed: removed unused exception variable _e
     raise ImportError(
         "`litellm` is required to use the LitellmModel. You can install it via the optional "
         "dependency group: `pip install 'openai-agents[litellm]'`."
-    ) from _e
+    )
 
 from openai import NOT_GIVEN, AsyncStream, NotGiven
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageToolCall

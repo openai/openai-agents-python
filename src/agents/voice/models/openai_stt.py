@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, NOT_GIVEN
 
 from ... import _debug
 from ...exceptions import AgentsException
@@ -65,7 +65,8 @@ async def _wait_for_event(
         if evt_type in expected_types:
             return evt
         elif evt_type == "error":
-            raise Exception(f"Error event: {evt.get('error')}")
+            # fixed: changed generic exception to specific sttwebsocketconnectionerror
+            raise STTWebsocketConnectionError(f"Error event: {evt.get('error')}")
 
 
 class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
@@ -117,8 +118,9 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         )
         self._tracing_span.start()
 
-    def _end_turn(self, _transcript: str) -> None:
-        if len(_transcript) < 1:
+    def _end_turn(self, transcript: str) -> None:
+        # fixed: removed underscore prefix from parameter since it's actually used
+        if len(transcript) < 1:
             return
 
         if self._tracing_span:
@@ -128,7 +130,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             self._tracing_span.span_data.input_format = "pcm"
 
             if self._trace_include_sensitive_data:
-                self._tracing_span.span_data.output = _transcript
+                self._tracing_span.span_data.output = transcript
 
             self._tracing_span.finish()
             self._turn_audio_buffer = []
@@ -384,7 +386,8 @@ class OpenAISTTModel(STTModel):
         return self.model
 
     def _non_null_or_not_given(self, value: Any) -> Any:
-        return value if value is not None else None  # NOT_GIVEN
+        # fixed: changed to return not_given instead of none for consistency with other models
+        return value if value is not None else NOT_GIVEN
 
     async def transcribe(
         self,

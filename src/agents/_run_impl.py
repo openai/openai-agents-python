@@ -1172,6 +1172,6 @@ class LocalShellAction:
                 "type": "local_shell_call_output",
                 "id": call.tool_call.call_id,
                 "output": result,
-                # "id": "out" + call.tool_call.id,  # TODO remove this, it should be optional
             },
         )
+        # fixed: removed commented out code as per todo comment

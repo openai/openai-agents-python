@@ -123,8 +123,9 @@ class TestSessionExceptions:
         async with session:
             # Try to iterate and expect exception
             with pytest.raises(ValueError, match="Test error"):
-                async for _event in session:
+                async for _ in session:
                     pass  # Should never reach here
+                # fixed: changed _event to _ for unused variable (python convention)
 
         # Verify cleanup occurred
         assert session._closed is True
@@ -148,8 +149,9 @@ class TestSessionExceptions:
 
         with pytest.raises(websockets.exceptions.ConnectionClosed):
             async with session:
-                async for _event in session:
+                async for _ in session:
                     pass
+                # fixed: changed _event to _ for unused variable (python convention)
 
         # Verify error closure triggered cleanup
         assert session._closed is True
@@ -169,8 +171,9 @@ class TestSessionExceptions:
 
         with pytest.raises(json.JSONDecodeError):
             async with session:
-                async for _event in session:
+                async for _ in session:
                     pass
+                # fixed: changed _event to _ for unused variable (python convention)
 
         # Verify context is preserved
         assert session._stored_exception == json_error
@@ -193,8 +196,9 @@ class TestSessionExceptions:
 
             with pytest.raises(type(exception)):
                 async with session:
-                    async for _event in session:
+                    async for _ in session:
                         pass
+                    # fixed: changed _event to _ for unused variable (python convention)
 
             # Verify the exact exception is stored
             assert session._stored_exception == exception
@@ -262,8 +266,9 @@ class TestSessionExceptions:
 
         with pytest.raises(RuntimeError, match="Processing error"):
             async with session:
-                async for _event in session:
+                async for _ in session:
                     pass
+                # fixed: changed _event to _ for unused variable (python convention)
 
         # Verify guardrail tasks were properly cleaned up
         fake_task1.cancel.assert_called_once()

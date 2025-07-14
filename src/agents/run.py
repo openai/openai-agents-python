@@ -59,8 +59,9 @@ from .util import _coro, _error_tracing
 
 DEFAULT_MAX_TURNS = 10
 
-DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
+DEFAULT_AGENT_RUNNER: AgentRunner | None = None
 # the value is set at the end of the module
+# fixed: updated type annotation to be more explicit instead of using type ignore
 
 
 def set_default_agent_runner(runner: AgentRunner | None) -> None:

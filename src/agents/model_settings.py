@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from typing import Annotated, Any, Literal, Union
 
-from openai import Omit as _Omit
+from openai import Omit as OpenAIOmit  # fixed: changed alias from _omit to openaiomit to avoid confusion
 from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
@@ -21,8 +21,8 @@ class _OmitTypeAnnotation:
         _source_type: Any,
         _handler: GetCoreSchemaHandler,
     ) -> core_schema.CoreSchema:
-        def validate_from_none(value: None) -> _Omit:
-            return _Omit()
+        def validate_from_none(value: None) -> OpenAIOmit:
+            return OpenAIOmit()
 
         from_none_schema = core_schema.chain_schema(
             [
@@ -35,7 +35,7 @@ class _OmitTypeAnnotation:
             python_schema=core_schema.union_schema(
                 [
                     # check if it's an instance first before doing any further work
-                    core_schema.is_instance_schema(_Omit),
+                    core_schema.is_instance_schema(OpenAIOmit),
                     from_none_schema,
                 ]
             ),
@@ -49,7 +49,7 @@ class MCPToolChoice:
     name: str
 
 
-Omit = Annotated[_Omit, _OmitTypeAnnotation]
+Omit = Annotated[OpenAIOmit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
 ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
 

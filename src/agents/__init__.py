@@ -118,7 +118,7 @@ from .version import __version__
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
-    """Set the default OpenAI API key to use for LLM requests (and optionally tracing(). This is
+    """Set the default OpenAI API key to use for LLM requests (and optionally tracing). This is
     only necessary if the OPENAI_API_KEY environment variable is not already set.
 
     If provided, this key will be used instead of the OPENAI_API_KEY environment variable.
@@ -129,6 +129,7 @@ def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
             If False, you'll either need to set the OPENAI_API_KEY environment variable or call
             set_tracing_export_api_key() with the API key you want to use for tracing.
     """
+    # fixed: added missing closing parenthesis in docstring
     _config.set_default_openai_key(key, use_for_tracing)
 
 
