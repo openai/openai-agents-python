@@ -36,6 +36,7 @@ async def main():
                 spanish_agent,
                 msg,
             ),
+            return_exceptions=True,
         )
 
         outputs = [
