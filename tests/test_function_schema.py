@@ -452,21 +452,21 @@ def test_name_override_without_docstring() -> None:
     assert fs.name == "custom"
     assert fs.params_json_schema.get("title") == "custom_args"
 
-# Tests for, "enforce_type_annotations" update inside "function_schema.py"
+
 def test_unannotated_function_with_enforcement():
     """Test enforcement raises error for unannotated parameters"""
     def my_func(x): ...
-    
+
     with pytest.raises(ValueError) as exc_info:
         function_schema(my_func, enforce_type_annotations=True)
-    
+
     assert "Parameter 'x' must be type-annotated" in str(exc_info.value)
 
 
 def test_unannotated_function_without_enforcement():
     """Test fallback to Any when enforcement is off"""
     def my_func(x): ...
-    
+
     schema = function_schema(my_func, enforce_type_annotations=False)
     assert schema.params_json_schema["properties"]["x"]["type"] == "any"
 
@@ -474,7 +474,7 @@ def test_unannotated_function_without_enforcement():
 def test_annotated_function_works_with_enforcement():
     """Test basic type hints work with enforcement"""
     def my_func(x: int): ...
-    
+
     schema = function_schema(my_func, enforce_type_annotations=True)
     assert schema.params_json_schema["properties"]["x"]["type"] == "integer"
 
@@ -482,6 +482,6 @@ def test_annotated_function_works_with_enforcement():
 def test_positional_args_backward_compatibility():
     """Ensure old positional args still work"""
     def my_func(x: int): ...
-    
+
     schema = function_schema(my_func, "sphinx", enforce_type_annotations=False)
     assert schema.name == "my_func"
