@@ -95,12 +95,14 @@ class TestRealtimeTracingIntegration:
                     "session": {"id": "session_456"},
                 }
 
-                with patch.object(model, "send_event") as mock_send_event:
+                with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with tracing config
-                    mock_send_event.assert_called_once_with(
-                        {
+                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+
+                    expected_event = RealtimeModelSendRawMessage(
+                        message={
                             "type": "session.update",
                             "other_data": {
                                 "session": {
@@ -112,6 +114,7 @@ class TestRealtimeTracingIntegration:
                             },
                         }
                     )
+                    mock_send_raw_message.assert_called_once_with(expected_event)
 
     @pytest.mark.asyncio
     async def test_send_tracing_config_auto_mode(self, model, mock_websocket):
@@ -137,13 +140,19 @@ class TestRealtimeTracingIntegration:
                     "session": {"id": "session_456"},
                 }
 
-                with patch.object(model, "send_event") as mock_send_event:
+                with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with "auto"
-                    mock_send_event.assert_called_once_with(
-                        {"type": "session.update", "other_data": {"session": {"tracing": "auto"}}}
+                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+
+                    expected_event = RealtimeModelSendRawMessage(
+                        message={
+                            "type": "session.update",
+                            "other_data": {"session": {"tracing": "auto"}},
+                        }
                     )
+                    mock_send_raw_message.assert_called_once_with(expected_event)
 
     @pytest.mark.asyncio
     async def test_tracing_config_none_skips_session_update(self, model, mock_websocket):
@@ -196,22 +205,26 @@ class TestRealtimeTracingIntegration:
                     "session": {"id": "session_456"},
                 }
 
-                with patch.object(model, "send_event") as mock_send_event:
+                with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with complete tracing config including metadata
-                    expected_call = {
-                        "type": "session.update",
-                        "other_data": {
-                            "session": {
-                                "tracing": {
-                                    "workflow_name": "complex_workflow",
-                                    "metadata": complex_metadata,
+                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+
+                    expected_event = RealtimeModelSendRawMessage(
+                        message={
+                            "type": "session.update",
+                            "other_data": {
+                                "session": {
+                                    "tracing": {
+                                        "workflow_name": "complex_workflow",
+                                        "metadata": complex_metadata,
+                                    }
                                 }
-                            }
-                        },
-                    }
-                    mock_send_event.assert_called_once_with(expected_call)
+                            },
+                        }
+                    )
+                    mock_send_raw_message.assert_called_once_with(expected_event)
 
     @pytest.mark.asyncio
     async def test_tracing_disabled_prevents_tracing(self, mock_websocket):
@@ -222,27 +235,24 @@ class TestRealtimeTracingIntegration:
         # Create a test agent and runner with tracing disabled
         agent = RealtimeAgent(name="test_agent", instructions="test")
 
-        runner = RealtimeRunner(
-            starting_agent=agent,
-            config={"tracing_disabled": True}
-        )
+        runner = RealtimeRunner(starting_agent=agent, config={"tracing_disabled": True})
 
         # Test the _get_model_settings method directly since that's where the logic is
         model_settings = await runner._get_model_settings(
             agent=agent,
             disable_tracing=True,  # This should come from config["tracing_disabled"]
             initial_settings=None,
-            overrides=None
+            overrides=None,
         )
 
         # When tracing is disabled, model settings should have tracing=None
         assert model_settings["tracing"] is None
 
         # Also test that the runner passes disable_tracing=True correctly
-        with patch.object(runner, '_get_model_settings') as mock_get_settings:
+        with patch.object(runner, "_get_model_settings") as mock_get_settings:
             mock_get_settings.return_value = {"tracing": None}
 
-            with patch('agents.realtime.session.RealtimeSession') as mock_session_class:
+            with patch("agents.realtime.session.RealtimeSession") as mock_session_class:
                 mock_session = AsyncMock()
                 mock_session_class.return_value = mock_session
 
@@ -250,8 +260,5 @@ class TestRealtimeTracingIntegration:
 
                 # Verify that _get_model_settings was called with disable_tracing=True
                 mock_get_settings.assert_called_once_with(
-                    agent=agent,
-                    disable_tracing=True,
-                    initial_settings=None,
-                    overrides=None
+                    agent=agent, disable_tracing=True, initial_settings=None, overrides=None
                 )

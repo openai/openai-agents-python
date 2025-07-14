@@ -7,12 +7,13 @@ from typing import Any, cast
 from typing_extensions import assert_never
 
 from ..agent import Agent
+from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..run_context import RunContextWrapper, TContext
 from ..tool import FunctionTool
 from ..tool_context import ToolContext
 from .agent import RealtimeAgent
-from .config import RealtimeRunConfig, RealtimeUserInput
+from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
 from .events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -22,6 +23,7 @@ from .events import (
     RealtimeError,
     RealtimeEventInfo,
     RealtimeGuardrailTripped,
+    RealtimeHandoffEvent,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
@@ -35,6 +37,13 @@ from .model_events import (
     RealtimeModelEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelToolCallEvent,
+)
+from .model_inputs import (
+    RealtimeModelSendAudio,
+    RealtimeModelSendInterrupt,
+    RealtimeModelSendSessionUpdate,
+    RealtimeModelSendToolOutput,
+    RealtimeModelSendUserInput,
 )
 
 
@@ -84,6 +93,7 @@ class RealtimeSession(RealtimeModelListener):
         self._run_config = run_config or {}
         self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
         self._closed = False
+        self._stored_exception: Exception | None = None
 
         # Guardrails state tracking
         self._interrupted_by_guardrail = False
@@ -92,6 +102,8 @@ class RealtimeSession(RealtimeModelListener):
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
             "debounce_text_length", 100
         )
+
+        self._guardrail_tasks: set[asyncio.Task[Any]] = set()
 
     async def __aenter__(self) -> RealtimeSession:
         """Start the session by connecting to the model. After this, you will be able to stream
@@ -128,6 +140,12 @@ class RealtimeSession(RealtimeModelListener):
         """Iterate over events from the session."""
         while not self._closed:
             try:
+                # Check if there's a stored exception to raise
+                if self._stored_exception is not None:
+                    # Clean up resources before raising
+                    await self._cleanup()
+                    raise self._stored_exception
+
                 event = await self._event_queue.get()
                 yield event
             except asyncio.CancelledError:
@@ -135,21 +153,19 @@ class RealtimeSession(RealtimeModelListener):
 
     async def close(self) -> None:
         """Close the session."""
-        self._closed = True
-        self._model.remove_listener(self)
-        await self._model.close()
+        await self._cleanup()
 
     async def send_message(self, message: RealtimeUserInput) -> None:
         """Send a message to the model."""
-        await self._model.send_message(message)
+        await self._model.send_event(RealtimeModelSendUserInput(user_input=message))
 
     async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
         """Send a raw audio chunk to the model."""
-        await self._model.send_audio(audio, commit=commit)
+        await self._model.send_event(RealtimeModelSendAudio(audio=audio, commit=commit))
 
     async def interrupt(self) -> None:
         """Interrupt the model."""
-        await self._model.interrupt()
+        await self._model.send_event(RealtimeModelSendInterrupt())
 
     async def on_event(self, event: RealtimeModelEvent) -> None:
         await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
@@ -164,7 +180,7 @@ class RealtimeSession(RealtimeModelListener):
             await self._put_event(RealtimeAudioInterrupted(info=self._event_info))
         elif event.type == "audio_done":
             await self._put_event(RealtimeAudioEnd(info=self._event_info))
-        elif event.type == "conversation.item.input_audio_transcription.completed":
+        elif event.type == "input_audio_transcription_completed":
             self._history = RealtimeSession._get_new_history(self._history, event)
             await self._put_event(
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
@@ -185,7 +201,7 @@ class RealtimeSession(RealtimeModelListener):
 
             if current_length >= next_run_threshold:
                 self._item_guardrail_run_counts[item_id] += 1
-                await self._run_output_guardrails(self._item_transcripts[item_id])
+                self._enqueue_guardrail_task(self._item_transcripts[item_id])
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
             self._history = self._get_new_history(self._history, event.item)
@@ -225,6 +241,9 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                 )
             )
+        elif event.type == "exception":
+            # Store the exception to be raised in __aiter__
+            self._stored_exception = event.exception
         elif event.type == "other":
             pass
         else:
@@ -253,7 +272,11 @@ class RealtimeSession(RealtimeModelListener):
             tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
             result = await func_tool.on_invoke_tool(tool_context, event.arguments)
 
-            await self._model.send_tool_output(event, str(result), True)
+            await self._model.send_event(
+                RealtimeModelSendToolOutput(
+                    tool_call=event, output=str(result), start_response=True
+                )
+            )
 
             await self._put_event(
                 RealtimeToolEnd(
@@ -264,11 +287,47 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.name in handoff_map:
-            # TODO (rm) Add support for handoffs
-            pass
+            handoff = handoff_map[event.name]
+            tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
+
+            # Execute the handoff to get the new agent
+            result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
+            if not isinstance(result, RealtimeAgent):
+                raise UserError(f"Handoff {handoff.name} returned invalid result: {type(result)}")
+
+            # Store previous agent for event
+            previous_agent = self._current_agent
+
+            # Update current agent
+            self._current_agent = result
+
+            # Get updated model settings from new agent
+            updated_settings = await self._get__updated_model_settings(self._current_agent)
+
+            # Send handoff event
+            await self._put_event(
+                RealtimeHandoffEvent(
+                    from_agent=previous_agent,
+                    to_agent=self._current_agent,
+                    info=self._event_info,
+                )
+            )
+
+            # Send tool output to complete the handoff
+            await self._model.send_event(
+                RealtimeModelSendToolOutput(
+                    tool_call=event,
+                    output=f"Handed off to {self._current_agent.name}",
+                    start_response=True,
+                )
+            )
+
+            # Send session update to model
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
         else:
-            # TODO (rm) Add error handling
-            pass
+            raise ModelBehaviorError(f"Tool {event.name} not found")
 
     @classmethod
     def _get_new_history(
@@ -357,12 +416,77 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Interrupt the model
-            await self._model.interrupt()
+            await self._model.send_event(RealtimeModelSendInterrupt())
 
             # Send guardrail triggered message
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
-            await self._model.send_message(f"guardrail triggered: {', '.join(guardrail_names)}")
+            await self._model.send_event(
+                RealtimeModelSendUserInput(
+                    user_input=f"guardrail triggered: {', '.join(guardrail_names)}"
+                )
+            )
 
             return True
 
         return False
+
+    def _enqueue_guardrail_task(self, text: str) -> None:
+        # Runs the guardrails in a separate task to avoid blocking the main loop
+
+        task = asyncio.create_task(self._run_output_guardrails(text))
+        self._guardrail_tasks.add(task)
+
+        # Add callback to remove completed tasks and handle exceptions
+        task.add_done_callback(self._on_guardrail_task_done)
+
+    def _on_guardrail_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Handle completion of a guardrail task."""
+        # Remove from tracking set
+        self._guardrail_tasks.discard(task)
+
+        # Check for exceptions and propagate as events
+        if not task.cancelled():
+            exception = task.exception()
+            if exception:
+                # Create an exception event instead of raising
+                asyncio.create_task(
+                    self._put_event(
+                        RealtimeError(
+                            info=self._event_info,
+                            error={"message": f"Guardrail task failed: {str(exception)}"},
+                        )
+                    )
+                )
+
+    def _cleanup_guardrail_tasks(self) -> None:
+        for task in self._guardrail_tasks:
+            if not task.done():
+                task.cancel()
+        self._guardrail_tasks.clear()
+
+    async def _cleanup(self) -> None:
+        """Clean up all resources and mark session as closed."""
+        # Cancel and cleanup guardrail tasks
+        self._cleanup_guardrail_tasks()
+
+        # Remove ourselves as a listener
+        self._model.remove_listener(self)
+
+        # Close the model connection
+        await self._model.close()
+
+        # Mark as closed
+        self._closed = True
+
+    async def _get__updated_model_settings(
+        self, new_agent: RealtimeAgent
+    ) -> RealtimeSessionModelSettings:
+        updated_settings: RealtimeSessionModelSettings = {}
+        instructions, tools = await asyncio.gather(
+            new_agent.get_system_prompt(self._context_wrapper),
+            new_agent.get_all_tools(self._context_wrapper),
+        )
+        updated_settings["instructions"] = instructions or ""
+        updated_settings["tools"] = tools or []
+
+        return updated_settings
