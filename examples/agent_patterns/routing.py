@@ -2,7 +2,7 @@ import asyncio
 import uuid
 
 from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
-
+from typing import Literal
 from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace
 
 """
@@ -33,7 +33,7 @@ triage_agent = Agent(
 )
 
 
-async def main():
+async def main():   
     # We'll create an ID for this conversation, so we can link each trace
     conversation_id = str(uuid.uuid4().hex[:16])
 
@@ -52,6 +52,7 @@ async def main():
             async for event in result.stream_events():
                 if not isinstance(event, RawResponsesStreamEvent):
                     continue
+        
                 data = event.data
                 if isinstance(data, ResponseTextDeltaEvent):
                     print(data.delta, end="", flush=True)
@@ -60,10 +61,18 @@ async def main():
 
         inputs = result.to_input_list()
         print("\n")
-
+        # inform user how to exit
+        print("To end the conversation, type 'exit' (English), 'sortie' (French), or 'salida' (Spanish).")
+        
         user_msg = input("Enter a message: ")
         inputs.append({"content": user_msg, "role": "user"})
+        
+        # define valid exit commands
+        exit_commands = ["exit" , "sortie" , "salida"]
+        if user_msg.lower().strip() in exit_commands:
+            break
         agent = result.current_agent
+
 
 
 if __name__ == "__main__":
