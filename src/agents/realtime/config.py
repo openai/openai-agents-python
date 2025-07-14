@@ -1,18 +1,29 @@
 from __future__ import annotations
 
-import inspect
 from typing import (
     Any,
-    Callable,
     Literal,
     Union,
 )
 
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
+from ..guardrail import OutputGuardrail
 from ..model_settings import ToolChoice
-from ..tool import FunctionTool
-from ..util._types import MaybeAwaitable
+from ..tool import Tool
+
+RealtimeModelName: TypeAlias = Union[
+    Literal[
+        "gpt-4o-realtime-preview",
+        "gpt-4o-mini-realtime-preview",
+        "gpt-4o-realtime-preview-2025-06-03",
+        "gpt-4o-realtime-preview-2024-12-17",
+        "gpt-4o-realtime-preview-2024-10-01",
+        "gpt-4o-mini-realtime-preview-2024-12-17",
+    ],
+    str,
+]
+"""The name of a realtime model."""
 
 
 class RealtimeClientMessage(TypedDict):
@@ -20,7 +31,7 @@ class RealtimeClientMessage(TypedDict):
     other_data: NotRequired[dict[str, Any]]
 
 
-class UserInputText(TypedDict):
+class RealtimeUserInputText(TypedDict):
     type: Literal["input_text"]
     text: str
 
@@ -28,7 +39,7 @@ class UserInputText(TypedDict):
 class RealtimeUserInputMessage(TypedDict):
     type: Literal["message"]
     role: Literal["user"]
-    content: list[UserInputText]
+    content: list[RealtimeUserInputText]
 
 
 RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]
@@ -55,9 +66,11 @@ class RealtimeTurnDetectionConfig(TypedDict):
     threshold: NotRequired[float]
 
 
-class RealtimeSessionConfig(TypedDict):
-    api_key: NotRequired[APIKeyOrKeyFunc]
-    model: NotRequired[str]
+class RealtimeSessionModelSettings(TypedDict):
+    """Model settings for a realtime model session."""
+
+    model_name: NotRequired[RealtimeModelName]
+
     instructions: NotRequired[str]
     modalities: NotRequired[list[Literal["text", "audio"]]]
     voice: NotRequired[str]
@@ -68,24 +81,45 @@ class RealtimeSessionConfig(TypedDict):
     turn_detection: NotRequired[RealtimeTurnDetectionConfig]
 
     tool_choice: NotRequired[ToolChoice]
-    tools: NotRequired[list[FunctionTool]]
+    tools: NotRequired[list[Tool]]
+
+    tracing: NotRequired[RealtimeModelTracingConfig | None]
 
 
-APIKeyOrKeyFunc = str | Callable[[], MaybeAwaitable[str]]
-"""Either an API key or a function that returns an API key."""
+class RealtimeGuardrailsSettings(TypedDict):
+    """Settings for output guardrails in realtime sessions."""
+
+    debounce_text_length: NotRequired[int]
+    """
+    The minimum number of characters to accumulate before running guardrails on transcript
+    deltas. Defaults to 100. Guardrails run every time the accumulated text reaches
+    1x, 2x, 3x, etc. times this threshold.
+    """
 
 
-async def get_api_key(key: APIKeyOrKeyFunc | None) -> str | None:
-    """Get the API key from the key or key function."""
-    if key is None:
-        return None
-    elif isinstance(key, str):
-        return key
+class RealtimeModelTracingConfig(TypedDict):
+    """Configuration for tracing in realtime model sessions."""
 
-    result = key()
-    if inspect.isawaitable(result):
-        return await result
-    return result
+    workflow_name: NotRequired[str]
+    """The workflow name to use for tracing."""
 
-    # TODO (rm) Add tracing support
-    # tracing: NotRequired[RealtimeTracingConfig | None]
+    group_id: NotRequired[str]
+    """A group identifier to use for tracing, to link multiple traces together."""
+
+    metadata: NotRequired[dict[str, Any]]
+    """Additional metadata to include with the trace."""
+
+
+class RealtimeRunConfig(TypedDict):
+    model_settings: NotRequired[RealtimeSessionModelSettings]
+
+    output_guardrails: NotRequired[list[OutputGuardrail[Any]]]
+    """List of output guardrails to run on the agent's responses."""
+
+    guardrails_settings: NotRequired[RealtimeGuardrailsSettings]
+    """Settings for guardrail execution."""
+
+    tracing_disabled: NotRequired[bool]
+    """Whether tracing is disabled for this run."""
+
+    # TODO (rm) Add history audio storage config
