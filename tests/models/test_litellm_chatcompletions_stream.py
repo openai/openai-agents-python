@@ -214,17 +214,18 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     the model is streaming a function/tool call instead of plain text.
     The function call will be split across two chunks.
     """
-    # Simulate a single tool call whose ID stays constant and function name/args built over chunks.
+    # Simulate a single tool call with complete function name in first chunk
+    # and arguments split across chunks (reflecting real API behavior)
     tool_call_delta1 = ChoiceDeltaToolCall(
         index=0,
         id="tool-id",
-        function=ChoiceDeltaToolCallFunction(name="my_", arguments="arg1"),
+        function=ChoiceDeltaToolCallFunction(name="my_func", arguments="arg1"),
         type="function",
     )
     tool_call_delta2 = ChoiceDeltaToolCall(
         index=0,
         id="tool-id",
-        function=ChoiceDeltaToolCallFunction(name="func", arguments="arg2"),
+        function=ChoiceDeltaToolCallFunction(name=None, arguments="arg2"),
         type="function",
     )
     chunk1 = ChatCompletionChunk(
@@ -284,21 +285,19 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     # The added item should be a ResponseFunctionToolCall.
     added_fn = output_events[1].item
     assert isinstance(added_fn, ResponseFunctionToolCall)
-    assert added_fn.name == "my_func"  # Name should be concatenation of both chunks.
-    assert added_fn.arguments == "arg1arg2"
+    assert added_fn.name == "my_func"  # Name should be complete from first chunk
+    assert added_fn.arguments == ""  # Arguments start empty
     assert output_events[2].type == "response.function_call_arguments.delta"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
-    assert added_fn.name == "my_func"  # Name should be concatenation of both chunks.
-    assert added_fn.arguments == "arg1arg2"
-    assert output_events[2].type == "response.function_call_arguments.delta"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
+    assert output_events[2].delta == "arg1"  # First argument chunk
+    assert output_events[3].type == "response.function_call_arguments.delta"
+    assert output_events[3].delta == "arg2"  # Second argument chunk
+    assert output_events[4].type == "response.output_item.done"
+    assert output_events[5].type == "response.completed"
+    # Final function call should have complete arguments
+    final_fn = output_events[4].item
+    assert isinstance(final_fn, ResponseFunctionToolCall)
+    assert final_fn.name == "my_func"
+    assert final_fn.arguments == "arg1arg2"
 
 
 @pytest.mark.allow_call_model_methods

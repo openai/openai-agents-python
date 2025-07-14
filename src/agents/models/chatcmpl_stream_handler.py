@@ -273,34 +273,24 @@ class ChatCmplStreamHandler:
 
                     tc_function = tc_delta.function
 
-                    # Accumulate the data as before
+                    # Accumulate arguments as they come in
                     state.function_calls[tc_delta.index].arguments += (
                         tc_function.arguments if tc_function else ""
                     ) or ""
-                    state.function_calls[tc_delta.index].name += (
-                        tc_function.name if tc_function else ""
-                    ) or ""
+
+                    # Set function name directly (it's correct from the first function call chunk)
+                    if tc_function and tc_function.name:
+                        state.function_calls[tc_delta.index].name = tc_function.name
+
                     if tc_delta.id:
                         state.function_calls[tc_delta.index].call_id = tc_delta.id
 
-                    # Check if we have enough info to start streaming this function call
                     function_call = state.function_calls[tc_delta.index]
 
-                    # Strategy: Only start streaming when we see arguments coming in
-                    # but no new name information, indicating the name is finalized
-                    current_chunk_has_name = tc_function and tc_function.name
-                    current_chunk_has_args = tc_function and tc_function.arguments
-
-                    # If this chunk has a name, it means the function name might still be building
-                    # We should wait until we get a chunk with only arguments (no name)
-                    name_seems_finalized = not current_chunk_has_name and current_chunk_has_args
-
+                    # Start streaming as soon as we have function name and call_id
                     if (not state.function_call_streaming[tc_delta.index] and
                         function_call.name and
-                        function_call.call_id and
-                        # Only start streaming when we're confident the name is finalized
-                        # This happens when we get args but no new name chunk
-                        name_seems_finalized):
+                        function_call.call_id):
 
                         # Calculate the output index for this function call
                         function_call_starting_index = 0
@@ -337,7 +327,7 @@ class ChatCmplStreamHandler:
                         )
 
                     # Stream arguments if we've started streaming this function call
-                    if (state.function_call_streaming[tc_delta.index] and
+                    if (state.function_call_streaming.get(tc_delta.index, False) and
                         tc_function and
                         tc_function.arguments):
 
