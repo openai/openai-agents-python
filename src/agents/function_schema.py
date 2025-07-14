@@ -5,7 +5,8 @@ import inspect
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
+from typing import Union, Optional, List, Dict, Any, Callable, Literal, get_args, get_origin, get_type_hints
+from typing_extensions import Literal
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
@@ -24,7 +25,7 @@ class FuncSchema:
 
     name: str
     """The name of the function."""
-    description: str | None
+    description: Union[str, None]
     """The description of the function."""
     params_pydantic_model: type[BaseModel]
     """A Pydantic model that represents the function's parameters."""
@@ -186,9 +187,9 @@ def generate_func_documentation(
 
 def function_schema(
     func: Callable[..., Any],
-    docstring_style: DocstringStyle | None = None,
-    name_override: str | None = None,
-    description_override: str | None = None,
+    docstring_style: Union[DocstringStyle, None] = None,
+    name_override: Union[str, None] = None,
+    description_override: Union[str, None] = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
     enforce_type_annotations: bool = False,
@@ -210,7 +211,8 @@ def function_schema(
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
             recommend setting this to True, as it increases the likelihood of the LLM providing
             correct JSON input.
-        enforce_type_annotations: If True, raises a ValueError for any unannotated parameters.
+        enforce_type_annotations: bool = False
+            If True, raises a ValueError for any unannotated parameters.
             If False (default), unannotated parameters are assumed to be of type `Any`.
 
     Returns:
@@ -277,6 +279,7 @@ def function_schema(
                 )
             else:
                 ann = Any  # Fallback only if enforcement is off
+                field_info["type"] = "any"
 
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
