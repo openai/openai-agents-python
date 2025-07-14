@@ -207,7 +207,7 @@ class Converter:
         ):
             return cast(ResponseOutputMessageParam, item)
         return None
-    
+
     @classmethod
     def maybe_reasoning_message(cls, item: Any) -> ResponseReasoningItemParam | None:
         if isinstance(item, dict) and item.get("type") == "reasoning":
