@@ -30,7 +30,7 @@ from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    from .agent import Agent, AgentBase
 
 ToolParams = ParamSpec("ToolParams")
 
@@ -87,7 +87,7 @@ class FunctionTool:
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
@@ -300,7 +300,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -315,7 +315,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -330,7 +330,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:

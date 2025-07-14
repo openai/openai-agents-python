@@ -5,7 +5,14 @@ import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
-from agents import Agent, FunctionTool, ModelBehaviorError, RunContextWrapper, function_tool
+from agents import (
+    Agent,
+    AgentBase,
+    FunctionTool,
+    ModelBehaviorError,
+    RunContextWrapper,
+    function_tool,
+)
 from agents.tool import default_tool_error_function
 from agents.tool_context import ToolContext
 
@@ -268,7 +275,7 @@ async def test_is_enabled_bool_and_callable():
     def disabled_tool():
         return "nope"
 
-    async def cond_enabled(ctx: RunContextWrapper[BoolCtx], agent: Agent[Any]) -> bool:
+    async def cond_enabled(ctx: RunContextWrapper[BoolCtx], agent: AgentBase) -> bool:
         return ctx.context.enable_tools
 
     @function_tool(is_enabled=cond_enabled)
