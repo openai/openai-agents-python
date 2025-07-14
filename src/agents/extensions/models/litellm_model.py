@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, Optional, cast, overload
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
@@ -43,6 +43,14 @@ from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
+
+
+class InternalChatCompletionMessage(ChatCompletionMessage):
+    """
+    An internal subclass to carry reasoning_content without modifying the original model.
+    """
+
+    reasoning_content: Optional[str] = None
 
 
 class LitellmModel(Model):
@@ -364,13 +372,18 @@ class LitellmConverter:
             provider_specific_fields.get("refusal", None) if provider_specific_fields else None
         )
 
-        return ChatCompletionMessage(
+        reasoning_content = ""
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            reasoning_content = message.reasoning_content
+
+        return InternalChatCompletionMessage(
             content=message.content,
             refusal=refusal,
             role="assistant",
             annotations=cls.convert_annotations_to_openai(message),
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     @classmethod
