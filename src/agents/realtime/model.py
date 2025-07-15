@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import abc
-from typing import Any, Callable
+from typing import Callable
 
 from typing_extensions import NotRequired, TypedDict
 
 from ..util._types import MaybeAwaitable
 from .config import (
-    RealtimeClientMessage,
     RealtimeSessionModelSettings,
-    RealtimeUserInput,
 )
-from .model_events import RealtimeModelEvent, RealtimeModelToolCallEvent
+from .model_events import RealtimeModelEvent
+from .model_inputs import RealtimeModelSendEvent
 
 
 class RealtimeModelListener(abc.ABC):
@@ -60,38 +59,8 @@ class RealtimeModel(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def send_event(self, event: RealtimeClientMessage) -> None:
+    async def send_event(self, event: RealtimeModelSendEvent) -> None:
         """Send an event to the model."""
-        pass
-
-    @abc.abstractmethod
-    async def send_message(
-        self, message: RealtimeUserInput, other_event_data: dict[str, Any] | None = None
-    ) -> None:
-        """Send a message to the model."""
-        pass
-
-    @abc.abstractmethod
-    async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
-        """Send a raw audio chunk to the model.
-
-        Args:
-            audio: The audio data to send.
-            commit: Whether to commit the audio buffer to the model.  If the model does not do turn
-            detection, this can be used to indicate the turn is completed.
-        """
-        pass
-
-    @abc.abstractmethod
-    async def send_tool_output(
-        self, tool_call: RealtimeModelToolCallEvent, output: str, start_response: bool
-    ) -> None:
-        """Send tool output to the model."""
-        pass
-
-    @abc.abstractmethod
-    async def interrupt(self) -> None:
-        """Interrupt the model. For example, could be triggered by a guardrail."""
         pass
 
     @abc.abstractmethod
