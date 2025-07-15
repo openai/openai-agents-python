@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, Literal
 
 import pytest
-from pydantic import BaseModel, ValidationError, Field
+from pydantic import BaseModel, Field, ValidationError
 from typing_extensions import TypedDict
 
 from agents import RunContextWrapper
