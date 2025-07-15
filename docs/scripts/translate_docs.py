@@ -221,21 +221,16 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     translated_content: list[str] = []
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
-        if OPENAI_MODEL.startswith("o"):
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=instructions,
-                input=chunk,
-            )
-            translated_content.append(response.output_text)
-        else:
-            response = openai_client.responses.create(
-                model=OPENAI_MODEL,
-                instructions=instructions,
-                input=chunk,
-                temperature=0.0,
-            )
-            translated_content.append(response.output_text)
+        # Use Chat Completions for translation (typed in openai v1.96+)
+        chat = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user",   "content": chunk},
+            ],
+            temperature=0.0,
+        )
+        translated_content.append(chat.choices[0].message.content)
 
     translated_text = "\n".join(translated_content)
     for idx, code_block in enumerate(code_blocks):
@@ -275,7 +270,6 @@ def main():
         # Translate a single file
         # Handle both "foo.md" and "docs/foo.md" formats
         if args.file.startswith("docs/"):
-            # Remove "docs/" prefix if present
             relative_file = args.file[5:]
         else:
             relative_file = args.file
@@ -293,7 +287,6 @@ def main():
             # Skip the target directories
             if any(lang in root for lang in languages):
                 continue
-            # Increasing this will make the translation faster; you can decide considering the model's capacity
             concurrency = 6
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 futures = []
@@ -309,5 +302,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # translate_single_source_file("docs/index.md")
     main()
