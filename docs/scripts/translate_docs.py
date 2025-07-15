@@ -222,25 +222,25 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
 
-        # Build the messages payload
         messages = [
-            {"role": "system", "content": instructions},
-            {"role": "user",   "content": chunk},
+            {"role": "system",  "content": instructions},
+            {"role": "user",    "content": chunk},
         ]
 
-        # Prepare arguments for the chat completion
-        create_kwargs: dict[str, object] = {
-            "model": OPENAI_MODEL,
-            "messages": messages,
-        }
-        # If you want zero temperature for non-"o*" models:
-        if not OPENAI_MODEL.startswith("o"):
-            create_kwargs["temperature"] = 0.0
+        if OPENAI_MODEL.startswith("o"):
+            # Use default temperature for "o*" models
+            response = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+            )
+        else:
+            # Force zero temperature on other models
+            response = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                temperature=0.0,
+            )
 
-        # Call the new chat completion endpoint
-        response = openai_client.chat.completions.create(**create_kwargs)
-
-        # Extract the translated text from the first choice
         translated_content.append(response.choices[0].message.content)
 
     translated_text = "\n".join(translated_content)
