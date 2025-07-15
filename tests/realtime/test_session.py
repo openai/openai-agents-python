@@ -56,6 +56,8 @@ class MockRealtimeModel(RealtimeModel):
         self.listeners = []
         self.connect_called = False
         self.close_called = False
+        self.sent_events = []
+        # Legacy tracking for tests that haven't been updated yet
         self.sent_messages = []
         self.sent_audio = []
         self.sent_tool_outputs = []
@@ -72,19 +74,24 @@ class MockRealtimeModel(RealtimeModel):
             self.listeners.remove(listener)
 
     async def send_event(self, event):
-        pass
+        from agents.realtime.model_inputs import (
+            RealtimeModelSendAudio,
+            RealtimeModelSendInterrupt,
+            RealtimeModelSendToolOutput,
+            RealtimeModelSendUserInput,
+        )
 
-    async def send_message(self, message, other_event_data=None):
-        self.sent_messages.append(message)
+        self.sent_events.append(event)
 
-    async def send_audio(self, audio, commit=False):
-        self.sent_audio.append((audio, commit))
-
-    async def send_tool_output(self, tool_call, output, start_response=True):
-        self.sent_tool_outputs.append((tool_call, output, start_response))
-
-    async def interrupt(self):
-        self.interrupts_called += 1
+        # Update legacy tracking for compatibility
+        if isinstance(event, RealtimeModelSendUserInput):
+            self.sent_messages.append(event.user_input)
+        elif isinstance(event, RealtimeModelSendAudio):
+            self.sent_audio.append((event.audio, event.commit))
+        elif isinstance(event, RealtimeModelSendToolOutput):
+            self.sent_tool_outputs.append((event.tool_call, event.output, event.start_response))
+        elif isinstance(event, RealtimeModelSendInterrupt):
+            self.interrupts_called += 1
 
     async def close(self):
         self.close_called = True
@@ -787,8 +794,23 @@ class TestToolCallExecution:
         assert sent_output == "result_two"
 
     @pytest.mark.asyncio
-    async def test_handoff_tool_handling_todo(self, mock_model, mock_agent, mock_handoff):
-        """Test that handoff tools are recognized but not yet implemented"""
+    async def test_handoff_tool_handling(self, mock_model, mock_agent, mock_handoff):
+        """Test that handoff tools are properly handled"""
+        from unittest.mock import AsyncMock
+
+        from agents.realtime.agent import RealtimeAgent
+
+        # Create a mock new agent to be returned by handoff
+        mock_new_agent = Mock(spec=RealtimeAgent)
+        mock_new_agent.name = "new_agent"
+        mock_new_agent.instructions = "New agent instructions"
+        mock_new_agent.get_all_tools = AsyncMock(return_value=[])
+        mock_new_agent.get_system_prompt = AsyncMock(return_value="New agent system prompt")
+
+        # Set up handoff to return the new agent
+        mock_handoff.on_invoke_handoff = AsyncMock(return_value=mock_new_agent)
+        mock_handoff.name = "test_handoff"
+
         # Set up agent to return handoff tool
         mock_agent.get_all_tools.return_value = [mock_handoff]
 
@@ -800,15 +822,22 @@ class TestToolCallExecution:
 
         await session._handle_tool_call(tool_call_event)
 
-        # Should not have sent any tool outputs (handoffs not implemented)
-        assert len(mock_model.sent_tool_outputs) == 0
+        # Should have sent session update and tool output
+        assert len(mock_model.sent_events) >= 2
 
-        # Should not have queued any events (handoffs not implemented)
-        assert session._event_queue.qsize() == 0
+        # Should have sent handoff event
+        assert session._event_queue.qsize() >= 1
+
+        # Verify agent was updated
+        assert session._current_agent == mock_new_agent
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_handling_todo(self, mock_model, mock_agent, mock_function_tool):
-        """Test that unknown tools are handled gracefully (TODO: add error handling)"""
+    async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
+        """Test that unknown tools raise an error"""
+        import pytest
+
+        from agents.exceptions import ModelBehaviorError
+
         # Set up agent to return different tool than what's called
         mock_function_tool.name = "known_tool"
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -820,16 +849,12 @@ class TestToolCallExecution:
             name="unknown_tool", call_id="call_unknown", arguments="{}"
         )
 
-        await session._handle_tool_call(tool_call_event)
+        # Should raise an error for unknown tool
+        with pytest.raises(ModelBehaviorError, match="Tool unknown_tool not found"):
+            await session._handle_tool_call(tool_call_event)
 
         # Should not have called any tools
         mock_function_tool.on_invoke_tool.assert_not_called()
-
-        # Should not have sent any tool outputs
-        assert len(mock_model.sent_tool_outputs) == 0
-
-        # Should not have queued any events
-        assert session._event_queue.qsize() == 0
 
     @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
@@ -971,24 +996,33 @@ class TestToolCallExecution:
 class TestGuardrailFunctionality:
     """Test suite for output guardrail functionality in RealtimeSession"""
 
+    async def _wait_for_guardrail_tasks(self, session):
+        """Wait for all pending guardrail tasks to complete."""
+        import asyncio
+
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
     @pytest.fixture
     def triggered_guardrail(self):
         """Creates a guardrail that always triggers"""
+
         def guardrail_func(context, agent, output):
             return GuardrailFunctionOutput(
-                output_info={"reason": "test trigger"},
-                tripwire_triggered=True
+                output_info={"reason": "test trigger"}, tripwire_triggered=True
             )
+
         return OutputGuardrail(guardrail_function=guardrail_func, name="triggered_guardrail")
 
     @pytest.fixture
     def safe_guardrail(self):
         """Creates a guardrail that never triggers"""
+
         def guardrail_func(context, agent, output):
             return GuardrailFunctionOutput(
-                output_info={"reason": "safe content"},
-                tripwire_triggered=False
+                output_info={"reason": "safe content"}, tripwire_triggered=False
             )
+
         return OutputGuardrail(guardrail_function=guardrail_func, name="safe_guardrail")
 
     @pytest.mark.asyncio
@@ -998,7 +1032,7 @@ class TestGuardrailFunctionality:
         """Test that guardrails run when transcript delta reaches debounce threshold"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 10}
+            "guardrails_settings": {"debounce_text_length": 10},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
@@ -1009,6 +1043,9 @@ class TestGuardrailFunctionality:
         )
 
         await session.on_event(transcript_event)
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should have triggered guardrail and interrupted
         assert session._interrupted_by_guardrail is True
@@ -1032,20 +1069,23 @@ class TestGuardrailFunctionality:
         """Test guardrails run at 1x, 2x, 3x thresholds for same item_id"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # First delta - reaches 1x threshold (5 chars)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="12345", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="12345", response_id="resp_1")
+        )
 
         # Second delta - reaches 2x threshold (10 chars total)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="67890", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="67890", response_id="resp_1")
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should only trigger once due to interrupted_by_guardrail flag
         assert mock_model.interrupts_called == 1
@@ -1058,28 +1098,32 @@ class TestGuardrailFunctionality:
         """Test that different item_ids are tracked separately for debouncing"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [safe_guardrail],
-            "guardrails_settings": {"debounce_text_length": 10}
+            "guardrails_settings": {"debounce_text_length": 10},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # Add text to item_1 (8 chars - below threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="12345678", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="12345678", response_id="resp_1"
+            )
+        )
 
         # Add text to item_2 (8 chars - below threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_2", delta="abcdefgh", response_id="resp_2"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_2", delta="abcdefgh", response_id="resp_2"
+            )
+        )
 
         # Neither should trigger guardrails yet
         assert mock_model.interrupts_called == 0
 
         # Add more text to item_1 (total 12 chars - above threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="90ab", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="90ab", response_id="resp_1")
+        )
 
         # item_1 should have triggered guardrail run (but not interrupted since safe)
         assert session._item_guardrail_run_counts["item_1"] == 1
@@ -1095,15 +1139,20 @@ class TestGuardrailFunctionality:
         """Test that turn_ended event clears guardrail state for next turn"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # Trigger guardrail
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="trigger", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="trigger", response_id="resp_1"
+            )
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         assert session._interrupted_by_guardrail is True
         assert len(session._item_transcripts) == 1
@@ -1117,16 +1166,13 @@ class TestGuardrailFunctionality:
         assert len(session._item_guardrail_run_counts) == 0
 
     @pytest.mark.asyncio
-    async def test_multiple_guardrails_all_triggered(
-        self, mock_model, mock_agent
-    ):
+    async def test_multiple_guardrails_all_triggered(self, mock_model, mock_agent):
         """Test that all triggered guardrails are included in the event"""
+
         def create_triggered_guardrail(name):
             def guardrail_func(context, agent, output):
-                return GuardrailFunctionOutput(
-                    output_info={"name": name},
-                    tripwire_triggered=True
-                )
+                return GuardrailFunctionOutput(output_info={"name": name}, tripwire_triggered=True)
+
             return OutputGuardrail(guardrail_function=guardrail_func, name=name)
 
         guardrail1 = create_triggered_guardrail("guardrail_1")
@@ -1134,14 +1180,19 @@ class TestGuardrailFunctionality:
 
         run_config: RealtimeRunConfig = {
             "output_guardrails": [guardrail1, guardrail2],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="trigger", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="trigger", response_id="resp_1"
+            )
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should have interrupted and sent message with both guardrail names
         assert mock_model.interrupts_called == 1

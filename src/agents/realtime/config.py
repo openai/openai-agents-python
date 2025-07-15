@@ -26,26 +26,15 @@ RealtimeModelName: TypeAlias = Union[
 """The name of a realtime model."""
 
 
+RealtimeAudioFormat: TypeAlias = Union[Literal["pcm16", "g711_ulaw", "g711_alaw"], str]
+
+
 class RealtimeClientMessage(TypedDict):
+    """A raw message to be sent to the model."""
+
     type: str  # explicitly required
     other_data: NotRequired[dict[str, Any]]
-
-
-class RealtimeUserInputText(TypedDict):
-    type: Literal["input_text"]
-    text: str
-
-
-class RealtimeUserInputMessage(TypedDict):
-    type: Literal["message"]
-    role: Literal["user"]
-    content: list[RealtimeUserInputText]
-
-
-RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]
-
-
-RealtimeAudioFormat: TypeAlias = Union[Literal["pcm16", "g711_ulaw", "g711_alaw"], str]
+    """Merged into the message body."""
 
 
 class RealtimeInputAudioTranscriptionConfig(TypedDict):
@@ -123,3 +112,17 @@ class RealtimeRunConfig(TypedDict):
     """Whether tracing is disabled for this run."""
 
     # TODO (rm) Add history audio storage config
+
+
+class RealtimeUserInputText(TypedDict):
+    type: Literal["input_text"]
+    text: str
+
+
+class RealtimeUserInputMessage(TypedDict):
+    type: Literal["message"]
+    role: Literal["user"]
+    content: list[RealtimeUserInputText]
+
+
+RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]

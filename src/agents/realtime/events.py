@@ -197,6 +197,7 @@ class RealtimeGuardrailTripped:
 
     type: Literal["guardrail_tripped"] = "guardrail_tripped"
 
+
 RealtimeSessionEvent: TypeAlias = Union[
     RealtimeAgentStartEvent,
     RealtimeAgentEndEvent,

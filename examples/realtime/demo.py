@@ -58,55 +58,45 @@ class Example:
             self.session = session
             self.ui.set_is_connected(True)
             async for event in session:
-                await self.on_event(event)
+                await self._on_event(event)
+            print("done")
 
         # Wait for UI task to complete when session ends
         await ui_task
 
     async def on_audio_recorded(self, audio_bytes: bytes) -> None:
-        """Called when audio is recorded by the UI."""
-        try:
-            # Send the audio to the session
-            assert self.session is not None
-            await self.session.send_audio(audio_bytes)
-        except Exception as e:
-            self.ui.log_message(f"Error sending audio: {e}")
+        # Send the audio to the session
+        assert self.session is not None
+        await self.session.send_audio(audio_bytes)
 
-    async def on_event(self, event: RealtimeSessionEvent) -> None:
-        # Display event in the UI
-        try:
-            if event.type == "agent_start":
-                self.ui.add_transcript(f"Agent started: {event.agent.name}")
-            elif event.type == "agent_end":
-                self.ui.add_transcript(f"Agent ended: {event.agent.name}")
-            elif event.type == "handoff":
-                self.ui.add_transcript(
-                    f"Handoff from {event.from_agent.name} to {event.to_agent.name}"
-                )
-            elif event.type == "tool_start":
-                self.ui.add_transcript(f"Tool started: {event.tool.name}")
-            elif event.type == "tool_end":
-                self.ui.add_transcript(f"Tool ended: {event.tool.name}; output: {event.output}")
-            elif event.type == "audio_end":
-                self.ui.add_transcript("Audio ended")
-            elif event.type == "audio":
-                np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
-                self.ui.play_audio(np_audio)
-            elif event.type == "audio_interrupted":
-                self.ui.add_transcript("Audio interrupted")
-            elif event.type == "error":
-                self.ui.add_transcript(f"Error: {event.error}")
-            elif event.type == "history_updated":
-                pass
-            elif event.type == "history_added":
-                pass
-            elif event.type == "raw_model_event":
-                self.ui.log_message(f"Raw model event: {event.data}")
-            else:
-                self.ui.log_message(f"Unknown event type: {event.type}")
-        except Exception as e:
-            # This can happen if the UI has already exited
-            self.ui.log_message(f"Event handling error: {str(e)}")
+    async def _on_event(self, event: RealtimeSessionEvent) -> None:
+        if event.type == "agent_start":
+            self.ui.add_transcript(f"Agent started: {event.agent.name}")
+        elif event.type == "agent_end":
+            self.ui.add_transcript(f"Agent ended: {event.agent.name}")
+        elif event.type == "handoff":
+            self.ui.add_transcript(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
+        elif event.type == "tool_start":
+            self.ui.add_transcript(f"Tool started: {event.tool.name}")
+        elif event.type == "tool_end":
+            self.ui.add_transcript(f"Tool ended: {event.tool.name}; output: {event.output}")
+        elif event.type == "audio_end":
+            self.ui.add_transcript("Audio ended")
+        elif event.type == "audio":
+            np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
+            self.ui.play_audio(np_audio)
+        elif event.type == "audio_interrupted":
+            self.ui.add_transcript("Audio interrupted")
+        elif event.type == "error":
+            self.ui.add_transcript(f"Error: {event.error}")
+        elif event.type == "history_updated":
+            pass
+        elif event.type == "history_added":
+            pass
+        elif event.type == "raw_model_event":
+            self.ui.log_message(f"Raw model event: {event.data}")
+        else:
+            self.ui.log_message(f"Unknown event type: {event.type}")
 
 
 if __name__ == "__main__":
