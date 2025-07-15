@@ -4,6 +4,10 @@ import sys
 import argparse
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
+from openai import (
+    ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParam,
+)
 
 # import logging
 # logging.basicConfig(level=logging.INFO)
@@ -95,7 +99,6 @@ eng_to_non_eng_instructions = {
     ],
     # Add more languages here
 }
-
 
 def built_instructions(target_language: str, lang_code: str) -> str:
     do_not_translate_terms = "\n".join(do_not_translate)
@@ -222,30 +225,31 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
 
-        messages = [
-            {"role": "system",  "content": instructions},
-            {"role": "user",    "content": chunk},
+        messages: list[
+            ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam
+        ] = [
+            ChatCompletionSystemMessageParam(role="system", content=instructions),
+            ChatCompletionUserMessageParam(role="user", content=chunk),
         ]
 
         if OPENAI_MODEL.startswith("o"):
-            # Use default temperature for "o*" models
             response = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=messages,
             )
         else:
-            # Force zero temperature on other models
             response = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=messages,
                 temperature=0.0,
             )
 
-        translated_content.append(response.choices[0].message.content)
+        # `content` can be None, so fallback to empty string
+        text = response.choices[0].message.content or ""
+        translated_content.append(text)
 
     translated_text = "\n".join(translated_content)
 
-    translated_text = "\n".join(translated_content)
     for idx, code_block in enumerate(code_blocks):
         translated_text = translated_text.replace(f"CODE_BLOCK_{idx:02}", code_block)
 
