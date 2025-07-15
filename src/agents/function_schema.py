@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
+from pydantic.fields import FieldInfo
 
 from .exceptions import UserError
 from .run_context import RunContextWrapper
@@ -318,6 +319,14 @@ def function_schema(
                 fields[name] = (
                     ann,
                     Field(..., description=field_description),
+                )
+            elif isinstance(default, FieldInfo):
+                # Parameter with a default value that is a Field(...)
+                fields[name] = (
+                    ann,
+                    FieldInfo.merge_field_infos(
+                        default, description=field_description or default.description
+                    ),
                 )
             else:
                 # Parameter with a default value

@@ -123,7 +123,7 @@ class TestSessionExceptions:
         async with session:
             # Try to iterate and expect exception
             with pytest.raises(ValueError, match="Test error"):
-                async for _event in session:
+                async for _ in session:
                     pass  # Should never reach here
 
         # Verify cleanup occurred
