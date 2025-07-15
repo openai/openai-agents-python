@@ -222,14 +222,14 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
         if OPENAI_MODEL.startswith("o"):
-            openai_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 instructions=instructions,
                 input=chunk,
             )
             translated_content.append(response.output_text)
         else:
-            openai_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 instructions=instructions,
                 input=chunk,
