@@ -210,7 +210,7 @@ class Agent(AgentBase, Generic[TContext]):
         The final output will be the output of the first matching tool call. The LLM does not
         process the result of the tool call.
     - A function: If you pass a function, it will be called with the run context and the list of
-      tool results. It must return a `ToolToFinalOutputResult`, which determines whether the tool
+      tool results. It must return a `ToolsToFinalOutputResult`, which determines whether the tool
       calls result in a final output.
 
       NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
