@@ -31,7 +31,6 @@ from .events import (
     RealtimeToolStart,
 )
 from .items import (
-    AssistantAudio,
     AssistantMessageItem,
     AssistantText,
     InputAudio,
@@ -123,7 +122,6 @@ __all__ = [
     "RealtimeToolEnd",
     "RealtimeToolStart",
     # Items
-    "AssistantAudio",
     "AssistantMessageItem",
     "AssistantText",
     "InputAudio",

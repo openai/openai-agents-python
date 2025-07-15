@@ -388,15 +388,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, item: ConversationItem, previous_item_id: str | None
     ) -> None:
         """Handle conversation item creation/retrieval events."""
-        message_item: RealtimeMessageItem = TypeAdapter(RealtimeMessageItem).validate_python(
-            {
-                "item_id": item.id or "",
-                "previous_item_id": previous_item_id,
-                "type": item.type,
-                "role": item.role,
-                "content": item.content,
-                "status": "in_progress",
-            }
+        message_item = _ConversionHelper.conversation_item_to_realtime_message_item(
+            item, previous_item_id
         )
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=message_item))
 
@@ -418,6 +411,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         try:
+            if "previous_item_id" in event and event["previous_item_id"] is None:
+                event["previous_item_id"] = ""  # TODO (rm) remove
             parsed: OpenAIRealtimeServerEvent = TypeAdapter(
                 OpenAIRealtimeServerEvent
             ).validate_python(event)
@@ -465,7 +460,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             previous_item_id = (
                 parsed.previous_item_id if parsed.type == "conversation.item.created" else None
             )
-            await self._handle_conversation_item(parsed.item, previous_item_id)
+            if parsed.item.type == "message":
+                await self._handle_conversation_item(parsed.item, previous_item_id)
         elif (
             parsed.type == "conversation.item.input_audio_transcription.completed"
             or parsed.type == "conversation.item.truncated"
@@ -567,3 +563,22 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
         return converted_tools
+
+
+class _ConversionHelper:
+    @classmethod
+    def conversation_item_to_realtime_message_item(
+        cls, item: ConversationItem, previous_item_id: str | None
+    ) -> RealtimeMessageItem:
+        return TypeAdapter(RealtimeMessageItem).validate_python(
+            {
+                "item_id": item.id or "",
+                "previous_item_id": previous_item_id,
+                "type": item.type,
+                "role": item.role,
+                "content": (
+                    [content.model_dump() for content in item.content] if item.content else []
+                ),
+                "status": "in_progress",
+            },
+        )

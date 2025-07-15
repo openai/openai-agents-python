@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class InputText(BaseModel):
     type: Literal["input_text"] = "input_text"
-    text: str
+    text: str | None = None
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -24,16 +24,7 @@ class InputAudio(BaseModel):
 
 class AssistantText(BaseModel):
     type: Literal["text"] = "text"
-    text: str
-
-    # Allow extra data
-    model_config = ConfigDict(extra="allow")
-
-
-class AssistantAudio(BaseModel):
-    type: Literal["audio"] = "audio"
-    audio: str | None = None
-    transcript: str | None = None
+    text: str | None = None
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -55,7 +46,7 @@ class UserMessageItem(BaseModel):
     previous_item_id: str | None = None
     type: Literal["message"] = "message"
     role: Literal["user"] = "user"
-    content: list[InputText | InputAudio]
+    content: list[Annotated[InputText | InputAudio, Field(discriminator="type")]]
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -67,7 +58,7 @@ class AssistantMessageItem(BaseModel):
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] | None = None
-    content: list[AssistantText | AssistantAudio]
+    content: list[AssistantText]
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
