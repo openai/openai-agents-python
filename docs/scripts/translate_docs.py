@@ -21,7 +21,6 @@ search:
 ---
 """
 
-
 # Define the source and target directories
 source_dir = "docs"
 languages = {
@@ -177,7 +176,6 @@ Follow the following workflow to translate the given markdown text data:
 6. Once the final output is ready, return **only** the translated markdown text. No extra commentary.
 """
 
-
 # Function to translate and save files
 def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     print(f"Translating {file_path} into a different language: {lang_code}")
@@ -230,7 +228,9 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
             ],
             temperature=0.0,
         )
-        translated_content.append(chat.choices[0].message.content)
+        # Ensure content is a string before appending
+        content_str = chat.choices[0].message.content or ""
+        translated_content.append(content_str)
 
     translated_text = "\n".join(translated_content)
     for idx, code_block in enumerate(code_blocks):
