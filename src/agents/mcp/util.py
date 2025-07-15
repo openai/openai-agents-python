@@ -5,12 +5,11 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from typing_extensions import NotRequired, TypedDict
 
-from agents.strict_schema import ensure_strict_json_schema
-
 from .. import _debug
 from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
+from ..strict_schema import ensure_strict_json_schema
 from ..tool import FunctionTool, Tool
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
@@ -18,7 +17,7 @@ from ..util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
 
-    from ..agent import Agent
+    from ..agent import AgentBase
     from .server import MCPServer
 
 
@@ -29,7 +28,7 @@ class ToolFilterContext:
     run_context: RunContextWrapper[Any]
     """The current run context."""
 
-    agent: "Agent[Any]"
+    agent: "AgentBase"
     """The agent that is requesting the tool list."""
 
     server_name: str
@@ -100,7 +99,7 @@ class MCPUtil:
         servers: list["MCPServer"],
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "Agent[Any]",
+        agent: "AgentBase",
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -126,7 +125,7 @@ class MCPUtil:
         server: "MCPServer",
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "Agent[Any]",
+        agent: "AgentBase",
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
