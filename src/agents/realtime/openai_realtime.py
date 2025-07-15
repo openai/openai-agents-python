@@ -8,24 +8,29 @@ import os
 from datetime import datetime
 from typing import Any, Callable, Literal
 
+import pydantic
 import websockets
 from openai.types.beta.realtime.conversation_item import ConversationItem
 from openai.types.beta.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
 from openai.types.beta.realtime.response_audio_delta_event import ResponseAudioDeltaEvent
+from openai.types.beta.realtime.session_update_event import (
+    Session as OpenAISessionObject,
+    SessionTool as OpenAISessionTool,
+)
 from pydantic import TypeAdapter
+from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
 
+from agents.tool import FunctionTool, Tool
 from agents.util._types import MaybeAwaitable
 
 from ..exceptions import UserError
 from ..logger import logger
 from .config import (
-    RealtimeClientMessage,
     RealtimeModelTracingConfig,
     RealtimeSessionModelSettings,
-    RealtimeUserInput,
 )
 from .items import RealtimeMessageItem, RealtimeToolCallItem
 from .model import (
@@ -39,6 +44,7 @@ from .model_events import (
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
+    RealtimeModelExceptionEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
@@ -47,6 +53,26 @@ from .model_events import (
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
 )
+from .model_inputs import (
+    RealtimeModelSendAudio,
+    RealtimeModelSendEvent,
+    RealtimeModelSendInterrupt,
+    RealtimeModelSendRawMessage,
+    RealtimeModelSendSessionUpdate,
+    RealtimeModelSendToolOutput,
+    RealtimeModelSendUserInput,
+)
+
+DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
+    "voice": "ash",
+    "modalities": ["text", "audio"],
+    "input_audio_format": "pcm16",
+    "output_audio_format": "pcm16",
+    "input_audio_transcription": {
+        "model": "gpt-4o-mini-transcribe",
+    },
+    "turn_detection": {"type": "semantic_vad"},
+}
 
 
 async def get_api_key(key: str | Callable[[], MaybeAwaitable[str]] | None) -> str | None:
@@ -102,23 +128,31 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         }
         self._websocket = await websockets.connect(url, additional_headers=headers)
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
+        await self._update_session_config(model_settings)
 
     async def _send_tracing_config(
         self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
     ) -> None:
         """Update tracing configuration via session.update event."""
         if tracing_config is not None:
-            await self.send_event(
-                {"type": "session.update", "other_data": {"session": {"tracing": tracing_config}}}
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(
+                    message={
+                        "type": "session.update",
+                        "other_data": {"session": {"tracing": tracing_config}},
+                    }
+                )
             )
 
     def add_listener(self, listener: RealtimeModelListener) -> None:
         """Add a listener to the model."""
-        self._listeners.append(listener)
+        if listener not in self._listeners:
+            self._listeners.append(listener)
 
     def remove_listener(self, listener: RealtimeModelListener) -> None:
         """Remove a listener from the model."""
-        self._listeners.remove(listener)
+        if listener in self._listeners:
+            self._listeners.remove(listener)
 
     async def _emit_event(self, event: RealtimeModelEvent) -> None:
         """Emit an event to the listeners."""
@@ -130,103 +164,141 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         try:
             async for message in self._websocket:
-                parsed = json.loads(message)
-                await self._handle_ws_event(parsed)
+                try:
+                    parsed = json.loads(message)
+                    await self._handle_ws_event(parsed)
+                except json.JSONDecodeError as e:
+                    await self._emit_event(
+                        RealtimeModelExceptionEvent(
+                            exception=e, context="Failed to parse WebSocket message as JSON"
+                        )
+                    )
+                except Exception as e:
+                    await self._emit_event(
+                        RealtimeModelExceptionEvent(
+                            exception=e, context="Error handling WebSocket event"
+                        )
+                    )
 
-        except websockets.exceptions.ConnectionClosed:
-            # TODO connection closed handling (event, cleanup)
-            logger.warning("WebSocket connection closed")
+        except websockets.exceptions.ConnectionClosedOK:
+            # Normal connection closure - no exception event needed
+            logger.info("WebSocket connection closed normally")
+        except websockets.exceptions.ConnectionClosed as e:
+            await self._emit_event(
+                RealtimeModelExceptionEvent(
+                    exception=e, context="WebSocket connection closed unexpectedly"
+                )
+            )
         except Exception as e:
-            logger.error(f"WebSocket error: {e}")
+            await self._emit_event(
+                RealtimeModelExceptionEvent(
+                    exception=e, context="WebSocket error in message listener"
+                )
+            )
 
-    async def send_event(self, event: RealtimeClientMessage) -> None:
+    async def send_event(self, event: RealtimeModelSendEvent) -> None:
         """Send an event to the model."""
+        if isinstance(event, RealtimeModelSendRawMessage):
+            await self._send_raw_message(event)
+        elif isinstance(event, RealtimeModelSendUserInput):
+            await self._send_user_input(event)
+        elif isinstance(event, RealtimeModelSendAudio):
+            await self._send_audio(event)
+        elif isinstance(event, RealtimeModelSendToolOutput):
+            await self._send_tool_output(event)
+        elif isinstance(event, RealtimeModelSendInterrupt):
+            await self._send_interrupt(event)
+        elif isinstance(event, RealtimeModelSendSessionUpdate):
+            await self._send_session_update(event)
+        else:
+            assert_never(event)
+            raise ValueError(f"Unknown event type: {type(event)}")
+
+    async def _send_raw_message(self, event: RealtimeModelSendRawMessage) -> None:
+        """Send a raw message to the model."""
         assert self._websocket is not None, "Not connected"
+
         converted_event = {
-            "type": event["type"],
+            "type": event.message["type"],
         }
 
-        converted_event.update(event.get("other_data", {}))
+        converted_event.update(event.message.get("other_data", {}))
 
         await self._websocket.send(json.dumps(converted_event))
 
-    async def send_message(
-        self, message: RealtimeUserInput, other_event_data: dict[str, Any] | None = None
-    ) -> None:
-        """Send a message to the model."""
+    async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         message = (
-            message
-            if isinstance(message, dict)
+            event.user_input
+            if isinstance(event.user_input, dict)
             else {
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": message}],
+                "content": [{"type": "input_text", "text": event.user_input}],
             }
         )
         other_data = {
             "item": message,
         }
-        if other_event_data:
-            other_data.update(other_event_data)
 
-        await self.send_event({"type": "conversation.item.create", "other_data": other_data})
-
-        await self.send_event({"type": "response.create"})
-
-    async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
-        """Send a raw audio chunk to the model.
-
-        Args:
-            audio: The audio data to send.
-            commit: Whether to commit the audio buffer to the model.  If the model does not do turn
-            detection, this can be used to indicate the turn is completed.
-        """
-        assert self._websocket is not None, "Not connected"
-        base64_audio = base64.b64encode(audio).decode("utf-8")
-        await self.send_event(
-            {
-                "type": "input_audio_buffer.append",
-                "other_data": {
-                    "audio": base64_audio,
-                },
-            }
+        await self._send_raw_message(
+            RealtimeModelSendRawMessage(
+                message={"type": "conversation.item.create", "other_data": other_data}
+            )
         )
-        if commit:
-            await self.send_event({"type": "input_audio_buffer.commit"})
+        await self._send_raw_message(
+            RealtimeModelSendRawMessage(message={"type": "response.create"})
+        )
 
-    async def send_tool_output(
-        self, tool_call: RealtimeModelToolCallEvent, output: str, start_response: bool
-    ) -> None:
-        """Send tool output to the model."""
-        await self.send_event(
-            {
-                "type": "conversation.item.create",
-                "other_data": {
-                    "item": {
-                        "type": "function_call_output",
-                        "output": output,
-                        "call_id": tool_call.id,
+    async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
+        base64_audio = base64.b64encode(event.audio).decode("utf-8")
+        await self._send_raw_message(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": "input_audio_buffer.append",
+                    "other_data": {
+                        "audio": base64_audio,
                     },
-                },
-            }
+                }
+            )
+        )
+        if event.commit:
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(message={"type": "input_audio_buffer.commit"})
+            )
+
+    async def _send_tool_output(self, event: RealtimeModelSendToolOutput) -> None:
+        await self._send_raw_message(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": "conversation.item.create",
+                    "other_data": {
+                        "item": {
+                            "type": "function_call_output",
+                            "output": event.output,
+                            "call_id": event.tool_call.id,
+                        },
+                    },
+                }
+            )
         )
 
         tool_item = RealtimeToolCallItem(
-            item_id=tool_call.id or "",
-            previous_item_id=tool_call.previous_item_id,
+            item_id=event.tool_call.id or "",
+            previous_item_id=event.tool_call.previous_item_id,
             type="function_call",
             status="completed",
-            arguments=tool_call.arguments,
-            name=tool_call.name,
-            output=output,
+            arguments=event.tool_call.arguments,
+            name=event.tool_call.name,
+            output=event.output,
         )
         await self._emit_event(RealtimeModelItemUpdatedEvent(item=tool_item))
 
-        if start_response:
-            await self.send_event({"type": "response.create"})
+        if event.start_response:
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(message={"type": "response.create"})
+            )
 
-    async def interrupt(self) -> None:
-        """Interrupt the model."""
+    async def _send_interrupt(self, event: RealtimeModelSendInterrupt) -> None:
         if not self._current_item_id or not self._audio_start_time:
             return
 
@@ -235,21 +307,27 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elapsed_time_ms = (datetime.now() - self._audio_start_time).total_seconds() * 1000
         if elapsed_time_ms > 0 and elapsed_time_ms < self._audio_length_ms:
             await self._emit_event(RealtimeModelAudioInterruptedEvent())
-            await self.send_event(
-                {
-                    "type": "conversation.item.truncate",
-                    "other_data": {
-                        "item_id": self._current_item_id,
-                        "content_index": self._current_audio_content_index,
-                        "audio_end_ms": elapsed_time_ms,
-                    },
-                }
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(
+                    message={
+                        "type": "conversation.item.truncate",
+                        "other_data": {
+                            "item_id": self._current_item_id,
+                            "content_index": self._current_audio_content_index,
+                            "audio_end_ms": elapsed_time_ms,
+                        },
+                    }
+                )
             )
 
         self._current_item_id = None
         self._audio_start_time = None
         self._audio_length_ms = 0.0
         self._current_audio_content_index = None
+
+    async def _send_session_update(self, event: RealtimeModelSendSessionUpdate) -> None:
+        """Send a session update to the model."""
+        await self._update_session_config(event.session_settings)
 
     async def _handle_audio_delta(self, parsed: ResponseAudioDeltaEvent) -> None:
         """Handle audio delta events and update audio tracking state."""
@@ -333,7 +411,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _cancel_response(self) -> None:
         if self._ongoing_response:
-            await self.send_event({"type": "response.cancel"})
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(message={"type": "response.cancel"})
+            )
             self._ongoing_response = False
 
     async def _handle_ws_event(self, event: dict[str, Any]):
@@ -341,9 +421,23 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             parsed: OpenAIRealtimeServerEvent = TypeAdapter(
                 OpenAIRealtimeServerEvent
             ).validate_python(event)
+        except pydantic.ValidationError as e:
+            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            await self._emit_event(
+                RealtimeModelErrorEvent(
+                    error=e,
+                )
+            )
+            return
         except Exception as e:
-            logger.error(f"Invalid event: {event} - {e}")
-            # await self._emit_event(RealtimeModelErrorEvent(error=f"Invalid event: {event} - {e}"))
+            event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
+            logger.error(f"Failed to validate server event: {event}", exc_info=True)
+            await self._emit_event(
+                RealtimeModelExceptionEvent(
+                    exception=e,
+                    context=f"Failed to validate server event: {event_type}",
+                )
+            )
             return
 
         if parsed.type == "response.audio.delta":
@@ -351,7 +445,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elif parsed.type == "response.audio.done":
             await self._emit_event(RealtimeModelAudioDoneEvent())
         elif parsed.type == "input_audio_buffer.speech_started":
-            await self.interrupt()
+            await self._send_interrupt(RealtimeModelSendInterrupt())
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
@@ -376,13 +470,15 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             parsed.type == "conversation.item.input_audio_transcription.completed"
             or parsed.type == "conversation.item.truncated"
         ):
-            await self.send_event(
-                {
-                    "type": "conversation.item.retrieve",
-                    "other_data": {
-                        "item_id": self._current_item_id,
-                    },
-                }
+            await self._send_raw_message(
+                RealtimeModelSendRawMessage(
+                    message={
+                        "type": "conversation.item.retrieve",
+                        "other_data": {
+                            "item_id": self._current_item_id,
+                        },
+                    }
+                )
             )
             if parsed.type == "conversation.item.input_audio_transcription.completed":
                 await self._emit_event(
@@ -408,3 +504,66 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             or parsed.type == "response.output_item.done"
         ):
             await self._handle_output_item(parsed.item)
+
+    async def _update_session_config(self, model_settings: RealtimeSessionModelSettings) -> None:
+        session_config = self._get_session_config(model_settings)
+        await self._send_raw_message(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": "session.update",
+                    "other_data": {
+                        "session": session_config.model_dump(exclude_unset=True, exclude_none=True)
+                    },
+                }
+            )
+        )
+
+    def _get_session_config(
+        self, model_settings: RealtimeSessionModelSettings
+    ) -> OpenAISessionObject:
+        """Get the session config."""
+        return OpenAISessionObject(
+            instructions=model_settings.get("instructions", None),
+            model=(
+                model_settings.get("model_name", self.model)  # type: ignore
+                or DEFAULT_MODEL_SETTINGS.get("model_name")
+            ),
+            voice=model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice")),
+            modalities=model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities")),
+            input_audio_format=model_settings.get(
+                "input_audio_format",
+                DEFAULT_MODEL_SETTINGS.get("input_audio_format"),  # type: ignore
+            ),
+            output_audio_format=model_settings.get(
+                "output_audio_format",
+                DEFAULT_MODEL_SETTINGS.get("output_audio_format"),  # type: ignore
+            ),
+            input_audio_transcription=model_settings.get(
+                "input_audio_transcription",
+                DEFAULT_MODEL_SETTINGS.get("input_audio_transcription"),  # type: ignore
+            ),
+            turn_detection=model_settings.get(
+                "turn_detection",
+                DEFAULT_MODEL_SETTINGS.get("turn_detection"),  # type: ignore
+            ),
+            tool_choice=model_settings.get(
+                "tool_choice",
+                DEFAULT_MODEL_SETTINGS.get("tool_choice"),  # type: ignore
+            ),
+            tools=self._tools_to_session_tools(model_settings.get("tools", [])),
+        )
+
+    def _tools_to_session_tools(self, tools: list[Tool]) -> list[OpenAISessionTool]:
+        converted_tools: list[OpenAISessionTool] = []
+        for tool in tools:
+            if not isinstance(tool, FunctionTool):
+                raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
+            converted_tools.append(
+                OpenAISessionTool(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=tool.params_json_schema,
+                    type="function",
+                )
+            )
+        return converted_tools
