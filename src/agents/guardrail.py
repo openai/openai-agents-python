@@ -317,7 +317,7 @@ def output_guardrail(
         return OutputGuardrail(
             guardrail_function=f,
             # Guardrail name defaults to function name when not specified (None).
-            name=name if name else function.__name__,
+            name=name if name else f.__name__,
         )
 
     if func is not None:
