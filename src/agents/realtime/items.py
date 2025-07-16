@@ -73,6 +73,7 @@ RealtimeMessageItem = Annotated[
 class RealtimeToolCallItem(BaseModel):
     item_id: str
     previous_item_id: str | None = None
+    call_id: str | None
     type: Literal["function_call"] = "function_call"
     status: Literal["in_progress", "completed"]
     arguments: str

@@ -103,7 +103,8 @@ class Example:
             elif event.type == "history_added":
                 pass
             elif event.type == "raw_model_event":
-                self.ui.log_message(f"Raw model event: {_truncate_str(str(event.data), 50)}")
+                if event.data.type != "error" and event.data.type != "exception":
+                    self.ui.log_message(f"Raw model event: {event.data}")
             else:
                 self.ui.log_message(f"Unknown event type: {event.type}")
         except Exception as e:
