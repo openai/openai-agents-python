@@ -292,6 +292,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             "output_index": 0,
             "item": {
                 "id": "call_123",
+                "call_id": "call_123",
                 "type": "function_call",
                 "status": "completed",
                 "name": "get_weather",
