@@ -266,7 +266,9 @@ def translate_single_source_file(file_path: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Translate documentation files")
-    parser.add_argument("--file", type=str, help="Specific file to translate (relative to docs directory)")
+    parser.add_argument(
+        "--file", type=str, help="Specific file to translate (relative to docs directory)"
+    )
     args = parser.parse_args()
 
     if args.file:

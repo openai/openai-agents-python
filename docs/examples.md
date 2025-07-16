@@ -40,3 +40,6 @@ Check out a variety of sample implementations of the SDK in the examples section
 
 - **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
   See examples of voice agents, using our TTS and STT models.
+
+- **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
+  Examples showing how to build realtime experiences using the SDK.
