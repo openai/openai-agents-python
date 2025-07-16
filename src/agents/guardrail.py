@@ -18,17 +18,18 @@ if TYPE_CHECKING:
 
 @dataclass
 class GuardrailFunctionOutput:
-    """The output of a guardrail function."""
+    """Encapsulates the result of a guardrail’s validation step."""
 
     output_info: Any
     """
-    Optional information about the guardrail's output. For example, the guardrail could include
-    information about the checks it performed and granular results.
+    Detailed metadata or diagnostics from the check,
+    for example which rules passed, which failed, and any metrics.
     """
 
     tripwire_triggered: bool
     """
-    Whether the tripwire was triggered. If triggered, the agent's execution will be halted.
+    Whether this check caused a hard stop.
+    If True, downstream execution must abort immediately.
     """
 
 
