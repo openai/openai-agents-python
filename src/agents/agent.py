@@ -256,7 +256,7 @@ class Agent(AgentBase, Generic[TContext]):
 
         if (
             self.prompt is not None
-            and not isinstance(self.prompt, (Prompt, DynamicPromptFunction))
+            and not isinstance(self.prompt, dict)
             and not callable(self.prompt)
         ):
             raise TypeError(
@@ -297,10 +297,11 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.output_type).__name__}"
             )
 
+        # Fixed hooks validation - use AgentHooksBase instead of generic AgentHooks
         if self.hooks is not None:
-            from .lifecycle import AgentHooks
+            from .lifecycle import AgentHooksBase
 
-            if not isinstance(self.hooks, AgentHooks):
+            if not isinstance(self.hooks, AgentHooksBase):
                 raise TypeError(
                     f"Agent hooks must be an AgentHooks instance or None, "
                     f"got {type(self.hooks).__name__}"
