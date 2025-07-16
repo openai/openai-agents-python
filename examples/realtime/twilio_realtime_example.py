@@ -37,7 +37,6 @@ async def incoming_voice_get(request: Request):
     response = VoiceResponse()
     host = request.url.hostname
     # response.say("Welcome to ODAI. How can I help you today?")
-    # print(f"Host: {host}")
     connect = Connect()
     connect.stream(url=f'wss://{host}/twilio/streaming')
     response.append(connect)
@@ -102,7 +101,6 @@ async def voice_streaming(websocket: WebSocket):
                 elif event.type == "audio_end":
                     print("Audio ended")
                 elif event.type == "audio":
-                    print(f"Stream SID: {stream_sid}")
                     audio_payload = base64.b64encode(event.audio.data).decode('utf-8')
                     audio_delta = {
                             "event": "media",
@@ -113,7 +111,6 @@ async def voice_streaming(websocket: WebSocket):
                         }
                     await websocket.send_json(audio_delta)
                 elif event.type == "audio_interrupted":
-                    await realtime_session.interrupt()
                     print("Audio interrupted")
                 elif event.type == "error":
                     pass
