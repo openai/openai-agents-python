@@ -221,6 +221,10 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+    def __post_init__(self):
+        if not isinstance(self.name, str):
+            raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:
         ```
@@ -259,19 +263,17 @@ class Agent(AgentBase, Generic[TContext]):
             from .run import Runner, get_current_run_config
 
             # Get the current run_config from context if available
-            run_config = None
             current_run_config = get_current_run_config()
-            if current_run_config and current_run_config.pass_run_config_to_sub_agents:
-                run_config = current_run_config
 
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
                 context=context.context,
-                run_config=run_config,
+                run_config=current_run_config,  # Pass inherited config
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
+
             return ItemHelpers.text_message_outputs(output.new_items)
 
         return run_agent
