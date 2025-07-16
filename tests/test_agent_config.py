@@ -178,10 +178,10 @@ class TestAgentValidation:
         """Test name validation - the original issue that started this PR"""
         # This was the original failing case that caused JSON serialization errors
         with pytest.raises(TypeError, match="Agent name must be a string, got int"):
-            Agent(name=1)
+            Agent(name=1)  # type: ignore
 
         with pytest.raises(TypeError, match="Agent name must be a string, got NoneType"):
-            Agent(name=None)
+            Agent(name=None)  # type: ignore
 
     def test_tool_use_behavior_dict_validation(self):
         """Test tool_use_behavior accepts StopAtTools dict - fixes existing test failures"""
@@ -190,7 +190,7 @@ class TestAgentValidation:
 
         # Invalid cases that should fail
         with pytest.raises(TypeError, match="Agent tool_use_behavior must be"):
-            Agent(name="test", tool_use_behavior=123)
+            Agent(name="test", tool_use_behavior=123)  # type: ignore
 
     def test_hooks_validation_python39_compatibility(self):
         """Test hooks validation works with Python 3.9 - fixes generic type issues"""
@@ -199,20 +199,20 @@ class TestAgentValidation:
             pass
 
         # Valid case
-        Agent(name="test", hooks=MockHooks())
+        Agent(name="test", hooks=MockHooks())  # type: ignore
 
         # Invalid case
         with pytest.raises(TypeError, match="Agent hooks must be an AgentHooks instance"):
-            Agent(name="test", hooks="invalid")
+            Agent(name="test", hooks="invalid")  # type: ignore
 
     def test_list_field_validation(self):
         """Test critical list fields that commonly get wrong types"""
         # These are the most common mistakes users make
         with pytest.raises(TypeError, match="Agent tools must be a list"):
-            Agent(name="test", tools="not_a_list")
+            Agent(name="test", tools="not_a_list")  # type: ignore
 
         with pytest.raises(TypeError, match="Agent handoffs must be a list"):
-            Agent(name="test", handoffs="not_a_list")
+            Agent(name="test", handoffs="not_a_list")  # type: ignore
 
     def test_model_settings_validation(self):
         """Test model_settings validation - prevents runtime errors"""
@@ -223,4 +223,4 @@ class TestAgentValidation:
         with pytest.raises(
             TypeError, match="Agent model_settings must be a ModelSettings instance"
         ):
-            Agent(name="test", model_settings={})
+            Agent(name="test", model_settings={})  # type: ignore
