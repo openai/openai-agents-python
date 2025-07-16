@@ -95,7 +95,9 @@ You can define custom guardrails to run on the input or output.
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
+from agents.exceptions import InputGuardrailTripwireTriggered
 from pydantic import BaseModel
+
 
 class HomeworkOutput(BaseModel):
     is_homework: bool
@@ -122,6 +124,7 @@ Let's put it all together and run the entire workflow, using handoffs and the in
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
+from agents.exceptions import InputGuardrailTripwireTriggered
 from pydantic import BaseModel
 import asyncio
 
