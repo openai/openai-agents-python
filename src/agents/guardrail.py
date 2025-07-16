@@ -41,7 +41,9 @@ class InputGuardrailResult:
     """
 
     output: GuardrailFunctionOutput
-    """The output of the guardrail function."""
+    """
+    The output of the guardrail function.
+    """
 
 
 @dataclass
