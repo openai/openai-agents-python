@@ -16,6 +16,10 @@ from agents import (
     UserError,
     handoff,
 )
+from agents.extensions.handoff_prompt import (
+    RECOMMENDED_PROMPT_PREFIX,
+    prompt_with_handoff_instructions,
+)
 from agents.run import AgentRunner
 
 
@@ -375,3 +379,10 @@ async def test_handoff_is_enabled_filtering_integration():
     agent_names = {h.agent_name for h in filtered_handoffs}
     assert agent_names == {"agent_1", "agent_3"}
     assert "agent_2" not in agent_names
+
+@pytest.mark.asyncio
+async def test_handoff_prompt_is_correct():
+    n = len(RECOMMENDED_PROMPT_PREFIX)
+    assert (RECOMMENDED_PROMPT_PREFIX ==
+            prompt_with_handoff_instructions("Respond to user queries")
+            [:n])

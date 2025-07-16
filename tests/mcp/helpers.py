@@ -4,7 +4,19 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, PromptMessage, TextContent
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    PromptMessage,
+    ReadResourceResult,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+)
+from pydantic import AnyUrl
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -57,10 +69,14 @@ class _TestFilterServer(_MCPServerWithClientSession):
 class FakeMCPServer(MCPServer):
     def __init__(
         self,
+        resources: list[Resource] | None = None,
+        resources_templates: list[ResourceTemplate] | None = None,
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
+        self.resources = resources or []
+        self.resources_templates = resources_templates or []
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
@@ -105,6 +121,33 @@ class FakeMCPServer(MCPServer):
         content = f"Fake prompt content for {name}"
         message = PromptMessage(role="user", content=TextContent(type="text", text=content))
         return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
+
+    async def list_resources(self, run_context=None, agent=None) -> ListResourcesResult:
+        """Return empty list of resources for the fake server"""
+        return ListResourcesResult(resources=self.resources)
+
+    async def list_resource_templates(self, run_context=None, agent=None) \
+            -> ListResourceTemplatesResult:
+        """Return empty list of resources templates for the fake server"""
+        return ListResourceTemplatesResult(resourceTemplates=self.resources_templates)
+
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
+        """Return a fake resource read for the fake server"""
+        for resource in self.resources:
+            if resource.uri == uri:
+                return ReadResourceResult(**resource.model_dump(), contents=[])
+
+        raise KeyError(f"Resource {uri} not found")
+
+    def add_resource(self, uri: AnyUrl, name: str, description: str | None = None):
+        """Add a resource to the fake server"""
+        self.resources.append(Resource(uri=uri, description=description, name=name))
+
+    def add_resource_template(self, uri: str, name: str, description: str | None = None):
+        """Add a resource template to the fake server"""
+        self.resources_templates.append(
+            ResourceTemplate(uriTemplate=uri, description=description, name=name)
+        )
 
     @property
     def name(self) -> str:

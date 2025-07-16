@@ -167,6 +167,42 @@ agent = Agent(
 )
 ```
 
+## Resources
+
+Resources are a core primitive in the Model Context Protocol (MCP) that allow servers to expose data and content that can be read by clients and used as context for LLM interactions.
+
+### Using Resources
+
+MCP servers that support resources provide three main methods:
+
+- `list_resources()`: Lists all available resources on the server
+- `list_resource_templates()`: Lists all available resources templates on the server
+- `read_resource()`: Read data from a specific resource given its URI
+
+```python
+# List available resources
+resources_result = await mcp_server.list_resources()
+for resource in resources_result.resources:
+    print(f"name: {resource.name}, description: {resource.description}")
+
+# List available resources templates
+resources_templates_result = await mcp_server.list_resource_templates()
+for resource in resources_templates_result.resourceTemplates:
+    print(f"name: {resource.name}, description: {resource.description}")
+    
+# Read from a specific resource
+resource = await mcp_server.read_resource("docs://api/reference")
+print(resource.contents[0].text)
+
+# Use the prompt-generated instructions with an Agent
+agent = Agent(
+    name="Company Information Maintainer",
+    instructions="How to access to API service?",
+    mcp_servers=[server]
+)
+```
+
+
 ## Caching
 
 Every time an Agent runs, it calls `list_tools()` on the MCP server. This can be a latency hit, especially if the server is a remote server. To automatically cache the list of tools, you can pass `cache_tools_list=True` to [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. You should only do this if you're certain the tool list will not change.
