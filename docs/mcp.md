@@ -169,9 +169,9 @@ agent = Agent(
 
 ## Caching
 
-Every time an Agent runs, it calls `list_tools()` on the MCP server. This can be a latency hit, especially if the server is a remote server. To automatically cache the list of tools, you can pass `cache_tools_list=True` to [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. You should only do this if you're certain the tool list will not change.
+Every time an Agent runs, it calls `list_tools()` and `list_prompts()` on the MCP server. This can be a latency hit, especially if the server is a remote server. To automatically cache the list of tools and prompts, you can pass `cache_tools_list=True` and `cache_prompts_list=True` to [`MCPServerStdio`][agents.mcp.server.MCPServerStdio], [`MCPServerSse`][agents.mcp.server.MCPServerSse], and [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]. You should only do this if you're certain the tools and the prompts lists will not change.
 
-If you want to invalidate the cache, you can call `invalidate_tools_cache()` on the servers.
+If you want to invalidate the cache, you can call `invalidate_tools_cache()` and `invalidate_prompts_cache()` on the servers.
 
 ## End-to-end examples
 
