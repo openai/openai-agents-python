@@ -253,9 +253,16 @@ class OpenAIResponsesModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            # Combine system and user messages only for logging purposes
+            combined_prompt_for_logging = (
+                [{"role": "system", "content": system_instructions}]
+                if system_instructions
+                else []
+            ) + list_input
+
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
+                f"{json.dumps(combined_prompt_for_logging, indent=2, ensure_ascii=False)}\n"
                 f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
