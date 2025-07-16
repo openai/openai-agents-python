@@ -222,6 +222,8 @@ class Agent(AgentBase, Generic[TContext]):
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
     def __post_init__(self):
+        from typing import get_origin
+
         if not isinstance(self.name, str):
             raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
 
@@ -256,21 +258,26 @@ class Agent(AgentBase, Generic[TContext]):
 
         if (
             self.prompt is not None
-            and not isinstance(self.prompt, dict)
             and not callable(self.prompt)
+            and not hasattr(self.prompt, "get")
         ):
             raise TypeError(
-                f"Agent prompt must be a Prompt, DynamicPromptFunction, callable, or None, "
+                f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
                 f"got {type(self.prompt).__name__}"
             )
 
         if not isinstance(self.handoffs, list):
             raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
 
-        if self.model is not None and not isinstance(self.model, (str, Model)):
-            raise TypeError(
-                f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
-            )
+        if self.model is not None and not isinstance(self.model, str):
+            from .models.interface import Model
+
+            if not isinstance(self.model, Model):
+                raise TypeError(
+                    f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
+                )
+
+        from .model_settings import ModelSettings
 
         if not isinstance(self.model_settings, ModelSettings):
             raise TypeError(
@@ -289,35 +296,36 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.output_guardrails).__name__}"
             )
 
-        if self.output_type is not None and not isinstance(
-            self.output_type, (type, AgentOutputSchemaBase)
-        ):
-            raise TypeError(
-                f"Agent output_type must be a type, AgentOutputSchemaBase, or None, "
-                f"got {type(self.output_type).__name__}"
-            )
+        if self.output_type is not None:
+            from .agent_output import AgentOutputSchemaBase
 
-        # Fixed hooks validation - use AgentHooksBase instead of generic AgentHooks
+            if not (
+                isinstance(self.output_type, (type, AgentOutputSchemaBase))
+                or get_origin(self.output_type) is not None
+            ):
+                raise TypeError(
+                    f"Agent output_type must be a type, AgentOutputSchemaBase, or None, "
+                    f"got {type(self.output_type).__name__}"
+                )
+
         if self.hooks is not None:
-            from .lifecycle import AgentHooksBase
+            from .lifecycle import AgentHooks
 
-            if not isinstance(self.hooks, AgentHooksBase):
+            if not isinstance(self.hooks, AgentHooks):
                 raise TypeError(
                     f"Agent hooks must be an AgentHooks instance or None, "
                     f"got {type(self.hooks).__name__}"
                 )
 
-        if (
-            not (
-                isinstance(self.tool_use_behavior, str)
-                and self.tool_use_behavior in ["run_llm_again", "stop_on_first_tool"]
-            )
-            and not isinstance(self.tool_use_behavior, dict)
-            and not callable(self.tool_use_behavior)
+        if not (
+            self.tool_use_behavior == "run_llm_again"
+            or self.tool_use_behavior == "stop_on_first_tool"
+            or isinstance(self.tool_use_behavior, list)
+            or callable(self.tool_use_behavior)
         ):
             raise TypeError(
                 f"Agent tool_use_behavior must be 'run_llm_again', 'stop_on_first_tool', "
-                f"StopAtTools dict, or callable, got {type(self.tool_use_behavior).__name__}"
+                f"a list of tool names, or a callable, got {type(self.tool_use_behavior).__name__}"
             )
 
         if not isinstance(self.reset_tool_choice, bool):
