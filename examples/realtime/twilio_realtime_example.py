@@ -43,7 +43,6 @@ async def incoming_voice_get(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
     response = VoiceResponse()
     host = request.url.hostname
-    response.say("Welcome to the Open AI Realtime Agent. How can I help you today?")
     connect = Connect()
     connect.stream(url=f"wss://{host}/twilio/streaming")
     response.append(connect)
@@ -86,7 +85,7 @@ async def voice_streaming(websocket: WebSocket):
         async def send_to_twilio():
             nonlocal stream_sid
             await realtime_session.send_message(
-                "Greet the user with 'Hello! Welcome to the ODAI Voice Assistant. How can I help you today?' and then wait for the user to speak."
+                "Greet the user with 'Hello! Welcome to the Open AI Realtime Test Voice Assistant. How can I help you today?' and then wait for the user to speak."
             )
             async for event in realtime_session:
                 await _on_event(event, stream_sid)
