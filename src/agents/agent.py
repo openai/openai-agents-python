@@ -158,7 +158,7 @@ class Agent(AgentBase, Generic[TContext]):
     usable with OpenAI models, using the Responses API.
     """
 
-    handoffs: list[Agent[Any] | Handoff[TContext]] = field(default_factory=list)
+    handoffs: list[Agent[Any] | Handoff[TContext, Any]] = field(default_factory=list)
     """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
     and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
     modularity.

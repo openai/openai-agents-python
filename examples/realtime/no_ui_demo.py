@@ -1,5 +1,8 @@
 import asyncio
+import queue
 import sys
+import threading
+from typing import Any
 
 import numpy as np
 import sounddevice as sd
@@ -46,14 +49,77 @@ class NoUIDemo:
         self.audio_player: sd.OutputStream | None = None
         self.recording = False
 
+        # Audio output state for callback system
+        self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=10)  # Buffer more chunks
+        self.interrupt_event = threading.Event()
+        self.current_audio_chunk: np.ndarray | None = None  # type: ignore
+        self.chunk_position = 0
+
+    def _output_callback(self, outdata, frames: int, time, status) -> None:
+        """Callback for audio output - handles continuous audio stream from server."""
+        if status:
+            print(f"Output callback status: {status}")
+
+        # Check if we should clear the queue due to interrupt
+        if self.interrupt_event.is_set():
+            # Clear the queue and current chunk state
+            while not self.output_queue.empty():
+                try:
+                    self.output_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.current_audio_chunk = None
+            self.chunk_position = 0
+            self.interrupt_event.clear()
+            outdata.fill(0)
+            return
+
+        # Fill output buffer from queue and current chunk
+        outdata.fill(0)  # Start with silence
+        samples_filled = 0
+
+        while samples_filled < len(outdata):
+            # If we don't have a current chunk, try to get one from queue
+            if self.current_audio_chunk is None:
+                try:
+                    self.current_audio_chunk = self.output_queue.get_nowait()
+                    self.chunk_position = 0
+                except queue.Empty:
+                    # No more audio data available - this causes choppiness
+                    # Uncomment next line to debug underruns:
+                    # print(f"Audio underrun: {samples_filled}/{len(outdata)} samples filled")
+                    break
+
+            # Copy data from current chunk to output buffer
+            remaining_output = len(outdata) - samples_filled
+            remaining_chunk = len(self.current_audio_chunk) - self.chunk_position
+            samples_to_copy = min(remaining_output, remaining_chunk)
+
+            if samples_to_copy > 0:
+                chunk_data = self.current_audio_chunk[
+                    self.chunk_position : self.chunk_position + samples_to_copy
+                ]
+                # More efficient: direct assignment for mono audio instead of reshape
+                outdata[samples_filled : samples_filled + samples_to_copy, 0] = chunk_data
+                samples_filled += samples_to_copy
+                self.chunk_position += samples_to_copy
+
+                # If we've used up the entire chunk, reset for next iteration
+                if self.chunk_position >= len(self.current_audio_chunk):
+                    self.current_audio_chunk = None
+                    self.chunk_position = 0
+
     async def run(self) -> None:
         print("Connecting, may take a few seconds...")
 
-        # Initialize audio player
+        # Initialize audio player with callback
+        chunk_size = int(SAMPLE_RATE * CHUNK_LENGTH_S)
         self.audio_player = sd.OutputStream(
             channels=CHANNELS,
             samplerate=SAMPLE_RATE,
             dtype=FORMAT,
+            callback=self._output_callback,
+            blocksize=chunk_size,  # Match our chunk timing for better alignment
         )
         self.audio_player.start()
 
@@ -146,15 +212,24 @@ class NoUIDemo:
             elif event.type == "audio_end":
                 print("Audio ended")
             elif event.type == "audio":
-                # Play audio through speakers
+                # Enqueue audio for callback-based playback
                 np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
-                if self.audio_player:
-                    try:
-                        self.audio_player.write(np_audio)
-                    except Exception as e:
-                        print(f"Audio playback error: {e}")
+                try:
+                    self.output_queue.put_nowait(np_audio)
+                except queue.Full:
+                    # Queue is full - only drop if we have significant backlog
+                    # This prevents aggressive dropping that could cause choppiness
+                    if self.output_queue.qsize() > 8:  # Keep some buffer
+                        try:
+                            self.output_queue.get_nowait()
+                            self.output_queue.put_nowait(np_audio)
+                        except queue.Empty:
+                            pass
+                    # If queue isn't too full, just skip this chunk to avoid blocking
             elif event.type == "audio_interrupted":
                 print("Audio interrupted")
+                # Signal the output callback to clear its queue and state
+                self.interrupt_event.set()
             elif event.type == "error":
                 print(f"Error: {event.error}")
             elif event.type == "history_updated":

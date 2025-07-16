@@ -244,7 +244,7 @@ def input_guardrail(
         return InputGuardrail(
             guardrail_function=f,
             # If not set, guardrail name uses the function’s name by default.
-            name=name if name else f.__name__
+            name=name if name else f.__name__,
         )
 
     if func is not None:

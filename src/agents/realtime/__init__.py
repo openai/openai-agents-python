@@ -30,6 +30,7 @@ from .events import (
     RealtimeToolEnd,
     RealtimeToolStart,
 )
+from .handoffs import realtime_handoff
 from .items import (
     AssistantMessageItem,
     AssistantText,
@@ -92,6 +93,8 @@ __all__ = [
     "RealtimeAgentHooks",
     "RealtimeRunHooks",
     "RealtimeRunner",
+    # Handoffs
+    "realtime_handoff",
     # Config
     "RealtimeAudioFormat",
     "RealtimeClientMessage",

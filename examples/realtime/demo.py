@@ -93,7 +93,8 @@ class Example:
                 self.ui.add_transcript("Audio ended")
             elif event.type == "audio":
                 np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
-                self.ui.play_audio(np_audio)
+                # Play audio in a separate thread to avoid blocking the event loop
+                await asyncio.to_thread(self.ui.play_audio, np_audio)
             elif event.type == "audio_interrupted":
                 self.ui.add_transcript("Audio interrupted")
             elif event.type == "error":

@@ -56,6 +56,7 @@ from pydantic import TypeAdapter
 from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
 
+from agents.handoffs import Handoff
 from agents.tool import FunctionTool, Tool
 from agents.util._types import MaybeAwaitable
 
@@ -363,7 +364,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     "item_id": item.id or "",
                     "type": item.type,
                     "role": item.role,
-                    "content": item.content,
+                    "content": (
+                        [content.model_dump() for content in item.content] if item.content else []
+                    ),
                     "status": "in_progress",
                 }
             )
@@ -519,10 +522,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 "tool_choice",
                 DEFAULT_MODEL_SETTINGS.get("tool_choice"),  # type: ignore
             ),
-            tools=self._tools_to_session_tools(model_settings.get("tools", [])),
+            tools=self._tools_to_session_tools(
+                tools=model_settings.get("tools", []), handoffs=model_settings.get("handoffs", [])
+            ),
         )
 
-    def _tools_to_session_tools(self, tools: list[Tool]) -> list[OpenAISessionTool]:
+    def _tools_to_session_tools(
+        self, tools: list[Tool], handoffs: list[Handoff]
+    ) -> list[OpenAISessionTool]:
         converted_tools: list[OpenAISessionTool] = []
         for tool in tools:
             if not isinstance(tool, FunctionTool):
@@ -535,6 +542,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     type="function",
                 )
             )
+
+        for handoff in handoffs:
+            converted_tools.append(
+                OpenAISessionTool(
+                    name=handoff.tool_name,
+                    description=handoff.tool_description,
+                    parameters=handoff.input_json_schema,
+                    type="function",
+                )
+            )
+
         return converted_tools
 
 

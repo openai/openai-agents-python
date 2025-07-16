@@ -30,6 +30,15 @@ class AssistantText(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class AssistantAudio(BaseModel):
+    type: Literal["audio"] = "audio"
+    audio: str | None = None
+    transcript: str | None = None
+
+    # Allow extra data
+    model_config = ConfigDict(extra="allow")
+
+
 class SystemMessageItem(BaseModel):
     item_id: str
     previous_item_id: str | None = None
@@ -58,7 +67,7 @@ class AssistantMessageItem(BaseModel):
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] | None = None
-    content: list[AssistantText]
+    content: list[Annotated[AssistantText | AssistantAudio, Field(discriminator="type")]]
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
