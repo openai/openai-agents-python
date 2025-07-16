@@ -129,7 +129,6 @@ async def voice_streaming(websocket: WebSocket):
             nonlocal continue_streaming
             while continue_streaming:
                 await asyncio.sleep(0.25)
-            continue_streaming = False
             send_to_twilio_task.cancel()
             receive_from_twilio_task.cancel()
             await realtime_session.close()
