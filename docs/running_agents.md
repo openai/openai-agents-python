@@ -23,7 +23,7 @@ Read more in the [results guide](results.md).
 
 ## The agent loop
 
-When you use the run method in `Runner`, you pass in a starting agent and input. The input can either be a string (which is considered a user message), or a list of input items, which are the items in the OpenAI Response API.
+When you use the run method in `Runner`, you pass in a starting agent and input. The input can either be a string (which is considered a user message), or a list of input items, which are the items in the OpenAI Responses API.
 
 The runner then runs a loop:
 
