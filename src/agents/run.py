@@ -812,7 +812,9 @@ class AgentRunner:
 
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
         input.extend([item.to_input_item() for item in streamed_result.new_items])
-
+        # Call hook just before the model is invoked, with the correct system_prompt.
+        if agent.hooks:
+            await agent.hooks.on_llm_start(context_wrapper, agent, system_prompt, input)
         # 1. Stream the output events
         async for event in model.stream_response(
             system_prompt,
@@ -848,6 +850,10 @@ class AgentRunner:
                 context_wrapper.usage.add(usage)
 
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+        # Call hook just after the model response is finalized.
+        if agent.hooks:
+            await agent.hooks.on_llm_end(context_wrapper, agent, final_response)
 
         # 2. At this point, the streaming is complete for this turn of the agent loop.
         if not final_response:

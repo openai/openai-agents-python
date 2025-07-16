@@ -4,7 +4,7 @@ from typing import Any, Optional
 import pytest
 
 from agents.agent import Agent
-from agents.items import ModelResponse, TResponseInputItem
+from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
 from agents.lifecycle import AgentHooks
 from agents.run import Runner
 from agents.run_context import RunContextWrapper, TContext
@@ -63,7 +63,7 @@ class AgentHooksForTests(AgentHooks):
 
     async def on_llm_end(
         self,
-        ccontext: RunContextWrapper[TContext],
+        context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         response: ModelResponse,
     ) -> None:
@@ -72,7 +72,7 @@ class AgentHooksForTests(AgentHooks):
 
 # Example test using the above hooks:
 @pytest.mark.asyncio
-async def test_non_streamed_agent_hooks_with_llm():
+async def test_async_agent_hooks_with_llm():
     hooks = AgentHooksForTests()
     model = FakeModel()
     agent = Agent(
@@ -81,5 +81,50 @@ async def test_non_streamed_agent_hooks_with_llm():
     # Simulate a single LLM call producing an output:
     model.set_next_output([get_text_message("hello")])
     await Runner.run(agent, input="hello")
+    # Expect one on_start, one on_llm_start, one on_llm_end, and one on_end
+    assert hooks.events == {"on_start": 1, "on_llm_start": 1, "on_llm_end": 1, "on_end": 1}
+
+
+# test_sync_agent_hook_with_llm()
+def test_sync_agent_hook_with_llm():
+    hooks = AgentHooksForTests()
+    model = FakeModel()
+    agent = Agent(
+        name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=hooks
+    )
+    # Simulate a single LLM call producing an output:
+    model.set_next_output([get_text_message("hello")])
+    Runner.run_sync(agent, input="hello")
+    # Expect one on_start, one on_llm_start, one on_llm_end, and one on_end
+    assert hooks.events == {"on_start": 1, "on_llm_start": 1, "on_llm_end": 1, "on_end": 1}
+
+
+# test_streamed_agent_hooks_with_llm():
+@pytest.mark.asyncio
+async def test_streamed_agent_hooks_with_llm():
+    hooks = AgentHooksForTests()
+    model = FakeModel()
+    agent = Agent(
+        name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[], hooks=hooks
+    )
+    # Simulate a single LLM call producing an output:
+    model.set_next_output([get_text_message("hello")])
+    stream = Runner.run_streamed(agent, input="hello")
+
+    async for event in stream.stream_events():
+        if event.type == "raw_response_event":
+            continue
+        if event.type == "agent_updated_stream_event":
+            print(f"[EVENT] agent_updated → {event.new_agent.name}")
+        elif event.type == "run_item_stream_event":
+            item = event.item
+            if item.type == "tool_call_item":
+                print("[EVENT] tool_call_item")
+            elif item.type == "tool_call_output_item":
+                print(f"[EVENT] tool_call_output_item → {item.output}")
+            elif item.type == "message_output_item":
+                text = ItemHelpers.text_message_output(item)
+                print(f"[EVENT] message_output_item → {text}")
+
     # Expect one on_start, one on_llm_start, one on_llm_end, and one on_end
     assert hooks.events == {"on_start": 1, "on_llm_start": 1, "on_llm_end": 1, "on_end": 1}
