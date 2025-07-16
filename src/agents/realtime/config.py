@@ -9,6 +9,7 @@ from typing import (
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from ..guardrail import OutputGuardrail
+from ..handoffs import Handoff
 from ..model_settings import ToolChoice
 from ..tool import Tool
 
@@ -71,6 +72,7 @@ class RealtimeSessionModelSettings(TypedDict):
 
     tool_choice: NotRequired[ToolChoice]
     tools: NotRequired[list[Tool]]
+    handoffs: NotRequired[list[Handoff]]
 
     tracing: NotRequired[RealtimeModelTracingConfig | None]
 

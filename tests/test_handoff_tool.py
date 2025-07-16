@@ -1,3 +1,4 @@
+import inspect
 import json
 from typing import Any
 
@@ -322,6 +323,8 @@ async def test_handoff_is_enabled_callable():
     handoff_callable_enabled = handoff(agent, is_enabled=always_enabled)
     assert callable(handoff_callable_enabled.is_enabled)
     result = handoff_callable_enabled.is_enabled(RunContextWrapper(agent), agent)
+    assert inspect.isawaitable(result)
+    result = await result
     assert result is True
 
     # Test callable that returns False
@@ -331,6 +334,8 @@ async def test_handoff_is_enabled_callable():
     handoff_callable_disabled = handoff(agent, is_enabled=always_disabled)
     assert callable(handoff_callable_disabled.is_enabled)
     result = handoff_callable_disabled.is_enabled(RunContextWrapper(agent), agent)
+    assert inspect.isawaitable(result)
+    result = await result
     assert result is False
 
     # Test async callable

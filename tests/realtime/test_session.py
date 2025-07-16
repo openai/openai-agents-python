@@ -1,5 +1,5 @@
 from typing import cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, PropertyMock
 
 import pytest
 
@@ -101,6 +101,8 @@ class MockRealtimeModel(RealtimeModel):
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
     agent.get_all_tools = AsyncMock(return_value=[])
+
+    type(agent).handoffs = PropertyMock(return_value=[])
     return agent
 
 
@@ -293,7 +295,7 @@ class TestEventHandling:
         # Check that item was updated
         assert len(session._history) == 1
         updated_item = cast(AssistantMessageItem, session._history[0])
-        assert cast(AssistantText, updated_item.content[0]).text == "Updated"
+        assert updated_item.content[0].text == "Updated"  # type: ignore
 
         # Should have 2 events: raw + history updated (not added)
         assert session._event_queue.qsize() == 2
@@ -524,7 +526,7 @@ class TestHistoryManagement:
         # Item should be updated
         result_item = cast(AssistantMessageItem, new_history[0])
         assert result_item.item_id == "item_1"
-        assert cast(AssistantText, result_item.content[0]).text == "Updated"
+        assert result_item.content[0].text == "Updated"  # type: ignore
 
     def test_update_existing_item_preserves_order(self):
         """Test that updating existing item preserves its position in history"""
@@ -557,13 +559,13 @@ class TestHistoryManagement:
 
         # Middle item should be updated
         updated_result = cast(AssistantMessageItem, new_history[1])
-        assert cast(AssistantText, updated_result.content[0]).text == "Updated Second"
+        assert updated_result.content[0].text == "Updated Second"  # type: ignore
 
         # Other items should be unchanged
         item1_result = cast(AssistantMessageItem, new_history[0])
         item3_result = cast(AssistantMessageItem, new_history[2])
-        assert cast(AssistantText, item1_result.content[0]).text == "First"
-        assert cast(AssistantText, item3_result.content[0]).text == "Third"
+        assert item1_result.content[0].text == "First"  # type: ignore
+        assert item3_result.content[0].text == "Third"  # type: ignore
 
     def test_insert_new_item_after_previous_item(self):
         """Test inserting new item after specified previous_item_id"""
@@ -598,7 +600,7 @@ class TestHistoryManagement:
 
         # Content should be correct
         item2_result = cast(AssistantMessageItem, new_history[1])
-        assert cast(AssistantText, item2_result.content[0]).text == "Second"
+        assert item2_result.content[0].text == "Second"  # type: ignore
 
     def test_insert_new_item_after_nonexistent_previous_item(self):
         """Test that item with nonexistent previous_item_id gets added to end"""
@@ -701,7 +703,7 @@ class TestHistoryManagement:
         assert len(history) == 4
         assert [item.item_id for item in history] == ["A", "B", "D", "C"]
         itemB_result = cast(AssistantMessageItem, history[1])
-        assert cast(AssistantText, itemB_result.content[0]).text == "Updated B"
+        assert itemB_result.content[0].text == "Updated B"  # type: ignore
 
 
 # Test 3: Tool call execution flow (_handle_tool_call method)
@@ -794,30 +796,26 @@ class TestToolCallExecution:
         assert sent_output == "result_two"
 
     @pytest.mark.asyncio
-    async def test_handoff_tool_handling(self, mock_model, mock_agent, mock_handoff):
-        """Test that handoff tools are properly handled"""
-        from unittest.mock import AsyncMock
+    async def test_handoff_tool_handling(self, mock_model):
+        first_agent = RealtimeAgent(
+            name="first_agent",
+            instructions="first_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        second_agent = RealtimeAgent(
+            name="second_agent",
+            instructions="second_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
 
-        from agents.realtime.agent import RealtimeAgent
+        first_agent.handoffs = [second_agent]
 
-        # Create a mock new agent to be returned by handoff
-        mock_new_agent = Mock(spec=RealtimeAgent)
-        mock_new_agent.name = "new_agent"
-        mock_new_agent.instructions = "New agent instructions"
-        mock_new_agent.get_all_tools = AsyncMock(return_value=[])
-        mock_new_agent.get_system_prompt = AsyncMock(return_value="New agent system prompt")
-
-        # Set up handoff to return the new agent
-        mock_handoff.on_invoke_handoff = AsyncMock(return_value=mock_new_agent)
-        mock_handoff.name = "test_handoff"
-
-        # Set up agent to return handoff tool
-        mock_agent.get_all_tools.return_value = [mock_handoff]
-
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(mock_model, first_agent, None)
 
         tool_call_event = RealtimeModelToolCallEvent(
-            name="test_handoff", call_id="call_789", arguments="{}"
+            name=Handoff.default_tool_name(second_agent), call_id="call_789", arguments="{}"
         )
 
         await session._handle_tool_call(tool_call_event)
@@ -829,7 +827,7 @@ class TestToolCallExecution:
         assert session._event_queue.qsize() >= 1
 
         # Verify agent was updated
-        assert session._current_agent == mock_new_agent
+        assert session._current_agent == second_agent
 
     @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):

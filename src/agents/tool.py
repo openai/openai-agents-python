@@ -200,7 +200,7 @@ MCPToolApprovalFunction = Callable[
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
-    call tools, without requiring a a round trip back to your code.
+    call tools, without requiring a round trip back to your code.
     If you want to run MCP servers locally via stdio, in a VPC or other non-publicly-accessible
     environment, or you just prefer to run tool calls locally, then you can instead use the servers
     in `agents.mcp` and pass `Agent(mcp_servers=[...])` to the agent."""

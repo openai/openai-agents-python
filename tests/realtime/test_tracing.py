@@ -99,22 +99,18 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with tracing config
-                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
-
-                    expected_event = RealtimeModelSendRawMessage(
-                        message={
-                            "type": "session.update",
-                            "other_data": {
-                                "session": {
-                                    "tracing": {
-                                        "workflow_name": "test_workflow",
-                                        "group_id": "group_123",
-                                    }
-                                }
-                            },
-                        }
+                    from openai.types.beta.realtime.session_update_event import (
+                        SessionTracingTracingConfiguration,
+                        SessionUpdateEvent,
                     )
-                    mock_send_raw_message.assert_called_once_with(expected_event)
+
+                    mock_send_raw_message.assert_called_once()
+                    call_args = mock_send_raw_message.call_args[0][0]
+                    assert isinstance(call_args, SessionUpdateEvent)
+                    assert call_args.type == "session.update"
+                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
+                    assert call_args.session.tracing.workflow_name == "test_workflow"
+                    assert call_args.session.tracing.group_id == "group_123"
 
     @pytest.mark.asyncio
     async def test_send_tracing_config_auto_mode(self, model, mock_websocket):
@@ -144,15 +140,13 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with "auto"
-                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
+                    from openai.types.beta.realtime.session_update_event import SessionUpdateEvent
 
-                    expected_event = RealtimeModelSendRawMessage(
-                        message={
-                            "type": "session.update",
-                            "other_data": {"session": {"tracing": "auto"}},
-                        }
-                    )
-                    mock_send_raw_message.assert_called_once_with(expected_event)
+                    mock_send_raw_message.assert_called_once()
+                    call_args = mock_send_raw_message.call_args[0][0]
+                    assert isinstance(call_args, SessionUpdateEvent)
+                    assert call_args.type == "session.update"
+                    assert call_args.session.tracing == "auto"
 
     @pytest.mark.asyncio
     async def test_tracing_config_none_skips_session_update(self, model, mock_websocket):
@@ -209,22 +203,18 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with complete tracing config including metadata
-                    from agents.realtime.model_inputs import RealtimeModelSendRawMessage
-
-                    expected_event = RealtimeModelSendRawMessage(
-                        message={
-                            "type": "session.update",
-                            "other_data": {
-                                "session": {
-                                    "tracing": {
-                                        "workflow_name": "complex_workflow",
-                                        "metadata": complex_metadata,
-                                    }
-                                }
-                            },
-                        }
+                    from openai.types.beta.realtime.session_update_event import (
+                        SessionTracingTracingConfiguration,
+                        SessionUpdateEvent,
                     )
-                    mock_send_raw_message.assert_called_once_with(expected_event)
+
+                    mock_send_raw_message.assert_called_once()
+                    call_args = mock_send_raw_message.call_args[0][0]
+                    assert isinstance(call_args, SessionUpdateEvent)
+                    assert call_args.type == "session.update"
+                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
+                    assert call_args.session.tracing.workflow_name == "complex_workflow"
+                    assert call_args.session.tracing.metadata == complex_metadata
 
     @pytest.mark.asyncio
     async def test_tracing_disabled_prevents_tracing(self, mock_websocket):

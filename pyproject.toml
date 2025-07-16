@@ -1,13 +1,13 @@
 [project]
 name = "openai-agents"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=1.93.1, <2",
+    "openai>=1.96.1, <2",
     "pydantic>=2.10, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
@@ -63,7 +63,6 @@ dev = [
     "mkdocs-static-i18n>=1.3.0",
     "eval-type-backport>=0.2.2",
     "fastapi >= 0.110.0, <1",
-    "numpy>=2.2.0",
 ]
 
 [tool.uv.workspace]

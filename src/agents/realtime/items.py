@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class InputText(BaseModel):
     type: Literal["input_text"] = "input_text"
-    text: str
+    text: str | None = None
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -24,7 +24,7 @@ class InputAudio(BaseModel):
 
 class AssistantText(BaseModel):
     type: Literal["text"] = "text"
-    text: str
+    text: str | None = None
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -55,7 +55,7 @@ class UserMessageItem(BaseModel):
     previous_item_id: str | None = None
     type: Literal["message"] = "message"
     role: Literal["user"] = "user"
-    content: list[InputText | InputAudio]
+    content: list[Annotated[InputText | InputAudio, Field(discriminator="type")]]
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -67,7 +67,7 @@ class AssistantMessageItem(BaseModel):
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
     status: Literal["in_progress", "completed", "incomplete"] | None = None
-    content: list[AssistantText | AssistantAudio]
+    content: list[Annotated[AssistantText | AssistantAudio, Field(discriminator="type")]]
 
     # Allow extra data
     model_config = ConfigDict(extra="allow")
@@ -82,6 +82,7 @@ RealtimeMessageItem = Annotated[
 class RealtimeToolCallItem(BaseModel):
     item_id: str
     previous_item_id: str | None = None
+    call_id: str | None
     type: Literal["function_call"] = "function_call"
     status: Literal["in_progress", "completed"]
     arguments: str

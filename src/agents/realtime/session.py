@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -31,6 +32,7 @@ from .events import (
     RealtimeToolEnd,
     RealtimeToolStart,
 )
+from .handoffs import realtime_handoff
 from .items import InputAudio, InputText, RealtimeItem
 from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
@@ -255,9 +257,12 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _handle_tool_call(self, event: RealtimeModelToolCallEvent) -> None:
         """Handle a tool call event."""
-        all_tools = await self._current_agent.get_all_tools(self._context_wrapper)
-        function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
-        handoff_map = {tool.name: tool for tool in all_tools if isinstance(tool, Handoff)}
+        tools, handoffs = await asyncio.gather(
+            self._current_agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(self._current_agent, self._context_wrapper),
+        )
+        function_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
+        handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
 
         if event.name in function_map:
             await self._put_event(
@@ -269,7 +274,12 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             func_tool = function_map[event.name]
-            tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
+            tool_context = ToolContext(
+                context=self._context_wrapper.context,
+                usage=self._context_wrapper.usage,
+                tool_name=event.name,
+                tool_call_id=event.call_id,
+            )
             result = await func_tool.on_invoke_tool(tool_context, event.arguments)
 
             await self._model.send_event(
@@ -288,12 +298,19 @@ class RealtimeSession(RealtimeModelListener):
             )
         elif event.name in handoff_map:
             handoff = handoff_map[event.name]
-            tool_context = ToolContext.from_agent_context(self._context_wrapper, event.call_id)
+            tool_context = ToolContext(
+                context=self._context_wrapper.context,
+                usage=self._context_wrapper.usage,
+                tool_name=event.name,
+                tool_call_id=event.call_id,
+            )
 
             # Execute the handoff to get the new agent
             result = await handoff.on_invoke_handoff(self._context_wrapper, event.arguments)
             if not isinstance(result, RealtimeAgent):
-                raise UserError(f"Handoff {handoff.name} returned invalid result: {type(result)}")
+                raise UserError(
+                    f"Handoff {handoff.tool_name} returned invalid result: {type(result)}"
+                )
 
             # Store previous agent for event
             previous_agent = self._current_agent
@@ -482,11 +499,37 @@ class RealtimeSession(RealtimeModelListener):
         self, new_agent: RealtimeAgent
     ) -> RealtimeSessionModelSettings:
         updated_settings: RealtimeSessionModelSettings = {}
-        instructions, tools = await asyncio.gather(
+        instructions, tools, handoffs = await asyncio.gather(
             new_agent.get_system_prompt(self._context_wrapper),
             new_agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(new_agent, self._context_wrapper),
         )
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
+        updated_settings["handoffs"] = handoffs or []
 
         return updated_settings
+
+    @classmethod
+    async def _get_handoffs(
+        cls, agent: RealtimeAgent[Any], context_wrapper: RunContextWrapper[Any]
+    ) -> list[Handoff[Any, RealtimeAgent[Any]]]:
+        handoffs: list[Handoff[Any, RealtimeAgent[Any]]] = []
+        for handoff_item in agent.handoffs:
+            if isinstance(handoff_item, Handoff):
+                handoffs.append(handoff_item)
+            elif isinstance(handoff_item, RealtimeAgent):
+                handoffs.append(realtime_handoff(handoff_item))
+
+        async def _check_handoff_enabled(handoff_obj: Handoff[Any, RealtimeAgent[Any]]) -> bool:
+            attr = handoff_obj.is_enabled
+            if isinstance(attr, bool):
+                return attr
+            res = attr(context_wrapper, agent)
+            if inspect.isawaitable(res):
+                return await res
+            return res
+
+        results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
+        enabled = [h for h, ok in zip(handoffs, results) if ok]
+        return enabled
