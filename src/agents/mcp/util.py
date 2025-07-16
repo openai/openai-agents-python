@@ -198,8 +198,16 @@ class MCPUtil:
         # string. We'll try to convert.
         if len(result.content) == 1:
             tool_output = result.content[0].model_dump_json()
+            # Append structured content if it exists and we're using it.
+            if server.use_structured_content and result.structuredContent:
+                tool_output = f"{tool_output}\n{json.dumps(result.structuredContent)}"
         elif len(result.content) > 1:
-            tool_output = json.dumps([item.model_dump(mode="json") for item in result.content])
+            tool_results = [item.model_dump(mode="json") for item in result.content]
+            if server.use_structured_content and result.structuredContent:
+                tool_results.append(result.structuredContent)
+            tool_output = json.dumps(tool_results)
+        elif server.use_structured_content and result.structuredContent:
+            tool_output = json.dumps(result.structuredContent)
         else:
             logger.error(f"Errored MCP tool result: {result}")
             tool_output = "Error running tool."
