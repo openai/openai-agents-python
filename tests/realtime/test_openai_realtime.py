@@ -174,39 +174,32 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
     @pytest.mark.asyncio
     async def test_handle_malformed_json_logs_error_continues(self, model):
-        """Test that malformed JSON is logged as error but doesn't crash."""
+        """Test that malformed JSON emits error event but doesn't crash."""
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
 
         # Malformed JSON should not crash the handler
-        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
-            await model._handle_ws_event("invalid json {")
+        await model._handle_ws_event("invalid json {")
 
-            # Should log error but not crash
-            mock_logger.error.assert_called_once()
-            assert "Invalid event" in mock_logger.error.call_args[0][0]
-
-            # Should not emit any events to listeners
-            mock_listener.on_event.assert_not_called()
+        # Should emit error event to listeners
+        mock_listener.on_event.assert_called_once()
+        error_event = mock_listener.on_event.call_args[0][0]
+        assert error_event.type == "error"
 
     @pytest.mark.asyncio
     async def test_handle_invalid_event_schema_logs_error(self, model):
-        """Test that events with invalid schema are logged but don't crash."""
+        """Test that events with invalid schema emit error events but don't crash."""
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
 
         invalid_event = {"type": "response.audio.delta"}  # Missing required fields
 
-        with patch("agents.realtime.openai_realtime.logger") as mock_logger:
-            await model._handle_ws_event(invalid_event)
+        await model._handle_ws_event(invalid_event)
 
-            # Should log validation error
-            mock_logger.error.assert_called_once()
-            error_msg = mock_logger.error.call_args[0][0]
-            assert "Invalid event" in error_msg
-
-            # Should not emit events to listeners
-            mock_listener.on_event.assert_not_called()
+        # Should emit error event to listeners
+        mock_listener.on_event.assert_called_once()
+        error_event = mock_listener.on_event.call_args[0][0]
+        assert error_event.type == "error"
 
     @pytest.mark.asyncio
     async def test_handle_unknown_event_type_ignored(self, model):
@@ -299,6 +292,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             "output_index": 0,
             "item": {
                 "id": "call_123",
+                "call_id": "call_123",
                 "type": "function_call",
                 "status": "completed",
                 "name": "get_weather",
