@@ -5,12 +5,11 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from typing_extensions import NotRequired, TypedDict
 
-from agents.strict_schema import ensure_strict_json_schema
-
 from .. import _debug
 from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
+from ..strict_schema import ensure_strict_json_schema
 from ..tool import FunctionTool, Tool
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
@@ -18,7 +17,7 @@ from ..util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
 
-    from ..agent import Agent
+    from ..agent import AgentBase
     from .server import MCPServer
 
 
@@ -29,7 +28,7 @@ class ToolFilterContext:
     run_context: RunContextWrapper[Any]
     """The current run context."""
 
-    agent: "Agent[Any]"
+    agent: "AgentBase"
     """The agent that is requesting the tool list."""
 
     server_name: str
@@ -100,7 +99,7 @@ class MCPUtil:
         servers: list["MCPServer"],
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "Agent[Any]",
+        agent: "AgentBase",
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -126,7 +125,7 @@ class MCPUtil:
         server: "MCPServer",
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "Agent[Any]",
+        agent: "AgentBase",
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -199,8 +198,16 @@ class MCPUtil:
         # string. We'll try to convert.
         if len(result.content) == 1:
             tool_output = result.content[0].model_dump_json()
+            # Append structured content if it exists and we're using it.
+            if server.use_structured_content and result.structuredContent:
+                tool_output = f"{tool_output}\n{json.dumps(result.structuredContent)}"
         elif len(result.content) > 1:
-            tool_output = json.dumps([item.model_dump(mode="json") for item in result.content])
+            tool_results = [item.model_dump(mode="json") for item in result.content]
+            if server.use_structured_content and result.structuredContent:
+                tool_results.append(result.structuredContent)
+            tool_output = json.dumps(tool_results)
+        elif server.use_structured_content and result.structuredContent:
+            tool_output = json.dumps(result.structuredContent)
         else:
             logger.error(f"Errored MCP tool result: {result}")
             tool_output = "Error running tool."

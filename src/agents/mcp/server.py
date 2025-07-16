@@ -22,11 +22,22 @@ from ..run_context import RunContextWrapper
 from .util import ToolFilter, ToolFilterCallable, ToolFilterContext, ToolFilterStatic
 
 if TYPE_CHECKING:
-    from ..agent import Agent
+    from ..agent import AgentBase
 
 
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
+
+    def __init__(self, use_structured_content: bool = False):
+        """
+        Args:
+            use_structured_content: Whether to use `tool_result.structured_content` when calling an
+                MCP tool.Defaults to False for backwards compatibility - most MCP servers still
+                include the structured content in the `tool_result.content`, and using it by
+                default will cause duplicate content. You can set this to True if you know the
+                server will not duplicate the structured content in the `tool_result.content`.
+        """
+        self.use_structured_content = use_structured_content
 
     @abc.abstractmethod
     async def connect(self):
@@ -53,7 +64,7 @@ class MCPServer(abc.ABC):
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         pass
@@ -86,6 +97,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         cache_tools_list: bool,
         client_session_timeout_seconds: float | None,
         tool_filter: ToolFilter = None,
+        use_structured_content: bool = False,
     ):
         """
         Args:
@@ -98,7 +110,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
+            use_structured_content: Whether to use `tool_result.structured_content` when calling an
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
+                include the structured content in the `tool_result.content`, and using it by
+                default will cause duplicate content. You can set this to True if you know the
+                server will not duplicate the structured content in the `tool_result.content`.
         """
+        super().__init__(use_structured_content=use_structured_content)
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
@@ -117,7 +135,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
         tools: list[MCPTool],
         run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        agent: AgentBase,
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
         if self.tool_filter is None:
@@ -153,7 +171,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self,
         tools: list[MCPTool],
         run_context: RunContextWrapper[Any],
-        agent: Agent[Any],
+        agent: AgentBase,
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
 
@@ -244,7 +262,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
-        agent: Agent[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """List the tools available on the server."""
         if not self.session:
@@ -346,6 +364,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
+        use_structured_content: bool = False,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -364,11 +383,17 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 command.
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
+            use_structured_content: Whether to use `tool_result.structured_content` when calling an
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
+                include the structured content in the `tool_result.content`, and using it by
+                default will cause duplicate content. You can set this to True if you know the
+                server will not duplicate the structured content in the `tool_result.content`.
         """
         super().__init__(
             cache_tools_list,
             client_session_timeout_seconds,
             tool_filter,
+            use_structured_content,
         )
 
         self.params = StdioServerParameters(
@@ -429,6 +454,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
+        use_structured_content: bool = False,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -449,11 +475,17 @@ class MCPServerSse(_MCPServerWithClientSession):
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
+            use_structured_content: Whether to use `tool_result.structured_content` when calling an
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
+                include the structured content in the `tool_result.content`, and using it by
+                default will cause duplicate content. You can set this to True if you know the
+                server will not duplicate the structured content in the `tool_result.content`.
         """
         super().__init__(
             cache_tools_list,
             client_session_timeout_seconds,
             tool_filter,
+            use_structured_content,
         )
 
         self.params = params
@@ -514,6 +546,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         name: str | None = None,
         client_session_timeout_seconds: float | None = 5,
         tool_filter: ToolFilter = None,
+        use_structured_content: bool = False,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -535,11 +568,17 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
             client_session_timeout_seconds: the read timeout passed to the MCP ClientSession.
             tool_filter: The tool filter to use for filtering tools.
+            use_structured_content: Whether to use `tool_result.structured_content` when calling an
+                MCP tool. Defaults to False for backwards compatibility - most MCP servers still
+                include the structured content in the `tool_result.content`, and using it by
+                default will cause duplicate content. You can set this to True if you know the
+                server will not duplicate the structured content in the `tool_result.content`.
         """
         super().__init__(
             cache_tools_list,
             client_session_timeout_seconds,
             tool_filter,
+            use_structured_content,
         )
 
         self.params = params

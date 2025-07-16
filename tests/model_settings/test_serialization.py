@@ -5,7 +5,7 @@ from openai.types.shared import Reasoning
 from pydantic import TypeAdapter
 from pydantic_core import to_json
 
-from agents.model_settings import ModelSettings
+from agents.model_settings import MCPToolChoice, ModelSettings
 
 
 def verify_serialization(model_settings: ModelSettings) -> None:
@@ -25,6 +25,17 @@ def test_basic_serialization() -> None:
         max_tokens=100,
     )
 
+    # Now, lets serialize the ModelSettings instance to a JSON string
+    verify_serialization(model_settings)
+
+
+def test_mcp_tool_choice_serialization() -> None:
+    """Tests whether ModelSettings with MCPToolChoice can be serialized to a JSON string."""
+    # First, lets create a ModelSettings instance
+    model_settings = ModelSettings(
+        temperature=0.5,
+        tool_choice=MCPToolChoice(server_label="mcp", name="mcp_tool"),
+    )
     # Now, lets serialize the ModelSettings instance to a JSON string
     verify_serialization(model_settings)
 
@@ -135,8 +146,8 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.temperature == 0.5
     assert resolved.top_p == 0.9
 
-def test_pydantic_serialization() -> None:
 
+def test_pydantic_serialization() -> None:
     """Tests whether ModelSettings can be serialized with Pydantic."""
 
     # First, lets create a ModelSettings instance

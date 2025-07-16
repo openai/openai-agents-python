@@ -17,9 +17,9 @@ from typing_extensions import TypeAlias
 class _OmitTypeAnnotation:
     @classmethod
     def __get_pydantic_core_schema__(
-            cls,
-            _source_type: Any,
-            _handler: GetCoreSchemaHandler,
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
     ) -> core_schema.CoreSchema:
         def validate_from_none(value: None) -> _Omit:
             return _Omit()
@@ -39,12 +39,20 @@ class _OmitTypeAnnotation:
                     from_none_schema,
                 ]
             ),
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                lambda instance: None
-            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
         )
+
+
+@dataclass
+class MCPToolChoice:
+    server_label: str
+    name: str
+
+
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
+ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
+
 
 @dataclass
 class ModelSettings:
@@ -69,7 +77,7 @@ class ModelSettings:
     presence_penalty: float | None = None
     """The presence penalty to use when calling the model."""
 
-    tool_choice: Literal["auto", "required", "none"] | str | None = None
+    tool_choice: ToolChoice | None = None
     """The tool choice to use when calling the model."""
 
     parallel_tool_calls: bool | None = None

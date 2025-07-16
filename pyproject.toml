@@ -1,19 +1,19 @@
 [project]
 name = "openai-agents"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=1.87.0",
+    "openai>=1.96.1, <2",
     "pydantic>=2.10, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
-    "mcp>=1.9.4, <2; python_version >= '3.10'",
+    "mcp>=1.11.0, <2; python_version >= '3.10'",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -37,6 +37,7 @@ Repository = "https://github.com/openai/openai-agents-python"
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <16"]
 viz = ["graphviz>=0.17"]
 litellm = ["litellm>=1.67.4.post1, <2"]
+realtime = ["websockets>=15.0, <16"]
 
 [dependency-groups]
 dev = [
