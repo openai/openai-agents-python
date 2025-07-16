@@ -178,7 +178,7 @@ class TestConversionHelperUserInput:
             "content": [
                 {"type": "input_text", "text": "Hello"},
                 {"type": "input_text", "text": "World"},
-            ]
+            ],
         }
         event = RealtimeModelSendUserInput(user_input=user_input_dict)
 
@@ -199,7 +199,7 @@ class TestConversionHelperUserInput:
         user_input_dict: RealtimeModelUserInputMessage = {
             "type": "message",
             "role": "user",
-            "content": []
+            "content": [],
         }
         event = RealtimeModelSendUserInput(user_input=user_input_dict)
 

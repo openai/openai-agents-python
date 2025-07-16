@@ -209,8 +209,8 @@ class MCPUtil:
         elif server.use_structured_content and result.structuredContent:
             tool_output = json.dumps(result.structuredContent)
         else:
-            logger.error(f"Errored MCP tool result: {result}")
-            tool_output = "Error running tool."
+            # Empty content is a valid result (e.g., "no results found")
+            tool_output = "[]"
 
         current_span = get_current_span()
         if current_span:
