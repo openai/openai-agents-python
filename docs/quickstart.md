@@ -95,7 +95,6 @@ You can define custom guardrails to run on the input or output.
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
-from agents.exceptions import InputGuardrailTripwireTriggered
 from pydantic import BaseModel
 
 
@@ -169,11 +168,19 @@ triage_agent = Agent(
 )
 
 async def main():
-    result = await Runner.run(triage_agent, "who was the first president of the united states?")
-    print(result.final_output)
+    # Example 1: History question
+    try:
+        result = await Runner.run(triage_agent, "who was the first president of the united states?")
+        print(result.final_output)
+    except InputGuardrailTripwireTriggered as e:
+        print("Guardrail blocked this input:", e)
 
-    result = await Runner.run(triage_agent, "what is life")
-    print(result.final_output)
+    # Example 2: General/philosophical question
+    try:
+        result = await Runner.run(triage_agent, "What is the meaning of life?")
+        print(result.final_output)
+    except InputGuardrailTripwireTriggered as e:
+        print("Guardrail blocked this input:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
