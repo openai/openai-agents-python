@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import inspect
@@ -66,12 +67,15 @@ class OutputGuardrailResult:
     """
 
     output: GuardrailFunctionOutput
-    """The output of the guardrail function."""
+    """
+    The output of the guardrail function.
+    """
 
 
 @dataclass
 class InputGuardrail(Generic[TContext]):
-    """Input guardrails are checks that run in parallel to the agent's execution.
+    """
+    Input guardrails are checks that run in parallel to the agent's execution.
     They can be used to do things like:
     - Check if input messages are off-topic
     - Take over control of the agent's execution if an unexpected input is detected
@@ -87,13 +91,13 @@ class InputGuardrail(Generic[TContext]):
         [RunContextWrapper[TContext], Agent[Any], str | list[TResponseInputItem]],
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
-    """A function that receives the agent input and the context, and returns a
-     `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
-     include information about the guardrail's output.
+    """
+    A function that receives the agent input and the context, and returns a `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally, include information about the guardrail's output.
     """
 
     name: str | None = None
-    """The name of the guardrail, used for tracing. If not provided, we'll use the guardrail
+    """
+    The name of the guardrail, used for tracing. If not provided, we'll use the guardrail
     function's name.
     """
 
@@ -127,7 +131,8 @@ class InputGuardrail(Generic[TContext]):
 
 @dataclass
 class OutputGuardrail(Generic[TContext]):
-    """Output guardrails are checks that run on the final output of an agent.
+    """
+    Output guardrails are checks that run on the final output of an agent.
     They can be used to do check if the output passes certain validation criteria
 
     You can use the `@output_guardrail()` decorator to turn a function into an `OutputGuardrail`,
@@ -141,14 +146,13 @@ class OutputGuardrail(Generic[TContext]):
         [RunContextWrapper[TContext], Agent[Any], Any],
         MaybeAwaitable[GuardrailFunctionOutput],
     ]
-    """A function that receives the final agent, its output, and the context, and returns a
-     `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally
-     include information about the guardrail's output.
+    """
+    A function that receives the final agent, its output, and the context, and returns a `GuardrailResult`. The result marks whether the tripwire was triggered, and can optionally, include information about the guardrail's output.
     """
 
     name: str | None = None
-    """The name of the guardrail, used for tracing. If not provided, we'll use the guardrail
-    function's name.
+    """
+    The name of the guardrail, used for tracing. If not provided, we'll use the guardrail function's name.
     """
 
     def get_name(self) -> str:
