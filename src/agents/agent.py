@@ -230,11 +230,13 @@ class Agent(AgentBase, Generic[TContext]):
         return dataclasses.replace(self, **kwargs)
 
     def as_tool(
-        self,
-        tool_name: str | None,
-        tool_description: str | None,
-        custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
-    ) -> Tool:
+    self,
+    tool_name: str | None = None,
+    tool_description: str | None = None,
+    custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+) -> Tool:
+        tool_name = tool_name or self.name
+        tool_description = tool_description or self.instructions
         """Transform this agent into a tool, callable by other agents.
 
         This is different from handoffs in two ways:
