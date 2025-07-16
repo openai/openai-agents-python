@@ -36,7 +36,7 @@ async def incoming_voice_get(request: Request):
     """Handle incoming call and return TwiML response to connect to Media Stream."""
     response = VoiceResponse()
     host = request.url.hostname
-    # response.say("Welcome to ODAI. How can I help you today?")
+    response.say("Welcome to the Open AI Realtime Agent. How can I help you today?")
     connect = Connect()
     connect.stream(url=f'wss://{host}/twilio/streaming')
     response.append(connect)
