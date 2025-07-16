@@ -22,13 +22,12 @@ class GuardrailFunctionOutput:
 
     output_info: Any
     """
-    Optional information about the guardrail's output. For example, the guardrail could include
-    information about the checks it performed and granular results.
+    Optional metadata about the guardrail's execution, such as details of checks performed or results.
     """
 
     tripwire_triggered: bool
     """
-    Whether the tripwire was triggered. If triggered, the agent's execution will be halted.
+    Whether the tripwire was triggered; if True, agent execution will halt.
     """
 
 
