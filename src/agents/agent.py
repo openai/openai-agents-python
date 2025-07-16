@@ -277,8 +277,6 @@ class Agent(AgentBase, Generic[TContext]):
                     f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
                 )
 
-        from .model_settings import ModelSettings
-
         if not isinstance(self.model_settings, ModelSettings):
             raise TypeError(
                 f"Agent model_settings must be a ModelSettings instance, "
@@ -309,23 +307,25 @@ class Agent(AgentBase, Generic[TContext]):
                 )
 
         if self.hooks is not None:
-            from .lifecycle import AgentHooks
+            from .lifecycle import AgentHooksBase
 
-            if not isinstance(self.hooks, AgentHooks):
+            if not isinstance(self.hooks, AgentHooksBase):
                 raise TypeError(
                     f"Agent hooks must be an AgentHooks instance or None, "
                     f"got {type(self.hooks).__name__}"
                 )
 
-        if not (
-            self.tool_use_behavior == "run_llm_again"
-            or self.tool_use_behavior == "stop_on_first_tool"
-            or isinstance(self.tool_use_behavior, list)
-            or callable(self.tool_use_behavior)
+        if (
+            not (
+                isinstance(self.tool_use_behavior, str)
+                and self.tool_use_behavior in ["run_llm_again", "stop_on_first_tool"]
+            )
+            and not isinstance(self.tool_use_behavior, dict)
+            and not callable(self.tool_use_behavior)
         ):
             raise TypeError(
                 f"Agent tool_use_behavior must be 'run_llm_again', 'stop_on_first_tool', "
-                f"a list of tool names, or a callable, got {type(self.tool_use_behavior).__name__}"
+                f"StopAtTools dict, or callable, got {type(self.tool_use_behavior).__name__}"
             )
 
         if not isinstance(self.reset_tool_choice, bool):
