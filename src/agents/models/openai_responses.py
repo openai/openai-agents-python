@@ -267,7 +267,7 @@ class OpenAIResponsesModel(Model):
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
-            instructions=self._non_null_or_not_given(system_instructions),
+            instructions=system_instructions,
             model=self.model,
             input=list_input,
             include=include,
