@@ -78,6 +78,9 @@ plugins:
                     - voice/quickstart.md
                     - voice/pipeline.md
                     - voice/tracing.md
+                - Realtime agents:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
             - API Reference:
                 - Agents:
                     - ref/index.md
@@ -115,6 +118,12 @@ plugins:
                     - ref/tracing/setup.md
                     - ref/tracing/span_data.md
                     - ref/tracing/util.md
+                - Realtime:
+                    - ref/realtime/agent.md
+                    - ref/realtime/runner.md
+                    - ref/realtime/session.md
+                    - ref/realtime/events.md
+                    - ref/realtime/config.md
                 - Voice:
                     - ref/voice/pipeline.md
                     - ref/voice/workflow.md
@@ -163,6 +172,9 @@ plugins:
                     - voice/quickstart.md
                     - voice/pipeline.md
                     - voice/tracing.md
+                - リアルタイムエージェント:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
 
 extra:
   # Remove material generation message in footer
