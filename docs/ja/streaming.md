@@ -4,15 +4,15 @@ search:
 ---
 # ストリーミング
 
-ストリーミングを使用すると、 エージェント の実行が進行するにつれて発生する更新を購読できます。これにより、エンド ユーザーに進捗状況や部分的な応答を表示するのに役立ちます。
+ストリーミングを使用すると、エージェントの実行が進行するにつれて更新を購読できます。これは、エンドユーザーに進捗状況や部分的なレスポンスを表示する際に役立ちます。
 
-ストリーミングを行うには、 [`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が返されます。続いて `result.stream_events()` を呼び出すと、後述する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームを取得できます。
+ストリーミングを行うには、`Runner.run_streamed()` を呼び出します。これにより `RunResultStreaming` が返されます。`result.stream_events()` を呼び出すと、非同期で `StreamEvent` オブジェクトのストリームを取得できます。これらは後述します。
 
 ## raw response イベント
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、 LLM から直接渡される raw なイベントです。これらは OpenAI Responses API 形式であり、各イベントには `response.created` や `response.output_text.delta` などの type とデータが含まれます。生成されたメッセージを即座にユーザーへストリーミングしたい場合に便利です。
+`RawResponsesStreamEvent` は、LLM から直接渡される raw なイベントです。OpenAI Responses API フォーマットで提供されるため、各イベントには `response.created` や `response.output_text.delta` などの type とデータが含まれます。生成されたレスポンスメッセージをすぐにユーザーへストリーミングしたい場合に便利です。
 
-たとえば、以下のコードは LLM が生成したテキストをトークンごとに出力します。
+例えば、これを実行すると、生成されたテキストを LLM がトークンごとに出力します。
 
 ```python
 import asyncio
@@ -35,11 +35,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Run item イベントと エージェント イベント
+## Run item イベントと agent イベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルなイベントです。アイテムが完全に生成されたタイミングを通知するため、トークン単位ではなく「メッセージが生成された」「ツールが実行された」といったレベルで進捗をプッシュできます。同様に、 [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] はハンドオフなどで現在の エージェント が変わった際に更新を提供します。
+`RunItemStreamEvent` は、より高レベルなイベントで、アイテムが完全に生成されたタイミングを通知します。これにより、トークン単位ではなく「メッセージが生成された」「ツールが実行された」といったレベルで進捗をユーザーへ伝えられます。同様に、`AgentUpdatedStreamEvent` は、ハンドオフの結果などで現在のエージェントが変化した際に更新を提供します。
 
-たとえば、以下のコードは raw イベントを無視し、ユーザーへ更新のみをストリーミングします。
+例えば、この例では raw イベントを無視し、ユーザーへ更新のみをストリーミングします。
 
 ```python
 import asyncio
