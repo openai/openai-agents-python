@@ -15,6 +15,7 @@ on:
 
 jobs:
   update-docs:
+    if: "!contains(github.event.head_commit.message, 'Update all translated document pages')"
     name: Build and Push Translated Docs
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -34,14 +35,26 @@ jobs:
       - name: Build full docs
         run: make build-full-docs
 
-      - name: Commit and push changes
+      - name: Commit changes
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/
           if [ -n "$(git status --porcelain)" ]; then
             git commit -m "Update all translated document pages"
-            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
           else
             echo "No changes to commit"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Create Pull Request
+        if: steps.commit.outputs.committed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Update all translated document pages"
+          title: "Update all translated document pages"
+          body: "Automated update of translated documentation"
+          branch: update-translated-docs-${{ github.run_id }}
+          delete-branch: true
