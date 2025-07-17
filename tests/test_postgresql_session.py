@@ -7,10 +7,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool
 
-from agents.extensions.memory.postgres_session import (
-    MessageRow,
+from agents.extensions.memory import (
     PostgreSQLSession,
 )
+from agents.extensions.memory.postgres_session import MessageRow
 from agents.items import TResponseInputItem
 
 

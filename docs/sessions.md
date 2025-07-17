@@ -141,6 +141,27 @@ result = await Runner.run(
 )
 ```
 
+### PostgreSQL memory
+
+```python
+from agents.extensions.memory import PostgreSQLSession
+from psycopg_pool import AsyncConnectionPool
+
+# From a connection string (creates a new connection pool)
+session = PostgreSQLSession.from_connection_string("user_123", "postgresql://user:pass@host/db")
+
+# From existing connection pool
+pool = AsyncConnectionPool(connection_string)
+session = PostgreSQLSession("user_123", pool)
+
+# Use the session
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=session
+)
+```
+
 ### Multiple sessions
 
 ```python
@@ -222,7 +243,7 @@ Use meaningful session IDs that help you organize conversations:
 
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
--   Consider implementing custom session backends for production systems (Redis, PostgreSQL, etc.)
+-   Consider implementing custom session backends for production systems (Redis, etc.)
 
 ### Session management
 
@@ -318,3 +339,4 @@ For detailed API documentation, see:
 
 -   [`Session`][agents.memory.Session] - Protocol interface
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
+-   [`PostgreSQLSession`][agents.extensions.memory.PostgrSQLSession] - PostgreSQL implementation
