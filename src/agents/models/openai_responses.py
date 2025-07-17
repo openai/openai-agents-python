@@ -242,6 +242,7 @@ class OpenAIResponsesModel(Model):
             else NOT_GIVEN
         )
 
+        system_instructions = self._non_null_or_not_given(system_instructions)
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
@@ -253,16 +254,10 @@ class OpenAIResponsesModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
-            # Combine system and user messages only for logging purposes
-            combined_prompt_for_logging = (
-                [{"role": "system", "content": system_instructions}]
-                if system_instructions
-                else []
-            ) + list_input
-
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(combined_prompt_for_logging, indent=2, ensure_ascii=False)}\n"
+                f"System instructions: {system_instructions}\n"
+                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
                 f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
