@@ -62,6 +62,7 @@ from agents.util._types import MaybeAwaitable
 
 from ..exceptions import UserError
 from ..logger import logger
+from ..version import __version__
 from .config import (
     RealtimeModelTracingConfig,
     RealtimeSessionModelSettings,
@@ -96,6 +97,8 @@ from .model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
+
+_USER_AGENT = f"Agents/Python {__version__}"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -160,7 +163,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "Authorization": f"Bearer {api_key}",
             "OpenAI-Beta": "realtime=v1",
         }
-        self._websocket = await websockets.connect(url, additional_headers=headers)
+        self._websocket = await websockets.connect(
+            url, user_agent_header=_USER_AGENT, additional_headers=headers
+        )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
 
