@@ -148,7 +148,7 @@ from agents.extensions.memory import PostgreSQLSession
 from psycopg_pool import AsyncConnectionPool
 
 # From a connection string (creates a new connection pool)
-session = PostgreSQLSession.from_connection_string("user_123", "postgresql://user:pass@host/db")
+session = await PostgreSQLSession.from_connection_string("user_123", "postgresql://user:pass@host/db")
 
 # From existing connection pool
 pool = AsyncConnectionPool(connection_string)

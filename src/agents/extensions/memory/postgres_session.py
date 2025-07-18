@@ -56,7 +56,8 @@ class PostgreSQLSession(Session):
 
         Args:
             session_id: Unique identifier for the conversation session
-            pool: PostgreSQL connection pool instance
+            pool: PostgreSQL connection pool instance.
+                This should be opened before passing to this class.
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
@@ -74,7 +75,7 @@ class PostgreSQLSession(Session):
         self._initialized = False
 
     @classmethod
-    def from_connection_string(
+    async def from_connection_string(
         cls,
         session_id: str,
         connection_string: str,
@@ -93,7 +94,8 @@ class PostgreSQLSession(Session):
         Returns:
             PostgreSQLSession instance with a connection pool created from the connection string
         """
-        pool: AsyncConnectionPool = AsyncConnectionPool(connection_string)
+        pool: AsyncConnectionPool = AsyncConnectionPool(connection_string, open=False)
+        await pool.open()
         return cls(session_id, pool, sessions_table, messages_table)
 
     async def _ensure_initialized(self) -> None:
@@ -168,13 +170,10 @@ class PostgreSQLSession(Session):
                 else:
                     # Fetch the latest N items in chronological order
                     query = sql.SQL("""
-                        SELECT message_data FROM (
-                            SELECT message_data FROM {messages_table}
-                            WHERE session_id = %s
-                            ORDER BY created_at DESC
-                            LIMIT %s
-                        ) t
-                        ORDER BY created_at ASC
+                        SELECT message_data FROM {messages_table}
+                        WHERE session_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
                     """).format(messages_table=sql.Identifier(self.messages_table))
                     await cur.execute(query, (self.session_id, limit))
 
@@ -189,6 +188,10 @@ class PostgreSQLSession(Session):
                     except (AttributeError, TypeError):
                         # Skip invalid entries
                         continue
+
+                # If we used LIMIT, reverse the items to get chronological order
+                if limit is not None:
+                    items.reverse()
 
                 return items
 
