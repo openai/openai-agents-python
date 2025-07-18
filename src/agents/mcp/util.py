@@ -161,7 +161,6 @@ class MCPUtil:
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
         )
-
     @classmethod
     async def invoke_mcp_tool(
         cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
@@ -178,21 +177,24 @@ class MCPUtil:
                 f"Invalid JSON input for tool {tool.name}: {input_json}"
             ) from e
 
+        # Use original tool name for server call (strip server prefix if present)
+        original_name = getattr(tool, 'original_name', tool.name)
+
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool.name}")
+            logger.debug(f"Invoking MCP tool {tool.name} (original: {original_name})")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+            logger.debug(f"Invoking MCP tool {tool.name} (original: {original_name}) with input {input_json}")
 
         try:
-            result = await server.call_tool(tool.name, json_data)
+            result = await server.call_tool(original_name, json_data)
         except Exception as e:
             logger.error(f"Error invoking MCP tool {tool.name}: {e}")
             raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool.name} completed.")
+            logger.debug(f"MCP tool {tool.name} (original: {original_name}) completed.")
         else:
-            logger.debug(f"MCP tool {tool.name} returned {result}")
+            logger.debug(f"MCP tool {tool.name} (original: {original_name}) returned {result}")
 
         # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
         # string. We'll try to convert.
