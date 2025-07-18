@@ -235,6 +235,60 @@ async def test_agent_convert_schemas_false():
 
 
 @pytest.mark.asyncio
+async def test_mcp_fastmcp_behavior_verification():
+    """Test that verifies the exact FastMCP _convert_to_content behavior we observed.
+
+    Based on our testing, FastMCP's _convert_to_content function behaves as follows:
+    - None → content=[] → MCPUtil returns "[]"
+    - [] → content=[] → MCPUtil returns "[]"
+    - {} → content=[TextContent(text="{}")] → MCPUtil returns full JSON
+    - [{}] → content=[TextContent(text="{}")] → MCPUtil returns full JSON (flattened)
+    - [[]] → content=[] → MCPUtil returns "[]" (recursive empty)
+    """
+
+    from mcp.types import TextContent
+
+    server = FakeMCPServer()
+    server.add_tool("test_tool", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool", inputSchema={})
+
+    # Case 1: None -> "[]".
+    server._custom_content = []
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    assert result == "[]", f"None should return '[]', got {result}"
+
+    # Case 2: [] -> "[]".
+    server._custom_content = []
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    assert result == "[]", f"[] should return '[]', got {result}"
+
+    # Case 3: {} -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    server._custom_content = [TextContent(text="{}", type="text")]
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    assert result == expected, f"{{}} should return {expected}, got {result}"
+
+    # Case 4: [{}] -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    server._custom_content = [TextContent(text="{}", type="text")]
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    assert result == expected, f"[{{}}] should return {expected}, got {result}"
+
+    # Case 5: [[]] -> "[]".
+    server._custom_content = []
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    assert result == "[]", f"[[]] should return '[]', got {result}"
+
+    # Case 6: String values work normally.
+    server._custom_content = [TextContent(text="hello", type="text")]
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    expected = '{"type":"text","text":"hello","annotations":null,"meta":null}'
+    assert result == expected, f"String should return {expected}, got {result}"
+
+
+@pytest.mark.asyncio
 async def test_agent_convert_schemas_unset():
     """Test that leaving convert_schemas_to_strict unset (defaulting to False) leaves tool schemas
     as non-strict.

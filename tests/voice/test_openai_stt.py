@@ -186,7 +186,7 @@ async def test_stream_audio_sends_correct_json():
 @pytest.mark.asyncio
 async def test_transcription_event_puts_output_in_queue():
     """
-    Test that a 'conversation.item.input_audio_transcription.completed' event
+    Test that a 'input_audio_transcription_completed' event
     yields a transcript from transcribe_turns().
     """
     mock_ws = create_mock_websocket(
@@ -196,7 +196,7 @@ async def test_transcription_event_puts_output_in_queue():
             # Once configured, we mock a completed transcription event:
             json.dumps(
                 {
-                    "type": "conversation.item.input_audio_transcription.completed",
+                    "type": "input_audio_transcription_completed",
                     "transcript": "Hello world!",
                 }
             ),

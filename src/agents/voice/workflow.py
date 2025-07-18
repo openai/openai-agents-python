@@ -32,6 +32,14 @@ class VoiceWorkflowBase(abc.ABC):
         """
         pass
 
+    async def on_start(self) -> AsyncIterator[str]:
+        """
+        Optional method that runs before any user input is received. Can be used
+        to deliver a greeting or instruction via TTS. Defaults to doing nothing.
+        """
+        return
+        yield
+
 
 class VoiceWorkflowHelper:
     @classmethod

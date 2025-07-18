@@ -18,11 +18,14 @@ from .util import _error_tracing, _json, _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    from .agent import Agent, AgentBase
 
 
 # The handoff input type is the type of data passed when the agent is called via a handoff.
 THandoffInput = TypeVar("THandoffInput", default=Any)
+
+# The agent type that the handoff returns
+TAgent = TypeVar("TAgent", bound="AgentBase[Any]", default="Agent[Any]")
 
 OnHandoffWithInput = Callable[[RunContextWrapper[Any], THandoffInput], Any]
 OnHandoffWithoutInput = Callable[[RunContextWrapper[Any]], Any]
@@ -52,7 +55,7 @@ HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], HandoffInputData]
 
 
 @dataclass
-class Handoff(Generic[TContext]):
+class Handoff(Generic[TContext, TAgent]):
     """A handoff is when an agent delegates a task to another agent.
     For example, in a customer support scenario you might have a "triage agent" that determines
     which agent should handle the user's request, and sub-agents that specialize in different
@@ -69,7 +72,7 @@ class Handoff(Generic[TContext]):
     """The JSON schema for the handoff input. Can be empty if the handoff does not take an input.
     """
 
-    on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[Agent[TContext]]]
+    on_invoke_handoff: Callable[[RunContextWrapper[Any], str], Awaitable[TAgent]]
     """The function that invokes the handoff. The parameters passed are:
     1. The handoff run context
     2. The arguments from the LLM, as a JSON string. Empty string if input_json_schema is empty.
@@ -100,20 +103,22 @@ class Handoff(Generic[TContext]):
     True, as it increases the likelihood of correct JSON input.
     """
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = (
+        True
+    )
     """Whether the handoff is enabled. Either a bool or a Callable that takes the run context and
     agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
     a handoff based on your context/state."""
 
-    def get_transfer_message(self, agent: Agent[Any]) -> str:
+    def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
     @classmethod
-    def default_tool_name(cls, agent: Agent[Any]) -> str:
+    def default_tool_name(cls, agent: AgentBase[Any]) -> str:
         return _transforms.transform_string_function_style(f"transfer_to_{agent.name}")
 
     @classmethod
-    def default_tool_description(cls, agent: Agent[Any]) -> str:
+    def default_tool_description(cls, agent: AgentBase[Any]) -> str:
         return (
             f"Handoff to the {agent.name} agent to handle the request. "
             f"{agent.handoff_description or ''}"
@@ -128,7 +133,7 @@ def handoff(
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext]: ...
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 @overload
@@ -141,7 +146,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext]: ...
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 @overload
@@ -153,7 +158,7 @@ def handoff(
     tool_name_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext]: ...
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 def handoff(
@@ -163,8 +168,9 @@ def handoff(
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
     input_type: type[THandoffInput] | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext]:
+    is_enabled: bool
+    | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]:
     """Create a handoff from an agent.
 
     Args:
@@ -202,7 +208,7 @@ def handoff(
 
     async def _invoke_handoff(
         ctx: RunContextWrapper[Any], input_json: str | None = None
-    ) -> Agent[Any]:
+    ) -> Agent[TContext]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
                 _error_tracing.attach_error_to_current_span(
@@ -239,6 +245,18 @@ def handoff(
     # If there is a need, we can make this configurable in the future
     input_json_schema = ensure_strict_json_schema(input_json_schema)
 
+    async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
+        from .agent import Agent
+
+        assert callable(is_enabled), "is_enabled must be non-null here"
+        assert isinstance(agent_base, Agent), "Can't handoff to a non-Agent"
+        result = is_enabled(ctx, agent_base)
+
+        if inspect.isawaitable(result):
+            return await result
+
+        return result
+
     return Handoff(
         tool_name=tool_name,
         tool_description=tool_description,
@@ -246,5 +264,5 @@ def handoff(
         on_invoke_handoff=_invoke_handoff,
         input_filter=input_filter,
         agent_name=agent.name,
-        is_enabled=is_enabled,
+        is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
     )

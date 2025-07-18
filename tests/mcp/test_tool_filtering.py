@@ -3,6 +3,7 @@ Tool filtering tests use FakeMCPServer instead of real MCPServer implementations
 external dependencies (processes, network connections) and ensure fast, reliable unit tests.
 FakeMCPServer delegates filtering logic to the real _MCPServerWithClientSession implementation.
 """
+
 import asyncio
 
 import pytest
@@ -26,6 +27,7 @@ def create_test_context() -> RunContextWrapper:
 
 
 # === Static Tool Filtering Tests ===
+
 
 @pytest.mark.asyncio
 async def test_static_tool_filtering():
@@ -55,7 +57,7 @@ async def test_static_tool_filtering():
     # Test both filters together (allowed first, then blocked)
     server.tool_filter = {
         "allowed_tool_names": ["tool1", "tool2", "tool3"],
-        "blocked_tool_names": ["tool3"]
+        "blocked_tool_names": ["tool3"],
     }
     tools = await server.list_tools(run_context, agent)
     assert len(tools) == 2
@@ -68,8 +70,7 @@ async def test_static_tool_filtering():
 
     # Test helper function
     server.tool_filter = create_static_tool_filter(
-        allowed_tool_names=["tool1", "tool2"],
-        blocked_tool_names=["tool2"]
+        allowed_tool_names=["tool1", "tool2"], blocked_tool_names=["tool2"]
     )
     tools = await server.list_tools(run_context, agent)
     assert len(tools) == 1
@@ -77,6 +78,7 @@ async def test_static_tool_filtering():
 
 
 # === Dynamic Tool Filtering Core Tests ===
+
 
 @pytest.mark.asyncio
 async def test_dynamic_filter_sync_and_async():
@@ -180,6 +182,7 @@ async def test_dynamic_filter_error_handling():
 
 
 # === Integration Tests ===
+
 
 @pytest.mark.asyncio
 async def test_agent_dynamic_filtering_integration():

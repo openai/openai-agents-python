@@ -57,6 +57,7 @@ plugins:
             - Documentation:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -77,11 +78,15 @@ plugins:
                     - voice/quickstart.md
                     - voice/pipeline.md
                     - voice/tracing.md
+                - Realtime agents:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
             - API Reference:
                 - Agents:
                     - ref/index.md
                     - ref/agent.md
                     - ref/run.md
+                    - ref/memory.md
                     - ref/repl.md
                     - ref/tool.md
                     - ref/result.md
@@ -90,6 +95,7 @@ plugins:
                     - ref/lifecycle.md
                     - ref/items.md
                     - ref/run_context.md
+                    - ref/tool_context.md
                     - ref/usage.md
                     - ref/exceptions.md
                     - ref/guardrail.md
@@ -112,6 +118,12 @@ plugins:
                     - ref/tracing/setup.md
                     - ref/tracing/span_data.md
                     - ref/tracing/util.md
+                - Realtime:
+                    - ref/realtime/agent.md
+                    - ref/realtime/runner.md
+                    - ref/realtime/session.md
+                    - ref/realtime/events.md
+                    - ref/realtime/config.md
                 - Voice:
                     - ref/voice/pipeline.md
                     - ref/voice/workflow.md
@@ -140,6 +152,7 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
+                - sessions.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -159,6 +172,9 @@ plugins:
                     - voice/quickstart.md
                     - voice/pipeline.md
                     - voice/tracing.md
+                - リアルタイムエージェント:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
 
 extra:
   # Remove material generation message in footer

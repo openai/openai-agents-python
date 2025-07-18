@@ -30,7 +30,8 @@ languages = {
 }
 
 # Initialize OpenAI client
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("PROD_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=api_key)
 
 # Define dictionaries for translation control
 do_not_translate = [
@@ -266,7 +267,9 @@ def translate_single_source_file(file_path: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Translate documentation files")
-    parser.add_argument("--file", type=str, help="Specific file to translate (relative to docs directory)")
+    parser.add_argument(
+        "--file", type=str, help="Specific file to translate (relative to docs directory)"
+    )
     args = parser.parse_args()
 
     if args.file:

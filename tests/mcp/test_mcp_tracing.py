@@ -62,7 +62,7 @@ async def test_mcp_tracing():
                                 "data": {
                                     "name": "test_tool_1",
                                     "input": "",
-                                    "output": '{"type":"text","text":"result_test_tool_1_{}","annotations":null}',  # noqa: E501
+                                    "output": '{"type":"text","text":"result_test_tool_1_{}","annotations":null,"meta":null}',  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },
@@ -133,7 +133,7 @@ async def test_mcp_tracing():
                                 "data": {
                                     "name": "test_tool_2",
                                     "input": "",
-                                    "output": '{"type":"text","text":"result_test_tool_2_{}","annotations":null}',  # noqa: E501
+                                    "output": '{"type":"text","text":"result_test_tool_2_{}","annotations":null,"meta":null}',  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },
@@ -197,7 +197,7 @@ async def test_mcp_tracing():
                                 "data": {
                                     "name": "test_tool_3",
                                     "input": "",
-                                    "output": '{"type":"text","text":"result_test_tool_3_{}","annotations":null}',  # noqa: E501
+                                    "output": '{"type":"text","text":"result_test_tool_3_{}","annotations":null,"meta":null}',  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
                             },

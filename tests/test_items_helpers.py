@@ -11,7 +11,10 @@ from openai.types.responses.response_file_search_tool_call_param import (
 )
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_param import ResponseFunctionToolCallParam
-from openai.types.responses.response_function_web_search import ResponseFunctionWebSearch
+from openai.types.responses.response_function_web_search import (
+    ActionSearch,
+    ResponseFunctionWebSearch,
+)
 from openai.types.responses.response_function_web_search_param import ResponseFunctionWebSearchParam
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
@@ -225,7 +228,12 @@ def test_to_input_items_for_file_search_call() -> None:
 
 def test_to_input_items_for_web_search_call() -> None:
     """A web search tool call output should produce the same dict as a web search input."""
-    ws_call = ResponseFunctionWebSearch(id="w1", status="completed", type="web_search_call")
+    ws_call = ResponseFunctionWebSearch(
+        id="w1",
+        action=ActionSearch(type="search", query="query"),
+        status="completed",
+        type="web_search_call",
+    )
     resp = ModelResponse(output=[ws_call], usage=Usage(), response_id=None)
     input_items = resp.to_input_items()
     assert isinstance(input_items, list) and len(input_items) == 1
@@ -233,6 +241,7 @@ def test_to_input_items_for_web_search_call() -> None:
         "id": "w1",
         "status": "completed",
         "type": "web_search_call",
+        "action": {"type": "search", "query": "query"},
     }
     assert input_items[0] == expected
 

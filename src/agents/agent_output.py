@@ -115,8 +115,8 @@ class AgentOutputSchema(AgentOutputSchemaBase):
             except UserError as e:
                 raise UserError(
                     "Strict JSON schema is enabled, but the output type is not valid. "
-                    "Either make the output type strict, or pass output_schema_strict=False to "
-                    "your Agent()"
+                    "Either make the output type strict, "
+                    "or wrap your type with AgentOutputSchema(your_type, strict_json_schema=False)"
                 ) from e
 
     def is_plain_text(self) -> bool:

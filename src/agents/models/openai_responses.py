@@ -25,6 +25,7 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
+from ..model_settings import MCPToolChoice
 from ..tool import (
     CodeInterpreterTool,
     ComputerTool,
@@ -303,10 +304,16 @@ class ConvertedTools:
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | None
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> response_create_params.ToolChoice | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
+        elif isinstance(tool_choice, MCPToolChoice):
+            return {
+                "server_label": tool_choice.server_label,
+                "type": "mcp",
+                "name": tool_choice.name,
+            }
         elif tool_choice == "required":
             return "required"
         elif tool_choice == "auto":
@@ -334,9 +341,9 @@ class Converter:
                 "type": "code_interpreter",
             }
         elif tool_choice == "mcp":
-            return {
-                "type": "mcp",
-            }
+            # Note that this is still here for backwards compatibility,
+            # but migrating to MCPToolChoice is recommended.
+            return {"type": "mcp"}  # type: ignore [typeddict-item]
         else:
             return {
                 "type": "function",
@@ -363,7 +370,7 @@ class Converter:
     def convert_tools(
         cls,
         tools: list[Tool],
-        handoffs: list[Handoff[Any]],
+        handoffs: list[Handoff[Any, Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
         includes: list[ResponseIncludable] = []
