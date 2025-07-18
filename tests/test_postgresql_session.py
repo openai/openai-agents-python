@@ -3,6 +3,7 @@ import unittest
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool
@@ -23,7 +24,7 @@ class AsyncContextManagerMock:
     async def __aenter__(self):
         return self.return_value
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
         return None
 
 
@@ -54,7 +55,7 @@ class TestPostgreSQLSession(unittest.IsolatedAsyncioTestCase):
 
         self.mock_pool.connection = mock_connection
 
-        def mock_cursor_method(*args: Any, **kwargs: Any) -> AsyncContextManagerMock:
+        def mock_cursor_method(*_args: Any, **_kwargs: Any) -> AsyncContextManagerMock:
             return AsyncContextManagerMock(mock_cursor)
 
         mock_conn.cursor = mock_cursor_method
@@ -353,3 +354,206 @@ class TestPostgreSQLSession(unittest.IsolatedAsyncioTestCase):
 
         self.mock_pool.close.assert_called_once()
         self.assertFalse(self.session._initialized)
+
+    @patch("agents.extensions.memory.postgres_session.AsyncConnectionPool")
+    async def test_from_connection_string_success(self, mock_pool_class):
+        """Test creating a session from connection string."""
+        mock_pool = AsyncMock()
+        mock_pool_class.return_value = mock_pool
+
+        connection_string = "postgresql://user:pass@host/db"
+        session_id = "test_session_123"
+
+        session = await PostgreSQLSession.from_connection_string(session_id, connection_string)
+
+        # Verify pool was created with the connection string
+        mock_pool_class.assert_called_once_with(connection_string)
+        mock_pool.open.assert_called_once()
+
+        # Verify session was created with correct parameters
+        self.assertEqual(session.session_id, session_id)
+        self.assertEqual(session.pool, mock_pool)
+        self.assertEqual(session.sessions_table, "agent_sessions")
+        self.assertEqual(session.messages_table, "agent_messages")
+
+    @patch("agents.extensions.memory.postgres_session.AsyncConnectionPool")
+    async def test_from_connection_string_custom_tables(self, mock_pool_class):
+        """Test creating a session from connection string with custom table names."""
+        mock_pool = AsyncMock()
+        mock_pool_class.return_value = mock_pool
+
+        connection_string = "postgresql://user:pass@host/db"
+        session_id = "test_session_123"
+        custom_sessions_table = "custom_sessions"
+        custom_messages_table = "custom_messages"
+
+        session = await PostgreSQLSession.from_connection_string(
+            session_id,
+            connection_string,
+            sessions_table=custom_sessions_table,
+            messages_table=custom_messages_table,
+        )
+
+        # Verify pool was created with the connection string
+        mock_pool_class.assert_called_once_with(connection_string)
+        mock_pool.open.assert_called_once()
+
+        # Verify session was created with correct parameters
+        self.assertEqual(session.session_id, session_id)
+        self.assertEqual(session.pool, mock_pool)
+        self.assertEqual(session.sessions_table, custom_sessions_table)
+        self.assertEqual(session.messages_table, custom_messages_table)
+
+
+@pytest.mark.skip(reason="Integration tests require a running PostgreSQL instance")
+class TestPostgreSQLSessionIntegration(unittest.IsolatedAsyncioTestCase):
+    """Integration tests for PostgreSQL session that require a running database."""
+
+    # Test connection string - modify as needed for your test database
+    TEST_CONNECTION_STRING = "postgresql://postgres:password@localhost:5432/test_db"
+
+    async def asyncSetUp(self):
+        """Set up test session."""
+        self.session_id = "test_integration_session"
+        self.session = await PostgreSQLSession.from_connection_string(
+            self.session_id,
+            self.TEST_CONNECTION_STRING,
+            sessions_table="test_sessions",
+            messages_table="test_messages",
+        )
+
+        # Clean up any existing test data
+        await self.session.clear_session()
+
+    async def asyncTearDown(self):
+        """Clean up after tests."""
+        if hasattr(self, "session"):
+            await self.session.clear_session()
+            await self.session.close()
+
+    async def test_integration_full_workflow(self):
+        """Test complete workflow: add items, get items, pop item, clear session."""
+        # Initially empty
+        items = await self.session.get_items()
+        self.assertEqual(len(items), 0)
+
+        # Add some test items
+        test_items = cast(
+            list[TResponseInputItem],
+            [
+                {"role": "user", "content": "Hello", "type": "message"},
+                {"role": "assistant", "content": "Hi there!", "type": "message"},
+                {"role": "user", "content": "How are you?", "type": "message"},
+                {"role": "assistant", "content": "I'm doing well, thank you!", "type": "message"},
+            ],
+        )
+
+        for item in test_items:
+            await self.session.add_items([item])
+
+        # Verify items were added
+        stored_items = await self.session.get_items()
+        self.assertEqual(len(stored_items), 4)
+        self.assertEqual(stored_items[0], test_items[0])
+        self.assertEqual(stored_items[-1], test_items[-1])
+
+        # Test with limit
+        limited_items = await self.session.get_items(limit=2)
+        self.assertEqual(len(limited_items), 2)
+        # Should get the last 2 items in chronological order
+        self.assertEqual(limited_items[0], test_items[2])
+        self.assertEqual(limited_items[1], test_items[3])
+
+        # Test pop_item
+        popped_item = await self.session.pop_item()
+        self.assertEqual(popped_item, test_items[3])  # Last item
+
+        # Verify item was removed
+        remaining_items = await self.session.get_items()
+        self.assertEqual(len(remaining_items), 3)
+        self.assertEqual(remaining_items[-1], test_items[2])
+
+        # Test clear_session
+        await self.session.clear_session()
+        final_items = await self.session.get_items()
+        self.assertEqual(len(final_items), 0)
+
+    async def test_integration_multiple_sessions(self):
+        """Test that different sessions maintain separate data."""
+        # Create a second session
+        session2 = await PostgreSQLSession.from_connection_string(
+            "test_integration_session_2",
+            self.TEST_CONNECTION_STRING,
+            sessions_table="test_sessions",
+            messages_table="test_messages",
+        )
+
+        try:
+            # Add different items to each session
+            items1 = cast(
+                list[TResponseInputItem],
+                [{"role": "user", "content": "Session 1 message", "type": "message"}],
+            )
+            items2 = cast(
+                list[TResponseInputItem],
+                [{"role": "user", "content": "Session 2 message", "type": "message"}],
+            )
+
+            await self.session.add_items(items1)
+            await session2.add_items(items2)
+
+            # Verify sessions have different data
+            session1_items = await self.session.get_items()
+            session2_items = await session2.get_items()
+
+            self.assertEqual(len(session1_items), 1)
+            self.assertEqual(len(session2_items), 1)
+            self.assertEqual(session1_items[0]["content"], "Session 1 message")  # type: ignore
+            self.assertEqual(session2_items[0]["content"], "Session 2 message")  # type: ignore
+
+        finally:
+            await session2.clear_session()
+            await session2.close()
+
+    async def test_integration_empty_session_operations(self):
+        """Test operations on empty session."""
+        # Pop from empty session
+        popped = await self.session.pop_item()
+        self.assertIsNone(popped)
+
+        # Get items from empty session
+        items = await self.session.get_items()
+        self.assertEqual(len(items), 0)
+
+        # Get items with limit from empty session
+        limited_items = await self.session.get_items(limit=5)
+        self.assertEqual(len(limited_items), 0)
+
+        # Clear empty session (should not error)
+        await self.session.clear_session()
+
+    async def test_integration_connection_string_with_custom_tables(self):
+        """Test creating session with custom table names."""
+        custom_session = await PostgreSQLSession.from_connection_string(
+            "custom_table_test",
+            self.TEST_CONNECTION_STRING,
+            sessions_table="custom_sessions_table",
+            messages_table="custom_messages_table",
+        )
+
+        try:
+            # Test basic functionality with custom tables
+            test_items = cast(
+                list[TResponseInputItem],
+                [{"role": "user", "content": "Custom table test", "type": "message"}],
+            )
+
+            await custom_session.add_items(test_items)
+            stored_items = await custom_session.get_items()
+
+            self.assertEqual(len(stored_items), 1)
+            self.assertEqual(stored_items[0]["content"], "Custom table test")  # type: ignore
+
+        finally:
+            await custom_session.clear_session()
+            await custom_session.close()
