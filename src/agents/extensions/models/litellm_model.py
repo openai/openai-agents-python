@@ -364,6 +364,10 @@ class LitellmConverter:
             provider_specific_fields.get("refusal", None) if provider_specific_fields else None
         )
 
+        reasoning_content = ""
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            reasoning_content = message.reasoning_content
+
         return ChatCompletionMessage(
             content=message.content,
             refusal=refusal,
@@ -371,6 +375,7 @@ class LitellmConverter:
             annotations=cls.convert_annotations_to_openai(message),
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     @classmethod
