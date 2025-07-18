@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-一度だけ実行すれば十分です。
+これは一度だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -14,9 +14,9 @@ cd my_project
 python -m venv .venv
 ```
 
-### 仮想環境のアクティブ化
+### 仮想環境の有効化
 
-新しいターミナル セッションを開始するたびに実行してください。
+新しいターミナルセッションを開始するたびに実行してください。
 
 ```bash
 source .venv/bin/activate
@@ -28,17 +28,17 @@ source .venv/bin/activate
 pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
-### OpenAI API キーの設定
+### OpenAI API キーを設定する
 
-まだお持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従って OpenAI API キーを作成してください。
+お持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 最初のエージェントの作成
+## 最初のエージェントを作成する
 
-エージェントは instructions、名前、そして `model_config` などのオプション設定で定義します。
+エージェントは instructions、名前、そして `model_config` などのオプションの config で定義します。
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## エージェントを追加
+## さらにいくつかのエージェントを追加する
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを決定するための追加コンテキストを提供します。
+追加のエージェントも同じ方法で定義できます。`handoff_descriptions` は、ハンドオフのルーティングを決定するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -69,9 +69,9 @@ math_tutor_agent = Agent(
 )
 ```
 
-## ハンドオフの定義
+## ハンドオフを定義する
 
-各エージェントでは、タスクを進める方法を決定する際に選択できるハンドオフの選択肢（インベントリ）を定義できます。
+各エージェントでは、タスクを進める方法を選択できるよう、送信先ハンドオフのオプション一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -81,9 +81,9 @@ triage_agent = Agent(
 )
 ```
 
-## エージェントオーケストレーションの実行
+## エージェントオーケストレーションを実行する
 
-ワークフローが実行され、トリアージ エージェントが 2 つのスペシャリスト エージェント間で正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージエージェントが 2 つのスペシャリストエージェント間を正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -93,13 +93,14 @@ async def main():
     print(result.final_output)
 ```
 
-## ガードレールの追加
+## ガードレールを追加する
 
-入力または出力に対して実行するカスタム ガードレールを定義できます。
+入力または出力に対して実行するカスタムガードレールを定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
 from pydantic import BaseModel
+
 
 class HomeworkOutput(BaseModel):
     is_homework: bool
@@ -122,10 +123,11 @@ async def homework_guardrail(ctx, agent, input_data):
 
 ## すべてを組み合わせる
 
-これらをすべて組み合わせ、ハンドオフと入力ガードレールを利用してワークフロー全体を実行してみましょう。
+ハンドオフと入力ガードレールを使って、すべてを組み合わせたワークフロー全体を実行してみましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
+from agents.exceptions import InputGuardrailTripwireTriggered
 from pydantic import BaseModel
 import asyncio
 
@@ -170,24 +172,32 @@ triage_agent = Agent(
 )
 
 async def main():
-    result = await Runner.run(triage_agent, "who was the first president of the united states?")
-    print(result.final_output)
+    # Example 1: History question
+    try:
+        result = await Runner.run(triage_agent, "who was the first president of the united states?")
+        print(result.final_output)
+    except InputGuardrailTripwireTriggered as e:
+        print("Guardrail blocked this input:", e)
 
-    result = await Runner.run(triage_agent, "what is life")
-    print(result.final_output)
+    # Example 2: General/philosophical question
+    try:
+        result = await Runner.run(triage_agent, "What is the meaning of life?")
+        print(result.final_output)
+    except InputGuardrailTripwireTriggered as e:
+        print("Guardrail blocked this input:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの表示
+## トレースを表示する
 
-エージェント実行中に何が起こったかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動し、実行トレースを表示します。
+エージェント実行中に何が起こったかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動してエージェント実行のトレースを表示してください。
 
 ## 次のステップ
 
-より複雑なエージェント フローの構築方法を学びましょう。
+より複雑なエージェントフローを構築する方法を学びましょう:
 
--   [Agents](agents.md) の構成方法について学ぶ。
--   [エージェントの実行](running_agents.md) について学ぶ。
--   [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学ぶ。
+-   [エージェントの設定方法](agents.md) について学びます。
+-   [エージェントの実行](running_agents.md) について学びます。
+-   [ツール](tools.md)、[ガードレール](guardrails.md)、そして [モデル](models/index.md) について学びます。

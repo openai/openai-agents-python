@@ -4,65 +4,65 @@ search:
 ---
 # ガイド
 
-このガイドでは、OpenAI Agents SDK の realtime 機能を使って音声対応の AI エージェントを構築する方法を詳しく解説します。
+本ガイドでは、 OpenAI Agents SDK の realtime 機能を使用して音声対応の AI エージェントを構築する方法を詳しく説明します。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装の改善に伴い、破壊的変更が発生する可能性があります。
+Realtime エージェントはベータ版です。実装を改良する過程で互換性が壊れる変更が入る可能性があります。
 
 ## 概要
 
-Realtime エージェントは、音声とテキスト入力をリアルタイムで処理し、音声で応答する会話フローを実現します。OpenAI の Realtime API と永続的に接続を保ち、低レイテンシで自然な音声対話を可能にし、割り込みにもスムーズに対応します。
+Realtime エージェントは、音声とテキスト入力をリアルタイムに処理し、リアルタイム音声で応答することで対話フローを実現します。 OpenAI の Realtime API と永続的に接続を維持し、低レイテンシで自然な音声会話と割り込みへのスムーズな対応を可能にします。
 
 ## アーキテクチャ
 
-### 主要コンポーネント
+### コアコンポーネント
 
-realtime システムは、以下の主要コンポーネントで構成されています。
+リアルタイムシステムは、以下の主要コンポーネントで構成されています。
 
--   **RealtimeAgent**: instructions、tools、handoffs で設定されるエージェント。  
--   **RealtimeRunner**: 設定を管理します。`runner.run()` を呼び出してセッションを取得できます。  
--   **RealtimeSession**: 単一の対話セッション。ユーザーが会話を開始するたびに作成し、会話が終了するまで保持します。  
--   **RealtimeModel**: 基盤となるモデルインターフェース（通常は OpenAI の WebSocket 実装）。  
+-   **RealtimeAgent**: instructions、tools、handoffs で構成されるエージェントです。  
+-   **RealtimeRunner**: 設定を管理します。`runner.run()` を呼び出すことでセッションを取得できます。  
+-   **RealtimeSession**: 1 回の対話セッションを表します。ユーザーが会話を開始するたびに作成し、会話が終了するまで保持します。  
+-   **RealtimeModel**: 基盤となるモデルインターフェース（通常は OpenAI の WebSocket 実装）
 
 ### セッションフロー
 
-典型的な realtime セッションは次のように進行します。
+典型的なリアルタイムセッションは次の流れで進みます。
 
-1. **RealtimeAgent** を instructions、tools、handoffs で作成します。  
-2. **RealtimeRunner** をエージェントと設定オプションでセットアップします。  
-3. `await runner.run()` で **セッションを開始** し、RealtimeSession を受け取ります。  
-4. `send_audio()` または `send_message()` で **音声またはテキスト** をセッションへ送信します。  
-5. セッションを反復処理して **イベントを受信** します。イベントには音声出力、文字起こし、tool 呼び出し、handoff、エラーなどが含まれます。  
-6. ユーザーがエージェントの発話を **割り込んだ場合**、現在の音声生成が自動で停止します。  
+1. **RealtimeAgent** を instructions、tools、handoffs と共に作成します。  
+2. エージェントと各種設定を指定して **RealtimeRunner** をセットアップします。  
+3. `await runner.run()` を実行してセッション (**RealtimeSession**) を開始します。  
+4. `send_audio()` または `send_message()` を使用して音声またはテキストを送信します。  
+5. セッションを反復処理してイベントを受信します。イベントには音声出力、トランスクリプト、ツール呼び出し、ハンドオフ、エラーなどが含まれます。  
+6. ユーザーがエージェントの発話中に話し始めた場合は **割り込み** が発生し、現在の音声生成が自動で停止します。  
 
-セッションは会話履歴を保持し、realtime モデルとの永続接続を管理します。
+セッションは会話履歴を保持し、リアルタイムモデルとの永続接続を管理します。
 
 ## エージェント設定
 
-RealtimeAgent は通常の Agent クラスとほぼ同様に動作しますが、いくつか重要な違いがあります。API の詳細は [`RealtimeAgent`](agents.realtime.agent.RealtimeAgent) リファレンスをご覧ください。
+RealtimeAgent は通常の Agent クラスとほぼ同じですが、いくつか重要な違いがあります。詳細は [`RealtimeAgent`][agents.realtime.agent.RealtimeAgent] API リファレンスをご覧ください。
 
 主な違い:
 
--   モデルの選択はエージェントではなくセッションで設定します。  
--   structured outputs（`outputType`）はサポートされません。  
--   声質はエージェントごとに設定できますが、最初のエージェントが発話した後に変更できません。  
--   tools、handoffs、instructions などの他の機能は同じ方法で利用できます。  
+-   モデルの選択はエージェントではなくセッション単位で指定します。  
+-   structured outputs (`outputType`) はサポートされていません。  
+-   ボイスはエージェントごとに設定できますが、最初のエージェントが話し始めた後は変更できません。  
+-   tools、handoffs、instructions などその他の機能は通常のエージェントと同様に機能します。  
 
 ## セッション設定
 
 ### モデル設定
 
-セッション設定では、基盤となる realtime モデルの動作を制御できます。モデル名（例: `gpt-4o-realtime-preview`）、声質（alloy、echo、fable、onyx、nova、shimmer）、対応モダリティ（text と/または audio）を指定可能です。音声フォーマットは入力と出力で設定でき、デフォルトは PCM16 です。
+セッション設定では基盤となるリアルタイムモデルの挙動を制御できます。モデル名（`gpt-4o-realtime-preview` など）、ボイス（alloy、echo、fable、onyx、nova、shimmer）、対応モダリティ（text / audio）を指定できます。入力・出力の音声フォーマットは PCM16 がデフォルトですが変更可能です。
 
-### 音声設定
+### オーディオ設定
 
-音声設定では、音声入力と出力の扱いを制御します。Whisper などのモデルで入力音声を文字起こししたり、言語を指定したり、専門用語の精度向上のため transcription プロンプトを提供したりできます。ターン検出では、音声検出閾値、無音時間、検出された音声の前後パディングなどを調整して、エージェントがいつ応答を開始・停止すべきかを制御します。
+オーディオ設定では音声入力・出力の扱いを制御します。Whisper などのモデルで音声をトランスクリプトし、言語設定やドメイン固有語の精度を上げる transcription prompt を指定できます。ターン検出では、音声活動検出のしきい値、無音継続時間、検出前後のパディングなどを設定して、エージェントがいつ応答を開始・終了すべきかを調整します。
 
-## Tools と Functions
+## ツールと関数
 
 ### ツールの追加
 
-通常のエージェントと同様に、realtime エージェントも会話中に実行される function tools をサポートします。
+通常のエージェントと同様に、Realtime エージェントでも会話中に実行される function tools を追加できます。
 
 ```python
 from agents import function_tool
@@ -90,7 +90,7 @@ agent = RealtimeAgent(
 
 ### ハンドオフの作成
 
-ハンドオフを使うことで、会話を専門エージェント間で引き継げます。
+ハンドオフを利用すると、会話を専門エージェントへ引き継げます。
 
 ```python
 from agents.realtime import realtime_handoff
@@ -119,40 +119,40 @@ main_agent = RealtimeAgent(
 
 ## イベント処理
 
-セッションはイベントをストリーム配信します。セッションオブジェクトを反復処理してイベントを受信してください。主なイベントは次のとおりです。
+セッションを反復処理することでストリーミングされるイベントを監視できます。主なイベントは以下のとおりです。
 
--   **audio**: エージェントの応答音声データ  
+-   **audio**: エージェント応答の raw 音声データ  
 -   **audio_end**: エージェントの発話終了  
--   **audio_interrupted**: ユーザーによる割り込み  
--   **tool_start/tool_end**: tool 実行の開始と終了  
--   **handoff**: エージェント間の handoff  
+-   **audio_interrupted**: ユーザーによる割り込み発話  
+-   **tool_start / tool_end**: ツール実行の開始・終了  
+-   **handoff**: エージェント間のハンドオフ発生  
 -   **error**: 処理中に発生したエラー  
 
-詳細は [`RealtimeSessionEvent`](agents.realtime.events.RealtimeSessionEvent) を参照してください。
+詳細は [`RealtimeSessionEvent`][agents.realtime.events.RealtimeSessionEvent] を参照してください。
 
 ## ガードレール
 
-Realtime エージェントでは出力ガードレールのみサポートされます。パフォーマンス低下を防ぐため、ガードレールはデバウンスされ、（1 文字ごとではなく）定期的に実行されます。デフォルトのデバウンス長は 100 文字ですが、変更可能です。
+Realtime エージェントでは出力ガードレールのみサポートされます。パフォーマンス維持のため、ガードレールはデバウンスされて定期的に（すべての単語ではなく）評価されます。デフォルトのデバウンス長は 100 文字ですが、変更可能です。
 
-ガードレールが発火すると `guardrail_tripped` イベントが生成され、エージェントの現在の応答が中断されることがあります。テキストエージェントと違い、Realtime エージェントではガードレール発火時に Exception は発生しません。
+ガードレールが発火すると `guardrail_tripped` イベントが生成され、エージェントの現在の応答が中断される場合があります。リアルタイム性能と安全性を両立させるための挙動です。テキストエージェントと異なり、Realtime エージェントではガードレール発火時に Exception は送出されません。
 
-## 音声処理
+## オーディオ処理
 
-[`session.send_audio(audio_bytes)`](agents.realtime.session.RealtimeSession.send_audio) で音声を、[`session.send_message()`](agents.realtime.session.RealtimeSession.send_message) でテキストを送信できます。
+[`session.send_audio(audio_bytes)`][agents.realtime.session.RealtimeSession.send_audio] で音声を、[`session.send_message()`][agents.realtime.session.RealtimeSession.send_message] でテキストをセッションに送信できます。
 
-音声出力を扱う際は `audio` イベントを受信し、任意の音声ライブラリで再生してください。ユーザーが割り込んだ場合は `audio_interrupted` イベントを検知して、即座に再生を停止し、キューにある音声をクリアする必要があります。
+音声出力を再生するには、`audio` イベントを監視して取得したデータをお好みのオーディオライブラリで再生してください。ユーザーが割り込んだ際には `audio_interrupted` イベントを受信して即座に再生を停止し、キューに溜まった音声をクリアする必要があります。
 
-## 直接モデルアクセス
+## 直接モデルへアクセス
 
-基盤モデルにアクセスして、カスタムリスナーを追加したり高度な操作を行ったりできます。
+より低レベルの制御やカスタムリスナー追加など、高度な用途では基盤モデルへ直接アクセスできます。
 
 ```python
 # Add a custom listener to the model
 session.model.add_listener(my_custom_listener)
 ```
 
-これにより、低レベルで接続を制御したい高度なユースケース向けに [`RealtimeModel`](agents.realtime.model.RealtimeModel) インターフェースへ直接アクセスできます。
+これにより、[`RealtimeModel`][agents.realtime.model.RealtimeModel] インターフェースを直接操作できます。
 
-## コード例
+## 例
 
-完全な動作例は、[examples/realtime ディレクトリ](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) をご覧ください。UI あり・なしのデモを含みます。
+動作する完全なサンプルは、[examples/realtime ディレクトリ](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) をご覧ください。 UI あり／なしのデモが含まれています。
