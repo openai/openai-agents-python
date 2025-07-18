@@ -493,9 +493,9 @@ class ChatCmplStreamHandler:
         final_response.output = outputs
         final_response.usage = (
             ResponseUsage(
-                input_tokens=usage.prompt_tokens,
-                output_tokens=usage.completion_tokens,
-                total_tokens=usage.total_tokens,
+                input_tokens=usage.prompt_tokens or 0,
+                output_tokens=usage.completion_tokens or 0,
+                total_tokens=usage.total_tokens or 0,
                 output_tokens_details=OutputTokensDetails(
                     reasoning_tokens=usage.completion_tokens_details.reasoning_tokens
                     if usage.completion_tokens_details
