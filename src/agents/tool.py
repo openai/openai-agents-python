@@ -92,6 +92,9 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    stream_inner_events: bool = False
+    """Whether to stream inner events when used as an agent tool."""
+
 
 @dataclass
 class FileSearchTool:
