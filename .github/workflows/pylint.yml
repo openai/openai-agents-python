@@ -1,0 +1,5 @@
+steps:
+  - name: Install dependencies
+    run: |
+      pip install -r requirements.txt
+      pip install pyotp python-dotenv SmartApi
