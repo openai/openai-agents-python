@@ -58,6 +58,7 @@ from .stream_events import (
     StreamEvent,
 )
 from .tool import (
+    Action,
     CodeInterpreterTool,
     ComputerTool,
     FileSearchTool,
@@ -239,6 +240,7 @@ __all__ = [
     "MCPToolApprovalRequest",
     "MCPToolApprovalFunctionResult",
     "function_tool",
+    "Action",
     "Usage",
     "add_trace_processor",
     "agent_span",
