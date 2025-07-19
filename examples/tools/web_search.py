@@ -1,7 +1,7 @@
 import asyncio
 
 from agents import Agent, Runner, WebSearchTool, trace
-from agents.tool import UserLocation
+from agents.tool import UserLocation  # type: ignore[attr-defined]
 
 
 async def main():
@@ -27,7 +27,6 @@ async def main():
         )
         print(result.final_output)
         # Now this _will_ be localized to New York!
-
 
 if __name__ == "__main__":
     asyncio.run(main())
