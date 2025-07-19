@@ -192,6 +192,7 @@ def function_schema(
     description_override: str | None = None,
     use_docstring_info: bool = True,
     strict_json_schema: bool = True,
+    enforce_type_annotations: bool = False,
 ) -> FuncSchema:
     """
     Given a python function, extracts a `FuncSchema` from it, capturing the name, description,
@@ -210,6 +211,8 @@ def function_schema(
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
             recommend setting this to True, as it increases the likelihood of the LLM providing
             correct JSON input.
+        enforce_type_annotations: If True, raises a ValueError for any unannotated parameters.
+            If False (default), unannotated parameters are assumed to be of type `Any`.
 
     Returns:
         A `FuncSchema` object containing the function's name, description, parameter descriptions,
@@ -267,9 +270,14 @@ def function_schema(
         ann = type_hints.get(name, param.annotation)
         default = param.default
 
-        # If there's no type hint, assume `Any`
+        # Raise an error for unannotated parameters if enforcement is on
         if ann == inspect._empty:
-            ann = Any
+            if enforce_type_annotations:
+                raise ValueError(
+                    f"Parameter '{name}' must be type-annotated. Example: def func({name}: str)"
+                )
+            else:
+                ann = Any  # Fallback only if enforcement is off
 
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
