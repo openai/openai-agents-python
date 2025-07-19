@@ -1,13 +1,23 @@
 import asyncio
 
 from agents import Agent, Runner, WebSearchTool, trace
+from agents.tool import UserLocation  # type: ignore[attr-defined]
 
 
 async def main():
     agent = Agent(
         name="Web searcher",
         instructions="You are a helpful agent.",
-        tools=[WebSearchTool(user_location={"type": "approximate", "city": "New York"})],
+        tools=[
+            WebSearchTool(
+                user_location=UserLocation(
+                    type="approximate",
+                    city="New York"
+                ),
+                # Feel free to adjust how much context the tool retrieves:
+                # search_context_size="medium",
+            )
+        ],
     )
 
     with trace("Web search example"):
@@ -16,8 +26,7 @@ async def main():
             "search the web for 'local sports news' and give me 1 interesting update in a sentence.",
         )
         print(result.final_output)
-        # The New York Giants are reportedly pursuing quarterback Aaron Rodgers after his ...
-
+        # Now this _will_ be localized to New York!
 
 if __name__ == "__main__":
     asyncio.run(main())
