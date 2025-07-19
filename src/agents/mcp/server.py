@@ -279,7 +279,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # Add server name prefix to each tool's name to ensure global uniqueness
             for tool in tools:
                 # Store original name for actual tool calls (cast to Any so mypy won't complain)
-                setattr(cast(Any, tool), "original_name", tool.name)
+                tool.original_name = tool.name  # type: ignore[attr-defined]
                 # Prefix tool name with server name using underscore separator
                 tool.name = f"{self.name}_{tool.name}"
             self._tools_list = tools
@@ -296,8 +296,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Invoke a tool on the server.
 
         Args:
-            tool_name: The name of the tool to call. This can be either the prefixed name (server_name_tool_name)
-                    or the original tool name.
+            tool_name: The name of the tool to call. Can be either the prefixed name
+                       (server_name_tool_name) or the original tool name.
             arguments: The arguments to pass to the tool.
         """
         if not self.session:
