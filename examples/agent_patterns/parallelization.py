@@ -39,9 +39,9 @@ async def main():
         )
 
         outputs = [
-            ItemHelpers.text_message_outputs(res_1.new_items),
-            ItemHelpers.text_message_outputs(res_2.new_items),
-            ItemHelpers.text_message_outputs(res_3.new_items),
+            " ".join(ItemHelpers.text_message_outputs(res_1.new_items)),
+            " ".join(ItemHelpers.text_message_outputs(res_2.new_items)),
+            " ".join(ItemHelpers.text_message_outputs(res_3.new_items)),
         ]
 
         translations = "\n\n".join(outputs)
