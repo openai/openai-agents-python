@@ -275,8 +275,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # Reset the cache dirty to False
             self._cache_dirty = False
             # Fetch the tools from the server
-            self._tools_list = (await self.session.list_tools()).tools
-            tools = self._tools_list
+            tools = (await self.session.list_tools()).tools
+            # Add server name prefix to each tool's name to ensure global uniqueness
+            for tool in tools:
+                # Store original name for actual tool calls (cast to Any so mypy won't complain)
+                setattr(cast(Any, tool), "original_name", tool.name)
+                # Prefix tool name with server name using underscore separator
+                tool.name = f"{self.name}_{tool.name}"
+            self._tools_list = tools
 
         # Filter tools based on tool_filter
         filtered_tools = tools
@@ -287,11 +293,23 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         return filtered_tools
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
-        """Invoke a tool on the server."""
+        """Invoke a tool on the server.
+
+        Args:
+            tool_name: The name of the tool to call. This can be either the prefixed name (server_name_tool_name)
+                    or the original tool name.
+            arguments: The arguments to pass to the tool.
+        """
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
-        return await self.session.call_tool(tool_name, arguments)
+        # If the tool name is prefixed with server name, strip it
+        if "_" in tool_name and tool_name.startswith(f"{self.name}_"):
+            original_tool_name = tool_name.split("_", 1)[1]
+        else:
+            original_tool_name = tool_name
+
+        return await self.session.call_tool(original_tool_name, arguments)
 
     async def list_prompts(
         self,
