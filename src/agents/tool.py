@@ -24,6 +24,7 @@ from .function_schema import DocstringStyle, function_schema
 from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tracing import SpanError
 from .util import _error_tracing
@@ -91,6 +92,10 @@ class FunctionTool:
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
+
+    def __post_init__(self):
+        if self.strict_json_schema:
+            self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
 
 @dataclass
@@ -200,7 +205,7 @@ MCPToolApprovalFunction = Callable[
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
-    call tools, without requiring a a round trip back to your code.
+    call tools, without requiring a round trip back to your code.
     If you want to run MCP servers locally via stdio, in a VPC or other non-publicly-accessible
     environment, or you just prefer to run tool calls locally, then you can instead use the servers
     in `agents.mcp` and pass `Agent(mcp_servers=[...])` to the agent."""

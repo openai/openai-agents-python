@@ -17,7 +17,7 @@ async def get_instructions_from_prompt(mcp_server: MCPServer, prompt_name: str, 
     try:
         prompt_result = await mcp_server.get_prompt(prompt_name, kwargs)
         content = prompt_result.messages[0].content
-        if hasattr(content, 'text'):
+        if hasattr(content, "text"):
             instructions = content.text
         else:
             instructions = str(content)

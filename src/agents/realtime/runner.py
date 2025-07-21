@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-
-from ..run_context import RunContextWrapper, TContext
+from ..run_context import TContext
 from .agent import RealtimeAgent
 from .config import (
     RealtimeRunConfig,
-    RealtimeSessionModelSettings,
 )
 from .model import (
     RealtimeModel,
@@ -67,16 +64,6 @@ class RealtimeRunner:
                     print(event)
             ```
         """
-        model_settings = await self._get_model_settings(
-            agent=self._starting_agent,
-            disable_tracing=self._config.get("tracing_disabled", False) if self._config else False,
-            initial_settings=model_config.get("initial_model_settings") if model_config else None,
-            overrides=self._config.get("model_settings") if self._config else None,
-        )
-
-        model_config = model_config.copy() if model_config else {}
-        model_config["initial_model_settings"] = model_settings
-
         # Create and return the connection
         session = RealtimeSession(
             model=self._model,
@@ -87,32 +74,3 @@ class RealtimeRunner:
         )
 
         return session
-
-    async def _get_model_settings(
-        self,
-        agent: RealtimeAgent,
-        disable_tracing: bool,
-        context: TContext | None = None,
-        initial_settings: RealtimeSessionModelSettings | None = None,
-        overrides: RealtimeSessionModelSettings | None = None,
-    ) -> RealtimeSessionModelSettings:
-        context_wrapper = RunContextWrapper(context)
-        model_settings = initial_settings.copy() if initial_settings else {}
-
-        instructions, tools = await asyncio.gather(
-            agent.get_system_prompt(context_wrapper),
-            agent.get_all_tools(context_wrapper),
-        )
-
-        if instructions is not None:
-            model_settings["instructions"] = instructions
-        if tools is not None:
-            model_settings["tools"] = tools
-
-        if overrides:
-            model_settings.update(overrides)
-
-        if disable_tracing:
-            model_settings["tracing"] = None
-
-        return model_settings

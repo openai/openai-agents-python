@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import fields, replace
 from typing import Annotated, Any, Literal, Union
 
 from openai import Omit as _Omit
@@ -10,6 +10,7 @@ from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypeAlias
 
@@ -42,14 +43,17 @@ class _OmitTypeAnnotation:
             serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
         )
 
+
 @dataclass
 class MCPToolChoice:
     server_label: str
     name: str
 
+
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
 ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
+
 
 @dataclass
 class ModelSettings:
