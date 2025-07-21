@@ -161,6 +161,7 @@ class MCPUtil:
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
         )
+
     @classmethod
     async def invoke_mcp_tool(
         cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
@@ -178,12 +179,15 @@ class MCPUtil:
             ) from e
 
         # Use original tool name for server call (strip server prefix if present)
-        original_name = getattr(tool, 'original_name', tool.name)
+        original_name = getattr(tool, "original_name", tool.name)
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"Invoking MCP tool {tool.name} (original: {original_name})")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} (original: {original_name}) with input {input_json}")
+            logger.debug(
+                f"Invoking MCP tool {tool.name} (original: {original_name}) "
+                f"with input {input_json}"
+            )
 
         try:
             result = await server.call_tool(original_name, json_data)

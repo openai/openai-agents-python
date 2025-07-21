@@ -209,6 +209,26 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         return filtered_tools
 
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+        """Invoke a tool on the server.
+
+        Args:
+            tool_name: The name of the tool to call. This can be either the prefixed name
+                    (server_name_tool_name) or the original tool name.
+            arguments: The arguments to pass to the tool.
+        """
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        # If the tool name is prefixed with server name, strip it
+        if tool_name.startswith(f"{self.name}_"):
+            # Remove the server name prefix and the underscore
+            original_tool_name = tool_name[len(self.name) + 1:]
+        else:
+            original_tool_name = tool_name
+
+        return await self.session.call_tool(original_tool_name, arguments)
+
     @abc.abstractmethod
     def create_streams(
         self,
@@ -279,7 +299,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             # Add server name prefix to each tool's name to ensure global uniqueness
             for tool in tools:
                 # Store original name for actual tool calls
-                tool.original_name = tool.name
+                tool.original_name = tool.name  # type: ignore[attr-defined]
                 # Prefix tool name with server name using underscore separator
                 tool.name = f"{self.name}_{tool.name}"
             self._tools_list = tools
@@ -291,25 +311,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 raise UserError("run_context and agent are required for dynamic tool filtering")
             filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
         return filtered_tools
-
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
-        """Invoke a tool on the server.
-        
-        Args:
-            tool_name: The name of the tool to call. This can be either the prefixed name (server_name_tool_name)
-                    or the original tool name.
-            arguments: The arguments to pass to the tool.
-        """
-        if not self.session:
-            raise UserError("Server not initialized. Make sure you call `connect()` first.")
-
-        # If the tool name is prefixed with server name, strip it
-        if "_" in tool_name and tool_name.startswith(f"{self.name}_"):
-            original_tool_name = tool_name.split("_", 1)[1]
-        else:
-            original_tool_name = tool_name
-
-        return await self.session.call_tool(original_tool_name, arguments)
 
     async def list_prompts(
         self,
