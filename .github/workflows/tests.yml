@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - bigproman
   pull_request:
     # All PRs, including stacked PRs
 
