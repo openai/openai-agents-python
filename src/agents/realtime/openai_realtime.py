@@ -138,6 +138,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._ongoing_response: bool = False
         self._current_audio_content_index: int | None = None
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
+        self._created_session: OpenAISessionObject | None = None
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -298,10 +299,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if not self._current_item_id or not self._audio_start_time:
             return
 
-        await self._cancel_response()
+        automatic_response_cancellation_enabled = (
+            self._created_session
+            and self._created_session.turn_detection
+            and self._created_session.turn_detection.interrupt_response
+        )
+
+        if not automatic_response_cancellation_enabled:
+            await self._cancel_response()
 
         elapsed_time_ms = (datetime.now() - self._audio_start_time).total_seconds() * 1000
-        if elapsed_time_ms > 0 and elapsed_time_ms < self._audio_length_ms:
+
+        if elapsed_time_ms > 0 and elapsed_time_ms <= self._audio_length_ms:
             await self._emit_event(RealtimeModelAudioInterruptedEvent())
             converted = _ConversionHelper.convert_interrupt(
                 self._current_item_id,
@@ -335,8 +344,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         )
 
     def _calculate_audio_length_ms(self, audio_bytes: bytes) -> float:
-        """Calculate audio length in milliseconds for 24KHz PCM16LE format."""
-        return len(audio_bytes) / 24 / 2
+        audio_format = "pcm16"
+        if self._created_session and self._created_session.output_audio_format:
+            audio_format = self._created_session.output_audio_format
+
+        if audio_format.startswith("g711"):
+            # 8kHz * 1 byte per sample
+            return (len(audio_bytes) / 8000) * 1000  # Convert seconds to milliseconds
+        else:
+            # 24kHz * 2 bytes per sample
+            return (len(audio_bytes) / (24000 * 2)) * 1000  # Convert seconds to milliseconds
 
     async def _handle_output_item(self, item: ConversationItem) -> None:
         """Handle response output item events (function calls and messages)."""
@@ -439,6 +456,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._ongoing_response = False
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
+            self._created_session = parsed.session
             await self._send_tracing_config(self._tracing_config)
         elif parsed.type == "error":
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))

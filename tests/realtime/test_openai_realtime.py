@@ -344,17 +344,30 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         for event in audio_deltas:
             await model._handle_ws_event(event)
 
-        # Should accumulate audio length: 8 bytes / 24 / 2 = ~0.167ms per byte
-        # Total: 8 bytes / 24 / 2 = 0.167ms
-        expected_length = 8 / 24 / 2
+        # Should accumulate audio length: 8 bytes / (24000 * 2) * 1000 = ~0.167ms total
+        expected_length = (8 / (24000 * 2)) * 1000
         assert abs(model._audio_length_ms - expected_length) < 0.001
 
     def test_calculate_audio_length_ms_pure_function(self, model):
         """Test the pure audio length calculation function."""
-        # Test various audio buffer sizes
-        assert model._calculate_audio_length_ms(b"test") == 4 / 24 / 2  # 4 bytes
+        # Test various audio buffer sizes for PCM16 (default)
+        assert model._calculate_audio_length_ms(b"test") == (4 / (24000 * 2)) * 1000  # 4 bytes
         assert model._calculate_audio_length_ms(b"") == 0  # empty
-        assert model._calculate_audio_length_ms(b"a" * 48) == 1.0  # exactly 1ms worth
+        assert model._calculate_audio_length_ms(b"a" * 48000) == 1000.0  # exactly 1 second worth
+
+    def test_calculate_audio_length_ms_g711_format(self, model):
+        """Test audio length calculation for G.711 format."""
+        from unittest.mock import Mock
+
+        # Mock session with g711 format
+        mock_session = Mock()
+        mock_session.output_audio_format = "g711_ulaw"
+        model._created_session = mock_session
+
+        # Test G.711: 8kHz * 1 byte per sample
+        assert model._calculate_audio_length_ms(b"test") == (4 / 8000) * 1000  # 4 bytes = 0.5ms
+        assert model._calculate_audio_length_ms(b"") == 0  # empty
+        assert model._calculate_audio_length_ms(b"a" * 8000) == 1000.0  # exactly 1 second worth
 
     @pytest.mark.asyncio
     async def test_handle_audio_delta_state_management(self, model):
@@ -376,4 +389,4 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             assert model._current_audio_content_index == 5
             assert model._current_item_id == "test_item"
             assert model._audio_start_time == mock_now
-            assert model._audio_length_ms == 4 / 24 / 2  # 4 bytes
+            assert model._audio_length_ms == (4 / (24000 * 2)) * 1000  # 4 bytes, converted to ms
