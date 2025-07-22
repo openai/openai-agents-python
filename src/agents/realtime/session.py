@@ -107,6 +107,11 @@ class RealtimeSession(RealtimeModelListener):
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
 
+    @property
+    def model(self) -> RealtimeModel:
+        """Access the underlying model for adding listeners or other direct interaction."""
+        return self._model
+
     async def __aenter__(self) -> RealtimeSession:
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
@@ -114,8 +119,14 @@ class RealtimeSession(RealtimeModelListener):
         # Add ourselves as a listener
         self._model.add_listener(self)
 
+        model_config = self._model_config.copy()
+        model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
+            starting_settings=self._model_config.get("initial_model_settings", None),
+            agent=self._current_agent,
+        )
+
         # Connect to the model
-        await self._model.connect(self._model_config)
+        await self._model.connect(model_config)
 
         # Emit initial history update
         await self._put_event(
@@ -319,7 +330,10 @@ class RealtimeSession(RealtimeModelListener):
             self._current_agent = result
 
             # Get updated model settings from new agent
-            updated_settings = await self._get__updated_model_settings(self._current_agent)
+            updated_settings = await self._get_updated_model_settings_from_agent(
+                starting_settings=None,
+                agent=self._current_agent,
+            )
 
             # Send handoff event
             await self._put_event(
@@ -495,18 +509,30 @@ class RealtimeSession(RealtimeModelListener):
         # Mark as closed
         self._closed = True
 
-    async def _get__updated_model_settings(
-        self, new_agent: RealtimeAgent
+    async def _get_updated_model_settings_from_agent(
+        self,
+        starting_settings: RealtimeSessionModelSettings | None,
+        agent: RealtimeAgent,
     ) -> RealtimeSessionModelSettings:
-        updated_settings: RealtimeSessionModelSettings = {}
+        # Start with run config model settings as base
+        run_config_settings = self._run_config.get("model_settings", {})
+        updated_settings: RealtimeSessionModelSettings = run_config_settings.copy()
+        # Apply starting settings (from model config) next
+        if starting_settings:
+            updated_settings.update(starting_settings)
+
         instructions, tools, handoffs = await asyncio.gather(
-            new_agent.get_system_prompt(self._context_wrapper),
-            new_agent.get_all_tools(self._context_wrapper),
-            self._get_handoffs(new_agent, self._context_wrapper),
+            agent.get_system_prompt(self._context_wrapper),
+            agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(agent, self._context_wrapper),
         )
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
+
+        disable_tracing = self._run_config.get("tracing_disabled", False)
+        if disable_tracing:
+            updated_settings["tracing"] = None
 
         return updated_settings
 

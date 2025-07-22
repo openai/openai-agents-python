@@ -4,7 +4,14 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, PromptMessage, TextContent
+from mcp.types import (
+    CallToolResult,
+    Content,
+    GetPromptResult,
+    ListPromptsResult,
+    PromptMessage,
+    TextContent,
+)
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -67,6 +74,7 @@ class FakeMCPServer(MCPServer):
         self.tool_results: list[str] = []
         self.tool_filter = tool_filter
         self._server_name = server_name
+        self._custom_content: list[Content] | None = None
 
     def add_tool(self, name: str, input_schema: dict[str, Any]):
         self.tools.append(MCPTool(name=name, inputSchema=input_schema))
@@ -91,6 +99,11 @@ class FakeMCPServer(MCPServer):
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         self.tool_calls.append(tool_name)
         self.tool_results.append(f"result_{tool_name}_{json.dumps(arguments)}")
+
+        # Allow testing custom content scenarios
+        if self._custom_content is not None:
+            return CallToolResult(content=self._custom_content)
+
         return CallToolResult(
             content=[TextContent(text=self.tool_results[-1], type="text")],
         )

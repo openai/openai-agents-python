@@ -4,42 +4,45 @@ search:
 ---
 # コード例
 
-リポジトリの [examples セクション](https://github.com/openai/openai-agents-python/tree/main/examples) には、 SDK のさまざまなサンプル実装が用意されています。これらの例は、異なるパターンや機能を示す複数のカテゴリーに整理されています。
+[リポジトリ](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションには、 SDK のさまざまなサンプル実装が用意されています。これらのコード例は、異なるパターンや機能を示す複数のカテゴリーに整理されています。
 
 
 ## カテゴリー
 
 - **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**  
-  このカテゴリーの例では、一般的なエージェント設計パターンを紹介しています。
+  このカテゴリーのコード例では、一般的なエージェント設計パターンを紹介しています。例:
 
-    - 決定論的ワークフロー  
-    - ツールとしてのエージェント  
-    - エージェントの並列実行  
+    - 決定的ワークフロー
+    - エージェントをツールとして利用
+    - エージェントの並列実行
 
 - **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**  
-  SDK の基礎的な機能を示す例です。
+  ここでは、以下のような SDK の基礎的な機能を紹介しています。例:
 
-    - 動的なシステムプロンプト  
-    - ストリーミング出力  
-    - ライフサイクルイベント  
+    - 動的なシステムプロンプト
+    - ストリーミング出力
+    - ライフサイクルイベント
 
 - **[tool examples](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**  
   Web 検索やファイル検索など、 OpenAI がホストするツールの実装方法と、それらをエージェントに統合する方法を学べます。
 
 - **[model providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**  
-  OpenAI 以外のモデルを SDK で利用する方法を探ります。
+  OpenAI 以外のモデルを SDK と併用する方法を探求できます。
 
 - **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**  
-  エージェントのハンドオフを実践的に示す例です。
+  エージェントのハンドオフに関する実践的なコード例です。
 
 - **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**  
-  MCP を使ったエージェントの構築方法を学べます。
+  MCP を用いたエージェントの構築方法を学べます。
 
 - **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**  
-  より実践的なユースケースを示す、拡張された 2 つの例です。
+  実際のユースケースを想定した、より充実した 2 つのコード例
 
-    - **customer_service**: 航空会社向けカスタマーサービスシステムの例  
-    - **research_bot**: シンプルなディープリサーチクローン  
+    - **customer_service**: 航空会社向けのカスタマーサービスシステム例  
+    - **research_bot**: シンプルなディープリサーチ クローン
 
 - **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**  
-  TTS と STT モデルを用いた音声エージェントの例をご覧ください。
+  TTS と STT モデルを利用した音声エージェントのコード例です。
+
+- **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**  
+  SDK を用いてリアルタイム体験を構築する方法を示すコード例です。
