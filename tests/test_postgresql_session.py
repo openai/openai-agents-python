@@ -367,7 +367,7 @@ class TestPostgreSQLSession(unittest.IsolatedAsyncioTestCase):
         session = await PostgreSQLSession.from_connection_string(session_id, connection_string)
 
         # Verify pool was created with the connection string
-        mock_pool_class.assert_called_once_with(connection_string)
+        mock_pool_class.assert_called_once_with(connection_string, open=False)
         mock_pool.open.assert_called_once()
 
         # Verify session was created with correct parameters
@@ -395,7 +395,7 @@ class TestPostgreSQLSession(unittest.IsolatedAsyncioTestCase):
         )
 
         # Verify pool was created with the connection string
-        mock_pool_class.assert_called_once_with(connection_string)
+        mock_pool_class.assert_called_once_with(connection_string, open=False)
         mock_pool.open.assert_called_once()
 
         # Verify session was created with correct parameters
