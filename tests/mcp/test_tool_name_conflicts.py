@@ -19,12 +19,12 @@ from agents.mcp.server import MCPServer
 from agents.run_context import RunContextWrapper
 
 
-def create_test_agent(name: str = "test_agent") -> Agent:
+def create_test_agent(name: str = "test_agent") -> Agent[Any]:
     """Create a test agent for tool name conflict tests."""
     return Agent(name=name, instructions="Test agent")
 
 
-def create_test_context() -> RunContextWrapper:
+def create_test_context() -> RunContextWrapper[Any]:
     """Create a test run context for tool name conflict tests."""
     return RunContextWrapper(context=None)
 
@@ -32,7 +32,7 @@ def create_test_context() -> RunContextWrapper:
 class MockMCPServer(MCPServer):
     """Mock MCP server for testing tool name prefixing functionality."""
 
-    def __init__(self, name: str, tools: list[tuple[str, dict]]):
+    def __init__(self, name: str, tools: list[tuple[str, dict[str, Any]]]):
         super().__init__()
         self._name = name
         self._tools = [
@@ -53,7 +53,7 @@ class MockMCPServer(MCPServer):
     async def list_tools(
         self,
         run_context: Union[RunContextWrapper[Any], None] = None,
-        agent: Union["AgentBase", None] = None,
+        agent: Union["AgentBase[Any]", None] = None,
     ) -> list[MCPTool]:
         """Return tools with server name prefix to simulate the actual server behavior."""
         tools = []
@@ -63,7 +63,7 @@ class MockMCPServer(MCPServer):
                 name=tool.name, description=tool.description, inputSchema=tool.inputSchema
             )
             # Store original name
-            tool_copy.original_name = tool.name
+            setattr(tool_copy, "original_name", tool.name)
             # Add server name prefix
             tool_copy.name = f"{self.name}_{tool.name}"
             tools.append(tool_copy)
@@ -111,9 +111,9 @@ async def test_tool_name_prefixing_single_server():
     for tool in tools:
         assert hasattr(tool, 'original_name')
         if tool.name == "server1_run":
-            assert tool.original_name == "run"
+            assert getattr(tool, 'original_name', None) == "run"
         elif tool.name == "server1_echo":
-            assert tool.original_name == "echo"
+            assert getattr(tool, 'original_name', None) == "echo"
 
 
 @pytest.mark.asyncio
@@ -143,9 +143,9 @@ async def test_tool_name_prefixing_multiple_servers():
     for tool in all_tools:
         assert hasattr(tool, 'original_name')
         if tool.name == "server1_run":
-            assert tool.original_name == "run"
+            assert getattr(tool, 'original_name', None) == "run"
         elif tool.name == "server2_run":
-            assert tool.original_name == "run"
+            assert getattr(tool, 'original_name', None) == "run"
 
 
 @pytest.mark.asyncio
@@ -202,7 +202,7 @@ async def test_mcp_util_get_all_function_tools_with_resolved_conflicts():
 class LegacyMockMCPServer(MCPServer):
     """Mock MCP server that simulates legacy behavior without name prefixing."""
 
-    def __init__(self, name: str, tools: list[tuple[str, dict]]):
+    def __init__(self, name: str, tools: list[tuple[str, dict[str, Any]]]):
         super().__init__()
         self._name = name
         self._tools = [
@@ -223,7 +223,7 @@ class LegacyMockMCPServer(MCPServer):
     async def list_tools(
         self,
         run_context: Union[RunContextWrapper[Any], None] = None,
-        agent: Union["AgentBase", None] = None,
+        agent: Union["AgentBase[Any]", None] = None,
     ) -> list[MCPTool]:
         """Return tools without prefixes (simulating legacy behavior)."""
         return self._tools.copy()
@@ -276,7 +276,7 @@ async def test_tool_invocation_uses_original_name():
 
     # Verify tool has both prefixed name and original name
     assert tool.name == "server1_run"
-    assert tool.original_name == "run"
+    assert getattr(tool, 'original_name', None) == "run"
 
     # Create function tool via MCPUtil
     function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
@@ -305,7 +305,7 @@ async def test_empty_server_name():
     assert len(tools) == 1
     tool = tools[0]
     assert tool.name == "_run"  # empty prefix + "_" + tool name
-    assert tool.original_name == "run"
+    assert getattr(tool, 'original_name', None) == "run"
 
 
 @pytest.mark.asyncio
@@ -322,7 +322,7 @@ async def test_special_characters_in_server_name():
     assert len(tools) == 1
     tool = tools[0]
     assert tool.name == "server-1.test_run"
-    assert tool.original_name == "run"
+    assert getattr(tool, 'original_name', None) == "run"
 
 
 @pytest.mark.asyncio
@@ -340,4 +340,4 @@ async def test_tool_description_preserved():
     # Verify description is preserved
     assert tool.description == "Tool run"  # Based on MockMCPServer implementation
     assert tool.name == "server1_run"
-    assert tool.original_name == "run"
+    assert getattr(tool, 'original_name', None) == "run"
