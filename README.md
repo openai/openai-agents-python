@@ -198,6 +198,24 @@ result = Runner.run_sync(
     session=session
 )
 print(result.final_output)  # "Approximately 39 million"
+
+### Async Example
+
+```python
+import asyncio
+from agents import Agent, Runner
+
+agent = Agent(
+    name="Helper",
+    instructions="You are a helpful agent.",
+)
+
+async def main():
+    result = await Runner.run(agent, "Tell me a joke.")
+    print(result.final_output)
+
+asyncio.run(main())
+
 ```
 
 ### Session options
