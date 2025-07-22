@@ -3,10 +3,11 @@ from __future__ import annotations
 import dataclasses
 import inspect
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast
 
 from ..agent import AgentBase
+from ..handoffs import Handoff
 from ..lifecycle import AgentHooksBase, RunHooksBase
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
@@ -51,6 +52,14 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     Can either be a string, or a function that dynamically generates instructions for the agent. If
     you provide a function, it will be called with the context and the agent instance. It must
     return a string.
+    """
+
+    handoffs: list[RealtimeAgent[Any] | Handoff[TContext, RealtimeAgent[Any]]] = field(
+        default_factory=list
+    )
+    """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
+    and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
+    modularity.
     """
 
     hooks: RealtimeAgentHooks | None = None

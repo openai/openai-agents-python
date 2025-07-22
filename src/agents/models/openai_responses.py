@@ -343,7 +343,7 @@ class Converter:
         elif tool_choice == "mcp":
             # Note that this is still here for backwards compatibility,
             # but migrating to MCPToolChoice is recommended.
-            return { "type": "mcp" }  # type: ignore [typeddict-item]
+            return {"type": "mcp"}  # type: ignore [typeddict-item]
         else:
             return {
                 "type": "function",
@@ -370,7 +370,7 @@ class Converter:
     def convert_tools(
         cls,
         tools: list[Tool],
-        handoffs: list[Handoff[Any]],
+        handoffs: list[Handoff[Any, Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
         includes: list[ResponseIncludable] = []

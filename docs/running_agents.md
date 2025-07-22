@@ -16,7 +16,7 @@ async def main():
     print(result.final_output)
     # Code within the code,
     # Functions calling themselves,
-    # Infinite loop's dance.
+    # Infinite loop's dance
 ```
 
 Read more in the [results guide](results.md).
@@ -40,7 +40,7 @@ The runner then runs a loop:
 
 ## Streaming
 
-Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produces. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
+Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
 
 ## Run config
 
@@ -73,6 +73,7 @@ You can manually manage conversation history using the [`RunResultBase.to_input_
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
+    thread_id = "thread_123"  # Example thread ID
     with trace(workflow_name="Conversation", group_id=thread_id):
         # First turn
         result = await Runner.run(agent, "What city is the Golden Gate Bridge in?")

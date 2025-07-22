@@ -484,7 +484,7 @@ class Converter:
         )
 
     @classmethod
-    def convert_handoff_tool(cls, handoff: Handoff[Any]) -> ChatCompletionToolParam:
+    def convert_handoff_tool(cls, handoff: Handoff[Any, Any]) -> ChatCompletionToolParam:
         return {
             "type": "function",
             "function": {

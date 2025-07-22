@@ -239,10 +239,7 @@ class AppUI(App[None]):
 
                 # Call audio callback if set
                 if self.audio_callback:
-                    try:
-                        await self.audio_callback(audio_bytes)
-                    except Exception as e:
-                        self.log_message(f"Audio callback error: {e}")
+                    await self.audio_callback(audio_bytes)
 
                 # Yield control back to event loop
                 await asyncio.sleep(0)

@@ -64,9 +64,7 @@ class RealtimeModelInputAudioTranscriptionCompletedEvent:
     item_id: str
     transcript: str
 
-    type: Literal["conversation.item.input_audio_transcription.completed"] = (
-        "conversation.item.input_audio_transcription.completed"
-    )
+    type: Literal["input_audio_transcription_completed"] = "input_audio_transcription_completed"
 
 
 @dataclass
@@ -130,6 +128,16 @@ class RealtimeModelOtherEvent:
     type: Literal["other"] = "other"
 
 
+@dataclass
+class RealtimeModelExceptionEvent:
+    """Exception occurred during model operation."""
+
+    exception: Exception
+    context: str | None = None
+
+    type: Literal["exception"] = "exception"
+
+
 # TODO (rm) Add usage events
 
 
@@ -147,4 +155,5 @@ RealtimeModelEvent: TypeAlias = Union[
     RealtimeModelTurnStartedEvent,
     RealtimeModelTurnEndedEvent,
     RealtimeModelOtherEvent,
+    RealtimeModelExceptionEvent,
 ]

@@ -1,12 +1,12 @@
 from typing import cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, PropertyMock
 
 import pytest
 
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
-from agents.realtime.config import RealtimeRunConfig
+from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
 from agents.realtime.events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -29,7 +29,7 @@ from agents.realtime.items import (
     RealtimeItem,
     UserMessageItem,
 )
-from agents.realtime.model import RealtimeModel
+from agents.realtime.model import RealtimeModel, RealtimeModelConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioDoneEvent,
     RealtimeModelAudioEvent,
@@ -56,6 +56,8 @@ class MockRealtimeModel(RealtimeModel):
         self.listeners = []
         self.connect_called = False
         self.close_called = False
+        self.sent_events = []
+        # Legacy tracking for tests that haven't been updated yet
         self.sent_messages = []
         self.sent_audio = []
         self.sent_tool_outputs = []
@@ -72,19 +74,24 @@ class MockRealtimeModel(RealtimeModel):
             self.listeners.remove(listener)
 
     async def send_event(self, event):
-        pass
+        from agents.realtime.model_inputs import (
+            RealtimeModelSendAudio,
+            RealtimeModelSendInterrupt,
+            RealtimeModelSendToolOutput,
+            RealtimeModelSendUserInput,
+        )
 
-    async def send_message(self, message, other_event_data=None):
-        self.sent_messages.append(message)
+        self.sent_events.append(event)
 
-    async def send_audio(self, audio, commit=False):
-        self.sent_audio.append((audio, commit))
-
-    async def send_tool_output(self, tool_call, output, start_response=True):
-        self.sent_tool_outputs.append((tool_call, output, start_response))
-
-    async def interrupt(self):
-        self.interrupts_called += 1
+        # Update legacy tracking for compatibility
+        if isinstance(event, RealtimeModelSendUserInput):
+            self.sent_messages.append(event.user_input)
+        elif isinstance(event, RealtimeModelSendAudio):
+            self.sent_audio.append((event.audio, event.commit))
+        elif isinstance(event, RealtimeModelSendToolOutput):
+            self.sent_tool_outputs.append((event.tool_call, event.output, event.start_response))
+        elif isinstance(event, RealtimeModelSendInterrupt):
+            self.interrupts_called += 1
 
     async def close(self):
         self.close_called = True
@@ -94,6 +101,8 @@ class MockRealtimeModel(RealtimeModel):
 def mock_agent():
     agent = Mock(spec=RealtimeAgent)
     agent.get_all_tools = AsyncMock(return_value=[])
+
+    type(agent).handoffs = PropertyMock(return_value=[])
     return agent
 
 
@@ -286,7 +295,7 @@ class TestEventHandling:
         # Check that item was updated
         assert len(session._history) == 1
         updated_item = cast(AssistantMessageItem, session._history[0])
-        assert cast(AssistantText, updated_item.content[0]).text == "Updated"
+        assert updated_item.content[0].text == "Updated"  # type: ignore
 
         # Should have 2 events: raw + history updated (not added)
         assert session._event_queue.qsize() == 2
@@ -517,7 +526,7 @@ class TestHistoryManagement:
         # Item should be updated
         result_item = cast(AssistantMessageItem, new_history[0])
         assert result_item.item_id == "item_1"
-        assert cast(AssistantText, result_item.content[0]).text == "Updated"
+        assert result_item.content[0].text == "Updated"  # type: ignore
 
     def test_update_existing_item_preserves_order(self):
         """Test that updating existing item preserves its position in history"""
@@ -550,13 +559,13 @@ class TestHistoryManagement:
 
         # Middle item should be updated
         updated_result = cast(AssistantMessageItem, new_history[1])
-        assert cast(AssistantText, updated_result.content[0]).text == "Updated Second"
+        assert updated_result.content[0].text == "Updated Second"  # type: ignore
 
         # Other items should be unchanged
         item1_result = cast(AssistantMessageItem, new_history[0])
         item3_result = cast(AssistantMessageItem, new_history[2])
-        assert cast(AssistantText, item1_result.content[0]).text == "First"
-        assert cast(AssistantText, item3_result.content[0]).text == "Third"
+        assert item1_result.content[0].text == "First"  # type: ignore
+        assert item3_result.content[0].text == "Third"  # type: ignore
 
     def test_insert_new_item_after_previous_item(self):
         """Test inserting new item after specified previous_item_id"""
@@ -591,7 +600,7 @@ class TestHistoryManagement:
 
         # Content should be correct
         item2_result = cast(AssistantMessageItem, new_history[1])
-        assert cast(AssistantText, item2_result.content[0]).text == "Second"
+        assert item2_result.content[0].text == "Second"  # type: ignore
 
     def test_insert_new_item_after_nonexistent_previous_item(self):
         """Test that item with nonexistent previous_item_id gets added to end"""
@@ -694,7 +703,7 @@ class TestHistoryManagement:
         assert len(history) == 4
         assert [item.item_id for item in history] == ["A", "B", "D", "C"]
         itemB_result = cast(AssistantMessageItem, history[1])
-        assert cast(AssistantText, itemB_result.content[0]).text == "Updated B"
+        assert itemB_result.content[0].text == "Updated B"  # type: ignore
 
 
 # Test 3: Tool call execution flow (_handle_tool_call method)
@@ -787,28 +796,46 @@ class TestToolCallExecution:
         assert sent_output == "result_two"
 
     @pytest.mark.asyncio
-    async def test_handoff_tool_handling_todo(self, mock_model, mock_agent, mock_handoff):
-        """Test that handoff tools are recognized but not yet implemented"""
-        # Set up agent to return handoff tool
-        mock_agent.get_all_tools.return_value = [mock_handoff]
+    async def test_handoff_tool_handling(self, mock_model):
+        first_agent = RealtimeAgent(
+            name="first_agent",
+            instructions="first_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
+        second_agent = RealtimeAgent(
+            name="second_agent",
+            instructions="second_agent_instructions",
+            tools=[],
+            handoffs=[],
+        )
 
-        session = RealtimeSession(mock_model, mock_agent, None)
+        first_agent.handoffs = [second_agent]
+
+        session = RealtimeSession(mock_model, first_agent, None)
 
         tool_call_event = RealtimeModelToolCallEvent(
-            name="test_handoff", call_id="call_789", arguments="{}"
+            name=Handoff.default_tool_name(second_agent), call_id="call_789", arguments="{}"
         )
 
         await session._handle_tool_call(tool_call_event)
 
-        # Should not have sent any tool outputs (handoffs not implemented)
-        assert len(mock_model.sent_tool_outputs) == 0
+        # Should have sent session update and tool output
+        assert len(mock_model.sent_events) >= 2
 
-        # Should not have queued any events (handoffs not implemented)
-        assert session._event_queue.qsize() == 0
+        # Should have sent handoff event
+        assert session._event_queue.qsize() >= 1
+
+        # Verify agent was updated
+        assert session._current_agent == second_agent
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_handling_todo(self, mock_model, mock_agent, mock_function_tool):
-        """Test that unknown tools are handled gracefully (TODO: add error handling)"""
+    async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
+        """Test that unknown tools raise an error"""
+        import pytest
+
+        from agents.exceptions import ModelBehaviorError
+
         # Set up agent to return different tool than what's called
         mock_function_tool.name = "known_tool"
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -820,16 +847,12 @@ class TestToolCallExecution:
             name="unknown_tool", call_id="call_unknown", arguments="{}"
         )
 
-        await session._handle_tool_call(tool_call_event)
+        # Should raise an error for unknown tool
+        with pytest.raises(ModelBehaviorError, match="Tool unknown_tool not found"):
+            await session._handle_tool_call(tool_call_event)
 
         # Should not have called any tools
         mock_function_tool.on_invoke_tool.assert_not_called()
-
-        # Should not have sent any tool outputs
-        assert len(mock_model.sent_tool_outputs) == 0
-
-        # Should not have queued any events
-        assert session._event_queue.qsize() == 0
 
     @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
@@ -971,24 +994,33 @@ class TestToolCallExecution:
 class TestGuardrailFunctionality:
     """Test suite for output guardrail functionality in RealtimeSession"""
 
+    async def _wait_for_guardrail_tasks(self, session):
+        """Wait for all pending guardrail tasks to complete."""
+        import asyncio
+
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
     @pytest.fixture
     def triggered_guardrail(self):
         """Creates a guardrail that always triggers"""
+
         def guardrail_func(context, agent, output):
             return GuardrailFunctionOutput(
-                output_info={"reason": "test trigger"},
-                tripwire_triggered=True
+                output_info={"reason": "test trigger"}, tripwire_triggered=True
             )
+
         return OutputGuardrail(guardrail_function=guardrail_func, name="triggered_guardrail")
 
     @pytest.fixture
     def safe_guardrail(self):
         """Creates a guardrail that never triggers"""
+
         def guardrail_func(context, agent, output):
             return GuardrailFunctionOutput(
-                output_info={"reason": "safe content"},
-                tripwire_triggered=False
+                output_info={"reason": "safe content"}, tripwire_triggered=False
             )
+
         return OutputGuardrail(guardrail_function=guardrail_func, name="safe_guardrail")
 
     @pytest.mark.asyncio
@@ -998,7 +1030,7 @@ class TestGuardrailFunctionality:
         """Test that guardrails run when transcript delta reaches debounce threshold"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 10}
+            "guardrails_settings": {"debounce_text_length": 10},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
@@ -1009,6 +1041,9 @@ class TestGuardrailFunctionality:
         )
 
         await session.on_event(transcript_event)
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should have triggered guardrail and interrupted
         assert session._interrupted_by_guardrail is True
@@ -1032,20 +1067,23 @@ class TestGuardrailFunctionality:
         """Test guardrails run at 1x, 2x, 3x thresholds for same item_id"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # First delta - reaches 1x threshold (5 chars)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="12345", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="12345", response_id="resp_1")
+        )
 
         # Second delta - reaches 2x threshold (10 chars total)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="67890", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="67890", response_id="resp_1")
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should only trigger once due to interrupted_by_guardrail flag
         assert mock_model.interrupts_called == 1
@@ -1058,28 +1096,32 @@ class TestGuardrailFunctionality:
         """Test that different item_ids are tracked separately for debouncing"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [safe_guardrail],
-            "guardrails_settings": {"debounce_text_length": 10}
+            "guardrails_settings": {"debounce_text_length": 10},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # Add text to item_1 (8 chars - below threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="12345678", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="12345678", response_id="resp_1"
+            )
+        )
 
         # Add text to item_2 (8 chars - below threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_2", delta="abcdefgh", response_id="resp_2"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_2", delta="abcdefgh", response_id="resp_2"
+            )
+        )
 
         # Neither should trigger guardrails yet
         assert mock_model.interrupts_called == 0
 
         # Add more text to item_1 (total 12 chars - above threshold)
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="90ab", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="90ab", response_id="resp_1")
+        )
 
         # item_1 should have triggered guardrail run (but not interrupted since safe)
         assert session._item_guardrail_run_counts["item_1"] == 1
@@ -1095,15 +1137,20 @@ class TestGuardrailFunctionality:
         """Test that turn_ended event clears guardrail state for next turn"""
         run_config: RealtimeRunConfig = {
             "output_guardrails": [triggered_guardrail],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
         # Trigger guardrail
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="trigger", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="trigger", response_id="resp_1"
+            )
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         assert session._interrupted_by_guardrail is True
         assert len(session._item_transcripts) == 1
@@ -1117,16 +1164,13 @@ class TestGuardrailFunctionality:
         assert len(session._item_guardrail_run_counts) == 0
 
     @pytest.mark.asyncio
-    async def test_multiple_guardrails_all_triggered(
-        self, mock_model, mock_agent
-    ):
+    async def test_multiple_guardrails_all_triggered(self, mock_model, mock_agent):
         """Test that all triggered guardrails are included in the event"""
+
         def create_triggered_guardrail(name):
             def guardrail_func(context, agent, output):
-                return GuardrailFunctionOutput(
-                    output_info={"name": name},
-                    tripwire_triggered=True
-                )
+                return GuardrailFunctionOutput(output_info={"name": name}, tripwire_triggered=True)
+
             return OutputGuardrail(guardrail_function=guardrail_func, name=name)
 
         guardrail1 = create_triggered_guardrail("guardrail_1")
@@ -1134,14 +1178,19 @@ class TestGuardrailFunctionality:
 
         run_config: RealtimeRunConfig = {
             "output_guardrails": [guardrail1, guardrail2],
-            "guardrails_settings": {"debounce_text_length": 5}
+            "guardrails_settings": {"debounce_text_length": 5},
         }
 
         session = RealtimeSession(mock_model, mock_agent, None, run_config=run_config)
 
-        await session.on_event(RealtimeModelTranscriptDeltaEvent(
-            item_id="item_1", delta="trigger", response_id="resp_1"
-        ))
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="trigger", response_id="resp_1"
+            )
+        )
+
+        # Wait for async guardrail tasks to complete
+        await self._wait_for_guardrail_tasks(session)
 
         # Should have interrupted and sent message with both guardrail names
         assert mock_model.interrupts_called == 1
@@ -1157,3 +1206,283 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert len(guardrail_events[0].guardrail_results) == 2
+
+
+class TestModelSettingsIntegration:
+    """Test suite for model settings integration in RealtimeSession."""
+
+    @pytest.mark.asyncio
+    async def test_session_gets_model_settings_from_agent_during_connection(self):
+        """Test that session properly gets model settings from agent during __aenter__."""
+        # Create mock model that records the config passed to connect()
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        # Create agent with specific settings
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Test agent instructions")
+        agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "test_tool"}])
+        agent.handoffs = []
+
+        session = RealtimeSession(mock_model, agent, None)
+
+        # Connect the session
+        await session.__aenter__()
+
+        # Verify model.connect was called with settings from agent
+        mock_model.connect.assert_called_once()
+        connect_config = mock_model.connect.call_args[0][0]
+
+        initial_settings = connect_config["initial_model_settings"]
+        assert initial_settings["instructions"] == "Test agent instructions"
+        assert initial_settings["tools"] == [{"type": "function", "name": "test_tool"}]
+        assert initial_settings["handoffs"] == []
+
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_model_config_overrides_model_settings_not_agent(self):
+        """Test that initial_model_settings from model_config override model settings
+        but not agent-derived settings."""
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Agent instructions")
+        agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "agent_tool"}])
+        agent.handoffs = []
+
+        # Provide model config with settings
+        model_config: RealtimeModelConfig = {
+            "initial_model_settings": {
+                "voice": "nova",
+                "model_name": "gpt-4o-realtime",
+            }
+        }
+
+        session = RealtimeSession(mock_model, agent, None, model_config=model_config)
+
+        await session.__aenter__()
+
+        # Verify model config settings were applied
+        connect_config = mock_model.connect.call_args[0][0]
+        initial_settings = connect_config["initial_model_settings"]
+
+        # Agent-derived settings should come from agent
+        assert initial_settings["instructions"] == "Agent instructions"
+        assert initial_settings["tools"] == [{"type": "function", "name": "agent_tool"}]
+        # Model config settings should be applied
+        assert initial_settings["voice"] == "nova"
+        assert initial_settings["model_name"] == "gpt-4o-realtime"
+
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_handoffs_are_included_in_model_settings(self):
+        """Test that handoffs from agent are properly processed into model settings."""
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        # Create agent with handoffs
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Agent with handoffs")
+        agent.get_all_tools = AsyncMock(return_value=[])
+
+        # Create a mock handoff
+        handoff_agent = Mock(spec=RealtimeAgent)
+        handoff_agent.name = "handoff_target"
+
+        mock_handoff = Mock(spec=Handoff)
+        mock_handoff.tool_name = "transfer_to_specialist"
+        mock_handoff.is_enabled = True
+
+        agent.handoffs = [handoff_agent]  # Agent handoff
+
+        # Mock the _get_handoffs method since it's complex
+        with pytest.MonkeyPatch().context() as m:
+
+            async def mock_get_handoffs(cls, agent, context_wrapper):
+                return [mock_handoff]
+
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            session = RealtimeSession(mock_model, agent, None)
+
+            await session.__aenter__()
+
+            # Verify handoffs were included
+            connect_config = mock_model.connect.call_args[0][0]
+            initial_settings = connect_config["initial_model_settings"]
+
+            assert initial_settings["handoffs"] == [mock_handoff]
+
+            await session.__aexit__(None, None, None)
+
+
+# Test: Model settings precedence
+class TestModelSettingsPrecedence:
+    """Test suite for model settings precedence in RealtimeSession"""
+
+    @pytest.mark.asyncio
+    async def test_model_settings_precedence_order(self):
+        """Test that model settings follow correct precedence:
+        run_config -> agent -> model_config"""
+
+        # Create a test agent
+        agent = RealtimeAgent(name="test_agent", instructions="agent_instructions")
+        agent.handoffs = []
+
+        # Mock the agent methods to return known values
+        agent.get_system_prompt = AsyncMock(return_value="agent_system_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        # Mock model
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+
+        # Define settings at each level with different values
+        run_config_settings: RealtimeSessionModelSettings = {
+            "voice": "run_config_voice",
+            "modalities": ["text"],
+        }
+
+        model_config_initial_settings: RealtimeSessionModelSettings = {
+            "voice": "model_config_voice",  # Should override run_config
+            "tool_choice": "auto",  # New setting not in run_config
+        }
+
+        run_config: RealtimeRunConfig = {"model_settings": run_config_settings}
+
+        model_config: RealtimeModelConfig = {
+            "initial_model_settings": model_config_initial_settings
+        }
+
+        # Create session with both configs
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config=model_config,
+            run_config=run_config,
+        )
+
+        # Mock the _get_handoffs method
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            # Test the method directly
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=model_config_initial_settings, agent=agent
+            )
+
+            # Verify precedence order:
+            # 1. Agent settings should always be set (highest precedence for these)
+            assert model_settings["instructions"] == "agent_system_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # 2. model_config settings should override run_config settings
+            assert model_settings["voice"] == "model_config_voice"  # model_config wins
+
+            # 3. run_config settings should be preserved when not overridden
+            assert model_settings["modalities"] == ["text"]  # only in run_config
+
+            # 4. model_config-only settings should be present
+            assert model_settings["tool_choice"] == "auto"  # only in model_config
+
+    @pytest.mark.asyncio
+    async def test_model_settings_with_run_config_only(self):
+        """Test that run_config model_settings are used when no model_config provided"""
+
+        agent = RealtimeAgent(name="test_agent", instructions="test")
+        agent.handoffs = []
+        agent.get_system_prompt = AsyncMock(return_value="test_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        mock_model = Mock(spec=RealtimeModel)
+
+        run_config_settings: RealtimeSessionModelSettings = {
+            "voice": "run_config_only_voice",
+            "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+        }
+
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config=None,  # No model config
+            run_config={"model_settings": run_config_settings},
+        )
+
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=None,  # No initial settings
+                agent=agent,
+            )
+
+            # Agent settings should be present
+            assert model_settings["instructions"] == "test_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # All run_config settings should be preserved (no overrides)
+            assert model_settings["voice"] == "run_config_only_voice"
+            assert model_settings["modalities"] == ["text", "audio"]
+            assert model_settings["input_audio_format"] == "pcm16"
+
+    @pytest.mark.asyncio
+    async def test_model_settings_with_model_config_only(self):
+        """Test that model_config settings are used when no run_config model_settings"""
+
+        agent = RealtimeAgent(name="test_agent", instructions="test")
+        agent.handoffs = []
+        agent.get_system_prompt = AsyncMock(return_value="test_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        mock_model = Mock(spec=RealtimeModel)
+
+        model_config_settings: RealtimeSessionModelSettings = {
+            "voice": "model_config_only_voice",
+            "tool_choice": "required",
+            "output_audio_format": "g711_ulaw",
+        }
+
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config={"initial_model_settings": model_config_settings},
+            run_config={},  # No model_settings in run_config
+        )
+
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=model_config_settings, agent=agent
+            )
+
+            # Agent settings should be present
+            assert model_settings["instructions"] == "test_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # All model_config settings should be preserved
+            assert model_settings["voice"] == "model_config_only_voice"
+            assert model_settings["tool_choice"] == "required"
+            assert model_settings["output_audio_format"] == "g711_ulaw"
