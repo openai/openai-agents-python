@@ -123,3 +123,4 @@ async def main():
 -   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
 -   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agent-integration)
 -   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
+-   [LangDB AI](https://docs.langdb.ai/getting-started/working-with-agent-frameworks/working-with-openai-agents-sdk)
