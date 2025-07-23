@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Optional, cast, overload
+from typing import Any, Literal, cast, overload
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
@@ -50,7 +50,7 @@ class InternalChatCompletionMessage(ChatCompletionMessage):
     An internal subclass to carry reasoning_content without modifying the original model.
     """
 
-    reasoning_content: Optional[str] = None
+    reasoning_content: str
 
 
 class LitellmModel(Model):
