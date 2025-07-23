@@ -1,19 +1,16 @@
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from agents import Runner
 from agents.agent import Agent
 from agents.handoffs import Handoff
 from agents.tool import FunctionTool, Tool
-from examples.hackathon.example_agents import customer_service_agent
+from examples.hackathon.example_agents import triage_agent
 from examples.hackathon.types import ScoringConfig, TestCase
 
-
-from typing import Literal
 
 class _LLMScoringConfig(BaseModel):
     type: Optional[Literal["tool_name", "tool_argument", "handoff", "model_graded"]] = Field(
@@ -111,14 +108,32 @@ async def generate_test_scenarios(agent: Agent) -> list[TestCase]:
     }
 
     system_instructions = (
-        "You are an expert QA engineer for AI agents. Generate diverse, high-signal test cases for the given agent. "
-        "Each test case MUST include: name, scenario, and scoring_config. scoring_config.type MUST be one of: \n"
-        "- handoff: the very next turn of the agent should hand off to another agent. ground_truth MUST be JSON like {\\\"assistant\\\": \\\"manager\\\"} indicating the assistant/agent to transfer to.\n"
-        "- tool_name: the very next turn of the agent should call a tool. ground_truth MUST be the exact tool name.\n"
-        "- tool_argument: the very next turn of the agent should call a tool. ground_truth MUST be the serialized argument list/object passed to that tool.\n"
-        "- model_graded: the next turn should follow an instruction. criteria MUST be a grading/system prompt another LLM-as-judge can use to return a 0-1 score for adherence. ground_truth is not required here.\n"
-        "Rules: If type is model_graded, criteria is required and ground_truth omitted. For all other types, ground_truth is required and criteria omitted.\n"
-        "Return ONLY data conforming to the provided output schema (do not include the agent object)."
+        """
+        You are an expert QA engineer for AI agents. Your task is to generate an exhaustive, high-signal suite of test cases for the provided agent.
+
+        Mandatory structure:
+        - Every test case MUST include: name, scenario, scoring_config.
+        - scoring_config.type MUST be one of: handoff, tool_name, tool_argument, model_graded.
+
+        Coverage requirements:
+        1. Exhaustiveness across types: Produce test cases for ALL four types (handoff, tool_name, tool_argument, model_graded).
+        2. Tool & handoff coverage: Ensure EVERY available tool and EVERY handoff has AT LEAST one dedicated test. Add more than one where needed for full edge-case coverage (e.g., invalid args vs valid args, alternative branches, etc.).
+        3. Model-graded coverage: Carefully read the agent's instructions. Create at least one model_graded test for EVERY distinct instruction or behavioral rule you can identify (e.g., "always greet the customer first", "tell the customer how much they owe"). Use criteria to specify a grading/system prompt another LLM-as-judge can apply to yield a 0–1 adherence score.
+
+        Field rules:
+        - handoff: The very next turn of the agent should hand off to another agent. ground_truth MUST be JSON like {"assistant": "manager"} indicating who to hand off to.
+        - tool_name: The very next turn of the agent should call a tool. ground_truth MUST be the exact tool name.
+        - tool_argument: The very next turn of the agent should call a tool. ground_truth MUST be the serialized argument object/list that should be passed to that tool.
+        - model_graded: The next turn should follow an instruction. criteria MUST be a grading/system prompt for an LLM judge to score adherence from 0 to 1. ground_truth is NOT required here.
+
+        Validation constraints:
+        - If type == model_graded => criteria is required, ground_truth omitted.
+        - Otherwise => ground_truth is required, criteria omitted.
+
+        Output policy:
+        - Return ONLY data conforming to the provided output schema. Do NOT include the agent object reference; the caller will attach it.
+        - Use concise, unambiguous names and scenarios. Scenarios should be concrete, step-by-step (Given/When/Then or numbered turns) describing exactly what should happen up to the next agent turn.
+        """
     )
 
     generator_agent = Agent(
@@ -132,6 +147,8 @@ async def generate_test_scenarios(agent: Agent) -> list[TestCase]:
     llm_resp: GeneratedTestScenarioResponse = run_result.final_output  # type: ignore[assignment]
     llm_cases = llm_resp.test_cases
 
+    print(llm_cases)
+
     out: list[TestCase] = []
     for tc in llm_cases:
         sc = ScoringConfig(
@@ -141,8 +158,7 @@ async def generate_test_scenarios(agent: Agent) -> list[TestCase]:
         )
         out.append(TestCase(name=tc.name, scenario=tc.scenario, scoring_config=sc, agent_to_test=agent))
 
-    print(out)
     return out
 
 if __name__ == "__main__":
-    asyncio.run(generate_test_scenarios(customer_service_agent))
+    asyncio.run(generate_test_scenarios(triage_agent))
