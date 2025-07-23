@@ -6,7 +6,7 @@ import pytest
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
-from agents.realtime.config import RealtimeRunConfig
+from agents.realtime.config import RealtimeRunConfig, RealtimeSessionModelSettings
 from agents.realtime.events import (
     RealtimeAgentEndEvent,
     RealtimeAgentStartEvent,
@@ -29,7 +29,7 @@ from agents.realtime.items import (
     RealtimeItem,
     UserMessageItem,
 )
-from agents.realtime.model import RealtimeModel
+from agents.realtime.model import RealtimeModel, RealtimeModelConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioDoneEvent,
     RealtimeModelAudioEvent,
@@ -1206,3 +1206,283 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert len(guardrail_events[0].guardrail_results) == 2
+
+
+class TestModelSettingsIntegration:
+    """Test suite for model settings integration in RealtimeSession."""
+
+    @pytest.mark.asyncio
+    async def test_session_gets_model_settings_from_agent_during_connection(self):
+        """Test that session properly gets model settings from agent during __aenter__."""
+        # Create mock model that records the config passed to connect()
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        # Create agent with specific settings
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Test agent instructions")
+        agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "test_tool"}])
+        agent.handoffs = []
+
+        session = RealtimeSession(mock_model, agent, None)
+
+        # Connect the session
+        await session.__aenter__()
+
+        # Verify model.connect was called with settings from agent
+        mock_model.connect.assert_called_once()
+        connect_config = mock_model.connect.call_args[0][0]
+
+        initial_settings = connect_config["initial_model_settings"]
+        assert initial_settings["instructions"] == "Test agent instructions"
+        assert initial_settings["tools"] == [{"type": "function", "name": "test_tool"}]
+        assert initial_settings["handoffs"] == []
+
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_model_config_overrides_model_settings_not_agent(self):
+        """Test that initial_model_settings from model_config override model settings
+        but not agent-derived settings."""
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Agent instructions")
+        agent.get_all_tools = AsyncMock(return_value=[{"type": "function", "name": "agent_tool"}])
+        agent.handoffs = []
+
+        # Provide model config with settings
+        model_config: RealtimeModelConfig = {
+            "initial_model_settings": {
+                "voice": "nova",
+                "model_name": "gpt-4o-realtime",
+            }
+        }
+
+        session = RealtimeSession(mock_model, agent, None, model_config=model_config)
+
+        await session.__aenter__()
+
+        # Verify model config settings were applied
+        connect_config = mock_model.connect.call_args[0][0]
+        initial_settings = connect_config["initial_model_settings"]
+
+        # Agent-derived settings should come from agent
+        assert initial_settings["instructions"] == "Agent instructions"
+        assert initial_settings["tools"] == [{"type": "function", "name": "agent_tool"}]
+        # Model config settings should be applied
+        assert initial_settings["voice"] == "nova"
+        assert initial_settings["model_name"] == "gpt-4o-realtime"
+
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_handoffs_are_included_in_model_settings(self):
+        """Test that handoffs from agent are properly processed into model settings."""
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        # Create agent with handoffs
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="Agent with handoffs")
+        agent.get_all_tools = AsyncMock(return_value=[])
+
+        # Create a mock handoff
+        handoff_agent = Mock(spec=RealtimeAgent)
+        handoff_agent.name = "handoff_target"
+
+        mock_handoff = Mock(spec=Handoff)
+        mock_handoff.tool_name = "transfer_to_specialist"
+        mock_handoff.is_enabled = True
+
+        agent.handoffs = [handoff_agent]  # Agent handoff
+
+        # Mock the _get_handoffs method since it's complex
+        with pytest.MonkeyPatch().context() as m:
+
+            async def mock_get_handoffs(cls, agent, context_wrapper):
+                return [mock_handoff]
+
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            session = RealtimeSession(mock_model, agent, None)
+
+            await session.__aenter__()
+
+            # Verify handoffs were included
+            connect_config = mock_model.connect.call_args[0][0]
+            initial_settings = connect_config["initial_model_settings"]
+
+            assert initial_settings["handoffs"] == [mock_handoff]
+
+            await session.__aexit__(None, None, None)
+
+
+# Test: Model settings precedence
+class TestModelSettingsPrecedence:
+    """Test suite for model settings precedence in RealtimeSession"""
+
+    @pytest.mark.asyncio
+    async def test_model_settings_precedence_order(self):
+        """Test that model settings follow correct precedence:
+        run_config -> agent -> model_config"""
+
+        # Create a test agent
+        agent = RealtimeAgent(name="test_agent", instructions="agent_instructions")
+        agent.handoffs = []
+
+        # Mock the agent methods to return known values
+        agent.get_system_prompt = AsyncMock(return_value="agent_system_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        # Mock model
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+
+        # Define settings at each level with different values
+        run_config_settings: RealtimeSessionModelSettings = {
+            "voice": "run_config_voice",
+            "modalities": ["text"],
+        }
+
+        model_config_initial_settings: RealtimeSessionModelSettings = {
+            "voice": "model_config_voice",  # Should override run_config
+            "tool_choice": "auto",  # New setting not in run_config
+        }
+
+        run_config: RealtimeRunConfig = {"model_settings": run_config_settings}
+
+        model_config: RealtimeModelConfig = {
+            "initial_model_settings": model_config_initial_settings
+        }
+
+        # Create session with both configs
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config=model_config,
+            run_config=run_config,
+        )
+
+        # Mock the _get_handoffs method
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            # Test the method directly
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=model_config_initial_settings, agent=agent
+            )
+
+            # Verify precedence order:
+            # 1. Agent settings should always be set (highest precedence for these)
+            assert model_settings["instructions"] == "agent_system_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # 2. model_config settings should override run_config settings
+            assert model_settings["voice"] == "model_config_voice"  # model_config wins
+
+            # 3. run_config settings should be preserved when not overridden
+            assert model_settings["modalities"] == ["text"]  # only in run_config
+
+            # 4. model_config-only settings should be present
+            assert model_settings["tool_choice"] == "auto"  # only in model_config
+
+    @pytest.mark.asyncio
+    async def test_model_settings_with_run_config_only(self):
+        """Test that run_config model_settings are used when no model_config provided"""
+
+        agent = RealtimeAgent(name="test_agent", instructions="test")
+        agent.handoffs = []
+        agent.get_system_prompt = AsyncMock(return_value="test_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        mock_model = Mock(spec=RealtimeModel)
+
+        run_config_settings: RealtimeSessionModelSettings = {
+            "voice": "run_config_only_voice",
+            "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+        }
+
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config=None,  # No model config
+            run_config={"model_settings": run_config_settings},
+        )
+
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=None,  # No initial settings
+                agent=agent,
+            )
+
+            # Agent settings should be present
+            assert model_settings["instructions"] == "test_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # All run_config settings should be preserved (no overrides)
+            assert model_settings["voice"] == "run_config_only_voice"
+            assert model_settings["modalities"] == ["text", "audio"]
+            assert model_settings["input_audio_format"] == "pcm16"
+
+    @pytest.mark.asyncio
+    async def test_model_settings_with_model_config_only(self):
+        """Test that model_config settings are used when no run_config model_settings"""
+
+        agent = RealtimeAgent(name="test_agent", instructions="test")
+        agent.handoffs = []
+        agent.get_system_prompt = AsyncMock(return_value="test_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        mock_model = Mock(spec=RealtimeModel)
+
+        model_config_settings: RealtimeSessionModelSettings = {
+            "voice": "model_config_only_voice",
+            "tool_choice": "required",
+            "output_audio_format": "g711_ulaw",
+        }
+
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config={"initial_model_settings": model_config_settings},
+            run_config={},  # No model_settings in run_config
+        )
+
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr("agents.realtime.session.RealtimeSession._get_handoffs", mock_get_handoffs)
+
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=model_config_settings, agent=agent
+            )
+
+            # Agent settings should be present
+            assert model_settings["instructions"] == "test_prompt"
+            assert model_settings["tools"] == []
+            assert model_settings["handoffs"] == []
+
+            # All model_config settings should be preserved
+            assert model_settings["voice"] == "model_config_only_voice"
+            assert model_settings["tool_choice"] == "required"
+            assert model_settings["output_audio_format"] == "g711_ulaw"

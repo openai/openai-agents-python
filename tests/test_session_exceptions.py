@@ -90,6 +90,8 @@ def fake_agent():
     """Create a fake agent for testing."""
     agent = Mock()
     agent.get_all_tools = AsyncMock(return_value=[])
+    agent.get_system_prompt = AsyncMock(return_value="test instructions")
+    agent.handoffs = []
     return agent
 
 

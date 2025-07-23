@@ -4,19 +4,18 @@ search:
 ---
 # REPL ユーティリティ
 
-`run_demo_loop` を使うと、ターミナルから手軽にエージェントを試せます。
+SDK は、簡易的なインタラクティブテスト用に `run_demo_loop` を提供します。
 
 ```python
 import asyncio
 from agents import Agent, run_demo_loop
 
 async def main() -> None:
-    agent = Agent(name="Assistant", instructions="あなたは親切なアシスタントです")
+    agent = Agent(name="Assistant", instructions="You are a helpful assistant.")
     await run_demo_loop(agent)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`run_demo_loop` は入力を繰り返し受け取り、会話履歴を保持したままエージェントを実行します。既定ではストリーミング出力を表示します。
-`quit` または `exit` と入力するか `Ctrl-D` を押すと終了します。
+`run_demo_loop` はループでユーザー入力を促し、ターン間の会話履歴を保持します。デフォルトでは、生成されたモデル出力をストリーミングします。ループを終了するには `quit` または `exit` と入力するか（または `Ctrl-D` を押してください）。

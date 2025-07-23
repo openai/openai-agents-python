@@ -138,6 +138,17 @@ Send audio to the session using [`session.send_audio(audio_bytes)`][agents.realt
 
 For audio output, listen for `audio` events and play the audio data through your preferred audio library. Make sure to listen for `audio_interrupted` events to stop playback immediately and clear any queued audio when the user interrupts the agent.
 
+## Direct model access
+
+You can access the underlying model to add custom listeners or perform advanced operations:
+
+```python
+# Add a custom listener to the model
+session.model.add_listener(my_custom_listener)
+```
+
+This gives you direct access to the [`RealtimeModel`][agents.realtime.model.RealtimeModel] interface for advanced use cases where you need lower-level control over the connection.
+
 ## Examples
 
 For complete working examples, check out the [examples/realtime directory](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) which includes demos with and without UI components.
