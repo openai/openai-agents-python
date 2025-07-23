@@ -528,7 +528,7 @@ class AgentRunner:
         finally:
             # Always reset the context variable
             if context_token is not None:
-                _current_run_config.set(context_token.old_value)
+                set_current_run_config(context_token.old_value)
 
     def run_sync(
         self,
@@ -635,7 +635,7 @@ class AgentRunner:
         finally:
             # Always reset the context variable
             if context_token is not None:
-                _current_run_config.set(context_token.old_value)
+                set_current_run_config(context_token.old_value)
 
     @classmethod
     async def _run_input_guardrails_with_queue(
