@@ -4,12 +4,11 @@ search:
 ---
 # エージェントの実行
 
-エージェントは [`Runner`][agents.run.Runner] クラスを介して実行できます。選択肢は 3 つあります。
+エージェントは `Runner` クラスを介して実行できます。方法は 3 つあります。
 
-1. 非同期で実行し、[`RunResult`][agents.result.RunResult] を返す [`Runner.run()`][agents.run.Runner.run]  
-2. 同期メソッドで、内部的に `.run()` を実行する [`Runner.run_sync()`][agents.run.Runner.run_sync]  
-3. 非同期で実行し、[`RunResultStreaming`][agents.result.RunResultStreaming] を返す [`Runner.run_streamed()`][agents.run.Runner.run_streamed]  
-   LLM をストリーミング モードで呼び出し、受信したイベントを逐次配信します。
+1. `Runner.run()` : 非同期で実行し、 `RunResult` を返します。  
+2. `Runner.run_sync()` : 同期メソッドで、内部的には `.run()` を呼び出します。  
+3. `Runner.run_streamed()` : 非同期で実行し、 `RunResultStreaming` を返します。LLM をストリーミングモードで呼び出し、受信したイベントを逐次ストリームします。
 
 ```python
 from agents import Agent, Runner
@@ -24,55 +23,55 @@ async def main():
     # Infinite loop's dance
 ```
 
-詳細は [結果ガイド](results.md) をご覧ください。
+詳細は [結果ガイド](results.md) を参照してください。
 
 ## エージェントループ
 
-` Runner ` の run メソッドを使用する際は、開始エージェントと入力を渡します。入力は文字列（ユーザー メッセージと見なされます）または OpenAI Responses API の項目リストのいずれかです。
+`Runner` の run メソッドを使う際には、開始エージェントと入力を渡します。入力は文字列（ユーザー メッセージと見なされます）か、OpenAI Responses API のアイテムのリストを指定できます。
 
-Runner は次のループを実行します。
+ランナーは次のループを実行します。
 
-1. 現在のエージェントに対して LLM を呼び出し、現在の入力を渡します。  
+1. 現在のエージェントと入力を用いて LLM を呼び出します。  
 2. LLM が出力を生成します。  
     1. `final_output` が返された場合、ループを終了し結果を返します。  
-    2. ハンドオフが発生した場合、現在のエージェントと入力を更新し、ループを再実行します。  
-    3. ツール呼び出しが生成された場合、それらを実行し結果を追加してループを再実行します。  
-3. 渡された `max_turns` を超えた場合、[`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] 例外を送出します。
+    2. ハンドオフが行われた場合、現在のエージェントと入力を更新してループを再実行します。  
+    3. ツール呼び出しを含む場合は、それらを実行し結果を追加してループを再実行します。  
+3. `max_turns` を超えた場合は `MaxTurnsExceeded` 例外を送出します。
 
 !!! note
 
-    LLM の出力が「最終出力」と見なされる条件は、望ましい型のテキスト出力を生成し、かつツール呼び出しが存在しない場合です。
+    LLM の出力が「最終出力」と見なされる条件は、望ましい型のテキスト出力であり、ツール呼び出しが存在しないことです。
 
 ## ストリーミング
 
-ストリーミングを利用すると、LLM 実行中のイベントを逐次受け取れます。ストリーム完了後、[`RunResultStreaming`][agents.result.RunResultStreaming] には実行に関する完全な情報（生成されたすべての新規出力を含む）が格納されます。`.stream_events()` を呼び出してストリーミング イベントを取得できます。詳細は [ストリーミング ガイド](streaming.md) を参照してください。
+ストリーミングを有効にすると、LLM の実行中にストリーミングイベントも受け取れます。ストリーム完了後、 `RunResultStreaming` には実行に関する完全な情報（新しく生成されたすべての出力を含む）が格納されます。`.stream_events()` を呼び出してストリーミングイベントを取得できます。詳細は [ストリーミングガイド](streaming.md) を参照してください。
 
-## Run 設定
+## 実行設定
 
-` run_config ` パラメーターでエージェント実行のグローバル設定を行えます。
+`run_config` パラメーターでは、エージェント実行に対するグローバル設定を行えます。
 
-- [`model`][agents.run.RunConfig.model]: 各エージェントの `model` 設定に関わらず、使用する LLM モデルをグローバルに指定します。  
-- [`model_provider`][agents.run.RunConfig.model_provider]: モデル名を解決するプロバイダー。既定では OpenAI です。  
-- [`model_settings`][agents.run.RunConfig.model_settings]: エージェント固有の設定を上書きします。例として `temperature` や `top_p` をグローバルに設定可能です。  
-- [`input_guardrails`][agents.run.RunConfig.input_guardrails], [`output_guardrails`][agents.run.RunConfig.output_guardrails]: すべての実行に含める入力／出力ガードレールのリスト。  
-- [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]: 既に handoff にフィルターが指定されていない場合に適用されるグローバル入力フィルター。新しいエージェントへ送信する入力を編集できます。詳細は [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] のドキュメントを参照してください。  
-- [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: 実行全体の [トレーシング](tracing.md) を無効にします。  
-- [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: LLM やツール呼び出しの入出力など、機微情報をトレースに含めるかどうかを設定します。  
-- [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: 実行のトレーシング workflow 名、trace ID、trace group ID を設定します。少なくとも `workflow_name` の設定を推奨します。group ID は複数実行にまたがるトレースを関連付けるための任意フィールドです。  
-- [`trace_metadata`][agents.run.RunConfig.trace_metadata]: すべてのトレースに含めるメタデータ。  
+- `model` : 各エージェントの `model` 設定に関わらず、グローバルに使用する LLM モデルを指定します。  
+- `model_provider` : モデル名を解決するモデルプロバイダーで、デフォルトは OpenAI です。  
+- `model_settings` : エージェント固有の設定を上書きします。例として、グローバルな `temperature` や `top_p` を設定できます。  
+- `input_guardrails`, `output_guardrails` : すべての実行に適用する入力／出力ガードレールのリスト。  
+- `handoff_input_filter` : 既にフィルターが設定されていないハンドオフに対し、すべてのハンドオフに適用するグローバル入力フィルター。詳細は `Handoff.input_filter` のドキュメントを参照してください。  
+- `tracing_disabled` : 実行全体に対して トレーシング を無効化します。  
+- `trace_include_sensitive_data` : トレースに LLM やツール呼び出しの入出力など、機密の可能性があるデータを含めるかどうかを設定します。  
+- `workflow_name`, `trace_id`, `group_id` : 実行のトレーシングに使うワークフロー名、トレース ID、トレース グループ ID を設定します。少なくとも `workflow_name` を設定することを推奨します。`group_id` は複数実行にわたるトレースを関連付けるための任意フィールドです。  
+- `trace_metadata` : すべてのトレースに含めるメタデータ。  
 
 ## 会話／チャットスレッド
 
-いずれかの run メソッドを呼び出すと、1 回または複数回のエージェント実行（つまり複数回の LLM 呼び出し）が発生しますが、チャット会話における 1 つの論理ターンを表します。例:
+いずれの run メソッドを呼び出しても、1 回または複数のエージェント（＝複数の LLM 呼び出し）が実行されますが、チャット会話上は 1 つの論理的ターンとなります。例:
 
-1. ユーザー ターン: ユーザーがテキストを入力  
-2. Runner 実行: 第 1 エージェントが LLM を呼び出しツールを実行、次に第 2 エージェントへハンドオフし追加のツールを実行、最終出力を生成  
+1. ユーザーターン: ユーザーがテキストを入力  
+2. Runner 実行: 第 1 エージェントが LLM を呼び出しツールを実行し、第 2 エージェントへハンドオフ。第 2 エージェントがさらにツールを実行し、最終出力を生成。  
 
-エージェント実行後、ユーザーにどの項目を表示するか選択できます。たとえば、エージェントが生成したすべての新規項目を表示することも、最終出力のみを表示することもできます。いずれの場合でも、ユーザーがフォローアップ質問をしたら再度 run メソッドを呼び出せます。
+エージェント実行の最後に、ユーザーへ何を表示するかを選択できます。たとえばエージェントが生成したすべての新規アイテムを表示するか、最終出力のみを表示するかを選べます。いずれの場合も、ユーザーが追加入力を行ったら再び run メソッドを呼び出します。
 
-### 手動の会話管理
+### 手動での会話管理
 
-[`RunResultBase.to_input_list()`][agents.result.RunResultBase.to_input_list] メソッドを使用して次のターンの入力を取得し、会話履歴を手動で管理できます。
+[`RunResultBase.to_input_list()`] メソッドを使って次のターンの入力を取得し、会話履歴を手動で管理できます。
 
 ```python
 async def main():
@@ -92,9 +91,9 @@ async def main():
         # California
 ```
 
-### Sessions による自動会話管理
+### Session を使った自動会話管理
 
-より簡単な方法として、[Sessions](sessions.md) を使用すると `.to_input_list()` を手動で呼ばずに会話履歴を自動管理できます。
+より簡単な方法として、[Sessions](sessions.md) を利用すれば `.to_input_list()` を手動で呼び出さずに会話履歴を自動管理できます。
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -117,20 +116,20 @@ async def main():
         # California
 ```
 
-Sessions は次を自動で行います。
+Session は自動で以下を行います。
 
 - 各実行前に会話履歴を取得  
-- 各実行後に新規メッセージを保存  
-- 異なるセッション ID ごとに個別の会話を維持  
+- 各実行後に新しいメッセージを保存  
+- 異なる session ID ごとに個別の会話を維持  
 
 詳細は [Sessions のドキュメント](sessions.md) を参照してください。
 
 ## 例外
 
-SDK は特定の場合に例外を送出します。完全な一覧は [`agents.exceptions`][] にあります。概要は次のとおりです。
+特定の状況で SDK は例外を送出します。完全な一覧は `agents.exceptions` にあります。概要は以下のとおりです。
 
-- [`AgentsException`][agents.exceptions.AgentsException] : SDK で送出されるすべての例外の基底クラス  
-- [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] : 実行が run メソッドに渡した `max_turns` を超えた場合に送出  
-- [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError] : モデルが無効な出力（例: 不正な JSON や存在しないツールの使用）を生成した場合に送出  
-- [`UserError`][agents.exceptions.UserError] : SDK を使用するコードの記述者が誤った使い方をした場合に送出  
-- [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered], [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] : [ガードレール](guardrails.md) がトリップした際に送出
+- `AgentsException` : SDK が送出するすべての例外の基底クラス。  
+- `MaxTurnsExceeded` : 実行が run メソッドに渡した `max_turns` を超えた場合に送出。  
+- `ModelBehaviorError` : モデルが無効な出力（例: 不正な JSON や存在しないツールの使用）を生成した場合に送出。  
+- `UserError` : SDK 利用時の実装ミスなど、ユーザー側のエラーで送出。  
+- `InputGuardrailTripwireTriggered`, `OutputGuardrailTripwireTriggered` : ガードレール がトリップした際に送出。

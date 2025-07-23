@@ -2,54 +2,55 @@
 search:
   exclude: true
 ---
-# 結果
+# 実行結果
 
-` Runner.run ` メソッドを呼び出すと、戻り値は次のいずれかになります。
+`Runner.run` メソッドを呼び出すと、次のいずれかが返されます。
 
--   [`RunResult`][agents.result.RunResult] （ `run` または `run_sync` を呼び出した場合）
--   [`RunResultStreaming`][agents.result.RunResultStreaming] （ `run_streamed` を呼び出した場合）
+- `run` または `run_sync` を呼び出した場合は [`RunResult`][agents.result.RunResult]
+- `run_streamed` を呼び出した場合は [`RunResultStreaming`][agents.result.RunResultStreaming]
 
-どちらも [`RunResultBase`][agents.result.RunResultBase] を継承しており、ほとんどの有用な情報はここに含まれています。
+どちらも [`RunResultBase`][agents.result.RunResultBase] を継承しており、多くの有用な情報はここに格納されています。
 
 ## 最終出力
 
-[`final_output`][agents.result.RunResultBase.final_output] プロパティには、最後に実行されたエージェントの最終出力が入っています。内容は次のいずれかです。
+[`final_output`][agents.result.RunResultBase.final_output] プロパティには、最後に実行されたエージェントの最終出力が入ります。内容は次のいずれかです。
 
--   最後のエージェントに `output_type` が定義されていない場合は `str`
--   エージェントに `output_type` が定義されている場合は `last_agent.output_type` 型のオブジェクト
+- 最後のエージェントで `output_type` が定義されていない場合は `str`
+- `last_agent.output_type` が定義されている場合はその型のオブジェクト
 
 !!! note
-    `final_output` の型は `Any` です。ハンドオフが発生する可能性があるため静的に型付けできません。ハンドオフが発生した場合、どのエージェントが最後になるか分からないため、可能な出力型の集合を静的に知ることはできません。
 
-## 次のターンへの入力
+    `final_output` の型は `Any` です。ハンドオフがある可能性があるため、静的に型付けすることはできません。ハンドオフが発生すると、どのエージェントが最後になるか分からないため、可能な出力型の集合を静的に特定できないからです。
 
-[`result.to_input_list()`][agents.result.RunResultBase.to_input_list] を使うと、元の入力とエージェント実行中に生成されたアイテムを連結して入力リストを作成できます。これにより、一度のエージェント実行の出力を別の実行に渡したり、ループで実行して毎回新しいユーザー入力を追加したりするのが簡単になります。
+## 次ターン用の入力
 
-## 最後のエージェント
+[`result.to_input_list()`][agents.result.RunResultBase.to_input_list] を使用すると、最初に渡した入力にエージェント実行中に生成された項目を連結した入力リストを取得できます。これにより、一度のエージェント実行の出力を次の実行に渡したり、ループ処理でユーザーの新しい入力を都度追加したりするのが簡単になります。
 
-[`last_agent`][agents.result.RunResultBase.last_agent] プロパティには、最後に実行されたエージェントが入っています。アプリケーションによっては、ユーザーが次に入力する際にこれを再利用すると便利です。たとえば、最初にフロントラインのトリアージエージェントが言語別エージェントへハンドオフする場合、最後のエージェントを保存しておけば、ユーザーが次にメッセージを送ったときに再利用できます。
+## 最後に実行したエージェント
+
+[`last_agent`][agents.result.RunResultBase.last_agent] プロパティには、最後に実行されたエージェントが格納されます。アプリケーションによっては、次にユーザーが入力した際に役立つことが多いです。たとえば、一次対応のトリアージエージェントが言語固有のエージェントへハンドオフする場合、`last_agent` を保存しておき、次回ユーザーがメッセージを送ったときに再利用できます。
 
 ## 新規アイテム
 
-[`new_items`][agents.result.RunResultBase.new_items] プロパティには、実行中に生成された新しいアイテムが入っています。アイテムは [`RunItem`][agents.items.RunItem] でラップされており、LLM が生成した生のアイテムを保持します。
+[`new_items`][agents.result.RunResultBase.new_items] プロパティには、実行中に生成された新規アイテムが含まれます。アイテムは [`RunItem`][agents.items.RunItem] でラップされています。RunItem は LLM が生成した raw アイテムを保持します。
 
--   [`MessageOutputItem`][agents.items.MessageOutputItem] は LLM からのメッセージを示します。生のアイテムは生成されたメッセージです。
--   [`HandoffCallItem`][agents.items.HandoffCallItem] は LLM がハンドオフツールを呼び出したことを示します。生のアイテムはツールコールアイテムです。
--   [`HandoffOutputItem`][agents.items.HandoffOutputItem] はハンドオフが発生したことを示します。生のアイテムはハンドオフツールコールへのツール応答です。アイテムからソース／ターゲットエージェントにもアクセスできます。
--   [`ToolCallItem`][agents.items.ToolCallItem] は LLM がツールを呼び出したことを示します。
--   [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] はツールが実行されたことを示します。生のアイテムはツール応答です。ツール出力にもアクセスできます。
--   [`ReasoningItem`][agents.items.ReasoningItem] は LLM からの推論アイテムを示します。生のアイテムは生成された推論です。
+- [`MessageOutputItem`][agents.items.MessageOutputItem] は LLM からのメッセージを示します。raw アイテムは生成されたメッセージです。
+- [`HandoffCallItem`][agents.items.HandoffCallItem] は LLM がハンドオフツールを呼び出したことを示します。raw アイテムはツール呼び出しアイテムです。
+- [`HandoffOutputItem`][agents.items.HandoffOutputItem] はハンドオフが発生したことを示します。raw アイテムはハンドオフツールへの応答です。ソース／ターゲットエージェントにもアクセスできます。
+- [`ToolCallItem`][agents.items.ToolCallItem] は LLM がツールを呼び出したことを示します。
+- [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] はツールが呼び出されたことを示します。raw アイテムはツール応答です。ツールの出力にもアクセスできます。
+- [`ReasoningItem`][agents.items.ReasoningItem] は LLM からの推論アイテムを示します。raw アイテムは生成された推論内容です。
 
 ## その他の情報
 
 ### ガードレール結果
 
-[`input_guardrail_results`][agents.result.RunResultBase.input_guardrail_results] と [`output_guardrail_results`][agents.result.RunResultBase.output_guardrail_results] プロパティには、ガードレールの結果（存在する場合）が入っています。ガードレール結果にはログや保存に有用な情報が含まれることがあるため、こちらで参照できます。
+[`input_guardrail_results`][agents.result.RunResultBase.input_guardrail_results] と [`output_guardrail_results`][agents.result.RunResultBase.output_guardrail_results] プロパティには、ガードレールの結果が入ります（存在する場合）。ガードレール結果にはログや保存に役立つ情報が含まれることがあるため、参照できるようにしています。
 
 ### raw 応答
 
-[`raw_responses`][agents.result.RunResultBase.raw_responses] プロパティには、LLM が生成した [`ModelResponse`][agents.items.ModelResponse] が入っています。
+[`raw_responses`][agents.result.RunResultBase.raw_responses] プロパティには、LLM が生成した [`ModelResponse`][agents.items.ModelResponse] が格納されます。
 
 ### 元の入力
 
-[`input`][agents.result.RunResultBase.input] プロパティには、 `run` メソッドに渡した元の入力が入っています。通常は必要ありませんが、必要に応じて参照できます。
+[`input`][agents.result.RunResultBase.input] プロパティには、`run` メソッドに渡した元の入力が保存されています。大半のケースでは不要ですが、必要に応じて参照できます。

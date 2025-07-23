@@ -4,15 +4,15 @@ search:
 ---
 # トレーシング
 
-[エージェントがトレーシングされる方法](../tracing.md) と同様に、音声パイプラインも自動的にトレーシングされます。
+[エージェント](../tracing.md) と同様に、 voice パイプラインも自動でトレーシングされます。
 
-基本的なトレーシング情報については上記のドキュメントをご覧ください。また、パイプラインのトレーシングは [`VoicePipelineConfig`][agents.voice.pipeline_config.VoicePipelineConfig] を通じて追加設定できます。
+基本的なトレーシングの情報については上記のドキュメントを参照してください。さらに、 `VoicePipelineConfig` を使用してパイプラインのトレーシングを設定できます。
 
-トレーシングに関連する主なフィールドは次のとおりです:
+トレーシングに関する主なフィールドは次のとおりです。
 
--   [`tracing_disabled`][agents.voice.pipeline_config.VoicePipelineConfig.tracing_disabled]: トレーシングを無効にするかどうかを制御します。デフォルトではトレーシングは有効です。  
--   [`trace_include_sensitive_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_data]: トレースに音声の書き起こしなどの機微情報を含めるかどうかを制御します。これは音声パイプラインに特有で、 Workflow 内で行われる処理には影響しません。  
--   [`trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data]: トレースに音声データを含めるかどうかを制御します。  
--   [`workflow_name`][agents.voice.pipeline_config.VoicePipelineConfig.workflow_name]: トレース Workflow の名前です。  
--   [`group_id`][agents.voice.pipeline_config.VoicePipelineConfig.group_id]: 複数のトレースを関連付けるための `group_id` です。  
--   [`trace_metadata`][agents.voice.pipeline_config.VoicePipelineConfig.tracing_disabled]: トレースに含める追加のメタデータです。
+-   [`tracing_disabled`][agents.voice.pipeline_config.VoicePipelineConfig.tracing_disabled]：トレーシングを無効にするかどうかを制御します。デフォルトではトレーシングは有効です。  
+-   [`trace_include_sensitive_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_data]：音声の文字起こしなど、機微なデータをトレースに含めるかどうかを制御します。これは voice パイプライン専用であり、Workflow 内部の処理には影響しません。  
+-   [`trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data]：音声データ自体をトレースに含めるかどうかを制御します。  
+-   [`workflow_name`][agents.voice.pipeline_config.VoicePipelineConfig.workflow_name]：トレースの Workflow 名です。  
+-   [`group_id`][agents.voice.pipeline_config.VoicePipelineConfig.group_id]：複数のトレースをリンクするための `group_id` です。  
+-   [`trace_metadata`][agents.voice.pipeline_config.VoicePipelineConfig.tracing_disabled]：トレースに追加するメタデータです。
