@@ -309,7 +309,7 @@ class OpenAIChatCompletionsModel(Model):
             #   Input should be 'none', 'auto' or 'required'
             #   [type=literal_error, input_value=NOT_GIVEN, input_type=NotGiven]
             # see also: https://github.com/openai/openai-agents-python/issues/980
-            responses_tool_choice = "none"
+            responses_tool_choice = "auto"
 
         response = Response(
             id=FAKE_RESPONSES_ID,
