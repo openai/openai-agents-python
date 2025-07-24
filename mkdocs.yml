@@ -125,6 +125,7 @@ plugins:
                     - ref/realtime/session.md
                     - ref/realtime/events.md
                     - ref/realtime/config.md
+                    - ref/realtime/model.md
                 - Voice:
                     - ref/voice/pipeline.md
                     - ref/voice/workflow.md
