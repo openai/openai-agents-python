@@ -16,7 +16,7 @@ from typing import Any, cast
 from agents import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_provider import OpenAIProvider
-from agents.types import ResponseOutputRefusal, ResponseOutputText  # type: ignore
+from openai.types.responses import ResponseOutputRefusal, ResponseOutputText  # type: ignore
 
 MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "deepseek-reasoner"
 
