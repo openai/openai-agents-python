@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix_trace_class_abc_inconsistency
   pull_request:
     # All PRs, including stacked PRs
 
