@@ -157,15 +157,17 @@ class TestEventHandling:
         session = RealtimeSession(mock_model, mock_agent, None)
 
         # Test audio event
-        audio_event = RealtimeModelAudioEvent(data=b"audio_data", response_id="resp_1")
+        audio_event = RealtimeModelAudioEvent(
+            data=b"audio_data", response_id="resp_1", item_id="item_1", content_index=0
+        )
         await session.on_event(audio_event)
 
         # Test audio interrupted event
-        interrupted_event = RealtimeModelAudioInterruptedEvent()
+        interrupted_event = RealtimeModelAudioInterruptedEvent(item_id="item_1", content_index=0)
         await session.on_event(interrupted_event)
 
         # Test audio done event
-        done_event = RealtimeModelAudioDoneEvent()
+        done_event = RealtimeModelAudioDoneEvent(item_id="item_1", content_index=0)
         await session.on_event(done_event)
 
         # Should have 6 events total (2 per event: raw + transformed)
