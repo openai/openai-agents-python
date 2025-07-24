@@ -191,8 +191,8 @@ from agents import RunContextWrapper, FunctionTool
 
 
 
-def process_user_data(username: str, age: int) -> str:
-    return f"{username} is {age} years old ."
+def do_some_work(data: str) -> str:
+    return "done"
 
 
 class FunctionArgs(BaseModel):
