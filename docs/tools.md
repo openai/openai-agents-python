@@ -202,7 +202,7 @@ class FunctionArgs(BaseModel):
 
 async def run_function(ctx: RunContextWrapper[Any], args: str) -> str:
     parsed = FunctionArgs.model_validate_json(args)
-    return process_user_data(parsed.username , parsed.age)
+    do_some_work(data=f"{parsed.username} is {parsed.age} years old")
 
 
 tool = FunctionTool(
