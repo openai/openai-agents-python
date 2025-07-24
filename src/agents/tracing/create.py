@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from ..logger import logger
+from .logger import logger
 from .setup import get_trace_provider
 from .span_data import (
     AgentSpanData,
