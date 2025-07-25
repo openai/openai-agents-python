@@ -188,14 +188,10 @@ class TestRedisSession:
         mock_time.return_value = 1234567890.0
         mock_from_url.return_value = mock_redis
 
-        # Create a proper async context manager mock
-        mock_pipeline = AsyncMock()
-        mock_context_manager = AsyncMock()
-        mock_context_manager.__aenter__.return_value = mock_pipeline
-        mock_context_manager.__aexit__.return_value = None
-
-        # Make pipeline() return the context manager directly (not a coroutine)
-        mock_redis.pipeline = MagicMock(return_value=mock_context_manager)
+        # Create a mock pipeline that's returned directly (not as context manager)
+        mock_pipeline = MagicMock()
+        mock_pipeline.execute = AsyncMock()
+        mock_redis.pipeline = MagicMock(return_value=mock_pipeline)
 
         # Mock _ensure_session_exists method
         redis_session._ensure_session_exists = AsyncMock()

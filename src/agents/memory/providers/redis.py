@@ -144,6 +144,36 @@ class RedisSession:
 
         await pipeline.execute()
 
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        """Add multiple items to the session's conversation history.
+
+        Args:
+            items: List of response input items to add
+        """
+        if not items:
+            return
+
+        client = await self._get_redis_client()
+
+        # Ensure session exists first
+        await self._ensure_session_exists(client)
+
+        # Serialize all items and add them to the messages list in one rpush call
+        serialized_items = [json.dumps(item) for item in items]
+        pipeline = client.pipeline()
+        pipeline.rpush(self.messages_key, *serialized_items)
+
+        # Update session timestamp
+        current_time = time.time()
+        pipeline.hset(self.session_key, "updated_at", str(current_time))
+
+        # Set expiration on both keys if TTL is configured
+        if self.ttl:
+            pipeline.expire(self.session_key, self.ttl)
+            pipeline.expire(self.messages_key, self.ttl)
+
+        await pipeline.execute()
+
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
