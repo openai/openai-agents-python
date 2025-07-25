@@ -140,6 +140,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._ongoing_response: bool = False
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
+        self._created_session: OpenAISessionObject | None = None
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -349,7 +350,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 int(elapsed_ms),
             )
             await self._send_raw_message(converted)
-        await self._cancel_response()
+
+        automatic_response_cancellation_enabled = (
+            self._created_session
+            and self._created_session.turn_detection
+            and self._created_session.turn_detection.interrupt_response
+        )
+        if not automatic_response_cancellation_enabled:
+            await self._cancel_response()
 
         self._audio_state_tracker.on_interrupted()
         if self._playback_tracker:
@@ -483,6 +491,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
+            self._update_created_session(parsed.session)  # type: ignore
+        elif parsed.type == "session.updated":
+            self._update_created_session(parsed.session)  # type: ignore
         elif parsed.type == "error":
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
@@ -531,6 +542,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             or parsed.type == "response.output_item.done"
         ):
             await self._handle_output_item(parsed.item)
+
+    def _update_created_session(self, session: OpenAISessionObject) -> None:
+        self._created_session = session
+        if session.output_audio_format:
+            self._audio_state_tracker.set_audio_format(session.output_audio_format)
+            if self._playback_tracker:
+                self._playback_tracker.set_audio_format(session.output_audio_format)
 
     async def _update_session_config(self, model_settings: RealtimeSessionModelSettings) -> None:
         session_config = self._get_session_config(model_settings)
