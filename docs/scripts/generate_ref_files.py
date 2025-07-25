@@ -31,6 +31,7 @@ def md_target(py_path: Path) -> Path:
     rel = py_path.relative_to(SRC_ROOT).with_suffix(".md")
     return DOCS_ROOT / rel
 
+
 def pretty_title(last_segment: str) -> str:
     """
     Convert a module/file segment like 'tool_context' to 'Tool Context'.
@@ -38,6 +39,7 @@ def pretty_title(last_segment: str) -> str:
     """
     cleaned = last_segment.replace("_", " ").replace("-", " ")
     return capwords(cleaned)
+
 
 # ---- Main ------------------------------------------------------------
 
