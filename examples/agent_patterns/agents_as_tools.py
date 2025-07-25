@@ -1,6 +1,6 @@
 import asyncio
 
-from agents import Agent, ItemHelpers, Runner, trace, ToolResponseItem
+from agents import Agent, ItemHelpers, Runner, trace
 
 """
 This example shows the agents-as-tools pattern. The frontline agent receives a user message and
@@ -63,11 +63,13 @@ async def main():
         orchestrator_result = await Runner.run(orchestrator_agent, msg)
 
         for item in orchestrator_result.new_items:
-            if isinstance(item, ToolResponseItem):
-                text = ItemHelpers.text_message_output(item.content)
-                if text:
+            text = ItemHelpers.text_message_output(item)
+            if text:
+                if hasattr(item, 'tool_name') and 'translate_to_' in getattr(item, 'tool_name', ''):
                     lang = item.tool_name.replace("translate_to_", "").capitalize()
                     print(f"  - {lang}: {text}")
+                else:
+                    print(f"  - Translation step: {text}")
 
         synthesizer_result = await Runner.run(
             synthesizer_agent, orchestrator_result.to_input_list()
