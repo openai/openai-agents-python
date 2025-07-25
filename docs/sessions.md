@@ -4,10 +4,38 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
+## Installation
+
+### SQLite Sessions
+SQLite sessions are available by default with no additional dependencies required.
+
+### Redis Sessions
+Redis sessions require the Redis package, which is included as a dependency:
+
+```bash
+# Redis support is included by default
+pip install openai-agents
+
+# Or if you already have the package installed
+pip install redis[hiredis]
+```
+
+You'll also need a Redis server running. For development, you can use Docker:
+
+```bash
+# Start Redis with Docker
+docker run -d -p 6379:6379 redis:latest
+
+# Or install Redis locally (macOS)
+brew install redis
+redis-server
+```
+
 ## Quick start
 
 ```python
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner
+from agents.memory.providers.sqlite import SQLiteSession
 
 # Create agent
 agent = Agent(
@@ -60,7 +88,7 @@ This eliminates the need to manually call `.to_input_list()` and manage conversa
 Sessions supports several operations for managing conversation history:
 
 ```python
-from agents import SQLiteSession
+from agents.memory.providers.sqlite import SQLiteSession
 
 session = SQLiteSession("user_123", "conversations.db")
 
@@ -87,7 +115,8 @@ await session.clear_session()
 The `pop_item` method is particularly useful when you want to undo or modify the last item in a conversation:
 
 ```python
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner
+from agents.memory.providers.sqlite import SQLiteSession
 
 agent = Agent(name="Assistant")
 session = SQLiteSession("correction_example")
@@ -125,7 +154,7 @@ result = await Runner.run(agent, "Hello")
 ### SQLite memory
 
 ```python
-from agents import SQLiteSession
+from agents.memory.providers.sqlite import SQLiteSession
 
 # In-memory database (lost when process ends)
 session = SQLiteSession("user_123")
@@ -141,10 +170,89 @@ result = await Runner.run(
 )
 ```
 
+### Redis memory
+
+```python
+from agents.memory.providers.redis import RedisSession
+
+# Basic Redis session (localhost:6379, default database)
+session = RedisSession("user_123")
+
+# Redis session with custom configuration
+session = RedisSession(
+    session_id="user_123",
+    redis_url="redis://localhost:6379",
+    db=1,
+    session_prefix="chat_session",
+    messages_prefix="chat_messages",
+    ttl=3600  # Session expires after 1 hour
+)
+
+# Use the session
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=session
+)
+
+# Remember to close the Redis connection when done
+await session.close()
+
+# Or use async context manager for automatic cleanup
+async with RedisSession("user_123") as session:
+    result = await Runner.run(
+        agent,
+        "Hello",
+        session=session
+    )
+    # Connection automatically closed when exiting the context
+```
+
+### Redis Session Manager
+
+For production applications with multiple sessions, use the Redis Session Manager for connection pooling:
+
+```python
+from agents.memory.providers.redis import RedisSessionManager
+
+# Create a session manager with connection pooling
+manager = RedisSessionManager(
+    redis_url="redis://localhost:6379",
+    db=0,
+    default_ttl=7200,  # 2 hours default TTL
+    max_connections=10
+)
+
+# Get session instances that share the connection pool
+session1 = manager.get_session("user_123")
+session2 = manager.get_session("user_456", ttl=3600)  # Custom TTL
+
+# Use sessions normally
+result1 = await Runner.run(agent, "Hello", session=session1)
+result2 = await Runner.run(agent, "Hi there", session=session2)
+
+# List all sessions
+session_ids = await manager.list_sessions()
+print(f"Active sessions: {session_ids}")
+
+# Delete a specific session
+await manager.delete_session("user_123")
+
+# Close the manager and all connections
+await manager.close()
+
+# Or use async context manager
+async with RedisSessionManager() as manager:
+    session = manager.get_session("user_123")
+    result = await Runner.run(agent, "Hello", session=session)
+    # Connections automatically closed when exiting
+```
+
 ### Multiple sessions
 
 ```python
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner
+from agents.memory.providers.sqlite import SQLiteSession
 
 agent = Agent(name="Assistant")
 
@@ -168,7 +276,7 @@ result2 = await Runner.run(
 
 You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
 
-````python
+```python
 from agents.memory import Session
 from typing import List
 
@@ -200,12 +308,15 @@ class MyCustomSession:
         pass
 
 # Use your custom session
+from agents import Agent, Runner
+
 agent = Agent(name="Assistant")
 result = await Runner.run(
     agent,
     "Hello",
     session=MyCustomSession("my_session")
 )
+```
 
 ## Session management
 
@@ -219,9 +330,10 @@ Use meaningful session IDs that help you organize conversations:
 
 ### Memory persistence
 
--   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
--   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
--   Consider implementing custom session backends for production systems (Redis, PostgreSQL, etc.)
+- Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
+- Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
+- Use Redis (`RedisSession("session_id")`) for distributed applications and when you need features like automatic expiration
+- Consider implementing custom session backends for specialized production systems
 
 ### Session management
 
@@ -232,7 +344,14 @@ await session.clear_session()
 # Different agents can share the same session
 support_agent = Agent(name="Support")
 billing_agent = Agent(name="Billing")
+
+# SQLite session example
+from agents.memory.providers.sqlite import SQLiteSession
 session = SQLiteSession("user_123")
+
+# Redis session example
+from agents.memory.providers.redis import RedisSession
+session = RedisSession("user_123", ttl=3600)
 
 # Both agents will see the same conversation history
 result1 = await Runner.run(
@@ -253,7 +372,8 @@ Here's a complete example showing session memory in action:
 
 ```python
 import asyncio
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner
+from agents.memory.providers.sqlite import SQLiteSession
 
 
 async def main():
@@ -311,9 +431,118 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## Redis Example
+
+Here's a complete example showing Redis session memory in action:
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.memory.providers.redis import RedisSession, RedisSessionManager
+
+
+async def redis_example():
+    # Create an agent
+    agent = Agent(
+        name="Assistant",
+        instructions="Reply very concisely.",
+    )
+
+    print("=== Redis Session Example ===")
+    print("Using Redis for distributed session memory.\n")
+
+    # Example 1: Basic Redis session
+    async with RedisSession("user_456", ttl=3600) as session:
+        print("First turn with Redis:")
+        print("User: What's the capital of France?")
+        result = await Runner.run(
+            agent,
+            "What's the capital of France?",
+            session=session
+        )
+        print(f"Assistant: {result.final_output}")
+        print()
+
+        print("Second turn:")
+        print("User: What's the population?")
+        result = await Runner.run(
+            agent,
+            "What's the population?",
+            session=session
+        )
+        print(f"Assistant: {result.final_output}")
+        print()
+
+    # Example 2: Redis Session Manager for production use
+    async with RedisSessionManager(default_ttl=7200) as manager:
+        # Get multiple sessions that share connection pool
+        session1 = manager.get_session("user_123")
+        session2 = manager.get_session("user_789")
+
+        # Use sessions concurrently
+        result1 = await Runner.run(
+            agent,
+            "Hello from session 1",
+            session=session1
+        )
+        result2 = await Runner.run(
+            agent,
+            "Hello from session 2", 
+            session=session2
+        )
+
+        print("Session Manager Example:")
+        print(f"Session 1 response: {result1.final_output}")
+        print(f"Session 2 response: {result2.final_output}")
+        print()
+
+        # List all active sessions
+        session_ids = await manager.list_sessions()
+        print(f"Active sessions: {session_ids}")
+
+        # Clean up specific session
+        await manager.delete_session("user_789")
+        print("Deleted session user_789")
+
+    print("=== Redis Example Complete ===")
+
+
+if __name__ == "__main__":
+    asyncio.run(redis_example())
+```
+
+## Choosing the Right Session Backend
+
+### SQLite vs Redis
+
+| Feature | SQLite | Redis |
+|---------|--------|-------|
+| **Setup** | No additional services required | Requires Redis server |
+| **Persistence** | File-based or in-memory | In-memory with optional persistence |
+| **Distribution** | Single process only | Multi-process/multi-server |
+| **TTL/Expiration** | Manual cleanup required | Automatic expiration with TTL |
+| **Concurrency** | Good for single application | Excellent for distributed systems |
+| **Performance** | Fast for local access | Very fast, especially for concurrent access |
+| **Use Cases** | Single-server applications, development | Production systems, microservices, scaling |
+
+### When to use SQLite:
+- Single-server applications
+- Development and testing
+- When you need file-based persistence
+- Simple deployment requirements
+
+### When to use Redis:
+- Multi-server applications
+- Microservices architecture
+- When you need automatic session expiration
+- High-concurrency applications
+- Distributed systems
+
 ## API Reference
 
 For detailed API documentation, see:
 
--   [`Session`][agents.memory.Session] - Protocol interface
--   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
+- [`Session`][agents.memory.Session] - Protocol interface
+- [`SQLiteSession`][agents.memory.providers.sqlite.SQLiteSession] - SQLite implementation
+- [`RedisSession`][agents.memory.providers.redis.RedisSession] - Redis implementation
+- [`RedisSessionManager`][agents.memory.providers.redis.RedisSessionManager] - Redis connection manager
