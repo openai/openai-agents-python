@@ -183,7 +183,7 @@ class TraceImpl(Trace):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.finish(reset_current=exc_type is not GeneratorExit)
+        self.finish(reset_current=(exc_type is not GeneratorExit))
 
     def export(self) -> dict[str, Any] | None:
         return {
