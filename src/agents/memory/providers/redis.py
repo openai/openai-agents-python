@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 try:
     import redis.asyncio as redis
+
     if TYPE_CHECKING:
         from agents.items import TResponseInputItem
 except ImportError as err:
@@ -78,7 +79,7 @@ class RedisSession:
                     "session_id": self.session_id,
                     "created_at": str(current_time),
                     "updated_at": str(current_time),
-                }
+                },
             )
 
         # Set TTL if specified (always refresh TTL)

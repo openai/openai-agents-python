@@ -97,4 +97,3 @@ class SessionABC(ABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         ...
-
