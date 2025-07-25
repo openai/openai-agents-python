@@ -47,6 +47,8 @@ from .model import (
     RealtimeModel,
     RealtimeModelConfig,
     RealtimeModelListener,
+    RealtimePlaybackState,
+    RealtimePlaybackTracker,
 )
 from .model_events import (
     RealtimeConnectionStatus,
@@ -139,6 +141,8 @@ __all__ = [
     "RealtimeModel",
     "RealtimeModelConfig",
     "RealtimeModelListener",
+    "RealtimePlaybackTracker",
+    "RealtimePlaybackState",
     # Model Events
     "RealtimeConnectionStatus",
     "RealtimeModelAudioDoneEvent",
