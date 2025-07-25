@@ -40,6 +40,12 @@ class RealtimeModelAudioEvent:
     data: bytes
     response_id: str
 
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
+
     type: Literal["audio"] = "audio"
 
 
@@ -47,12 +53,24 @@ class RealtimeModelAudioEvent:
 class RealtimeModelAudioInterruptedEvent:
     """Audio interrupted."""
 
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
+
     type: Literal["audio_interrupted"] = "audio_interrupted"
 
 
 @dataclass
 class RealtimeModelAudioDoneEvent:
     """Audio done."""
+
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
 
     type: Literal["audio_done"] = "audio_done"
 
