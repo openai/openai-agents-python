@@ -133,6 +133,12 @@ robot_agent = pirate_agent.clone(
 )
 ```
 
+## Agent-to-Agent (A2A) Protocol
+
+The OpenAI Agents SDK supports the Agent-to-Agent protocol for standardized agent interoperability. This includes agent cards for describing and sharing agent capabilities across different systems.
+
+For detailed information about A2A features including agent card creation, see the [A2A documentation](a2a.md).
+
 ## Forcing tool use
 
 Supplying a list of tools doesn't always mean the LLM will use a tool. You can force tool use by setting [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice]. Valid values are:
