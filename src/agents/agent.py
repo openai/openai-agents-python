@@ -253,7 +253,7 @@ class Agent(AgentBase, Generic[TContext]):
 
         @function_tool(
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
-            description_override=tool_description or "",
+            description_override=tool_description or self.handoff_description,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
