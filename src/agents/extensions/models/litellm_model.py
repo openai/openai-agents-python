@@ -45,6 +45,14 @@ from ...tracing.spans import Span
 from ...usage import Usage
 
 
+class InternalChatCompletionMessage(ChatCompletionMessage):
+    """
+    An internal subclass to carry reasoning_content without modifying the original model.
+    """
+
+    reasoning_content: str
+
+
 class LitellmModel(Model):
     """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
     Anthropic, Gemini, Mistral, and many other models.
@@ -364,13 +372,18 @@ class LitellmConverter:
             provider_specific_fields.get("refusal", None) if provider_specific_fields else None
         )
 
-        return ChatCompletionMessage(
+        reasoning_content = ""
+        if hasattr(message, "reasoning_content") and message.reasoning_content:
+            reasoning_content = message.reasoning_content
+
+        return InternalChatCompletionMessage(
             content=message.content,
             refusal=refusal,
             role="assistant",
             annotations=cls.convert_annotations_to_openai(message),
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     @classmethod
