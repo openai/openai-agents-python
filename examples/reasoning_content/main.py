@@ -13,10 +13,11 @@ import asyncio
 import os
 from typing import Any, cast
 
+from openai.types.responses import ResponseOutputRefusal, ResponseOutputText
+
 from agents import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_provider import OpenAIProvider
-from agents.types import ResponseOutputRefusal, ResponseOutputText  # type: ignore
 
 MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "deepseek-reasoner"
 

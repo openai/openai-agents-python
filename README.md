@@ -299,6 +299,7 @@ make format-check # run style checker
 We'd like to acknowledge the excellent work of the open-source community, especially:
 
 -   [Pydantic](https://docs.pydantic.dev/latest/) (data validation) and [PydanticAI](https://ai.pydantic.dev/) (advanced agent framework)
+-   [LiteLLM](https://github.com/BerriAI/litellm) (unified interface for 100+ LLMs)
 -   [MkDocs](https://github.com/squidfunk/mkdocs-material)
 -   [Griffe](https://github.com/mkdocstrings/griffe)
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
