@@ -86,6 +86,7 @@ from .model_events import (
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
+    RealtimeModelRawServerEvent,
     RealtimeModelToolCallEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelTurnEndedEvent,
@@ -447,6 +448,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._ongoing_response = False
 
     async def _handle_ws_event(self, event: dict[str, Any]):
+        await self._emit_event(RealtimeModelRawServerEvent(data=event))
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove

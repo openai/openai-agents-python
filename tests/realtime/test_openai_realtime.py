@@ -180,9 +180,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Malformed JSON should not crash the handler
         await model._handle_ws_event("invalid json {")
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        error_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
@@ -195,9 +195,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(invalid_event)
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        error_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
@@ -241,9 +241,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(audio_event)
 
-        # Should emit audio event to listeners
-        mock_listener.on_event.assert_called_once()
-        emitted_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and audio event to listeners
+        assert mock_listener.on_event.call_count == 2
+        emitted_event = mock_listener.on_event.call_args_list[1][0][0]
         assert isinstance(emitted_event, RealtimeModelAudioEvent)
         assert emitted_event.response_id == "resp_123"
         assert emitted_event.data == b"test audio"  # decoded from base64
@@ -274,9 +274,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(error_event)
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        emitted_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        emitted_event = mock_listener.on_event.call_args_list[1][0][0]
         assert isinstance(emitted_event, RealtimeModelErrorEvent)
 
     @pytest.mark.asyncio
@@ -303,12 +303,12 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(tool_call_event)
 
-        # Should emit both item updated and tool call events
-        assert mock_listener.on_event.call_count == 2
+        # Should emit raw server event, item updated, and tool call events
+        assert mock_listener.on_event.call_count == 3
 
-        # First should be item updated, second should be tool call
+        # First should be raw server event, second should be item updated, third should be tool call
         calls = mock_listener.on_event.call_args_list
-        tool_call_emitted = calls[1][0][0]
+        tool_call_emitted = calls[2][0][0]
         assert isinstance(tool_call_emitted, RealtimeModelToolCallEvent)
         assert tool_call_emitted.name == "get_weather"
         assert tool_call_emitted.arguments == '{"location": "San Francisco"}'

@@ -274,6 +274,8 @@ class RealtimeSession(RealtimeModelListener):
             self._stored_exception = event.exception
         elif event.type == "other":
             pass
+        elif event.type == "raw_server_event":
+            pass
         else:
             assert_never(event)
 
