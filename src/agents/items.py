@@ -299,7 +299,7 @@ class ItemHelpers:
     ) -> FunctionCallOutput:
         """Creates a tool call output item from a tool call and its output."""
         return {
-            "call_id": tool_call.call_id,
+            "call_id": str(tool_call.call_id),
             "output": output,
             "type": "function_call_output",
         }
