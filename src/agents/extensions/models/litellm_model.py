@@ -313,6 +313,7 @@ class LitellmModel(Model):
             stream=stream,
             stream_options=stream_options,
             reasoning_effort=reasoning_effort,
+            top_logprobs=model_settings.top_logprobs,
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             api_key=self.api_key,
             base_url=self.base_url,
