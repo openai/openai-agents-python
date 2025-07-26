@@ -243,6 +243,7 @@ class OpenAIResponsesModel(Model):
             else NOT_GIVEN
         )
 
+        system_instructions = self._non_null_or_not_given(system_instructions)
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
@@ -256,6 +257,7 @@ class OpenAIResponsesModel(Model):
         else:
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
+                f"System instructions: {system_instructions}\n"
                 f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
                 f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
                 f"Stream: {stream}\n"
@@ -266,7 +268,7 @@ class OpenAIResponsesModel(Model):
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
-            instructions=self._non_null_or_not_given(system_instructions),
+            instructions=system_instructions,
             model=self.model,
             input=list_input,
             include=include,
