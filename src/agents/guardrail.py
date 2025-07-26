@@ -78,8 +78,9 @@ class InputGuardrail(Generic[TContext]):
     You can use the `@input_guardrail()` decorator to turn a function into an `InputGuardrail`, or
     create an `InputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, the agent
-    execution will immediately stop and an `InputGuardrailTripwireTriggered` exception will be raised
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`,
+    the agent's execution will immediately stop, and
+    an `InputGuardrailTripwireTriggered` exception will be raised
     """
 
     guardrail_function: Callable[
