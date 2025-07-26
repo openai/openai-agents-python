@@ -211,6 +211,12 @@ class Converter:
         return None
 
     @classmethod
+    def maybe_item_reasoning(cls, item: Any) -> ItemReference | None:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(ItemReference, item)
+        return None
+
+    @classmethod
     def extract_text_content(
         cls, content: str | Iterable[ResponseInputContentParam]
     ) -> str | list[ChatCompletionContentPartTextParam]:
@@ -453,13 +459,17 @@ class Converter:
                 }
                 result.append(msg)
 
-            # 6) item reference => handle or raise
+            # 6) Check reasoning content and don't append to result
+            elif cls.maybe_item_reasoning(item):
+                continue
+
+            # 7) item reference => handle or raise
             elif item_ref := cls.maybe_item_reference(item):
                 raise UserError(
                     f"Encountered an item_reference, which is not supported: {item_ref}"
                 )
 
-            # 7) If we haven't recognized it => fail or ignore
+            # 8) If we haven't recognized it => fail or ignore
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 
