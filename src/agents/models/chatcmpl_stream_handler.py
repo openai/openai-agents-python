@@ -194,6 +194,7 @@ class ChatCmplStreamHandler:
                     content_index=state.text_content_index_and_output[0],
                     delta=delta.content,
                     item_id=FAKE_RESPONSES_ID,
+                    logprobs=getattr(delta, "logprobs", []) or [],  # logprobs are not always delivered by non-OpenAI model providers
                     output_index=state.reasoning_content_index_and_output
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
