@@ -22,7 +22,7 @@ class ConsoleSpanExporter(TracingExporter):
     def export(self, items: list[Trace | Span[Any]]) -> None:
         for item in items:
             if isinstance(item, Trace):
-                print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}, ")
+                print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}")
             else:
                 print(f"[Exporter] Export span: {item.export()}")
 
@@ -121,7 +121,7 @@ class BackendSpanExporter(TracingExporter):
                     logger.debug(f"Exported {len(items)} items")
                     return
 
-                # If the response is a client error (4xx), we wont retry
+                # If the response is a client error (4xx), we won't retry
                 if 400 <= response.status_code < 500:
                     logger.error(
                         f"[non-fatal] Tracing client error {response.status_code}: {response.text}"
