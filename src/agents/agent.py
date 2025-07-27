@@ -214,7 +214,7 @@ class Agent(AgentBase, Generic[TContext]):
       calls result in a final output.
 
       NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
-      web search, etc are always processed by the LLM.
+      web search, etc. are always processed by the LLM.
     """
 
     reset_tool_choice: bool = True
