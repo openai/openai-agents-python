@@ -183,7 +183,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._shutdown_event = threading.Event()
 
         # The queue size threshold at which we export immediately.
-        self._export_trigger_size = int(max_queue_size * export_trigger_ratio)
+        self._export_trigger_size = max(1, int(max_queue_size * export_trigger_ratio))
 
         # Track when we next *must* perform a scheduled export
         self._next_export_time = time.time() + self._schedule_delay
