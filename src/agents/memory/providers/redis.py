@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from typing import TYPE_CHECKING
+from agents.memory.session import SessionABC
 
 try:
     import redis.asyncio as redis
@@ -13,7 +14,7 @@ except ImportError as err:
     raise ImportError("redis and openai-agents packages are required") from err
 
 
-class RedisSession:
+class RedisSession(SessionABC):
     """Redis-based implementation of session storage.
 
     This implementation stores conversation history in Redis using lists and hashes.
