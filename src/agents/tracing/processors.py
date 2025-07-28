@@ -269,8 +269,7 @@ class BatchTraceProcessor(TracingProcessor):
 
     def _export_batches(self, force: bool = False):
         """Drains the queue and exports in batches. If force=True, export everything.
-        Otherwise, export up to `max_batch_size` repeatedly until the queue is empty or below a
-        certain threshold.
+        Otherwise, export up to `max_batch_size` repeatedly until the queue is completely empty.
         """
         while True:
             items_to_export: list[Span[Any] | Trace] = []
