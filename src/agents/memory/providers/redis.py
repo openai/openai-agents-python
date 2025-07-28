@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from typing import TYPE_CHECKING
+
 from agents.memory.session import SessionABC
 
 try:
@@ -10,6 +11,7 @@ try:
 
     if TYPE_CHECKING:
         from agents.items import TResponseInputItem
+
 except ImportError as err:
     raise ImportError("redis and openai-agents packages are required") from err
 
