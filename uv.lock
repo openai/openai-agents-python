@@ -1463,7 +1463,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "1.96.1"
+version = "1.97.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1475,9 +1475,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/b5/18fd5e1b6b6c7dca52d60307b3637f9e9e3206a8041a9c8028985dbc6260/openai-1.96.1.tar.gz", hash = "sha256:6d505b5cc550e036bfa3fe99d6cff565b11491d12378d4c353f92ef72b0a408a", size = 489065, upload-time = "2025-07-15T21:39:37.215Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/57/1c471f6b3efb879d26686d31582997615e969f3bb4458111c9705e56332e/openai-1.97.1.tar.gz", hash = "sha256:a744b27ae624e3d4135225da9b1c89c107a2a7e5bc4c93e5b7b5214772ce7a4e", size = 494267, upload-time = "2025-07-22T13:10:12.607Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/57/325bbdbdc27b47309be35cb4e0eb8980b0c1bc997194c797c3691d88ae41/openai-1.96.1-py3-none-any.whl", hash = "sha256:0afaab2019bae8e145e7a1baf6953167084f019dd15042c65edd117398c1eb1c", size = 757454, upload-time = "2025-07-15T21:39:34.517Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/35/412a0e9c3f0d37c94ed764b8ac7adae2d834dbd20e69f6aca582118e0f55/openai-1.97.1-py3-none-any.whl", hash = "sha256:4e96bbdf672ec3d44968c9ea39d2c375891db1acc1794668d8149d5fa6000606", size = 764380, upload-time = "2025-07-22T13:10:10.689Z" },
 ]
 
 [[package]]
@@ -1541,7 +1541,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.67.4.post1,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.11.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "openai", specifier = ">=1.96.1,<2" },
+    { name = "openai", specifier = ">=1.97.1,<2" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "types-requests", specifier = ">=2.0,<3" },
