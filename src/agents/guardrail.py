@@ -128,7 +128,7 @@ class InputGuardrail(Generic[TContext]):
 @dataclass
 class OutputGuardrail(Generic[TContext]):
     """Output guardrails are checks that run on the final output of an agent.
-    They can be used to check if the output passes certain validation criteria
+    They can be used to do check if the output passes certain validation criteria
 
     You can use the `@output_guardrail()` decorator to turn a function into an `OutputGuardrail`,
     or create an `OutputGuardrail` manually.
