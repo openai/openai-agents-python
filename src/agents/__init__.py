@@ -5,7 +5,13 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from . import _config
-from .agent import Agent, AgentBase, ToolsToFinalOutputFunction, ToolsToFinalOutputResult
+from .agent import (
+    Agent,
+    AgentBase,
+    StopAtTools,
+    ToolsToFinalOutputFunction,
+    ToolsToFinalOutputResult,
+)
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .computer import AsyncComputer, Button, Computer, Environment
 from .exceptions import (
@@ -162,6 +168,7 @@ def enable_verbose_stdout_logging():
 __all__ = [
     "Agent",
     "AgentBase",
+    "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
     "Runner",
