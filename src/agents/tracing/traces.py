@@ -10,7 +10,7 @@ from .processor_interface import TracingProcessor
 from .scope import Scope
 
 
-class Trace:
+class Trace(abc.ABC):
     """
     A trace is the root level object that tracing creates. It represents a logical "workflow".
     """

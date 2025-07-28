@@ -4,51 +4,52 @@ search:
 ---
 # モデル
 
-Agents SDK には、すぐに使える 2 種類の OpenAI モデル対応が含まれています。
+ Agents SDK には、OpenAI モデルに対するサポートが 2 つの形態で最初から組み込まれています。
 
-- **推奨**: [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] — 新しい [Responses API](https://platform.openai.com/docs/api-reference/responses) を使用して OpenAI API を呼び出します。  
-- [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] — [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) を使用して OpenAI API を呼び出します。
+- **推奨**: [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] は、新しい [Responses API](https://platform.openai.com/docs/api-reference/responses) を用いて OpenAI API を呼び出します。  
+- [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] は、[Chat Completions API](https://platform.openai.com/docs/api-reference/chat) を用いて OpenAI API を呼び出します。
 
 ## 非 OpenAI モデル
 
-ほとんどの非  OpenAI  モデルは [LiteLLM インテグレーション](./litellm.md) 経由で利用できます。まず、litellm 依存グループをインストールしてください。
+ほとんどの非 OpenAI モデルは [LiteLLM 連携](./litellm.md) を通じて利用できます。まずは litellm 依存グループをインストールしてください:
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-その後、`litellm/` プレフィックスを付けて [サポートされているモデル](https://docs.litellm.ai/docs/providers) を指定します。
+次に、`litellm/` プレフィックスを付けて、[サポートされているモデル](https://docs.litellm.ai/docs/providers) を使用します:
 
 ```python
 claude_agent = Agent(model="litellm/anthropic/claude-3-5-sonnet-20240620", ...)
 gemini_agent = Agent(model="litellm/gemini/gemini-2.5-flash-preview-04-17", ...)
 ```
 
-### 非 OpenAI モデルを利用するその他の方法
+### 非 OpenAI モデルを使用するその他の方法
 
-他の LLM プロバイダーを統合する方法はさらに 3 つあります（[こちら](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/) に code examples あり）。
+他の LLM プロバイダーは、さらに 3 通りの方法で統合できます（コード例は [こちら](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/)）:
 
-1. [`set_default_openai_client`][agents.set_default_openai_client] — `AsyncOpenAI` インスタンスを LLM クライアントとしてグローバルに使用したい場合に便利です。LLM プロバイダーが OpenAI 互換 API エンドポイントを持ち、`base_url` と `api_key` を設定できるケース向けです。設定例は [examples/model_providers/custom_example_global.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py) をご覧ください。  
-2. [`ModelProvider`][agents.models.interface.ModelProvider] — `Runner.run` レベルで指定できます。「この run 内のすべての エージェント ではカスタムモデルプロバイダーを使う」といった指定が可能です。設定例は [examples/model_providers/custom_example_provider.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py) をご覧ください。  
-3. [`Agent.model`][agents.agent.Agent.model] — 特定の Agent インスタンスにモデルを指定できます。これにより、エージェントごとに異なるプロバイダーを混在させることができます。設定例は [examples/model_providers/custom_example_agent.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py) をご覧ください。ほとんどのモデルを簡単に利用するには [LiteLLM インテグレーション](./litellm.md) が便利です。
+1. [`set_default_openai_client`][agents.set_default_openai_client]  
+   `AsyncOpenAI` のインスタンスを LLM クライアントとしてグローバルに使用したい場合に便利です。LLM プロバイダーが OpenAI 互換の API エンドポイントを持つ場合に、`base_url` と `api_key` を設定して利用できます。[examples/model_providers/custom_example_global.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_global.py) に設定例があります。  
+2. [`ModelProvider`][agents.models.interface.ModelProvider]  
+   `Runner.run` レベルで使用します。「この実行内のすべてのエージェントでカスタムのモデルプロバイダーを使う」と宣言できます。[examples/model_providers/custom_example_provider.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_provider.py) に設定例があります。  
+3. [`Agent.model`][agents.agent.Agent.model]  
+   特定の `Agent` インスタンスでモデルを指定できます。これにより、エージェントごとに異なるプロバイダーを組み合わせて使用できます。[examples/model_providers/custom_example_agent.py](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/custom_example_agent.py) に設定例があります。多くのモデルを簡単に使う方法としては、[LiteLLM 連携](./litellm.md) が便利です。  
 
-`platform.openai.com` の API キーをお持ちでない場合は、`set_tracing_disabled()` でトレーシングを無効化するか、[別のトレーシング プロセッサー](../tracing.md) を設定することをおすすめします。
+`platform.openai.com` の API キーを持っていない場合は、`set_tracing_disabled()` でトレーシングを無効化するか、[別のトレーシングプロセッサー](../tracing.md) を設定することを推奨します。
 
 !!! note
-
-    これらの例では Chat Completions API/モデルを使用しています。多くの LLM プロバイダーがまだ Responses API をサポートしていないためです。もしお使いの LLM プロバイダーが Responses API をサポートしている場合は、Responses を使用することを推奨します。
+    これらの例では Chat Completions API / モデルを使用しています。ほとんどの LLM プロバイダーがまだ Responses API に対応していないためです。もし利用中の LLM プロバイダーが Responses API をサポートしている場合は、Responses を使用することを推奨します。
 
 ## モデルの組み合わせ
 
-1 つのワークフロー内で、エージェントごとに異なるモデルを使用したい場合があります。たとえば、トリアージにはより小さく高速なモデルを使い、複雑なタスクにはより大型で高性能なモデルを使うといったケースです。[`Agent`][agents.Agent] を設定するとき、以下のいずれかの方法で特定のモデルを選択できます。
+1 つのワークフロー内で、エージェントごとに異なるモデルを使いたい場合があります。たとえば、軽量で高速なモデルでトリアージを行い、より大きく高性能なモデルで複雑なタスクを処理するといった使い分けです。[`Agent`][agents.Agent] を設定する際には、以下の方法でモデルを選択できます。
 
-1. モデル名を直接渡す。  
-2. どのモデル名でも渡し、その名前を Model インスタンスにマッピングできる [`ModelProvider`][agents.models.interface.ModelProvider] を渡す。  
-3. [`Model`][agents.models.interface.Model] 実装を直接渡す。  
+1. モデル名を直接渡す  
+2. モデル名と、それを `Model` インスタンスへマッピングできる [`ModelProvider`][agents.models.interface.ModelProvider] を渡す  
+3. [`Model`][agents.models.interface.Model] 実装を直接渡す  
 
 !!!note
-
-    SDK は [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] と [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] の両方の形をサポートしますが、ワークフローごとに 1 つのモデル形に統一することを推奨します。2 つの形では利用できる機能や tools が異なるためです。モデル形を混在させる場合は、使用するすべての機能が両方で利用可能であることを確認してください。
+    SDK は [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] と [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] の両方をサポートしていますが、ワークフローごとに 1 つのモデル形状を使用することを推奨します。両モデル形状は利用できる機能やツールが異なるためです。ワークフローで両方を混在させる場合は、使用するすべての機能が両モデルで利用可能かを確認してください。
 
 ```python
 from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
@@ -81,10 +82,10 @@ async def main():
     print(result.final_output)
 ```
 
-1. OpenAI モデル名を直接設定しています。  
-2. [`Model`][agents.models.interface.Model] 実装を提供しています。  
+1. OpenAI モデル名を直接指定  
+2. [`Model`][agents.models.interface.Model] 実装を提供  
 
-エージェントで使用するモデルをさらに細かく設定したい場合は、`temperature` などのオプションパラメーターを指定できる [`ModelSettings`][agents.models.interface.ModelSettings] を渡せます。
+エージェントに使用するモデルをさらに細かく設定したい場合は、`temperature` などのオプション設定を持つ [`ModelSettings`][agents.models.interface.ModelSettings] を渡すことができます。
 
 ```python
 from agents import Agent, ModelSettings
@@ -97,7 +98,7 @@ english_agent = Agent(
 )
 ```
 
-また、OpenAI の Responses API を使用する場合は [その他のオプションパラメーター](https://platform.openai.com/docs/api-reference/responses/create)（`user`、`service_tier` など）もあります。トップレベルで指定できない場合は、`extra_args` を利用して渡すことができます。
+また、OpenAI の Responses API を使用する際には、`user` や `service_tier` などの[追加パラメーター](https://platform.openai.com/docs/api-reference/responses/create) を指定できます。トップレベルで利用できない場合は、`extra_args` に渡してください。
 
 ```python
 from agents import Agent, ModelSettings
@@ -115,24 +116,27 @@ english_agent = Agent(
 
 ## 他の LLM プロバイダー利用時の一般的な問題
 
-### トレーシング クライアント 401 エラー
+### Tracing client error 401
 
-トレーシング関連のエラーが発生する場合、トレースが OpenAI サーバーにアップロードされる仕組みであり、OpenAI API キーがないことが原因です。解決策は次の 3 つです。
+トレーシング関連のエラーが発生する場合、これはトレースが OpenAI サーバーへアップロードされるため、OpenAI の API キーがないことが原因です。以下のいずれかで解決できます。
 
 1. トレーシングを完全に無効化する: [`set_tracing_disabled(True)`][agents.set_tracing_disabled]  
-2. トレーシング用に OpenAI キーを設定する: [`set_tracing_export_api_key(...)`][agents.set_tracing_export_api_key] — この API キーはトレースのアップロードのみに使用され、[platform.openai.com](https://platform.openai.com/) のキーである必要があります。  
-3. 非 OpenAI のトレース プロセッサーを使用する。詳細は [tracing docs](../tracing.md#custom-tracing-processors) を参照してください。  
+2. トレーシング用に OpenAI キーを設定する: [`set_tracing_export_api_key(...)`][agents.set_tracing_export_api_key]  
+   この API キーはトレースのアップロード専用で、[platform.openai.com](https://platform.openai.com/) のキーである必要があります。  
+3. OpenAI 以外のトレースプロセッサーを使用する。詳細は [tracing ドキュメント](../tracing.md#custom-tracing-processors) を参照してください。
 
-### Responses API サポート
+### Responses API のサポート
 
-SDK はデフォルトで Responses API を使用しますが、ほとんどの他社 LLM プロバイダーはまだ対応していません。その結果、404 エラーなどが発生することがあります。対処方法は次の 2 つです。
+SDK はデフォルトで Responses API を使用しますが、ほとんどの他社 LLM プロバイダーはまだ対応していません。このため 404 エラーなどが発生する場合があります。以下のいずれかを試してください。
 
-1. [`set_default_openai_api("chat_completions")`][agents.set_default_openai_api] を呼び出す。これは環境変数 `OPENAI_API_KEY` と `OPENAI_BASE_URL` を設定している場合に機能します。  
-2. [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] を使用する。code examples は [こちら](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/) にあります。  
+1. [`set_default_openai_api("chat_completions")`][agents.set_default_openai_api] を呼び出す  
+   `OPENAI_API_KEY` と `OPENAI_BASE_URL` を環境変数で設定している場合に機能します。  
+2. [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel] を使用する  
+   [こちら](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers/) にコード例があります。
 
-### structured outputs サポート
+### structured outputs のサポート
 
-一部のモデルプロバイダーは [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) をサポートしていません。その場合、次のようなエラーが発生することがあります。
+一部のモデルプロバイダーは [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) をサポートしていません。この場合、次のようなエラーが発生することがあります。
 
 ```
 
@@ -140,12 +144,12 @@ BadRequestError: Error code: 400 - {'error': {'message': "'response_format.type'
 
 ```
 
-これは一部プロバイダーの制限で、JSON 出力には対応しているものの、出力に使用する `json_schema` を指定できません。現在修正に取り組んでいますが、JSON schema 出力をサポートするプロバイダーを利用することを推奨します。そうでない場合、壊れた JSON が返され、アプリが頻繁に失敗する可能性があります。
+これは一部プロバイダーの制限で、JSON 出力には対応しているものの、出力に使用する `json_schema` を指定できません。現在修正に取り組んでいますが、JSON Schema 出力をサポートするプロバイダーを利用することを推奨します。そうしないと、不正な JSON によりアプリが頻繁に壊れる可能性があります。
 
-## プロバイダー間でのモデルの組み合わせ
+## プロバイダーを跨いだモデルの組み合わせ
 
-モデルプロバイダーごとの機能差を理解しておかないと、エラーが発生する可能性があります。たとえば、OpenAI は structured outputs、マルチモーダル入力、ホスト型の file search と web search をサポートしていますが、多くの他社プロバイダーはこれらをサポートしていません。以下の制限に注意してください。
+モデルプロバイダー間の機能差を理解しておかないと、エラーを招く可能性があります。たとえば、OpenAI は structured outputs、マルチモーダル入力、ホストされた file search / web search をサポートしていますが、多くの他社プロバイダーはこれらをサポートしていません。以下の制限に注意してください。
 
-- 未対応の `tools` を理解しないプロバイダーへ送らない  
-- テキストのみのモデルに呼び出す前にマルチモーダル入力をフィルタリングする  
-- structured JSON outputs をサポートしないプロバイダーでは、無効な JSON が返る場合があることを理解する
+- 対応していないプロバイダーに `tools` を送らない  
+- テキストのみのモデルを呼び出す前にマルチモーダル入力を除去する  
+- structured JSON outputs をサポートしないプロバイダーでは、無効な JSON が返る場合があることを念頭に置く  

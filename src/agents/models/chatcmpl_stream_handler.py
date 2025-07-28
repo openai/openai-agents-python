@@ -198,6 +198,7 @@ class ChatCmplStreamHandler:
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
                     sequence_number=sequence_number.get_and_increment(),
+                    logprobs=[],
                 )
                 # Accumulate the text into the response part
                 state.text_content_index_and_output[1].text += delta.content
@@ -288,10 +289,11 @@ class ChatCmplStreamHandler:
                     function_call = state.function_calls[tc_delta.index]
 
                     # Start streaming as soon as we have function name and call_id
-                    if (not state.function_call_streaming[tc_delta.index] and
-                        function_call.name and
-                        function_call.call_id):
-
+                    if (
+                        not state.function_call_streaming[tc_delta.index]
+                        and function_call.name
+                        and function_call.call_id
+                    ):
                         # Calculate the output index for this function call
                         function_call_starting_index = 0
                         if state.reasoning_content_index_and_output:
@@ -308,9 +310,9 @@ class ChatCmplStreamHandler:
 
                         # Mark this function call as streaming and store its output index
                         state.function_call_streaming[tc_delta.index] = True
-                        state.function_call_output_idx[
-                            tc_delta.index
-                        ] = function_call_starting_index
+                        state.function_call_output_idx[tc_delta.index] = (
+                            function_call_starting_index
+                        )
 
                         # Send initial function call added event
                         yield ResponseOutputItemAddedEvent(
@@ -327,10 +329,11 @@ class ChatCmplStreamHandler:
                         )
 
                     # Stream arguments if we've started streaming this function call
-                    if (state.function_call_streaming.get(tc_delta.index, False) and
-                        tc_function and
-                        tc_function.arguments):
-
+                    if (
+                        state.function_call_streaming.get(tc_delta.index, False)
+                        and tc_function
+                        and tc_function.arguments
+                    ):
                         output_index = state.function_call_output_idx[tc_delta.index]
                         yield ResponseFunctionCallArgumentsDeltaEvent(
                             delta=tc_function.arguments,
