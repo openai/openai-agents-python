@@ -52,7 +52,7 @@ class NoUIDemo:
         # Audio output state for callback system
         self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=10)  # Buffer more chunks
         self.interrupt_event = threading.Event()
-        self.current_audio_chunk: np.ndarray | None = None  # type: ignore
+        self.current_audio_chunk: np.ndarray | None = None
         self.chunk_position = 0
 
     def _output_callback(self, outdata, frames: int, time, status) -> None:
