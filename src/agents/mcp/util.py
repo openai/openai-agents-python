@@ -194,13 +194,13 @@ class MCPUtil:
         else:
             logger.debug(f"MCP tool {tool.name} returned {result}")
 
-
         # If structured content is requested and available, use it exclusively
         if server.use_structured_content and result.structuredContent:
             tool_output = json.dumps(result.structuredContent)
         else:
-            # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
-            # string. We'll try to convert.
+            # Fall back to regular text content processing
+            # The MCP tool result is a list of content items, whereas OpenAI tool
+            # outputs are a single string. We'll try to convert.
             if len(result.content) == 1:
                 tool_output = result.content[0].model_dump_json()
             elif len(result.content) > 1:
