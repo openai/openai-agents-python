@@ -50,8 +50,7 @@ def trace(
         group_id: Optional grouping identifier to link multiple traces from the same conversation
             or process. For instance, you might use a chat thread ID.
         metadata: Optional dictionary of additional metadata to attach to the trace.
-        disabled: If True, we will return a Trace but the Trace will not be recorded. This will
-            not be checked if there's an existing trace and `even_if_trace_running` is True.
+        disabled: If True, we will return a Trace but the Trace will not be recorded.
 
     Returns:
         The newly created trace object.
