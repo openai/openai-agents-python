@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import field
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from pydantic.dataclasses import dataclass
 
 
 @dataclass

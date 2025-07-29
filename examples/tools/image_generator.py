@@ -12,7 +12,7 @@ def open_file(path: str) -> None:
     if sys.platform.startswith("darwin"):
         subprocess.run(["open", path], check=False)  # macOS
     elif os.name == "nt":  # Windows
-        os.astartfile(path)  # type: ignore
+        os.startfile(path)  # type: ignore
     elif os.name == "posix":
         subprocess.run(["xdg-open", path], check=False)  # Linux/Unix
     else:

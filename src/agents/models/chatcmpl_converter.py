@@ -36,6 +36,7 @@ from openai.types.responses import (
     ResponseOutputRefusal,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseReasoningItemParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_reasoning_item import Summary
@@ -44,6 +45,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
+from ..model_settings import MCPToolChoice
 from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -51,10 +53,12 @@ from .fake_id import FAKE_RESPONSES_ID
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | None
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> ChatCompletionToolChoiceOptionParam | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
+        elif isinstance(tool_choice, MCPToolChoice):
+            raise UserError("MCPToolChoice is not supported for Chat Completions models")
         elif tool_choice == "auto":
             return "auto"
         elif tool_choice == "required":
@@ -205,6 +209,12 @@ class Converter:
             and item.get("role") == "assistant"
         ):
             return cast(ResponseOutputMessageParam, item)
+        return None
+
+    @classmethod
+    def maybe_reasoning_message(cls, item: Any) -> ResponseReasoningItemParam | None:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(ResponseReasoningItemParam, item)
         return None
 
     @classmethod
@@ -456,7 +466,11 @@ class Converter:
                     f"Encountered an item_reference, which is not supported: {item_ref}"
                 )
 
-            # 7) If we haven't recognized it => fail or ignore
+            # 7) reasoning message => not handled
+            elif cls.maybe_reasoning_message(item):
+                pass
+
+            # 8) If we haven't recognized it => fail or ignore
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 
@@ -481,7 +495,7 @@ class Converter:
         )
 
     @classmethod
-    def convert_handoff_tool(cls, handoff: Handoff[Any]) -> ChatCompletionToolParam:
+    def convert_handoff_tool(cls, handoff: Handoff[Any, Any]) -> ChatCompletionToolParam:
         return {
             "type": "function",
             "function": {

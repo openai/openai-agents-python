@@ -226,7 +226,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     break
 
                 event_type = event.get("type", "unknown")
-                if event_type == "conversation.item.input_audio_transcription.completed":
+                if event_type == "input_audio_transcription_completed":
                     transcript = cast(str, event.get("transcript", ""))
                     if len(transcript) > 0:
                         self._end_turn(transcript)

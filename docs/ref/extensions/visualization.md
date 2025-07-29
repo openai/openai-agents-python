@@ -1,0 +1,3 @@
+# `Visualization`
+
+::: agents.extensions.visualization
