@@ -156,6 +156,15 @@ class RealtimeModelExceptionEvent:
     type: Literal["exception"] = "exception"
 
 
+@dataclass
+class RealtimeModelRawServerEvent:
+    """Raw events forwarded from the server."""
+
+    data: Any
+
+    type: Literal["raw_server_event"] = "raw_server_event"
+
+
 # TODO (rm) Add usage events
 
 
@@ -174,4 +183,5 @@ RealtimeModelEvent: TypeAlias = Union[
     RealtimeModelTurnEndedEvent,
     RealtimeModelOtherEvent,
     RealtimeModelExceptionEvent,
+    RealtimeModelRawServerEvent,
 ]
