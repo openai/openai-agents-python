@@ -146,16 +146,15 @@ Supplying a list of tools doesn't always mean the LLM will use a tool. You can f
 from agents import Agent, Runner, function_tool, ModelSettings
 
 @function_tool
-def get_stock_price(ticker: str) -> str:
-    """Fetches the stock price for a given ticker symbol."""
-    prices = {"AAPL": "$150.00", "GOOGL": "$2750.00"}
-    return prices.get(ticker, "Stock not found")
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
 
 agent = Agent(
-    name="Stock Price Agent",
-    instructions="Retrieve the stock price if relevant, otherwise respond directly.",
-    tools=[get_stock_price],
-    model_settings=ModelSettings(tool_choice="get_stock_price") 
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
+    model_settings=ModelSettings(tool_choice="get_weather") 
 )
 
 ```
@@ -170,16 +169,14 @@ The `tool_use_behavior` parameter in the `Agent` configuration controls how tool
 from agents import Agent, Runner, function_tool, ModelSettings
 
 @function_tool
-def get_stock_price(ticker: str) -> str:
-    """Fetches the stock price for a given ticker symbol."""
-    prices = {"AAPL": "$150.00", "GOOGL": "$2750.00"}
-    return prices.get(ticker, "Stock not found")
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
 
-# Create the agent
 agent = Agent(
-    name="Stock Price Agent",
-    instructions="Retrieve the stock price.",
-    tools=[get_stock_price],
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
     tool_use_behavior="stop_on_first_tool"
 )
 ```
@@ -190,16 +187,20 @@ from agents import Agent, Runner, function_tool
 from agents.agent import StopAtTools
 
 @function_tool
-def get_stock_price(ticker: str) -> str:
-    """Fetches the stock price for a given ticker symbol."""
-    prices = {"AAPL": "$150.00", "GOOGL": "$2750.00"}
-    return prices.get(ticker, "Stock not found")
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
+
+@function_tool
+def sum_numbers(a: int, b: int) -> int:
+    """Adds two numbers."""
+    return a + b
 
 agent = Agent(
     name="Stop At Stock Agent",
-    instructions="Get stock price and stop.",
-    tools=[get_stock_price],
-    tool_use_behavior=StopAtTools(stop_at_tool_names=["get_stock_price"])
+    instructions="Get weather or sum numbers.",
+    tools=[get_weather, sum_numbers],
+    tool_use_behavior=StopAtTools(stop_at_tool_names=["get_weather"])
 )
 ```
 - `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
@@ -211,10 +212,9 @@ from agents.agent import ToolsToFinalOutputResult
 from typing import List, Any
 
 @function_tool
-def get_product_price(product_id: str) -> str:
-    """Fetches the price for a given product ID."""
-    prices = {"P101": "$25.00", "P102": "$49.99"}
-    return prices.get(product_id, "Product not found")
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
 
 def custom_tool_handler(
     context: RunContextWrapper[Any],
@@ -222,21 +222,20 @@ def custom_tool_handler(
 ) -> ToolsToFinalOutputResult:
     """Processes tool results to decide final output."""
     for result in tool_results:
-        if result.output and "$25.00" in result.output:
+        if result.output and "sunny" in result.output:
             return ToolsToFinalOutputResult(
                 is_final_output=True,
-                final_output=f"Final result: {result.output}"
+                final_output=f"Final weather: {result.output}"
             )
     return ToolsToFinalOutputResult(
         is_final_output=False,
         final_output=None
     )
 
-# Create the agent
 agent = Agent(
-    name="Product Price Agent",
-    instructions="Retrieve product prices and format them.",
-    tools=[get_product_price],
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
     tool_use_behavior=custom_tool_handler
 )
 
