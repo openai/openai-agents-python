@@ -4,9 +4,9 @@ search:
 ---
 # セッション
 
-Agents SDK には、組み込みのセッションメモリが用意されており、複数回のエージェント実行にわたって会話履歴を自動的に保持できます。そのため、ターンごとに `.to_input_list()` を手動で扱う必要がありません。
+Agents SDK には組み込みのセッションメモリーがあり、複数のエージェント実行にわたって会話履歴を自動的に保持します。これにより、ターン間で `.to_input_list()` を手動で扱う必要がなくなります。
 
-セッションは特定のセッションごとに会話履歴を保存し、明示的にメモリを管理しなくてもエージェントがコンテキストを維持できるようにします。これは、エージェントに過去のやり取りを記憶させたいチャットアプリケーションやマルチターンの会話を構築する際に特に便利です。
+Sessions は特定のセッションの会話履歴を保存し、明示的なメモリー管理を必要とせずにエージェントがコンテキストを維持できるようにします。これは、エージェントに以前のやり取りを覚えさせたいチャットアプリケーションやマルチターン会話を構築する際に特に便利です。
 
 ## クイックスタート
 
@@ -49,19 +49,19 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 仕組み
 
-セッションメモリを有効にすると、次のように動作します。
+セッションメモリーを有効にすると、次のように動作します。
 
-1. **実行前**: Runner はセッションの会話履歴を自動的に取得し、入力アイテムの先頭に追加します。  
-2. **実行後**: 実行中に生成された新しいアイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）はすべて、自動的にセッションに保存されます。  
-3. **コンテキストの保持**: 同じセッションで次回以降の実行を行うと、完全な会話履歴が入力に含まれるため、エージェントはコンテキストを維持できます。
+1. **各実行前**: Runner はそのセッションの会話履歴を自動で取得し、入力アイテムの先頭に追加します。  
+2. **各実行後**: 実行中に生成された新しいアイテム (ユーザー入力、アシスタント応答、ツール呼び出しなど) がすべて自動でセッションに保存されます。  
+3. **コンテキスト保持**: 同じセッションでの後続の実行には完全な会話履歴が含まれ、エージェントはコンテキストを維持できます。
 
 これにより、`.to_input_list()` を手動で呼び出したり、実行間で会話状態を管理したりする必要がなくなります。
 
-## メモリ操作
+## メモリー操作
 
 ### 基本操作
 
-セッションは会話履歴を管理するためのいくつかの操作をサポートしています。
+Sessions では会話履歴を管理するためのいくつかの操作がサポートされています。
 
 ```python
 from agents import SQLiteSession
@@ -86,7 +86,7 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### pop_item を使った修正
+### 訂正のための pop_item の使用
 
 `pop_item` メソッドは、会話の最後のアイテムを取り消したり修正したりしたい場合に特に便利です。
 
@@ -117,16 +117,16 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## メモリオプション
+## メモリーオプション
 
-### メモリなし（デフォルト）
+### メモリーなし (デフォルト)
 
 ```python
 # Default behavior - no session memory
 result = await Runner.run(agent, "Hello")
 ```
 
-### SQLite メモリ
+### SQLite メモリー
 
 ```python
 from agents import SQLiteSession
@@ -168,9 +168,9 @@ result2 = await Runner.run(
 )
 ```
 
-## カスタムメモリ実装
+## カスタムメモリー実装
 
-[`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成することで、独自のセッションメモリを実装できます。
+[`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成することで、独自のセッションメモリーを実装できます。
 
 ````python
 from agents.memory import Session
@@ -230,15 +230,15 @@ Use meaningful session IDs that help you organize conversations:
 ### Session management
 
 ```python
-# Clear a session when conversation should start fresh
+# 会話をリセットしたいときにセッションをクリアする
 await session.clear_session()
 
-# Different agents can share the same session
+# 異なるエージェントが同じセッションを共有できる
 support_agent = Agent(name="Support")
 billing_agent = Agent(name="Billing")
 session = SQLiteSession("user_123")
 
-# Both agents will see the same conversation history
+# 両方のエージェントは同じ会話履歴を参照します
 result1 = await Runner.run(
     support_agent,
     "Help me with my account",
@@ -261,19 +261,19 @@ from agents import Agent, Runner, SQLiteSession
 
 
 async def main():
-    # Create an agent
+    # エージェントを作成
     agent = Agent(
         name="Assistant",
         instructions="Reply very concisely.",
     )
 
-    # Create a session instance that will persist across runs
+    # 実行間で保持されるセッションインスタンスを作成
     session = SQLiteSession("conversation_123", "conversation_history.db")
 
     print("=== Sessions Example ===")
     print("The agent will remember previous messages automatically.\n")
 
-    # First turn
+    # 1 回目のターン
     print("First turn:")
     print("User: What city is the Golden Gate Bridge in?")
     result = await Runner.run(
@@ -284,7 +284,7 @@ async def main():
     print(f"Assistant: {result.final_output}")
     print()
 
-    # Second turn - the agent will remember the previous conversation
+    # 2 回目のターン - エージェントは前の会話を覚えています
     print("Second turn:")
     print("User: What state is it in?")
     result = await Runner.run(
@@ -295,7 +295,7 @@ async def main():
     print(f"Assistant: {result.final_output}")
     print()
 
-    # Third turn - continuing the conversation
+    # 3 回目のターン - 会話を継続
     print("Third turn:")
     print("User: What's the population of that state?")
     result = await Runner.run(
