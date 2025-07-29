@@ -46,8 +46,6 @@ async def main() -> None:
 
     # We'll run the entire workflow in a single trace
     with trace("LLM as a judge"):
-        max_attempts = 5
-        attempts = 0
         while True:
             story_outline_result = await Runner.run(
                 story_outline_generator,
@@ -63,10 +61,8 @@ async def main() -> None:
 
             print(f"Evaluator score: {result.score}")
 
-            attempts += 1
-            # break on pass or when we've tried max_attempts times
-            if result.score == "pass" or attempts >= max_attempts:
-                print(f"Exiting after {attempts} attempt{'s' if attempts != 1 else ''}.")
+            if result.score == "pass":
+                print("Story outline is good enough, exiting.")
                 break
 
             print("Re-running with feedback")
