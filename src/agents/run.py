@@ -913,12 +913,17 @@ class AgentRunner:
                 output_item = event.item
 
                 if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id = getattr(output_item, "call_id", getattr(output_item, "id", None))
+                    call_id: str | None = getattr(
+                        output_item, "call_id", getattr(output_item, "id", None)
+                    )
 
-                    if call_id not in emitted_tool_call_ids:
+                    if call_id and call_id not in emitted_tool_call_ids:
                         emitted_tool_call_ids.add(call_id)
 
-                        tool_item = ToolCallItem(raw_item=output_item, agent=agent)
+                        tool_item = ToolCallItem(
+                            raw_item=cast(ToolCallItemTypes, output_item),
+                            agent=agent,
+                        )
                         streamed_result._event_queue.put_nowait(
                             RunItemStreamEvent(item=tool_item, name="tool_called")
                         )
@@ -951,8 +956,12 @@ class AgentRunner:
                 for item in single_step_result.new_step_items
                 if not (
                     isinstance(item, ToolCallItem)
-                    and getattr(item.raw_item, "call_id", getattr(item.raw_item, "id", None))
-                    in emitted_tool_call_ids
+                    and (
+                        call_id := getattr(
+                            item.raw_item, "call_id", getattr(item.raw_item, "id", None)
+                        )
+                    )
+                    and call_id in emitted_tool_call_ids
                 )
             ]
 
