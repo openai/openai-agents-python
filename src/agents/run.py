@@ -843,8 +843,6 @@ class AgentRunner:
         all_tools: list[Tool],
         previous_response_id: str | None,
     ) -> SingleStepResult:
-        # Track tool call IDs we've already emitted to avoid duplicates when we later
-        # enqueue all items at the end of the turn.
         emitted_tool_call_ids: set[str] = set()
 
         if should_run_agent_start_hooks:
@@ -891,8 +889,6 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             prompt=prompt_config,
         ):
-            # 1. If the event signals the end of the assistant response, remember it so we can
-            #    process the full response after the streaming loop.
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
                     Usage(
@@ -913,8 +909,6 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(usage)
 
-            # 2. Detect tool call output-item additions **while** the model is still streaming.
-            #    Emit a high-level RunItemStreamEvent so UIs can react immediately.
             if isinstance(event, ResponseOutputItemAddedEvent):
                 output_item = event.item
 
@@ -929,10 +923,8 @@ class AgentRunner:
                             RunItemStreamEvent(item=tool_item, name="tool_called")
                         )
 
-            # Always forward the raw event.
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
-        # 2. At this point, the streaming is complete for this turn of the agent loop.
         if not final_response:
             raise ModelBehaviorError("Model did not produce a final response!")
 
@@ -951,9 +943,8 @@ class AgentRunner:
             tool_use_tracker=tool_use_tracker,
         )
 
-        # Remove tool_called items we've already emitted during streaming to avoid duplicates.
         if emitted_tool_call_ids:
-            import dataclasses as _dc  # local import to avoid polluting module namespace
+            import dataclasses as _dc
 
             filtered_items = [
                 item
