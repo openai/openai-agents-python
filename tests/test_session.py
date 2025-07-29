@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession, TResponseInputItem
+from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
 from agents.exceptions import UserError
 
 from .fake_model import FakeModel
@@ -394,7 +394,126 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
             await run_agent_async(runner_method, agent, list_input, session=session)
 
         # Verify the error message explains the issue
-        assert "Cannot provide both a session and a list of input items" in str(exc_info.value)
+        assert "You must specify the `session_input_handling` in" in str(exc_info.value)
         assert "manually manage conversation history" in str(exc_info.value)
+
+        session.close()
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_memory_append_list(runner_method):
+    """Test if the user passes a list of items and want to append them."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_memory.db"
+
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+
+        # Session
+        session_id = "session_1"
+        session = SQLiteSession(session_id, db_path)
+
+        model.set_next_output([get_text_message("I like cats")])
+        _ = await run_agent_async(runner_method, agent, "I like cats", session=session)
+
+        append_input = [
+            {"role": "user", "content": "Some random user text"},
+            {"role": "assistant", "content": "You're right"},
+            {"role": "user", "content": "What did I say I like?"},
+        ]
+        second_model_response = {"role": "assistant", "content": "Yes, you mentioned cats"}
+        model.set_next_output([get_text_message(second_model_response.get("content", ""))])
+
+        _ = await run_agent_async(
+            runner_method,
+            agent,
+            append_input,
+            session=session,
+            run_config=RunConfig(session_input_handling="append"),
+        )
+
+        session_items = await session.get_items()
+
+        # Check the items has been appended
+        assert len(session_items) == 6
+
+        # Check the items are the last 4 elements
+        append_input.append(second_model_response)
+        for sess_item, orig_item in zip(session_items[-4:], append_input):
+            assert sess_item.get("role") == orig_item.get("role")
+
+            sess_content = sess_item.get("content")
+            # Narrow to list or str for mypy
+            assert isinstance(sess_content, (list, str))
+
+            if isinstance(sess_content, list):
+                # now mypy knows `content: list[Any]`
+                assert isinstance(sess_content[0], dict) and "text" in sess_content[0]
+                val_sess = sess_content[0]["text"]
+            else:
+                # here content is str
+                val_sess = sess_content
+
+            assert val_sess == orig_item["content"]
+
+        session.close()
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_memory_replace_list(runner_method):
+    """Test if the user passes a list of items and want to replace the history."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_memory.db"
+
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+
+        # Session
+        session_id = "session_1"
+        session = SQLiteSession(session_id, db_path)
+
+        model.set_next_output([get_text_message("I like cats")])
+        _ = await run_agent_async(runner_method, agent, "I like cats", session=session)
+
+        replace_input = [
+            {"role": "user", "content": "Some random user text"},
+            {"role": "assistant", "content": "You're right"},
+            {"role": "user", "content": "What did I say I like?"},
+        ]
+        second_model_response = {"role": "assistant", "content": "Yes, you mentioned cats"}
+        model.set_next_output([get_text_message(second_model_response.get("content", ""))])
+
+        _ = await run_agent_async(
+            runner_method,
+            agent,
+            replace_input,
+            session=session,
+            run_config=RunConfig(session_input_handling="replace"),
+        )
+
+        session_items = await session.get_items()
+
+        # Check the new items replaced the history
+        assert len(session_items) == 4
+
+        # Check the items are the last 4 elements
+        replace_input.append(second_model_response)
+        for sess_item, orig_item in zip(session_items, replace_input):
+            assert sess_item.get("role") == orig_item.get("role")
+            sess_content = sess_item.get("content")
+            # Narrow to list or str for mypy
+            assert isinstance(sess_content, (list, str))
+
+            if isinstance(sess_content, list):
+                # now mypy knows `content: list[Any]`
+                assert isinstance(sess_content[0], dict) and "text" in sess_content[0]
+                val_sess = sess_content[0]["text"]
+            else:
+                # here content is str
+                val_sess = sess_content
+
+            assert val_sess == orig_item["content"]
 
         session.close()

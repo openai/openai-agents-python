@@ -4,7 +4,7 @@ import asyncio
 import copy
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Generic, Literal, cast
 
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.response_prompt_param import (
@@ -137,6 +137,11 @@ class RunConfig:
     trace_metadata: dict[str, Any] | None = None
     """
     An optional dictionary of additional metadata to include with the trace.
+    """
+
+    session_input_handling: Literal["replace", "append"] | None = None
+    """If a custom input list is given together with the Session, it will
+    be appended to the session messages or it will replace them.
     """
 
 
@@ -343,7 +348,9 @@ class AgentRunner:
             run_config = RunConfig()
 
         # Prepare input with session if enabled
-        prepared_input = await self._prepare_input_with_session(input, session)
+        prepared_input = await self._prepare_input_with_session(
+            input, session, run_config.session_input_handling
+        )
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -468,7 +475,9 @@ class AgentRunner:
                         )
 
                         # Save the conversation to session if enabled
-                        await self._save_result_to_session(session, input, result)
+                        await self._save_result_to_session(
+                            session, input, result, run_config.session_input_handling
+                        )
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -662,7 +671,9 @@ class AgentRunner:
 
         try:
             # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(starting_input, session)
+            prepared_input = await AgentRunner._prepare_input_with_session(
+                starting_input, session, run_config.session_input_handling
+            )
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
@@ -781,7 +792,7 @@ class AgentRunner:
                             context_wrapper=context_wrapper,
                         )
                         await AgentRunner._save_result_to_session(
-                            session, starting_input, temp_result
+                            session, starting_input, temp_result, run_config.session_input_handling
                         )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1191,18 +1202,18 @@ class AgentRunner:
         cls,
         input: str | list[TResponseInputItem],
         session: Session | None,
+        session_input_handling: Literal["replace", "append"] | None,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
             return input
 
-        # Validate that we don't have both a session and a list input, as this creates
-        # ambiguity about whether the list should append to or replace existing session history
-        if isinstance(input, list):
+        # If the user doesn't explicitly specify a mode, raise an error
+        if isinstance(input, list) and not session_input_handling:
             raise UserError(
-                "Cannot provide both a session and a list of input items. "
-                "When using session memory, provide only a string input to append to the "
-                "conversation, or use session=None and provide a list to manually manage "
+                "You must specify the `session_input_handling` in the `RunConfig`. "
+                "Otherwise, when using session memory, provide only a string input to append to "
+                "the conversation, or use session=None and provide a list to manually manage "
                 "conversation history."
             )
 
@@ -1212,8 +1223,17 @@ class AgentRunner:
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
-        # Combine history with new input
-        combined_input = history + new_input_list
+        if session_input_handling == "append" or session_input_handling is None:
+            # Append new input to history
+            combined_input = history + new_input_list
+        elif session_input_handling == "replace":
+            # Replace history with new input
+            combined_input = new_input_list
+        else:
+            raise UserError(
+                "The specified `session_input_handling` is not available. "
+                "Choose between `append`, `replace` or `None`."
+            )
 
         return combined_input
 
@@ -1223,10 +1243,15 @@ class AgentRunner:
         session: Session | None,
         original_input: str | list[TResponseInputItem],
         result: RunResult,
+        saving_mode: Literal["replace", "append"] | None = None,
     ) -> None:
         """Save the conversation turn to session."""
         if session is None:
             return
+
+        # Remove old history
+        if saving_mode == "replace":
+            await session.clear_session()
 
         # Convert original input to list format if needed
         input_list = ItemHelpers.input_to_new_input_list(original_input)
