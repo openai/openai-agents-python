@@ -6,7 +6,21 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Generic, cast
 
-from openai.types.responses import ResponseCompletedEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseComputerToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionToolCall,
+    ResponseOutputItemAddedEvent,
+)
+from openai.types.responses.response_code_interpreter_tool_call import (
+    ResponseCodeInterpreterToolCall,
+)
+from openai.types.responses.response_output_item import (
+    ImageGenerationCall,
+    LocalShellCall,
+    McpCall,
+)
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
@@ -41,7 +55,7 @@ from .guardrail import (
     OutputGuardrailResult,
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
-from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
+from .items import ItemHelpers, ModelResponse, RunItem, ToolCallItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
 from .memory import Session
@@ -50,7 +64,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
-from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
+from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -833,6 +847,10 @@ class AgentRunner:
         all_tools: list[Tool],
         previous_response_id: str | None,
     ) -> SingleStepResult:
+        # Track tool call IDs we've already emitted to avoid duplicates when we later
+        # enqueue all items at the end of the turn.
+        emitted_tool_call_ids: set[str] = set()
+
         if should_run_agent_start_hooks:
             await asyncio.gather(
                 hooks.on_agent_start(context_wrapper, agent),
@@ -877,6 +895,8 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             prompt=prompt_config,
         ):
+            # 1. If the event signals the end of the assistant response, remember it so we can
+            #    process the full response after the streaming loop.
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
                     Usage(
@@ -897,6 +917,34 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(usage)
 
+            # 2. Detect tool call output-item additions **while** the model is still streaming.
+            #    Emit a high-level RunItemStreamEvent so UIs can react immediately.
+            if isinstance(event, ResponseOutputItemAddedEvent):
+                output_item = event.item
+
+                if isinstance(
+                    output_item,
+                    (
+                        ResponseFunctionToolCall,
+                        ResponseFileSearchToolCall,
+                        ResponseComputerToolCall,
+                        ResponseCodeInterpreterToolCall,
+                        ImageGenerationCall,
+                        LocalShellCall,
+                        McpCall,
+                    ),
+                ):
+                    call_id = getattr(output_item, "call_id", getattr(output_item, "id", None))
+
+                    if call_id not in emitted_tool_call_ids:
+                        emitted_tool_call_ids.add(call_id)
+
+                        tool_item = ToolCallItem(raw_item=output_item, agent=agent)
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                        )
+
+            # Always forward the raw event.
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
         # 2. At this point, the streaming is complete for this turn of the agent loop.
@@ -918,7 +966,29 @@ class AgentRunner:
             tool_use_tracker=tool_use_tracker,
         )
 
-        RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        # Remove tool_called items we've already emitted during streaming to avoid duplicates.
+        if emitted_tool_call_ids:
+            import dataclasses as _dc  # local import to avoid polluting module namespace
+
+            filtered_items = [
+                item
+                for item in single_step_result.new_step_items
+                if not (
+                    isinstance(item, ToolCallItem)
+                    and getattr(item.raw_item, "call_id", getattr(item.raw_item, "id", None))
+                    in emitted_tool_call_ids
+                )
+            ]
+
+            single_step_result_filtered = _dc.replace(
+                single_step_result, new_step_items=filtered_items
+            )
+
+            RunImpl.stream_step_result_to_queue(
+                single_step_result_filtered, streamed_result._event_queue
+            )
+        else:
+            RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
         return single_step_result
 
     @classmethod
