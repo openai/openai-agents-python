@@ -157,7 +157,6 @@ agent = Agent(
     tools=[get_weather],
     model_settings=ModelSettings(tool_choice="get_weather") 
 )
-
 ```
 
 ## Tool Use Behavior
@@ -207,7 +206,6 @@ agent = Agent(
 - `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
 
 ```python
-
 from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
 from agents.agent import ToolsToFinalOutputResult
 from typing import List, Any
@@ -239,7 +237,6 @@ agent = Agent(
     tools=[get_weather],
     tool_use_behavior=custom_tool_handler
 )
-
 ```
 
 !!! note
