@@ -214,7 +214,7 @@ class Agent(AgentBase, Generic[TContext]):
       calls result in a final output.
 
       NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
-      web search, etc are always processed by the LLM.
+      web search, etc. are always processed by the LLM.
     """
 
     reset_tool_choice: bool = True
@@ -289,30 +289,3 @@ class Agent(AgentBase, Generic[TContext]):
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
         return await PromptUtil.to_model_input(self.prompt, run_context, self)
-
-    async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
-        """Fetches the available tools from the MCP servers."""
-        convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
-        return await MCPUtil.get_all_function_tools(
-            self.mcp_servers, convert_schemas_to_strict, run_context, self
-        )
-
-    async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
-        """All agent tools, including MCP tools and function tools."""
-        mcp_tools = await self.get_mcp_tools(run_context)
-
-        async def _check_tool_enabled(tool: Tool) -> bool:
-            if not isinstance(tool, FunctionTool):
-                return True
-
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, self)
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
-
-        results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        return [*mcp_tools, *enabled]
