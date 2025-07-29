@@ -17,8 +17,7 @@ lint:
 
 .PHONY: mypy
 mypy: 
-	uv run mypy ./src
-
+	uv run mypy .
 .PHONY: tests
 tests: 
 	uv run pytest 
