@@ -17,7 +17,7 @@ lint:
 
 .PHONY: mypy
 mypy: 
-	uv run mypy .
+	uv run mypy ./src
 
 .PHONY: tests
 tests: 
@@ -40,7 +40,7 @@ snapshots-create:
 
 .PHONY: old_version_tests
 old_version_tests: 
-	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest
+	UV_PROJECT_ENVIRONMENT=.venv_39 uv sync --all-extras --all-packages --group dev --python 3.9 && UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 pytest 
 
 .PHONY: build-docs
 build-docs:
