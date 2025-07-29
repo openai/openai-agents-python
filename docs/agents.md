@@ -34,6 +34,7 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 ```python
 @dataclass
 class UserContext:
+    name: str
     uid: str
     is_pro_user: bool
 

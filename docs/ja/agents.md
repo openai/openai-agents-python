@@ -38,6 +38,7 @@ agent = Agent(
 ```python
 @dataclass
 class UserContext:
+    name: str
     uid: str
     is_pro_user: bool
 
