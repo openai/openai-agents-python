@@ -4,22 +4,11 @@ import asyncio
 import copy
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Generic, cast, get_args
 
 from openai.types.responses import (
     ResponseCompletedEvent,
-    ResponseComputerToolCall,
-    ResponseFileSearchToolCall,
-    ResponseFunctionToolCall,
     ResponseOutputItemAddedEvent,
-)
-from openai.types.responses.response_code_interpreter_tool_call import (
-    ResponseCodeInterpreterToolCall,
-)
-from openai.types.responses.response_output_item import (
-    ImageGenerationCall,
-    LocalShellCall,
-    McpCall,
 )
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
@@ -55,7 +44,14 @@ from .guardrail import (
     OutputGuardrailResult,
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
-from .items import ItemHelpers, ModelResponse, RunItem, ToolCallItem, TResponseInputItem
+from .items import (
+    ItemHelpers,
+    ModelResponse,
+    RunItem,
+    ToolCallItem,
+    ToolCallItemTypes,
+    TResponseInputItem,
+)
 from .lifecycle import RunHooks
 from .logger import logger
 from .memory import Session
@@ -922,18 +918,7 @@ class AgentRunner:
             if isinstance(event, ResponseOutputItemAddedEvent):
                 output_item = event.item
 
-                if isinstance(
-                    output_item,
-                    (
-                        ResponseFunctionToolCall,
-                        ResponseFileSearchToolCall,
-                        ResponseComputerToolCall,
-                        ResponseCodeInterpreterToolCall,
-                        ImageGenerationCall,
-                        LocalShellCall,
-                        McpCall,
-                    ),
-                ):
+                if isinstance(output_item, _TOOL_CALL_TYPES):
                     call_id = getattr(output_item, "call_id", getattr(output_item, "id", None))
 
                     if call_id not in emitted_tool_call_ids:
@@ -1310,3 +1295,5 @@ class AgentRunner:
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
+
+_TOOL_CALL_TYPES: tuple[type, ...] = get_args(ToolCallItemTypes)
