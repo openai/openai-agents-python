@@ -120,6 +120,10 @@ Sessions automatically:
 
 See the [Sessions documentation](sessions.md) for more details.
 
+## Long running agents & human-in-the-loop
+
+You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8).
+
 ## Exceptions
 
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
