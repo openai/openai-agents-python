@@ -24,6 +24,7 @@ def spanish_handoff_message_filter(handoff_message_data: HandoffInputData) -> Ha
         else handoff_message_data.input_history
     )
 
+    # or, you can use the HandoffInputData.clone(kwargs) method
     return HandoffInputData(
         input_history=history,
         pre_handoff_items=tuple(handoff_message_data.pre_handoff_items),
