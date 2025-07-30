@@ -569,6 +569,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 or DEFAULT_MODEL_SETTINGS.get("model_name")
             ),
             voice=model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice")),
+            speed=model_settings.get("speed", None),
             modalities=model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities")),
             input_audio_format=model_settings.get(
                 "input_audio_format",
