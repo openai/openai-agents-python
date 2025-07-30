@@ -1,14 +1,13 @@
-"""
-This example demonstrates an OpenAI Agents SDK agent that triggers a UserError due to incorrect SDK usage.
-
-The 'Assistant' agent is configured with an invalid tool (`invalid_tool`) that declares a `None` return type but returns a string, causing a `UserError` when the agent is executed. The error indicates improper tool configuration by the user. The interactive loop processes user queries as direct string inputs, catching and displaying the `UserError` message.
-"""
-
 from __future__ import annotations
 import asyncio
 from agents import Agent, Runner, function_tool
 from agents.exceptions import UserError
 
+"""
+This example demonstrates an OpenAI Agents SDK agent that triggers a UserError due to incorrect SDK usage.
+
+The 'Assistant' agent is configured with an invalid tool (`invalid_tool`) that declares a `None` return type but returns a string, causing a `UserError` when the agent is executed. The error indicates improper tool configuration by the user. The interactive loop processes user queries as direct string inputs, catching and displaying the `UserError` message.
+"""
 
 @function_tool
 def invalid_tool() -> None:

@@ -1,3 +1,8 @@
+from __future__ import annotations
+import asyncio
+from agents import Agent, Runner, function_tool
+from agents.exceptions import AgentsException
+
 """
 This example demonstrates the use of the OpenAI Agents SDK with tools and comprehensive error handling.
 
@@ -16,10 +21,6 @@ Error handling is implemented with `AgentsException`, which is the base class fo
 
 Although this example does not include explicit guardrails, the structure supports adding input/output guardrails to validate user inputs or tool outputs. The `AgentsException` catch block ensures all SDK-related errors are handled gracefully.
 """
-from __future__ import annotations
-import asyncio
-from agents import Agent, Runner, function_tool
-from agents.exceptions import AgentsException
 
 @function_tool
 def get_weather(city: str) -> str:

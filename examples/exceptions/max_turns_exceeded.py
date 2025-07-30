@@ -1,13 +1,12 @@
+from __future__ import annotations
+import asyncio
+from agents import Agent, Runner, function_tool
+from agents.exceptions import MaxTurnsExceeded
 """
 This example demonstrates an OpenAI Agents SDK agent that triggers a MaxTurnsExceeded error.
 
 The 'TriageAgent' handles user queries using tools for fetching weather (`get_weather`) or adding numbers (`sum_numbers`). The agent is instructed to use one tool per execution cycle. With `max_turns=1`, attempting to process multiple tasks (e.g., weather and sum) in one input causes a `MaxTurnsExceeded` error. The interactive loop processes user queries as direct string inputs, catching and displaying the `MaxTurnsExceeded` error message.
 """
-from __future__ import annotations
-import asyncio
-from agents import Agent, Runner, function_tool
-from agents.exceptions import MaxTurnsExceeded
-
 @function_tool
 def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""

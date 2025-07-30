@@ -1,12 +1,12 @@
+from __future__ import annotations
+import asyncio
+from pydantic import BaseModel
+from agents import Agent, GuardrailFunctionOutput, OutputGuardrailTripwireTriggered, Runner, output_guardrail
 """
 This example demonstrates an OpenAI Agents SDK agent with an output guardrail to block math homework responses.
 
 The 'Assistant' agent processes user queries provided as direct string inputs in an interactive loop. An output guardrail, using a Pydantic model (`MathHomeworkOutput`) and a guardrail agent, checks if the response is a math homework answer. If detected, the guardrail raises `OutputGuardrailTripwireTriggered`, and a refusal message is printed. The loop continues to prompt for new inputs, handling each independently.
 """
-from __future__ import annotations
-import asyncio
-from pydantic import BaseModel
-from agents import Agent, GuardrailFunctionOutput, OutputGuardrailTripwireTriggered, Runner, output_guardrail
 
 class MathHomeworkOutput(BaseModel):
     is_math_homework: bool
