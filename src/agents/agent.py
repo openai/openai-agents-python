@@ -238,8 +238,7 @@ class Agent(AgentBase, Generic[TContext]):
             ```
         """
         return dataclasses.replace(self, **kwargs)
-
-
+        
     def as_tool(
         self,
         tool_name: str | None,
