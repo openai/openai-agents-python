@@ -18,7 +18,6 @@ async def main():
         name="MiniErrorBot",
         instructions="Just say: Hello",
         output_type=Output,
-        model="gpt-4o-mini",
     )
 
     while True:

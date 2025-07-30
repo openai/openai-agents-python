@@ -18,7 +18,7 @@ guardrail_agent = Agent(
 )
 
 @output_guardrail
-async def math_guardrail(context, agent: Agent, output: str) -> GuardrailFunctionOutput:
+async def math_guardrail(context: Runner, agent: Agent, output: str) -> GuardrailFunctionOutput:
     result = await Runner.run(guardrail_agent, output)
     output_data = result.final_output_as(MathHomeworkOutput)
     return GuardrailFunctionOutput(
