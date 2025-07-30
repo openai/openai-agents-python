@@ -8,12 +8,14 @@ license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
     "openai>=1.97.1,<2",
-    "pydantic>=2.10, <3",
+    "pydantic>=2.10,<3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
     "mcp>=1.11.0, <2; python_version >= '3.10'",
+    "typing>=3.10.0.0",
+    "lint>=1.2.1",
 ]
 classifiers = [
     "Typing :: Typed",
