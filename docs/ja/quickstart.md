@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これは最初の一度だけ実行すれば十分です。
+この作業は一度だけで大丈夫です。
 
 ```bash
 mkdir my_project
@@ -14,7 +14,7 @@ cd my_project
 python -m venv .venv
 ```
 
-### 仮想環境の有効化
+### 仮想環境のアクティブ化
 
 新しいターミナルセッションを開始するたびに実行してください。
 
@@ -22,23 +22,23 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-### Agents SDK のインストール
+###  Agents SDK のインストール
 
 ```bash
 pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
-### OpenAI API キーの設定
+###  OpenAI API キーの設定
 
-まだお持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+まだお持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従って  OpenAI API キーを作成してください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 最初のエージェントを作成する
+## 最初のエージェントの作成
 
-エージェントは instructions、名前、そして `model_config` のようなオプション設定で定義します。
+ エージェント は  instructions、名前、そして任意の config（`model_config` など）で定義します。
 
 ```python
 from agents import Agent
@@ -51,7 +51,7 @@ agent = Agent(
 
 ## エージェントをさらに追加する
 
-追加のエージェントも同じ方法で定義できます。`handoff_descriptions` はハンドオフのルーティングを判断するための追加コンテキストを提供します。
+追加の エージェント も同じ方法で定義できます。`handoff_descriptions` はハンドオフのルーティングを判断するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントには、タスクを進めるために選択できる送信側ハンドオフのインベントリを定義できます。
+各 エージェント で、タスクを前進させる方法を決定する際に選択できる、送信側ハンドオフオプションの一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェントオーケストレーションの実行
 
-ワークフローが正しく動作し、トリアージエージェントが 2 つのスペシャリストエージェント間で正しくルーティングするか確認してみましょう。
+ワークフローが実行され、トリアージ エージェント が 2 つの専門 エージェント 間を正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -95,7 +95,7 @@ async def main():
 
 ## ガードレールを追加する
 
-入力または出力に対して実行するカスタムガードレールを定義できます。
+入力または出力に対して実行するカスタム ガードレール を定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -123,7 +123,7 @@ async def homework_guardrail(ctx, agent, input_data):
 
 ## すべてをまとめる
 
-ハンドオフと入力ガードレールを使って、ワークフロー全体を実行してみましょう。
+ハンドオフと入力 ガードレール を使用して、ワークフロー全体をまとめて実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -190,14 +190,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの確認
+## トレースを表示する
 
-エージェント実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動してトレースを閲覧してください。
+ エージェント 実行中に何が起こったかを確認するには、 OpenAI ダッシュボードの [Trace viewer](https://platform.openai.com/traces) に移動して実行のトレースを表示してください。
 
 ## 次のステップ
 
-より複雑なエージェントフローの構築方法を学びましょう。
+より複雑なエージェントフローの構築方法を学びましょう:
 
--   [エージェント](agents.md) の設定方法を学ぶ  
--   [エージェントの実行](running_agents.md) について学ぶ  
--   [tools](tools.md)、[guardrails](guardrails.md)、[models](models/index.md) について学ぶ
+-   [エージェント](agents.md) の設定方法について学びます。
+-   [エージェントの実行](running_agents.md) について学びます。
+-   [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学びます。
