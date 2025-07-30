@@ -5,13 +5,14 @@ from openai.agents import Agent, function_tool, handoff
 def greet(name: str) -> str:
     return f"Hello, {name}!"
 
+
 def test_agent_clone_shallow_copy():
     target_agent = Agent(name="Target")
     original = Agent(
         name="Original",
         instructions="Testing clone shallow copy",
         tools=[greet],
-        handoffs=[handoff(target_agent)]
+        handoffs=[handoff(target_agent)],
     )
 
     cloned = original.clone(name="Cloned")
