@@ -1,5 +1,4 @@
 import asyncio
-
 from agents import Agent, ItemHelpers, MessageOutputItem, Runner, trace
 
 """
@@ -8,22 +7,23 @@ then picks which agents to call, as tools. In this case, it picks from a set of 
 agents.
 """
 
+# Translation Agents Example
 spanish_agent = Agent(
     name="spanish_agent",
     instructions="You translate the user's message to Spanish",
-    handoff_description="An english to spanish translator",
+    handoff_description="An English to Spanish translator",
 )
 
 french_agent = Agent(
     name="french_agent",
     instructions="You translate the user's message to French",
-    handoff_description="An english to french translator",
+    handoff_description="An English to French translator",
 )
 
 italian_agent = Agent(
     name="italian_agent",
     instructions="You translate the user's message to Italian",
-    handoff_description="An english to italian translator",
+    handoff_description="An English to Italian translator",
 )
 
 orchestrator_agent = Agent(
@@ -54,8 +54,8 @@ synthesizer_agent = Agent(
     instructions="You inspect translations, correct them if needed, and produce a final concatenated response.",
 )
 
-
-async def main():
+async def main_translation():
+    # Get input from the user for translation
     msg = input("Hi! What would you like translated, and to which languages? ")
 
     # Run the entire orchestration in a single trace
@@ -74,6 +74,49 @@ async def main():
 
     print(f"\n\nFinal response:\n{synthesizer_result.final_output}")
 
+# Simplified Example: Using Agent as Tool for Joke Generation
+"""
+This is a 2nd simpler example of the agents-as-tools pattern for beginners. It uses a single agent
+as a tool to generate a joke based on the user's name, making it easier to understand while
+maintaining the professional standard of the SDK.
+"""
 
+# An agent that creates jokes based on the user's name
+joke_agent = Agent(
+    name="JokeAgent",
+    instructions="You create a short, friendly joke based on the user's name.",
+    handoff_description="A joke generator that uses the user's name"
+)
+
+# Main agent that uses joke_agent as a tool
+main_agent = Agent(
+    name="MainAgent",
+    instructions=(
+        "You are a friendly assistant. When the user provides a name, "
+        "you use the joke tool to generate a joke. Do not create jokes yourself."
+    ),
+    tools=[
+        joke_agent.as_tool(
+            tool_name="generate_joke",
+            tool_description="Generates a joke based on the user's name"
+        )
+    ]
+)
+
+async def main_joke():
+    # Get input from the user
+    user_input = input("What is your name? ")
+
+    # Run the agent with tracing to track execution
+    with trace("Joke Generator"):
+        result = await Runner.run(main_agent, user_input)
+        print(f"Joke: {result.final_output}")
+
+# Run both examples
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run the translation example
+    print("Running Translation Example:")
+    asyncio.run(main_translation())
+    
+    print("\nRunning Simplified Joke Example:")
+    asyncio.run(main_joke())
