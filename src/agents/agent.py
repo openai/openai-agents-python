@@ -222,8 +222,7 @@ class Agent(AgentBase, Generic[TContext]):
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
-        """
-        Make a copy of the agent, with the given arguments changed.
+        """Make a copy of the agent, with the given arguments changed.
         
         Notes:
             - Uses `dataclasses.replace`, which performs a **shallow copy**.
@@ -231,7 +230,7 @@ class Agent(AgentBase, Generic[TContext]):
               new list objects are created only if overridden, but their contents
               (tool functions and handoff objects) are shared with the original.
             - To modify these independently, pass new lists when calling `clone()`.
-
+            
         Example:
             ```python
             new_agent = agent.clone(instructions="New instructions")
