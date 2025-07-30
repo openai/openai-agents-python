@@ -241,6 +241,7 @@ def remove_new_items(handoff_input_data: HandoffInputData) -> HandoffInputData:
         input_history=handoff_input_data.input_history,
         pre_handoff_items=(),
         new_items=(),
+        run_context=handoff_input_data.run_context,
     )
 
 
@@ -281,7 +282,7 @@ async def test_handoff_filters():
 
 
 @pytest.mark.asyncio
-async def test_async_input_filter_fails():
+async def test_async_input_filter_supported():
     # DO NOT rename this without updating pyproject.toml
 
     model = FakeModel()
@@ -293,7 +294,7 @@ async def test_async_input_filter_fails():
     async def on_invoke_handoff(_ctx: RunContextWrapper[Any], _input: str) -> Agent[Any]:
         return agent_1
 
-    async def invalid_input_filter(data: HandoffInputData) -> HandoffInputData:
+    async def async_input_filter(data: HandoffInputData) -> HandoffInputData:
         return data  # pragma: no cover
 
     agent_2 = Agent[None](
@@ -306,8 +307,7 @@ async def test_async_input_filter_fails():
                 input_json_schema={},
                 on_invoke_handoff=on_invoke_handoff,
                 agent_name=agent_1.name,
-                # Purposely ignoring the type error here to simulate invalid input
-                input_filter=invalid_input_filter,  # type: ignore
+                input_filter=async_input_filter,
             )
         ],
     )
@@ -319,10 +319,9 @@ async def test_async_input_filter_fails():
         ]
     )
 
-    with pytest.raises(UserError):
-        result = Runner.run_streamed(agent_2, input="user_message")
-        async for _ in result.stream_events():
-            pass
+    result = Runner.run_streamed(agent_2, input="user_message")
+    async for _ in result.stream_events():
+        pass
 
 
 @pytest.mark.asyncio
