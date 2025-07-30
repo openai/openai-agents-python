@@ -140,11 +140,11 @@ class Agent(AgentBase, Generic[TContext]):
     See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
     """
 
-    name: str = field(default=..., metadata={"description": "Agent name as string, can be provided as int or bool which will be converted to string"})
-    
+    name: str = field(default=..., metadata={"description": "Agent name must be a string, int or boolean will raise an error"})
+
     def __post_init__(self):
         if not isinstance(self.name, str):
-            self.name = str(self.name)
+            raise TypeError("Agent name must be a string, got {} instead".format(type(self.name).__name__))
 
     instructions: (
         str
@@ -230,7 +230,6 @@ class Agent(AgentBase, Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
-
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:
         ```
