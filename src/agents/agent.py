@@ -24,6 +24,10 @@ from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
 from .util import _transforms
 from .util._types import MaybeAwaitable
 
+# Pydantic ke liye import add kiya
+from pydantic import BaseModel, Field
+from typing import Union
+
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
     from .mcp import MCPServer
@@ -135,6 +139,12 @@ class Agent(AgentBase, Generic[TContext]):
 
     See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
     """
+
+    name: str = field(default=..., metadata={"description": "Agent name as string, can be provided as int or bool which will be converted to string"})
+    
+    def __post_init__(self):
+        if not isinstance(self.name, str):
+            self.name = str(self.name)
 
     instructions: (
         str
