@@ -168,6 +168,12 @@ print(result.final_output)
 
 (_For Jupyter notebook users, see [hello_world_jupyter.ipynb](examples/basic/hello_world_jupyter.ipynb)_)
 
+### Note on `name` vs `instructions`
+
+- `name` is a **required** parameter used to identify your agent internally (for logs, tracing, handoffs, etc.), **but it is not passed to the LLM**.
+- `instructions` is an **optional** parameter, but it **is sent to the LLM** as a system prompt to define how the agent should behave.
+
+
 ## Handoffs example
 
 ```python
