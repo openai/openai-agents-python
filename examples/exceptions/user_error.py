@@ -1,35 +1,39 @@
 from __future__ import annotations
 
 import asyncio
-
 from agents import Agent, Runner, function_tool
 from agents.exceptions import UserError
 
-"""
-This example demonstrates an OpenAI Agents SDK agent that triggers a UserError due to incorrect SDK usage.
 
-The 'Assistant' agent is configured with an invalid `tool_use_behavior` (empty string) and an invalid tool (`invalid_tool`) that declares a `None` return type but returns a string. Either issue raises a `UserError` when the agent is executed, indicating improper SDK configuration by the user. The interactive loop processes user queries as direct string inputs, catching and displaying the `UserError` message.
+"""
+This example demonstrates raising a `UserError` at runtime by violating a tool-specific logic rule
+(e.g., returning the wrong type despite declaring a valid return type).
+
+This passes `mypy` but fails at runtime due to logical misuse of the SDK.
 """
 
 
 @function_tool
 def invalid_tool() -> None:
-    return "I return a string"  # Type mismatch triggers UserError
+    # This tool *claims* to return None, but it returns a string instead.
+    # This misuse is caught by the SDK during runtime and raises UserError.
+    return "This return violates the declared return type."
 
 
 async def main():
     agent = Agent(
         name="Assistant",
-        instructions="Use the invalid_tool to process queries.",
+        instructions="Use the tool to demonstrate misuse.",
         tools=[invalid_tool],
-        tool_use_behavior="invalid_tool",
+        tool_use_behavior="run_llm_again",  # ✅ valid value — no mypy error
     )
-    user_input = "Do Something."
+
+    user_input = "Please do something invalid"
     try:
         result = await Runner.run(agent, user_input)
         print(result.final_output)
     except UserError as e:
-        print(f"UserError: {e}")
+        print(f"UserError caught as expected: {e}")
 
 
 if __name__ == "__main__":

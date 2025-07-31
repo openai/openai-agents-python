@@ -9,6 +9,7 @@ from agents import (
     GuardrailFunctionOutput,
     InputGuardrailTripwireTriggered,
     Runner,
+    RunContextWrapper,
     input_guardrail,
 )
 
@@ -17,6 +18,7 @@ This example demonstrates an OpenAI Agents SDK agent with an input guardrail to 
 
 The 'CustomerSupportAgent' processes user queries provided as direct string inputs in an interactive loop. A guardrail, implemented via 'GuardrailAgent' and a Pydantic model (`MathHomeworkOutput`), checks if the input is a math homework question. If detected, the guardrail raises `InputGuardrailTripwireTriggered`, triggering a refusal message ("Sorry, I can't help with math homework."). Otherwise, the agent responds to the query. The loop continues to prompt for new inputs, handling each independently.
 """
+
 
 class MathHomeworkOutput(BaseModel):
     is_math_homework: bool
@@ -30,7 +32,11 @@ guardrail_agent = Agent(
 
 
 @input_guardrail
-async def math_guardrail(context, agent: Agent, input: str) -> GuardrailFunctionOutput:
+def my_input_guardrail(
+    context: RunContextWrapper[Any],
+    agent: Agent[Any],
+    inputs: str | list[Any],
+) -> GuardrailFunctionOutput:
     result = await Runner.run(guardrail_agent, input)
     output = result.final_output_as(MathHomeworkOutput)
     return GuardrailFunctionOutput(
