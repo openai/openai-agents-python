@@ -8,7 +8,6 @@ from agents import (
     Runner,
     input_guardrail,
 )
-from agents.exceptions import AgentsException
 
 """
 This example demonstrates an OpenAI Agents SDK agent with an input guardrail to block math homework queries.
