@@ -1,4 +1,4 @@
-from openai.agents import Agent, function_tool, handoff
+from agents import Agent, function_tool, handoff
 
 
 @function_tool
