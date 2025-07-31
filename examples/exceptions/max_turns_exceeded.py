@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import asyncio
+
 from agents import Agent, Runner, function_tool
 from agents.exceptions import MaxTurnsExceeded
 
@@ -34,7 +36,7 @@ async def main():
         print(result.final_output)
     except MaxTurnsExceeded as e:
         print(f"Caught MaxTurnsExceeded: {e}")
-    
+
 
 
 if __name__ == "__main__":

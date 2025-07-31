@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 import asyncio
+
 from pydantic import BaseModel
+
 from agents import (
     Agent,
     GuardrailFunctionOutput,
@@ -8,7 +11,6 @@ from agents import (
     Runner,
     output_guardrail,
 )
-
 
 """
 This example demonstrates an OpenAI Agents SDK agent with an output guardrail to block math homework responses.

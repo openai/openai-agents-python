@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+
 from agents import Agent, Runner, function_tool
 from agents.exceptions import AgentsException
-
 
 """
 This example demonstrates the use of the OpenAI Agents SDK with tools and comprehensive error handling.

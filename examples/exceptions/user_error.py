@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import asyncio
+
 from agents import Agent, Runner, function_tool
 from agents.exceptions import UserError
-
 
 """
 This example demonstrates an OpenAI Agents SDK agent that triggers a UserError due to incorrect SDK usage.
