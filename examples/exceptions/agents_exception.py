@@ -1,7 +1,8 @@
 from __future__ import annotations
-from agents import Agent, RunContextWrapper, Runner, function_tool
-from agents.exceptions import AgentsException
+
 import asyncio
+from agents import Agent, Runner, function_tool
+from agents.exceptions import AgentsException
 
 
 """
@@ -12,47 +13,40 @@ The agent, 'Triage Agent', is configured to handle two tasks:
 - Adding two numbers using the `sum_numbers` tool.
 
 The agent is instructed to use only one tool per execution cycle and can switch to another tool in subsequent cycles.
-The example sets a `max_turns=1` limit to intentionally restrict the agent to a single turn, which may trigger a `MaxTurnsExceeded` error if the agent attempts multiple tool calls.
+The example sets a `max_turns=1` limit to intentionally restrict the agent to a single turn, which may trigger a `MaxTurnsExceeded` error.
 
-Error handling is implemented with `AgentsException`, which is the base class for all SDK-related exceptions, including:
-- `MaxTurnsExceeded`: Raised when the run exceeds the `max_turns` specified in the run methods.
-- `ModelBehaviorError`: Raised when the model produces invalid outputs, e.g., malformed JSON or using non-existent tools.
-- `UserError`: Raised when the SDK user makes an error in code implementation.
-- `InputGuardrailTripwireTriggered`: Raised when an input guardrail is violated (e.g., invalid or off-topic input).
-- `OutputGuardrailTripwireTriggered`: Raised when an output guardrail is violated (e.g., invalid tool output).
-
-Although this example does not include explicit guardrails, the structure supports adding input/output guardrails to validate user inputs or tool outputs. The `AgentsException` catch block ensures all SDK-related errors are handled gracefully.
+All exceptions are caught via `AgentsException`, the base class for SDK errors.
 """
 
-
+# Define tools
 
 @function_tool
-def get_weather(city: str) -> str:
+async def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""
-    return f"The weather in {city} is sunny"
+    return f"The weather in {city} is sunny."
 
 
 @function_tool
-def sum_numbers(a: int, b: int) -> int:
+async def sum_numbers(a: int, b: int) -> str:
     """Adds two numbers."""
-    return a + b
+    result = a + b
+    return f"The sum of {a} and {b} is {result}."
 
 
 agent = Agent(
     name="Triage Agent",
-    instructions="Get weather or sum numbers. You can use one tool at a time, switching to another tool in subsequent turns.",
-    tools=[sum_numbers, get_weather],
+    instructions="Get weather or sum numbers. Use only one tool per turn.",
+    tools=[get_weather, sum_numbers],
 )
 
 
 async def main():
     try:
         user_input = input("Enter a message: ")
-
         result = await Runner.run(agent, user_input, max_turns=1)
-        print(result.final_output)
+        print("✅ Final Output:", result.final_output)
     except AgentsException as e:
-        print(f"Caught AgentsException: {e}")
+        print(f"❌ Caught {e.__class__.__name__}: {e}")
 
 
 if __name__ == "__main__":
