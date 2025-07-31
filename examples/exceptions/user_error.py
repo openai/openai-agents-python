@@ -22,7 +22,6 @@ async def main():
         instructions="Use the invalid_tool to process queries.",
         tools=[invalid_tool],
         tool_use_behavior="invalid_tool",
-        model=model
     )
     user_input = "Do Something."
     try:

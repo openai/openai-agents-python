@@ -26,7 +26,6 @@ async def main():
         name="TriageAgent",
         instructions="Process both get_weather and sum_numbers in a single turn when asked for both.",
         tools=[sum_numbers, get_weather],
-        model=model,
     )
 
     user_input = "What is US Weather and sum 2 + 2."
