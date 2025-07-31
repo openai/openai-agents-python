@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+
 from agents import Agent, Runner, function_tool
 from agents.exceptions import UserError
-
 
 """
 This example demonstrates raising a `UserError` at runtime by violating a tool-specific logic rule
