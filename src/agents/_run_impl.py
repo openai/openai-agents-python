@@ -774,6 +774,7 @@ class RunImpl:
                     else original_input,
                     pre_handoff_items=tuple(pre_step_items),
                     new_items=tuple(new_step_items),
+                    run_context=context_wrapper,
                 )
                 if not callable(input_filter):
                     _error_tracing.attach_error_to_span(
@@ -785,6 +786,8 @@ class RunImpl:
                     )
                     raise UserError(f"Invalid input filter: {input_filter}")
                 filtered = input_filter(handoff_input_data)
+                if inspect.isawaitable(filtered):
+                    filtered = await filtered
                 if not isinstance(filtered, HandoffInputData):
                     _error_tracing.attach_error_to_span(
                         span_handoff,

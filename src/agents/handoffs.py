@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
 
 from pydantic import TypeAdapter
@@ -49,8 +49,24 @@ class HandoffInputData:
     handoff and the tool output message representing the response from the handoff output.
     """
 
+    run_context: RunContextWrapper[Any] | None = None
+    """
+    The run context at the time the handoff was invoked.
+    Note that, since this property was added later on, it's optional for backwards compatibility.
+    """
 
-HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], HandoffInputData]
+    def clone(self, **kwargs: Any) -> HandoffInputData:
+        """
+        Make a copy of the handoff input data, with the given arguments changed. For example, you
+        could do:
+        ```
+        new_handoff_input_data = handoff_input_data.clone(new_items=())
+        ```
+        """
+        return dataclasses_replace(self, **kwargs)
+
+
+HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], MaybeAwaitable[HandoffInputData]]
 """A function that filters the input data passed to the next agent."""
 
 
