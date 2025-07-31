@@ -4,23 +4,23 @@ search:
 ---
 # ツール
 
-ツールはエージェントがアクションを実行する手段です。データの取得、コードの実行、外部 API の呼び出し、さらにはコンピュータ操作まで行えます。Agents SDK には 3 種類のツールがあります。
+ツールを使用すると エージェント がアクションを実行できます。データの取得、コードの実行、外部 API の呼び出し、さらには コンピュータ操作 などが可能です。Agents SDK には次の 3 つの カテゴリー のツールがあります。
 
--   ホスト済みツール: これらは LLM サーバー上で AI モデルとともに実行されます。OpenAI はリトリーバル、Web 検索、コンピュータ操作をホスト済みツールとして提供しています。
--   Function Calling: 任意の Python 関数をツールとして利用できます。
--   エージェントをツールとして: エージェントをツールとして扱うことで、ハンドオフせずに他のエージェントを呼び出せます。
+- ホスト型ツール: これらは LLM サーバー上で AI モデルと並行して実行されます。OpenAI は retrieval、Web 検索、コンピュータ操作 をホスト型ツールとして提供しています。
+- 関数呼び出し (Function Calling): 任意の Python 関数をツールとして利用できます。
+- ツールとしてのエージェント: エージェント をツールとして使用でき、ハンドオフ せずに他の エージェント を呼び出せます。
 
-## ホスト済みツール
+## ホスト型ツール
 
-OpenAI は [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] を使用する際、いくつかの組み込みツールを提供しています。
+[`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] を使用する場合、OpenAI はいくつかの組み込みツールを提供しています。
 
--   [`WebSearchTool`][agents.tool.WebSearchTool] はエージェントに Web 検索を行わせます。
--   [`FileSearchTool`][agents.tool.FileSearchTool] は OpenAI ベクトルストアから情報を取得します。
--   [`ComputerTool`][agents.tool.ComputerTool] はコンピュータ操作タスクを自動化します。
--   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] は LLM がサンドボックス環境でコードを実行できるようにします。
--   [`HostedMCPTool`][agents.tool.HostedMCPTool] はリモート MCP サーバーのツールをモデルに公開します。
--   [`ImageGenerationTool`][agents.tool.ImageGenerationTool] はプロンプトから画像を生成します。
--   [`LocalShellTool`][agents.tool.LocalShellTool] はローカルマシンでシェルコマンドを実行します。
+- [`WebSearchTool`][agents.tool.WebSearchTool] を使用すると エージェント が Web 検索を実行できます。
+- [`FileSearchTool`][agents.tool.FileSearchTool] は OpenAI ベクトルストア から情報を取得します。
+- [`ComputerTool`][agents.tool.ComputerTool] は コンピュータ操作 タスクを自動化します。
+- [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] は LLM がサンドボックス環境でコードを実行できるようにします。
+- [`HostedMCPTool`][agents.tool.HostedMCPTool] は リモート MCP サーバー のツールをモデルに公開します。
+- [`ImageGenerationTool`][agents.tool.ImageGenerationTool] はプロンプトから画像を生成します。
+- [`LocalShellTool`][agents.tool.LocalShellTool] はローカルマシンでシェルコマンドを実行します。
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -43,14 +43,14 @@ async def main():
 
 ## 関数ツール
 
-任意の Python 関数をツールとして利用できます。Agents SDK が自動で設定を行います。
+任意の Python 関数をツールとして使用できます。Agents SDK がツールの設定を自動で行います。
 
--   ツール名は Python 関数名になります（名前を指定することも可能）。
--   ツールの説明は関数の docstring から取得されます（説明を指定することも可能）。
--   関数の引数から自動的に入力スキーマが生成されます。
--   各入力の説明は、無効化しない限り docstring から取得されます。
+- ツール名は Python 関数名になります (別名を指定することも可能です)。
+- ツールの説明は関数の docstring から取得されます (説明を直接指定することも可能です)。
+- 関数の引数から入力スキーマが自動生成されます。
+- 各入力の説明は docstring から取得されます (無効化も可能です)。
 
-関数シグネチャの抽出には Python の `inspect` モジュールを使用し、docstring の解析には [`griffe`](https://mkdocstrings.github.io/griffe/)、スキーマ生成には `pydantic` を利用しています。
+Python の `inspect` モジュールを使用して関数シグネチャを抽出し、[`griffe`](https://mkdocstrings.github.io/griffe/) で docstring を解析し、スキーマの作成には `pydantic` を利用しています。
 
 ```python
 import json
@@ -102,12 +102,12 @@ for tool in agent.tools:
 
 ```
 
-1.  引数には任意の Python 型を使え、関数は同期・非同期いずれも対応します。  
-2.  Docstring があれば、ツール全体および各引数の説明に使用されます。  
-3.  関数は任意で `context` を最初の引数として受け取れます。また、ツール名や説明、docstring スタイルなどのオーバーライド設定も可能です。  
-4.  デコレートした関数を tools のリストに渡します。  
+1. 引数には任意の Python 型を使用でき、関数は同期・非同期のいずれでも構いません。  
+2. docstring がある場合、全体の説明および引数の説明を取得します。  
+3. 関数はオプションで `context` を受け取れます (先頭の引数である必要があります)。また、ツール名や説明、docstring スタイルなどを上書き設定できます。  
+4. 装飾された関数をツール一覧に渡してください。
 
-??? note "出力を見るには展開"
+??? note "クリックして出力を表示"
 
     ```
     fetch_weather
@@ -179,12 +179,12 @@ for tool in agent.tools:
 
 ### カスタム関数ツール
 
-Python 関数をそのままツールにしたくない場合は、[`FunctionTool`][agents.tool.FunctionTool] を直接作成できます。次の項目を指定してください。
+Python 関数をツールとして使いたくない場合は、直接 [`FunctionTool`][agents.tool.FunctionTool] を作成できます。必要な項目は以下です。
 
--   `name`
--   `description`
--   `params_json_schema` : 引数の JSON スキーマ
--   `on_invoke_tool` : [`ToolContext`][agents.tool_context.ToolContext] と引数（JSON 文字列）を受け取り、ツールの出力文字列を返す async 関数
+- `name`
+- `description`
+- `params_json_schema` : 引数の JSON スキーマ
+- `on_invoke_tool` : [`ToolContext`][agents.tool_context.ToolContext] と引数 (JSON 文字列) を受け取り、ツールの出力文字列を返す非同期関数
 
 ```python
 from typing import Any
@@ -219,16 +219,16 @@ tool = FunctionTool(
 
 ### 引数と docstring の自動解析
 
-前述のとおり、関数シグネチャからツールのスキーマを、docstring からツールや各引数の説明を自動で取得します。ポイントは次のとおりです。
+前述のとおり、関数シグネチャを自動解析してツールのスキーマを抽出し、docstring を解析してツールおよび個々の引数の説明を取得します。主なポイントは以下のとおりです。
 
-1.  シグネチャ解析には `inspect` を使用します。型アノテーションを基に引数の型を判断し、Pydantic モデルを動的に構築して全体のスキーマを表現します。Python のプリミティブ型、Pydantic モデル、TypedDict など多くの型をサポートします。  
-2.  docstring 解析には `griffe` を使用します。`google`、`sphinx`、`numpy` 形式をサポートします。自動検出を試みますが、`function_tool` 呼び出し時に明示的に指定できます。また、`use_docstring_info` を `False` に設定して docstring 解析を無効化することも可能です。  
+1. シグネチャの解析は `inspect` モジュールで行います。型アノテーションを用いて引数の型を理解し、Pydantic モデルを動的に生成します。Python の基本型、Pydantic モデル、TypedDict など大半の型をサポートします。  
+2. docstring の解析には `griffe` を使用します。サポートされる docstring 形式は `google`、`sphinx`、`numpy` です。形式はベストエフォートで自動判定しますが、`function_tool` 呼び出し時に明示的に指定することもできます。`use_docstring_info` を `False` にすると docstring 解析を無効化できます。
 
 スキーマ抽出のコードは [`agents.function_schema`][] にあります。
 
-## エージェントをツールとして
+## ツールとしてのエージェント
 
-ワークフローによっては、中央のエージェントが専門エージェント群をオーケストレーションし、ハンドオフせずに制御したい場合があります。その際、エージェントをツールとしてモデル化できます。
+一部のワークフローでは、ハンドオフ する代わりに中央の エージェント が複数の専門 エージェント をオーケストレーションしたい場合があります。そのようなときは エージェント をツールとしてモデル化できます。
 
 ```python
 from agents import Agent, Runner
@@ -267,9 +267,9 @@ async def main():
     print(result.final_output)
 ```
 
-### ツール化したエージェントのカスタマイズ
+### ツールエージェントのカスタマイズ
 
-`agent.as_tool` はエージェントを簡単にツール化するための便利メソッドです。ただしすべての設定をサポートしているわけではありません（例: `max_turns` の設定不可）。高度なユースケースでは、ツール実装内で `Runner.run` を直接使用してください。
+`agent.as_tool` は エージェント を簡単にツール化するための便利メソッドです。ただしすべての設定をサポートしているわけではありません。たとえば `max_turns` は設定できません。高度なユースケースでは、ツール実装内で `Runner.run` を直接呼び出してください。
 
 ```python
 @function_tool
@@ -288,15 +288,15 @@ async def run_my_agent() -> str:
     return str(result.final_output)
 ```
 
-### 出力のカスタム抽出
+### 出力抽出のカスタマイズ
 
-場合によっては、ツール化したエージェントの出力を中央エージェントへ返す前に加工したいことがあります。たとえば次のようなケースです。
+場合によっては、ツールエージェント の出力を中央 エージェント に返す前に加工したいことがあります。たとえば以下のようなケースです。
 
--   サブエージェントのチャット履歴から特定情報（例: JSON ペイロード）だけを抽出したい。  
--   エージェントの最終回答を変換・再フォーマットしたい（例: Markdown をプレーンテキストや CSV に変換）。  
--   出力を検証し、欠落や不正な場合にフォールバック値を返したい。  
+- サブエージェントのチャット履歴から特定情報 (例: JSON ペイロード) を抽出したい。  
+- エージェント の最終回答を変換・再整形したい (例: Markdown をプレーンテキストや CSV に変換)。  
+- エージェント の応答が欠落している、または不正な場合に検証やフォールバック値を提供したい。  
 
-その場合は `as_tool` メソッドに `custom_output_extractor` 引数を渡してください。
+そのような場合は、`as_tool` メソッドに `custom_output_extractor` 引数を渡してください。
 
 ```python
 async def extract_json_payload(run_result: RunResult) -> str:
@@ -315,12 +315,12 @@ json_tool = data_agent.as_tool(
 )
 ```
 
-## 関数ツールにおけるエラー処理
+## 関数ツールでのエラー処理
 
-`@function_tool` で関数ツールを作成する際、`failure_error_function` を渡せます。これはツール呼び出しが失敗した場合に LLM へエラーレスポンスを返す関数です。
+`@function_tool` で関数ツールを作成する際、`failure_error_function` を渡すことができます。これはツール呼び出しがクラッシュした場合に LLM へ返すエラーレスポンスを生成する関数です。
 
--   何も渡さない場合、デフォルトで `default_tool_error_function` が実行され、LLM にエラーが発生したことを伝えます。  
--   独自のエラー関数を渡すと、その関数が実行され、LLM へレスポンスが送られます。  
--   明示的に `None` を渡すと、ツール呼び出しエラーは再スローされます。モデルが無効な JSON を生成した場合は `ModelBehaviorError`、コードがクラッシュした場合は `UserError` などになります。  
+- 何も渡さない場合、デフォルトで `default_tool_error_function` が実行され、LLM にエラーが発生したことを伝えます。  
+- 独自のエラー関数を渡した場合、その関数が実行され、その結果が LLM に送信されます。  
+- 明示的に `None` を渡すと、ツール呼び出し時のエラーは再スローされます。たとえばモデルが無効な JSON を生成した場合は `ModelBehaviorError`、ユーザーのコードがクラッシュした場合は `UserError` などになります。  
 
-`FunctionTool` オブジェクトを手動で作成する場合は、`on_invoke_tool` 内で必ずエラーを処理してください。
+`FunctionTool` オブジェクトを手動で作成する場合は、`on_invoke_tool` 関数内でエラーを処理する必要があります。
