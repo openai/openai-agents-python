@@ -121,7 +121,8 @@ class RealtimeSession(RealtimeModelListener):
 
         model_config = self._model_config.copy()
         model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
-            self._current_agent
+            starting_settings=self._model_config.get("initial_model_settings", None),
+            agent=self._current_agent,
         )
 
         # Connect to the model
@@ -187,11 +188,26 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "function_call":
             await self._handle_tool_call(event)
         elif event.type == "audio":
-            await self._put_event(RealtimeAudio(info=self._event_info, audio=event))
+            await self._put_event(
+                RealtimeAudio(
+                    info=self._event_info,
+                    audio=event,
+                    item_id=event.item_id,
+                    content_index=event.content_index,
+                )
+            )
         elif event.type == "audio_interrupted":
-            await self._put_event(RealtimeAudioInterrupted(info=self._event_info))
+            await self._put_event(
+                RealtimeAudioInterrupted(
+                    info=self._event_info, item_id=event.item_id, content_index=event.content_index
+                )
+            )
         elif event.type == "audio_done":
-            await self._put_event(RealtimeAudioEnd(info=self._event_info))
+            await self._put_event(
+                RealtimeAudioEnd(
+                    info=self._event_info, item_id=event.item_id, content_index=event.content_index
+                )
+            )
         elif event.type == "input_audio_transcription_completed":
             self._history = RealtimeSession._get_new_history(self._history, event)
             await self._put_event(
@@ -257,6 +273,8 @@ class RealtimeSession(RealtimeModelListener):
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
         elif event.type == "other":
+            pass
+        elif event.type == "raw_server_event":
             pass
         else:
             assert_never(event)
@@ -330,7 +348,8 @@ class RealtimeSession(RealtimeModelListener):
 
             # Get updated model settings from new agent
             updated_settings = await self._get_updated_model_settings_from_agent(
-                self._current_agent
+                starting_settings=None,
+                agent=self._current_agent,
             )
 
             # Send handoff event
@@ -509,9 +528,16 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _get_updated_model_settings_from_agent(
         self,
+        starting_settings: RealtimeSessionModelSettings | None,
         agent: RealtimeAgent,
     ) -> RealtimeSessionModelSettings:
-        updated_settings: RealtimeSessionModelSettings = {}
+        # Start with run config model settings as base
+        run_config_settings = self._run_config.get("model_settings", {})
+        updated_settings: RealtimeSessionModelSettings = run_config_settings.copy()
+        # Apply starting settings (from model config) next
+        if starting_settings:
+            updated_settings.update(starting_settings)
+
         instructions, tools, handoffs = await asyncio.gather(
             agent.get_system_prompt(self._context_wrapper),
             agent.get_all_tools(self._context_wrapper),
@@ -520,10 +546,6 @@ class RealtimeSession(RealtimeModelListener):
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
-
-        # Override with initial settings
-        initial_settings = self._model_config.get("initial_model_settings", {})
-        updated_settings.update(initial_settings)
 
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:

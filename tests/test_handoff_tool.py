@@ -221,6 +221,7 @@ def test_handoff_input_data():
         input_history="",
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 1
 
@@ -228,6 +229,7 @@ def test_handoff_input_data():
         input_history=({"role": "user", "content": "foo"},),
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 1
 
@@ -238,6 +240,7 @@ def test_handoff_input_data():
         ),
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 2
 
@@ -251,6 +254,7 @@ def test_handoff_input_data():
             message_item("bar", agent),
             message_item("baz", agent),
         ),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 5
 
@@ -264,6 +268,7 @@ def test_handoff_input_data():
             message_item("baz", agent),
             message_item("qux", agent),
         ),
+        run_context=RunContextWrapper(context=()),
     )
 
     assert get_len(data) == 5

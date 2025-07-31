@@ -16,6 +16,7 @@ from agents import Agent, ModelSettings, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
+     """returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
 
 agent = Agent(
@@ -33,6 +34,7 @@ Agents are generic on their `context` type. Context is a dependency-injection to
 ```python
 @dataclass
 class UserContext:
+    name: str
     uid: str
     is_pro_user: bool
 
@@ -141,8 +143,103 @@ Supplying a list of tools doesn't always mean the LLM will use a tool. You can f
 3. `none`, which requires the LLM to _not_ use a tool.
 4. Setting a specific string e.g. `my_tool`, which requires the LLM to use that specific tool.
 
+```python
+from agents import Agent, Runner, function_tool, ModelSettings
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
+    model_settings=ModelSettings(tool_choice="get_weather") 
+)
+```
+
+## Tool Use Behavior
+
+The `tool_use_behavior` parameter in the `Agent` configuration controls how tool outputs are handled:
+- `"run_llm_again"`: The default. Tools are run, and the LLM processes the results to produce a final response.
+- `"stop_on_first_tool"`: The output of the first tool call is used as the final response, without further LLM processing.
+
+```python
+from agents import Agent, Runner, function_tool, ModelSettings
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
+    tool_use_behavior="stop_on_first_tool"
+)
+```
+
+- `StopAtTools(stop_at_tool_names=[...])`: Stops if any specified tool is called, using its output as the final response.
+```python
+from agents import Agent, Runner, function_tool
+from agents.agent import StopAtTools
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
+
+@function_tool
+def sum_numbers(a: int, b: int) -> int:
+    """Adds two numbers."""
+    return a + b
+
+agent = Agent(
+    name="Stop At Stock Agent",
+    instructions="Get weather or sum numbers.",
+    tools=[get_weather, sum_numbers],
+    tool_use_behavior=StopAtTools(stop_at_tool_names=["get_weather"])
+)
+```
+- `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
+
+```python
+from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
+from agents.agent import ToolsToFinalOutputResult
+from typing import List, Any
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Returns weather info for the specified city."""
+    return f"The weather in {city} is sunny"
+
+def custom_tool_handler(
+    context: RunContextWrapper[Any],
+    tool_results: List[FunctionToolResult]
+) -> ToolsToFinalOutputResult:
+    """Processes tool results to decide final output."""
+    for result in tool_results:
+        if result.output and "sunny" in result.output:
+            return ToolsToFinalOutputResult(
+                is_final_output=True,
+                final_output=f"Final weather: {result.output}"
+            )
+    return ToolsToFinalOutputResult(
+        is_final_output=False,
+        final_output=None
+    )
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="Retrieve weather details.",
+    tools=[get_weather],
+    tool_use_behavior=custom_tool_handler
+)
+```
+
 !!! note
 
     To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call. This behavior is configurable via [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]. The infinite loop is because tool results are sent to the LLM, which then generates another tool call because of `tool_choice`, ad infinitum.
 
-    If you want the Agent to completely stop after a tool call (rather than continuing with auto mode), you can set [`Agent.tool_use_behavior="stop_on_first_tool"`] which will directly use the tool output as the final response without further LLM processing.
