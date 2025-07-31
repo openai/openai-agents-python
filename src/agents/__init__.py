@@ -44,6 +44,7 @@ from .memory import Session, SQLiteSession
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
+from .models.multi_provider import MultiProvider
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
@@ -171,6 +172,7 @@ __all__ = [
     "ModelTracing",
     "ModelSettings",
     "OpenAIChatCompletionsModel",
+    "MultiProvider",
     "OpenAIProvider",
     "OpenAIResponsesModel",
     "AgentOutputSchema",
