@@ -143,3 +143,5 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .aider*
+
+.venv_39
