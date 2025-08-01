@@ -110,7 +110,7 @@ set_tracing_export_api_key("OPENAI_API_KEY")
 
 model = LitellmModel(
     model="your-model-name",
-    api_key="your-api-key"
+    api_key="your-api-key",
 )
 
 agent = Agent(
