@@ -15,6 +15,9 @@ from .processor_interface import TracingExporter, TracingProcessor
 from .spans import Span
 from .traces import Trace
 
+TRACES_INGEST_PATH: str = "/traces/ingest"
+DEFAULT_TRACES_INGEST_ENDPOINT: str = f"https://api.openai.com/v1{TRACES_INGEST_PATH}"
+
 
 class ConsoleSpanExporter(TracingExporter):
     """Prints the traces and spans to the console."""
@@ -33,7 +36,7 @@ class BackendSpanExporter(TracingExporter):
         api_key: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        endpoint: str = "https://api.openai.com/v1/traces/ingest",
+        endpoint: str = DEFAULT_TRACES_INGEST_ENDPOINT,
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
@@ -46,7 +49,9 @@ class BackendSpanExporter(TracingExporter):
                 `os.environ["OPENAI_ORG_ID"]` if not provided.
             project: The OpenAI project to use. Defaults to
                 `os.environ["OPENAI_PROJECT_ID"]` if not provided.
-            endpoint: The HTTP endpoint to which traces/spans are posted.
+            endpoint: The HTTP endpoint to which traces/spans are posted. If not
+                overridden and ``OPENAI_BASE_URL`` is set, the endpoint will be
+                ``OPENAI_BASE_URL`` appended with ``/traces/ingest``.
             max_retries: Maximum number of retries upon failures.
             base_delay: Base delay (in seconds) for the first backoff.
             max_delay: Maximum delay (in seconds) for backoff growth.
@@ -54,7 +59,14 @@ class BackendSpanExporter(TracingExporter):
         self._api_key = api_key
         self._organization = organization
         self._project = project
-        self.endpoint = endpoint
+
+        env_base_url = os.environ.get("OPENAI_BASE_URL")
+        if env_base_url and endpoint == DEFAULT_TRACES_INGEST_ENDPOINT:
+            env_base_url = env_base_url.rstrip("/")
+            self.endpoint = f"{env_base_url}{TRACES_INGEST_PATH}"
+        else:
+            self.endpoint = endpoint
+
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
