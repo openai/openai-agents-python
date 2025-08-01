@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - fix-set-api-key-cached-property
   pull_request:
     # All PRs, including stacked PRs
 
