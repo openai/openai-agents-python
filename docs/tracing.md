@@ -39,7 +39,7 @@ By default, the SDK traces the following:
 -   Audio outputs (text-to-speech) are wrapped in a `speech_span()`
 -   Related audio spans may be parented under a `speech_group_span()`
 
-By default, the trace is named "Agent trace". You can set this name if you use `trace`, or you can can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
+By default, the trace is named "Agent workflow". You can set this name if you use `trace`, or you can configure the name and other properties with the [`RunConfig`][agents.run.RunConfig].
 
 In addition, you can set up [custom trace processors](#custom-tracing-processors) to push traces to other destinations (as a replacement, or secondary destination).
 
@@ -98,37 +98,28 @@ To customize this default setup, to send traces to alternative or additional bac
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
 
-## Tracing with Non-OpenAI LLMs
+## Tracing with Non-OpenAI Models
 
-You can use an OpenAI API key with non-OpenAI LLMs to enable free tracing on the Openai Traces dashboard without disabling tracing.
+You can use an OpenAI API key with non-OpenAI Models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing.
 
 ```python
-from agents import set_tracing_export_api_key, Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
-from dotenv import load_dotenv
-load_dotenv()
-import os
+from agents import set_tracing_export_api_key, Agent, Runner
+from agents.extensions.models.litellm_model import LitellmModel
 
-set_tracing_export_api_key(os.getenv("OPENAI_API_KEY"))
-gemini_api_key = os.getenv("GEMINI_API_KEY")
+set_tracing_export_api_key("OPENAI_API_KEY")
 
-external_client = AsyncOpenAI(
-    api_key=gemini_api_key,
-    base_url="https://generativelanguage.googleapis.com/v1beta"
-    )
-
-model = OpenAIChatCompletionsModel(
-        model="gemini-2.0-flash",
-        openai_client=external_client,
-    )
+model = LitellmModel(
+    model="your-model-name",
+    api_key="your-api-key"
+)
 
 agent = Agent(
     name="Assistant",
     model=model,
-    )
+)
 ```
 
 ## Notes
-- Set OPENAI_API_KEY in a .env file.
 - View free traces at Openai Traces dashboard.
 
 
@@ -152,3 +143,4 @@ agent = Agent(
 -   [Okahu-Monocle](https://github.com/monocle2ai/monocle)
 -   [Galileo](https://v2docs.galileo.ai/integrations/openai-agent-integration#openai-agent-integration)
 -   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
+-   [LangDB AI](https://docs.langdb.ai/getting-started/working-with-agent-frameworks/working-with-openai-agents-sdk)
