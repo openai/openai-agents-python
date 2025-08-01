@@ -2,11 +2,12 @@
 
 The [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) enables you to build agentic AI apps in a lightweight, easy-to-use package with very few abstractions. It's a production-ready upgrade of our previous experimentation for agents, [Swarm](https://github.com/openai/swarm/tree/main). The Agents SDK has a very small set of primitives:
 
-- **Agents**: These are large language models (LLMs) that are preconfigured with specific instructions, access to tools (like web search or file retrieval), and even safety guardrails. An agent's core function is to generate a response or decide which tool to use based on the current context.
-- **Handoffs**: This is one of the SDK’s most powerful features. It allows a primary agent to delegate a task to another, more specialized agent if the task falls outside its domain. This enables the creation of complex, multi-agent workflows.
-- **Guardrails**: These are built-in safety checks that validate both the inputs to the agent and its outputs. Their purpose is to ensure that agents operate within defined parameters, which is crucial for reducing risks associated with automation.
-- **Sessions**: This primitive automatically manages and maintains the conversation history across multiple agent runs. It ensures that the agent remembers previous interactions, providing a cohesive and contextual conversation flow without extra development effort.
-- **Tracing & Observability**: The SDK includes integrated tracing capabilities that allow developers to visualize and debug the flow of an agent’s actions in real-time. This is particularly useful for monitoring complex workflows, identifying performance bottlenecks, and optimizing the agent's behavior.
+-   **Agents**, which are LLMs equipped with instructions and tools
+-   **Handoffs**, which allow agents to delegate to other agents for specific tasks
+-   **Guardrails**, which enable the inputs to agents to be validated
+-   **Sessions**, which automatically maintains conversation history across agent runs
+-   **Tracing**, which lets you visualize and debug the flow of an agent's actions
+
 
 In combination with Python, these primitives are powerful enough to express complex relationships between tools and agents, and allow you to build real-world applications without a steep learning curve. In addition, the SDK comes with built-in **tracing** that lets you visualize and debug your agentic flows, as well as evaluate them and even fine-tune models for your application.
 
