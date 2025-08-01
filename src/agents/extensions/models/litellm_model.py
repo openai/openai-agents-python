@@ -46,17 +46,25 @@ from ...usage import Usage
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
-    """
-    An internal subclass to carry reasoning_content without modifying the original model.
+     """An internal subclass used by the SDK to carry the agent's reasoning content.
+
+    This separates the agent's internal thought process from the final message
+    sent to the user, which is crucial for debugging and understanding
+    how the agent arrived at its conclusion without modifying the standard model output.
     """
 
     reasoning_content: str
 
 
 class LitellmModel(Model):
-    """This class enables using any model via LiteLLM. LiteLLM allows you to acess OpenAPI,
-    Anthropic, Gemini, Mistral, and many other models.
-    See supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
+    """This class acts as a flexible bridge, allowing you to use a wide variety
+    of LLM providers with the Agents SDK via LiteLLM.
+
+    By using LiteLLM, you can easily switch between different models and providers
+    (like OpenAI, Anthropic, Gemini, Mistral, and many others) without changing
+    your core agent code.
+
+    See a list of all supported models here: [litellm models](https://docs.litellm.ai/docs/providers).
     """
 
     def __init__(
