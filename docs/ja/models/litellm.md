@@ -2,33 +2,33 @@
 search:
   exclude: true
 ---
-# LiteLLM を利用したモデルの使用
+# LiteLLM 経由でのモデル利用
 
 !!! note
 
-    LiteLLM 統合はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題を発見された場合は、[GitHub Issues](https://github.com/openai/openai-agents-python/issues) でご報告ください。迅速に対応いたします。
+    LiteLLM 統合はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題を見つけた場合は [Github issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に対応いたします。
 
-[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ のモデルを利用できるライブラリです。Agents SDK では LiteLLM との連携機能を追加し、任意の AI モデルを利用できるようにしました。
+[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ モデルを利用できるライブラリです。Agents SDK では LiteLLM 統合により、任意の AI モデルを使用できます。
 
 ## セットアップ
 
-`litellm` が利用可能であることを確認してください。オプションの `litellm` 依存関係グループをインストールすることで準備できます。
+`litellm` が利用可能であることを確認してください。オプションの `litellm` 依存グループをインストールすることで導入できます。
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-準備ができたら、任意のエージェントで [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
+インストール後は、任意のエージェントで [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
 
 ## 例
 
-以下は動作する完全な例です。実行すると、モデル名と API キーの入力を求められます。たとえば次のように入力できます。
+以下は完全に動作する例です。実行すると、モデル名と API キーの入力を求められます。たとえば次のように入力できます。
 
-- `openai/gpt-4.1` をモデルとして指定し、OpenAI API キーを入力  
-- `anthropic/claude-3-5-sonnet-20240620` をモデルとして指定し、Anthropic API キーを入力  
-- など
+-   `openai/gpt-4.1` をモデルに指定し、OpenAI API キーを入力
+-   `anthropic/claude-3-5-sonnet-20240620` をモデルに指定し、Anthropic API キーを入力
+-   そのほか
 
-LiteLLM がサポートするモデルの一覧は、[LiteLLM プロバイダーのドキュメント](https://docs.litellm.ai/docs/providers) をご覧ください。
+LiteLLM でサポートされているモデルの一覧は、[litellm providers docs](https://docs.litellm.ai/docs/providers) を参照してください。
 
 ```python
 from __future__ import annotations
