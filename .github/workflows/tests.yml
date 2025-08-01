@@ -25,6 +25,20 @@ jobs:
       - name: Run lint
         run: make lint
 
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: make sync
+      - name: Run format check
+        run: make format-check
+
   typecheck:
     runs-on: ubuntu-latest
     steps:

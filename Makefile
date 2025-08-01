@@ -61,4 +61,4 @@ deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
 .PHONY: check
-check: format-check lint mypy tests
+check: format-check lint mypy coverage
