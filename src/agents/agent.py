@@ -94,6 +94,10 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    def __post_init__(self):
+        if not isinstance(self.name, str):
+            raise TypeError(f"The 'name' property must be a string, but received a {type(self.name).__name__}.")
+
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
