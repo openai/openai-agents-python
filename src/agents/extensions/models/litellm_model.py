@@ -46,12 +46,13 @@ from ...usage import Usage
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
-     """An internal subclass used by the SDK to carry the agent's reasoning content.
+    """An internal subclass used by the SDK to carry the agent's reasoning content.
 
     This separates the agent's internal thought process from the final message
     sent to the user, which is crucial for debugging and understanding
     how the agent arrived at its conclusion without modifying the standard model output.
     """
+
 
     reasoning_content: str
 
