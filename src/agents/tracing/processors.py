@@ -69,9 +69,12 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
-        # We're specifically setting the underlying cached property as well
+        # Clear the cached property if it exists
+        if 'api_key' in self.__dict__:
+            del self.__dict__['api_key']
+
+        # Update the private attribute
         self._api_key = api_key
-        self.api_key = api_key
 
     @cached_property
     def api_key(self):
