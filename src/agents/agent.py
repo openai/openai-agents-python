@@ -221,6 +221,14 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+    def __post_init__(self):
+        if self.instructions is not None and not (
+        isinstance(self.instructions, str) or callable(self.instructions)
+    ):
+         raise TypeError(
+            f"The 'instructions' must be a string or a callable, but received {type(self.instructions).__name__}."
+        )
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed. For example, you could do:
         ```
