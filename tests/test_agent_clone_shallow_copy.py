@@ -1,5 +1,6 @@
 from agents import Agent, function_tool, handoff
 
+
 @function_tool
 def greet(name: str) -> str:
     return f"Hello, {name}!"
@@ -15,8 +16,8 @@ def test_agent_clone_shallow_copy():
     )
 
     cloned = original.clone(
-        name="Cloned", 
-        tools=original.tools.copy(), 
+        name="Cloned",
+        tools=original.tools.copy(),
         handoffs=original.handoffs.copy()
     )
 
@@ -24,7 +25,7 @@ def test_agent_clone_shallow_copy():
     assert cloned is not original
     assert cloned.name == "Cloned"
     assert cloned.instructions == original.instructions
-    
+
     # Shallow copy assertions
     assert cloned.tools is not original.tools, "Tools should be different list"
     assert cloned.tools[0] is original.tools[0], "Tool objects should be same instance"
