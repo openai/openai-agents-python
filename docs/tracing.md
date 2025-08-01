@@ -103,10 +103,12 @@ To customize this default setup, to send traces to alternative or additional bac
 You can use an OpenAI API key with non-OpenAI Models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing.
 
 ```python
+import os
 from agents import set_tracing_export_api_key, Agent, Runner
 from agents.extensions.models.litellm_model import LitellmModel
 
-set_tracing_export_api_key("OPENAI_API_KEY")
+tracing_api_key = os.environ["OPENAI_API_KEY"]
+set_tracing_export_api_key(tracing_api_key)
 
 model = LitellmModel(
     model="your-model-name",
