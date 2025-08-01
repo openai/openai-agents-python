@@ -178,21 +178,27 @@ class MCPUtil:
                 f"Invalid JSON input for tool {tool.name}: {input_json}"
             ) from e
 
+        # Use original tool name for server call (strip server prefix if present)
+        original_name = getattr(tool, "original_name", tool.name)
+
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool.name}")
+            logger.debug(f"Invoking MCP tool {tool.name} (original: {original_name})")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+            logger.debug(
+                f"Invoking MCP tool {tool.name} (original: {original_name}) "
+                f"with input {input_json}"
+            )
 
         try:
-            result = await server.call_tool(tool.name, json_data)
+            result = await server.call_tool(original_name, json_data)
         except Exception as e:
             logger.error(f"Error invoking MCP tool {tool.name}: {e}")
             raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool.name} completed.")
+            logger.debug(f"MCP tool {tool.name} (original: {original_name}) completed.")
         else:
-            logger.debug(f"MCP tool {tool.name} returned {result}")
+            logger.debug(f"MCP tool {tool.name} (original: {original_name}) returned {result}")
 
         # If structured content is requested and available, use it exclusively
         if server.use_structured_content and result.structuredContent:
