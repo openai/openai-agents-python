@@ -320,3 +320,37 @@ When you create a function tool via `@function_tool`, you can pass a `failure_er
 -   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
 
 If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
+
+## Example: Custom Error Handling in Function Tools
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool, FunctionTool, Model
+
+def my_custom_error_function(error, *args) -> str:
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
+
+@function_tool(failure_error_function=my_custom_error_function)
+def risky_operation(data) -> str:
+    """Performs a risky operation that might fail."""
+    if not data:
+        raise ValueError("Data list cannot be empty.")
+    return "Operation successful."
+
+async def main():
+    agent_with_error_tools = Agent(
+        name="Assistant",
+        instructions="Use the provided tools to answer.",
+        model=model,
+        tools=[risky_operation]
+    )   
+    try:
+        result = await Runner.run(agent_with_error_tools, "Run the risky operation with an empty list.")
+        print("Final Output:", result.final_output)
+    except Exception as e:
+        print(f"An unexpected exception occurred: {e}")
+
+if _name_ == "_main_":
+    asyncio.run(main())
