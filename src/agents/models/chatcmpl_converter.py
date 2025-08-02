@@ -460,7 +460,7 @@ class Converter:
                 }
                 result.append(msg)
 
-            # 6) item reference => handle or raise
+            # 7) item reference => handle or raise
             elif item_ref := cls.maybe_item_reference(item):
                 raise UserError(
                     f"Encountered an item_reference, which is not supported: {item_ref}"
