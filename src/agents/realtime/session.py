@@ -180,6 +180,29 @@ class RealtimeSession(RealtimeModelListener):
         """Interrupt the model."""
         await self._model.send_event(RealtimeModelSendInterrupt())
 
+    async def update_agent(self, agent: RealtimeAgent) -> None:
+        """Update the active agent for this session and apply its settings to the model."""
+
+        previous_agent = self._current_agent
+        self._current_agent = agent
+
+        updated_settings = await self._get_updated_model_settings_from_agent(
+            starting_settings=None,
+            agent=self._current_agent,
+        )
+
+        await self._put_event(
+            RealtimeHandoffEvent(
+                from_agent=previous_agent,
+                to_agent=self._current_agent,
+                info=self._event_info,
+            )
+        )
+
+        await self._model.send_event(
+            RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+        )
+
     async def on_event(self, event: RealtimeModelEvent) -> None:
         await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
 
