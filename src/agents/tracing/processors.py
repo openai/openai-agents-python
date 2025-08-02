@@ -60,8 +60,7 @@ class BackendSpanExporter(TracingExporter):
         self.max_delay = max_delay
 
         # Keep a client open for connection pooling across multiple export calls
-        # use separate connect/read timeouts
-        self._client = httpx.Client(timeout=httpx.Timeout(60.0, connect=5.0))
+        self._client = httpx.Client(timeout=httpx.Timeout(connect=5.0, read=60.0))
 
     def set_api_key(self, api_key: str):
         """Set the OpenAI API key for the exporter.
