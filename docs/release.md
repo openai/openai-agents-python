@@ -1,28 +1,33 @@
+
 # Release process/changelog
 
-The project follows a slightly modified version of semantic versioning using the form `0.Y.Z`. The leading `0` indicates the SDK is still evolving rapidly. Increment the components as follows:
+The project uses a versioning system in the form of `0.Y.Z`. The starting `0` means the SDK is still in a fast-evolving stage. The numbers `Y` and `Z` are incremented as follows:
 
 ## Minor (`Y`) versions
 
-We will increase minor versions `Y` for **breaking changes** to any public interfaces that are not marked as beta. For example, going from `0.0.x` to `0.1.x` might include breaking changes.
+We increase `Y` for **major, breaking changes** to public parts of the code. This means the new version might cause your existing code to fail. For example, changing from `0.0.x` to `0.1.x` could include breaking changes.
 
-If you don't want breaking changes, we recommend pinning to `0.0.x` versions in your project.
+> **Tip:** To avoid breaking changes, pin your project to a specific minor version, like `0.0.x`.
 
 ## Patch (`Z`) versions
 
-We will increment `Z` for non-breaking changes:
+We increase `Z` for **minor, non-breaking changes** that will not affect your existing code. These include:
 
 -   Bug fixes
+    
 -   New features
--   Changes to private interfaces
+    
+-   Changes to internal code
+    
 -   Updates to beta features
+    
 
 ## Breaking change changelog
 
 ### 0.2.0
 
-In this version, a few places that used to take `Agent` as an arg, now take `AgentBase` as an arg instead. For example, the `list_tools()` call in MCP servers. This is a purely typing change, you will still receive `Agent` objects. To update, just fix type errors by replacing `Agent` with `AgentBase`.
+In this version, some functions that used to take `Agent` as an argument now take `AgentBase`. This is a typing change, so to fix any type errors, simply replace `Agent` with `AgentBase` in your code.
 
 ### 0.1.0
 
-In this version, [`MCPServer.list_tools()`][agents.mcp.server.MCPServer] has two new params: `run_context` and `agent`. You'll need to add these params to any classes that subclass `MCPServer`.
+In this version, `MCPServer.list_tools()` now has two new parameters: `run_context` and `agent`. If you have a class that inherits from `MCPServer`, you must add these two new parameters to your `list_tools()` method.
