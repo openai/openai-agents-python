@@ -23,6 +23,7 @@ from .exceptions import (
     RunErrorDetails,
     UserError,
 )
+from .extensions.memory import SQLAlchemySession
 from .guardrail import (
     GuardrailFunctionOutput,
     InputGuardrail,
@@ -222,6 +223,7 @@ __all__ = [
     "AgentHooks",
     "Session",
     "SQLiteSession",
+    "SQLAlchemySession",
     "RunContextWrapper",
     "TContext",
     "RunErrorDetails",

@@ -1,0 +1,301 @@
+"""SQLAlchemy-powered Session backend.
+
+Usage::
+
+    from agents.extensions.memory import SQLAlchemySession
+
+    # Create from SQLAlchemy URL (uses asyncpg driver under the hood for Postgres)
+    session = SQLAlchemySession.from_url(
+        session_id="user-123",
+        url="postgresql+asyncpg://app:secret@db.example.com/agents",
+    )
+
+    # Or pass an existing AsyncEngine that your application already manages
+    session = SQLAlchemySession(
+        session_id="user-123",
+        engine=my_async_engine,
+    )
+
+    await Runner.run(agent, "Hello", session=session)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from sqlalchemy import (  # type: ignore
+    TIMESTAMP,
+    Column,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    insert,
+    select,
+    text as sql_text,
+    update,
+)
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine  # type: ignore
+from sqlalchemy.orm import sessionmaker  # type: ignore
+
+from ...items import TResponseInputItem  # type: ignore
+from ...memory.session import SessionABC
+
+
+class SQLAlchemySession(SessionABC):
+    """SQLAlchemy implementation of :pyclass:`agents.memory.session.Session`."""
+
+    _metadata: MetaData
+    _sessions: Table
+    _messages: Table
+
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        engine: AsyncEngine,
+        create_tables: bool = True,
+        sessions_table: str = "agent_sessions",
+        messages_table: str = "agent_messages",
+    ):  # noqa: D401 – short description on the class-level docstring
+        """Create a new session.
+
+        Parameters
+        ----------
+        session_id
+            Unique identifier for the conversation.
+        engine
+            A pre-configured SQLAlchemy *async* engine.  The engine **must** be
+            created with an async driver (``postgresql+asyncpg://``,
+            ``mysql+aiomysql://`` or ``sqlite+aiosqlite://``).
+        create_tables
+            Whether to automatically create the required tables & indexes.  Set
+            this to *False* if your migrations take care of schema management.
+        sessions_table, messages_table
+            Override default table names if needed.
+        """
+        self.session_id = session_id
+        self._engine = engine
+        self._lock = asyncio.Lock()
+
+        self._metadata = MetaData()
+        self._sessions = Table(
+            sessions_table,
+            self._metadata,
+            Column("session_id", String, primary_key=True),
+            Column(
+                "created_at",
+                TIMESTAMP(timezone=False),
+                server_default=sql_text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            Column(
+                "updated_at",
+                TIMESTAMP(timezone=False),
+                server_default=sql_text("CURRENT_TIMESTAMP"),
+                onupdate=sql_text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+        )
+
+        self._messages = Table(
+            messages_table,
+            self._metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column(
+                "session_id",
+                String,
+                ForeignKey(f"{sessions_table}.session_id", ondelete="CASCADE"),
+                nullable=False,
+            ),
+            Column("message_data", Text, nullable=False),
+            Column(
+                "created_at",
+                TIMESTAMP(timezone=False),
+                server_default=sql_text("CURRENT_TIMESTAMP"),
+                nullable=False,
+            ),
+            sqlite_autoincrement=True,
+        )
+
+        # Index for efficient retrieval of messages per session ordered by time
+        from sqlalchemy import Index  # type: ignore
+
+        Index(
+            f"idx_{messages_table}_session_time",
+            self._messages.c.session_id,
+            self._messages.c.created_at,
+        )
+
+        # Async session factory
+        self._session_factory: sessionmaker[AsyncSession] = sessionmaker(
+            self._engine, expire_on_commit=False, class_=AsyncSession
+        )
+
+        self._create_tables = create_tables
+
+    # ---------------------------------------------------------------------
+    # Convenience constructors
+    # ---------------------------------------------------------------------
+    @classmethod
+    def from_url(
+        cls,
+        session_id: str,
+        *,
+        url: str,
+        engine_kwargs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> SQLAlchemySession:
+        """Create a session from a database URL string.
+
+        Parameters
+        ----------
+        session_id
+            Conversation ID.
+        url
+            Any SQLAlchemy async URL – e.g. ``"postgresql+asyncpg://user:pass@host/db"``.
+        engine_kwargs
+            Additional kwargs forwarded to :pyfunc:`sqlalchemy.ext.asyncio.create_async_engine`.
+        kwargs
+            Forwarded to the main constructor (``create_tables``, custom table names, …).
+        """
+        engine_kwargs = engine_kwargs or {}
+        engine = create_async_engine(url, **engine_kwargs)
+        return cls(session_id, engine=engine, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Session protocol implementation
+    # ------------------------------------------------------------------
+    async def _ensure_tables(self) -> None:
+        """Ensure tables are created before any database operations."""
+        if self._create_tables:
+            async with self._engine.begin() as conn:
+                await conn.run_sync(self._metadata.create_all)
+            self._create_tables = False  # Only create once
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        await self._ensure_tables()
+        async with self._session_factory() as sess:
+            if limit is None:
+                stmt = (
+                    select(self._messages.c.message_data)
+                    .where(self._messages.c.session_id == self.session_id)
+                    .order_by(self._messages.c.created_at.asc())
+                )
+            else:
+                stmt = (
+                    select(self._messages.c.message_data)
+                    .where(self._messages.c.session_id == self.session_id)
+                    .order_by(self._messages.c.created_at.desc())
+                    .limit(limit)
+                )
+
+            result = await sess.execute(stmt)
+            rows: list[str] = [row[0] for row in result.all()]
+
+            if limit is not None:
+                rows.reverse()  # chronological order
+
+            items: list[TResponseInputItem] = []
+            for raw in rows:
+                try:
+                    items.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    # Skip corrupted rows
+                    continue
+            return items
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if not items:
+            return
+
+        await self._ensure_tables()
+        payload = [
+            {
+                "session_id": self.session_id,
+                "message_data": json.dumps(item, separators=(",", ":")),
+            }
+            for item in items
+        ]
+
+        async with self._session_factory() as sess:
+            async with sess.begin():
+                # Ensure the parent session row exists - use merge for cross-DB compatibility
+                # Check if session exists
+                existing = await sess.execute(
+                    select(self._sessions.c.session_id).where(
+                        self._sessions.c.session_id == self.session_id
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    # Session doesn't exist, create it
+                    await sess.execute(
+                        insert(self._sessions).values({"session_id": self.session_id})
+                    )
+
+                # Insert messages in bulk
+                await sess.execute(insert(self._messages), payload)
+
+                # Touch updated_at column
+                await sess.execute(
+                    update(self._sessions)
+                    .where(self._sessions.c.session_id == self.session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        await self._ensure_tables()
+        async with self._session_factory() as sess:
+            async with sess.begin():
+                # First try dialects that support DELETE … RETURNING for atomicity
+                try:
+                    stmt = (
+                        delete(self._messages)
+                        .where(self._messages.c.session_id == self.session_id)
+                        .order_by(self._messages.c.created_at.desc())
+                        .limit(1)
+                        .returning(self._messages.c.message_data)
+                    )
+                    result = await sess.execute(stmt)
+                    row = result.scalar_one_or_none()
+                except Exception:  # pragma: no cover – fallback path
+                    # Fallback for dialects that don't support ORDER BY in DELETE
+                    subq = (
+                        select(self._messages.c.id)
+                        .where(self._messages.c.session_id == self.session_id)
+                        .order_by(self._messages.c.created_at.desc())
+                        .limit(1)
+                    )
+                    res = await sess.execute(subq)
+                    row_id = res.scalar_one_or_none()
+                    if row_id is None:
+                        return None
+                    # Fetch data before deleting
+                    res_data = await sess.execute(
+                        select(self._messages.c.message_data).where(self._messages.c.id == row_id)
+                    )
+                    row = res_data.scalar_one_or_none()
+                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+
+                if row is None:
+                    return None
+                try:
+                    return json.loads(row)
+                except json.JSONDecodeError:
+                    return None
+
+    async def clear_session(self) -> None:  # noqa: D401 – imperative mood is fine
+        await self._ensure_tables()
+        async with self._session_factory() as sess:
+            async with sess.begin():
+                await sess.execute(
+                    delete(self._messages).where(self._messages.c.session_id == self.session_id)
+                )
+                await sess.execute(
+                    delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
+                )
