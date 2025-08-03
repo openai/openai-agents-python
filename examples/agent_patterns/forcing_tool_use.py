@@ -14,6 +14,7 @@ from agents import (
     ToolsToFinalOutputFunction,
     ToolsToFinalOutputResult,
     function_tool,
+    TContext
 )
 
 """
@@ -49,7 +50,7 @@ def get_weather(city: str) -> Weather:
 
 
 async def custom_tool_use_behavior(
-    context: RunContextWrapper[Any], results: list[FunctionToolResult]
+    context: RunContextWrapper[TContext], results: list[FunctionToolResult]
 ) -> ToolsToFinalOutputResult:
     weather: Weather = results[0].output
     return ToolsToFinalOutputResult(

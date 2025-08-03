@@ -53,7 +53,7 @@ import json
 
 from typing_extensions import TypedDict, Any
 
-from agents import Agent, FunctionTool, RunContextWrapper, function_tool
+from agents import Agent, FunctionTool, RunContextWrapper, function_tool, TContext
 
 
 class Location(TypedDict):
@@ -73,7 +73,7 @@ async def fetch_weather(location: Location) -> str:
 
 
 @function_tool(name_override="fetch_data")  # (3)!
-def read_file(ctx: RunContextWrapper[Any], path: str, directory: str | None = None) -> str:
+def read_file(ctx: RunContextWrapper[TContext], path: str, directory: str | None = None) -> str:
     """Read the contents of a file.
 
     Args:
