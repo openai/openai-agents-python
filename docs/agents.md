@@ -1,25 +1,24 @@
-# Agents
-
-Agents are the core building block in your apps. An agent is a large language model (LLM), configured with instructions and tools.
-
 ## Basic configuration
 
 The most common properties of an agent you'll configure are:
 
--   `name`: A required string that identifies your agent.
--   `instructions`: also known as a developer message or system prompt.
--   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
--   `tools`: Tools that the agent can use to achieve its tasks.
+-   name: A required string that identifies your agent.
+-   instructions: also known as a developer message or system prompt.
+-   model: which LLM to use, and optional model_settings to configure model tuning parameters like          temperature, top_p, etc.
+-   tools: Tools that the agent can use to achieve its tasks.
 
 ```python
 from agents import Agent, ModelSettings, function_tool
 
 @function_tool
 def get_weather(city: str) -> str:
+     """returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
 
 agent = Agent(
+    # The 'name' is the agent's identity, used for context and tool calling.
     name="Haiku agent",
+    # The 'instructions' define the agent's core behavior and rules.
     instructions="Always respond in haiku form",
     model="o3-mini",
     tools=[get_weather],
