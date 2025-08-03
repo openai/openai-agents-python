@@ -25,7 +25,7 @@ import asyncio
 import json
 from typing import Any
 
-from sqlalchemy import (  # type: ignore
+from sqlalchemy import (
     TIMESTAMP,
     Column,
     ForeignKey,
@@ -40,10 +40,10 @@ from sqlalchemy import (  # type: ignore
     text as sql_text,
     update,
 )
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine  # type: ignore
-from sqlalchemy.orm import sessionmaker  # type: ignore
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from ...items import TResponseInputItem  # type: ignore
+from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 
 
@@ -124,7 +124,7 @@ class SQLAlchemySession(SessionABC):
         )
 
         # Index for efficient retrieval of messages per session ordered by time
-        from sqlalchemy import Index  # type: ignore
+        from sqlalchemy import Index
 
         Index(
             f"idx_{messages_table}_session_time",
@@ -133,8 +133,8 @@ class SQLAlchemySession(SessionABC):
         )
 
         # Async session factory
-        self._session_factory: sessionmaker[AsyncSession] = sessionmaker(
-            self._engine, expire_on_commit=False, class_=AsyncSession
+        self._session_factory = async_sessionmaker(
+            self._engine, expire_on_commit=False
         )
 
         self._create_tables = create_tables
@@ -252,40 +252,28 @@ class SQLAlchemySession(SessionABC):
         await self._ensure_tables()
         async with self._session_factory() as sess:
             async with sess.begin():
-                # First try dialects that support DELETE … RETURNING for atomicity
-                try:
-                    stmt = (
-                        delete(self._messages)
-                        .where(self._messages.c.session_id == self.session_id)
-                        .order_by(self._messages.c.created_at.desc())
-                        .limit(1)
-                        .returning(self._messages.c.message_data)
-                    )
-                    result = await sess.execute(stmt)
-                    row = result.scalar_one_or_none()
-                except Exception:  # pragma: no cover – fallback path
-                    # Fallback for dialects that don't support ORDER BY in DELETE
-                    subq = (
-                        select(self._messages.c.id)
-                        .where(self._messages.c.session_id == self.session_id)
-                        .order_by(self._messages.c.created_at.desc())
-                        .limit(1)
-                    )
-                    res = await sess.execute(subq)
-                    row_id = res.scalar_one_or_none()
-                    if row_id is None:
-                        return None
-                    # Fetch data before deleting
-                    res_data = await sess.execute(
-                        select(self._messages.c.message_data).where(self._messages.c.id == row_id)
-                    )
-                    row = res_data.scalar_one_or_none()
-                    await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
+                # Fallback for all dialects - get ID first, then delete
+                subq = (
+                    select(self._messages.c.id)
+                    .where(self._messages.c.session_id == self.session_id)
+                    .order_by(self._messages.c.created_at.desc())
+                    .limit(1)
+                )
+                res = await sess.execute(subq)
+                row_id = res.scalar_one_or_none()
+                if row_id is None:
+                    return None
+                # Fetch data before deleting
+                res_data = await sess.execute(
+                    select(self._messages.c.message_data).where(self._messages.c.id == row_id)
+                )
+                row = res_data.scalar_one_or_none()
+                await sess.execute(delete(self._messages).where(self._messages.c.id == row_id))
 
                 if row is None:
                     return None
                 try:
-                    return json.loads(row)
+                    return json.loads(row)  # type: ignore[no-any-return]
                 except json.JSONDecodeError:
                     return None
 

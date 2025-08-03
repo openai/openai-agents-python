@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
+
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from tests.fake_model import FakeModel
@@ -58,6 +60,7 @@ async def test_runner_integration(agent: Agent):
     session = SQLAlchemySession.from_url(session_id, url=DB_URL)
 
     # First turn
+    assert isinstance(agent.model, FakeModel)
     agent.model.set_next_output([get_text_message("San Francisco")])
     result1 = await Runner.run(
         agent,
@@ -86,6 +89,7 @@ async def test_session_isolation(agent: Agent):
     session2 = SQLAlchemySession.from_url(session_id_2, url=DB_URL)
 
     # Interact with session 1
+    assert isinstance(agent.model, FakeModel)
     agent.model.set_next_output([get_text_message("I like cats.")])
     await Runner.run(agent, "I like cats.", session=session1)
 
