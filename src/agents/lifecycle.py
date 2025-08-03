@@ -83,7 +83,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         source: TAgent,
     ) -> None:
-        """Called when the agent is being handed off to. The `source` is the agent that is handing
+        """Called when the agent is being handed off. The `source` is the agent that is handing
         off to this agent."""
         pass
 
@@ -111,4 +111,4 @@ RunHooks = RunHooksBase[TContext, Agent]
 """Run hooks when using `Agent`."""
 
 AgentHooks = AgentHooksBase[TContext, Agent]
-"""Agent hooks for `Agent`s."""
+"""Agent hooks for `Agent`'s."""
