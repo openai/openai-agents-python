@@ -206,9 +206,9 @@ agent = Agent(
 - `ToolsToFinalOutputFunction`: A custom function that processes tool results and decides whether to stop or continue with the LLM.
 
 ```python
-from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
+from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper, TContext
 from agents.agent import ToolsToFinalOutputResult
-from typing import List, Any
+from typing import List
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -216,7 +216,7 @@ def get_weather(city: str) -> str:
     return f"The weather in {city} is sunny"
 
 def custom_tool_handler(
-    context: RunContextWrapper[Any],
+    context: RunContextWrapper[TContext],
     tool_results: List[FunctionToolResult]
 ) -> ToolsToFinalOutputResult:
     """Processes tool results to decide final output."""
