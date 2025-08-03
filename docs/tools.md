@@ -324,33 +324,42 @@ If you are manually creating a `FunctionTool` object, then you must handle error
 ## Example: Custom Error Handling in Function Tools
 
 ```python
-import asyncio
-from agents import Agent, Runner, function_tool, FunctionTool, Model
+iimport asyncio
+from agents import Agent, Runner, function_tool
+from typing import Any, List
 
-def my_custom_error_function(error, *args) -> str:
+def my_custom_error_function(error: Exception, *args: Any, **kwargs: Any) -> str:
     """A custom function to provide a user-friendly error message."""
     print(f"A tool call failed with the following error: {error}")
     return "An internal server error occurred. Please try again later."
 
 @function_tool(failure_error_function=my_custom_error_function)
-def risky_operation(data) -> str:
-    """Performs a risky operation that might fail."""
-    if not data:
-        raise ValueError("Data list cannot be empty.")
-    return "Operation successful."
+def get_user_profile(user_id: str) -> str:
+    """Fetches a user profile from a mock API.
+    
+    This function demonstrates a "flaky" or failing API call.
+    """
+    if user_id == "user_123":
+        return "User profile for user_123 successfully retrieved."
+    else:
+        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
 
 async def main():
+
     agent_with_error_tools = Agent(
         name="Assistant",
         instructions="Use the provided tools to answer.",
         model=model,
-        tools=[risky_operation]
-    )   
+        tools=[get_user_profile]
+    )
+    
     try:
-        result = await Runner.run(agent_with_error_tools, "Run the risky operation with an empty list.")
+        result = await Runner.run(agent_with_error_tools, "Get the profile for user_id 'user_456'.")
         print("Final Output:", result.final_output)
     except Exception as e:
         print(f"An unexpected exception occurred: {e}")
 
+
 if _name_ == "_main_":
     asyncio.run(main())
+```
