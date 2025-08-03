@@ -269,7 +269,7 @@ class Agent(AgentBase, Generic[TContext]):
 
             output = await Runner.run(
                 starting_agent=self,
-                input=input,
+                input=user_input,
                 context=context.context,
             )
             if custom_output_extractor:
