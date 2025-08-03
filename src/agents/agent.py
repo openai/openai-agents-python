@@ -264,12 +264,12 @@ class Agent(AgentBase, Generic[TContext]):
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
         )
-        async def run_agent(context: RunContextWrapper, user_input: str) -> str:
+        async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
 
             output = await Runner.run(
                 starting_agent=self,
-                input=user_input,
+                input=input,
                 context=context.context,
             )
             if custom_output_extractor:
