@@ -45,6 +45,7 @@ from agents.realtime.model_events import (
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
 )
+from agents.realtime.model_inputs import RealtimeModelSendSessionUpdate
 from agents.realtime.session import RealtimeSession
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
@@ -1488,3 +1489,24 @@ class TestModelSettingsPrecedence:
             assert model_settings["voice"] == "model_config_only_voice"
             assert model_settings["tool_choice"] == "required"
             assert model_settings["output_audio_format"] == "g711_ulaw"
+
+
+class TestUpdateAgentFunctionality:
+    """Tests for update agent functionality in RealtimeSession"""
+
+    @pytest.mark.asyncio
+    async def test_update_agent_creates_handoff_and_session_update_event(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first", tools=[], handoffs=[])
+        second_agent = RealtimeAgent(name="second", instructions="second", tools=[], handoffs=[])
+
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        await session.update_agent(second_agent)
+
+        # Should have sent session update
+        session_update_event = mock_model.sent_events[0]
+        assert isinstance(session_update_event, RealtimeModelSendSessionUpdate)
+        assert session_update_event.session_settings["instructions"] == "second"
+
+        # Check that the current agent and session settings are updated
+        assert session._current_agent == second_agent

@@ -904,10 +904,9 @@ class AgentRunner:
             raise ModelBehaviorError("Model did not produce a final response!")
 
         # 3. Now, we can process the turn as we do in the non-streaming case
-        single_step_result = await cls._get_single_step_result_from_response(
+        return await cls._get_single_step_result_from_streamed_response(
             agent=agent,
-            original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            streamed_result=streamed_result,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -917,9 +916,6 @@ class AgentRunner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
         )
-
-        RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
-        return single_step_result
 
     @classmethod
     async def _run_single_turn(
@@ -1022,6 +1018,57 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
         )
+
+    @classmethod
+    async def _get_single_step_result_from_streamed_response(
+        cls,
+        *,
+        agent: Agent[TContext],
+        all_tools: list[Tool],
+        streamed_result: RunResultStreaming,
+        new_response: ModelResponse,
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        tool_use_tracker: AgentToolUseTracker,
+    ) -> SingleStepResult:
+
+        original_input = streamed_result.input
+        pre_step_items = streamed_result.new_items
+        event_queue = streamed_result._event_queue
+
+        processed_response = RunImpl.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=new_response,
+            output_schema=output_schema,
+            handoffs=handoffs,
+        )
+        new_items_processed_response = processed_response.new_items
+        tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+        RunImpl.stream_step_items_to_queue(new_items_processed_response, event_queue)
+
+        single_step_result = await RunImpl.execute_tools_and_side_effects(
+            agent=agent,
+            original_input=original_input,
+            pre_step_items=pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            output_schema=output_schema,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+        )
+        new_step_items = [
+            item
+            for item in single_step_result.new_step_items
+            if item not in new_items_processed_response
+        ]
+        RunImpl.stream_step_items_to_queue(new_step_items, event_queue)
+
+        return single_step_result
 
     @classmethod
     async def _run_input_guardrails(

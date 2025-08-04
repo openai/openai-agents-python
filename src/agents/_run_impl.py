@@ -914,12 +914,12 @@ class RunImpl:
             return result
 
     @classmethod
-    def stream_step_result_to_queue(
+    def stream_step_items_to_queue(
         cls,
-        step_result: SingleStepResult,
+        new_step_items: list[RunItem],
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
-        for item in step_result.new_step_items:
+        for item in new_step_items:
             if isinstance(item, MessageOutputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
             elif isinstance(item, HandoffCallItem):
@@ -943,6 +943,14 @@ class RunImpl:
 
             if event:
                 queue.put_nowait(event)
+
+    @classmethod
+    def stream_step_result_to_queue(
+        cls,
+        step_result: SingleStepResult,
+        queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
+    ):
+        cls.stream_step_items_to_queue(step_result.new_step_items, queue)
 
     @classmethod
     async def _check_for_final_output_from_tools(

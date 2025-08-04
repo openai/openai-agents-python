@@ -150,7 +150,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         model_settings: RealtimeSessionModelSettings = options.get("initial_model_settings", {})
 
-        self._playback_tracker = options.get("playback_tracker", RealtimePlaybackTracker())
+        self._playback_tracker = options.get("playback_tracker", None)
 
         self.model = model_settings.get("model_name", self.model)
         api_key = await get_api_key(options.get("api_key"))
@@ -351,6 +351,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 int(elapsed_ms),
             )
             await self._send_raw_message(converted)
+        else:
+            logger.info(
+                "Didn't interrupt bc elapsed ms is < 0. "
+                f"Item id: {current_item_id}, "
+                f"elapsed ms: {elapsed_ms}, "
+                f"content index: {current_item_content_index}"
+            )
 
         automatic_response_cancellation_enabled = (
             self._created_session
