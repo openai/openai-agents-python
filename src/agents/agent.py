@@ -101,7 +101,7 @@ class AgentBase(Generic[TContext]):
             self.mcp_servers, convert_schemas_to_strict, run_context, self
         )
 
-    async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
+    async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
         mcp_tools = await self.get_mcp_tools(run_context)
 
@@ -201,14 +201,16 @@ class Agent(AgentBase, Generic[TContext]):
     tool_use_behavior: (
         Literal["run_llm_again", "stop_on_first_tool"] | StopAtTools | ToolsToFinalOutputFunction
     ) = "run_llm_again"
-    """This lets you configure how tool use is handled.
+    """
+    This lets you configure how tool use is handled.
     - "run_llm_again": The default behavior. Tools are run, and then the LLM receives the results
         and gets to respond.
     - "stop_on_first_tool": The output of the first tool call is used as the final output. This
         means that the LLM does not process the result of the tool call.
-    - A list of tool names: The agent will stop running if any of the tools in the list are called.
-        The final output will be the output of the first matching tool call. The LLM does not
-        process the result of the tool call.
+    - A StopAtTools object: The agent will stop running if any of the tools listed in
+        `stop_at_tool_names` is called.
+        The final output will be the output of the first matching tool call.
+        The LLM does not process the result of the tool call.
     - A function: If you pass a function, it will be called with the run context and the list of
       tool results. It must return a `ToolsToFinalOutputResult`, which determines whether the tool
       calls result in a final output.
