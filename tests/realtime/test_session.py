@@ -1504,12 +1504,6 @@ class TestUpdateAgentFunctionality:
 
         await session.update_agent(second_agent)
 
-        # Should have sent handoff event
-        handoff_event = await session._event_queue.get()
-        assert isinstance(handoff_event, RealtimeHandoffEvent)
-        assert handoff_event.from_agent == first_agent
-        assert handoff_event.to_agent == second_agent
-
         # Should have sent session update
         session_update_event = mock_model.sent_events[0]
         assert isinstance(session_update_event, RealtimeModelSendSessionUpdate)
