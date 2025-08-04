@@ -15,7 +15,6 @@ from agents.realtime.events import (
     RealtimeAudioInterrupted,
     RealtimeError,
     RealtimeGuardrailTripped,
-    RealtimeHandoffEvent,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
