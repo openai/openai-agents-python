@@ -101,9 +101,8 @@ class RealtimeSession(RealtimeModelListener):
         self._interrupted_by_guardrail = False
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
-        self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
-            "debounce_text_length", 100
-        )
+        guardrails_settings = (self._run_config or {}).get("guardrails_settings", {})
+        self._debounce_text_length = guardrails_settings.get("debounce_text_length", 100)
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
 
