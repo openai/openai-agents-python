@@ -320,3 +320,18 @@ When you create a function tool via `@function_tool`, you can pass a `failure_er
 -   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
 
 If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
+
+```python
+def sync_error_handler(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    """Custom error handler that provides a formatted error message."""
+    return f"An error occurred: {error.__class__.__name__} - {str(error)}"
+
+@function_tool(failure_error_function=sync_error_handler)
+def get_latest_news():
+    """Get the latest news from the web."""
+    # This function might fail due to network issues, API limits, etc.
+    raise ConnectionError("Failed to connect to news service")
+
+# The error handler will be called if the tool fails
+# and will return: "An error occurred: ConnectionError - Failed to connect to news service"
+```
