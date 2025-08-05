@@ -324,11 +324,10 @@ If you are manually creating a `FunctionTool` object, then you must handle error
 ## Example: Custom Error Handling in Function Tools
 
 ```python
-iimport asyncio
-from agents import Agent, Runner, function_tool
-from typing import Any, List
+from agents import function_tool, RunContextWrapper
+from typing import Any
 
-def my_custom_error_function(error: Exception, *args: Any, **kwargs: Any) -> str:
+def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
     """A custom function to provide a user-friendly error message."""
     print(f"A tool call failed with the following error: {error}")
     return "An internal server error occurred. Please try again later."
@@ -336,30 +335,11 @@ def my_custom_error_function(error: Exception, *args: Any, **kwargs: Any) -> str
 @function_tool(failure_error_function=my_custom_error_function)
 def get_user_profile(user_id: str) -> str:
     """Fetches a user profile from a mock API.
-    
-    This function demonstrates a "flaky" or failing API call.
+     This function demonstrates a 'flaky' or failing API call.
     """
     if user_id == "user_123":
         return "User profile for user_123 successfully retrieved."
     else:
         raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
 
-async def main():
-
-    agent_with_error_tools = Agent(
-        name="Assistant",
-        instructions="Use the provided tools to answer.",
-        model=model,
-        tools=[get_user_profile]
-    )
-    
-    try:
-        result = await Runner.run(agent_with_error_tools, "Get the profile for user_id 'user_456'.")
-        print("Final Output:", result.final_output)
-    except Exception as e:
-        print(f"An unexpected exception occurred: {e}")
-
-
-if _name_ == "_main_":
-    asyncio.run(main())
 ```
