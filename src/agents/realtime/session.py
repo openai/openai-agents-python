@@ -583,8 +583,8 @@ class RealtimeSession(RealtimeModelListener):
                 return attr
             res = attr(context_wrapper, agent)
             if inspect.isawaitable(res):
-                return await res
-            return res
+                res = await res
+            return bool(res)
 
         results = await asyncio.gather(*(_check_handoff_enabled(h) for h in handoffs))
         enabled = [h for h, ok in zip(handoffs, results) if ok]
