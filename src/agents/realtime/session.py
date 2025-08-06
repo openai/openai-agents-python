@@ -374,18 +374,19 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
 
-            # Send tool output to complete the handoff
+            # First, send the session update so the model receives the new instructions
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
+
+            # Then send tool output to complete the handoff (this triggers a new response)
+            transfer_message = handoff.get_transfer_message(result)
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
                     tool_call=event,
-                    output=f"Handed off to {self._current_agent.name}",
+                    output=transfer_message,
                     start_response=True,
                 )
-            )
-
-            # Send session update to model
-            await self._model.send_event(
-                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
             )
         else:
             raise ModelBehaviorError(f"Tool {event.name} not found")
