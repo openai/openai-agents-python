@@ -134,6 +134,24 @@ main_agent = RealtimeAgent(
 
 Realtime エージェントでは出力ガードレールのみがサポートされます。パフォーマンス低下を防ぐためにデバウンスされ、リアルタイム生成中に毎単語ではなく定期的に実行されます。デフォルトのデバウンス長は 100 文字で、設定可能です。
 
+ガードレールは `RealtimeAgent` に直接設定することも、セッションの `run_config` で指定することもできます。両方のリストが同時に実行されます。
+
+```python
+from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+
+def sensitive_data_check(context, agent, output):
+    return GuardrailFunctionOutput(
+        tripwire_triggered="password" in output,
+        output_info=None,
+    )
+
+agent = RealtimeAgent(
+    name="Assistant",
+    instructions="...",
+    output_guardrails=[OutputGuardrail(guardrail_function=sensitive_data_check)],
+)
+```
+
 ガードレールがトリガーされると `guardrail_tripped` イベントが生成され、エージェントの現在の応答を中断できます。デバウンス動作により安全性とリアルタイム性能のバランスを取ります。テキストエージェントとは異なり、realtime エージェントはガードレールがトリップしても Exception を発生させません。
 
 ## オーディオ処理

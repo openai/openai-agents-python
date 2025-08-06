@@ -443,7 +443,17 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _run_output_guardrails(self, text: str) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
-        output_guardrails = self._run_config.get("output_guardrails", [])
+        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+            "output_guardrails", []
+        )
+        seen_ids: set[int] = set()
+        output_guardrails = []
+        for guardrail in combined_guardrails:
+            guardrail_id = id(guardrail)
+            if guardrail_id not in seen_ids:
+                output_guardrails.append(guardrail)
+                seen_ids.add(guardrail_id)
+
         if not output_guardrails or self._interrupted_by_guardrail:
             return False
 
