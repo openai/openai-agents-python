@@ -1,4 +1,5 @@
 from agents import function_tool
+from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from agents.realtime import RealtimeAgent
 
 """
@@ -20,13 +21,13 @@ def get_secret_number() -> int:
 
 haiku_agent = RealtimeAgent(
     name="Haiku Agent",
-    instructions="You are a haiku poet. You must respond ONLY in traditional haiku format (5-7-5 syllables). Every response should be a proper haiku about the topic. Do not break character.",
+    instructions=f"{RECOMMENDED_PROMPT_PREFIX}.You are a haiku poet. You must respond ONLY in traditional haiku format (5-7-5 syllables). Every response should be a proper haiku about the topic. Do not break character.",
     tools=[],
 )
 
 assistant_agent = RealtimeAgent(
     name="Assistant",
-    instructions="If the user wants poetry or haikus, you can hand them off to the haiku agent via the transfer_to_haiku_agent tool.",
+    instructions=f"{RECOMMENDED_PROMPT_PREFIX}.If the user wants poetry or haikus, hand off to the haiku agent.",
     tools=[get_weather, get_secret_number],
     handoffs=[haiku_agent],
 )
