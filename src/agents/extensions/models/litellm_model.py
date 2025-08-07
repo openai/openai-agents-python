@@ -24,7 +24,7 @@ from openai.types.chat.chat_completion_message import (
     AnnotationURLCitation,
     ChatCompletionMessage,
 )
-from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall
 from openai.types.responses import Response
 
 from ... import _debug
@@ -416,7 +416,7 @@ class LitellmConverter:
         return ChatCompletionMessageToolCall(
             id=tool_call.id,
             type="function",
-            function=Function(
+            function=ChatCompletionMessageFunctionToolCall(
                 name=tool_call.function.name or "", arguments=tool_call.function.arguments
             ),
         )
