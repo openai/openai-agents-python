@@ -18,13 +18,15 @@ except ImportError as _e:
     ) from _e
 
 from openai import NOT_GIVEN, AsyncStream, NotGiven
-from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageToolCall
+from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageFunctionToolCall
 from openai.types.chat.chat_completion_message import (
     Annotation,
     AnnotationURLCitation,
     ChatCompletionMessage,
 )
-from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
+)
 from openai.types.responses import Response
 
 from ... import _debug
@@ -413,11 +415,11 @@ class LitellmConverter:
     @classmethod
     def convert_tool_call_to_openai(
         cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
-    ) -> ChatCompletionMessageToolCall:
-        return ChatCompletionMessageToolCall(
+    ) -> ChatCompletionMessageFunctionToolCall:
+        return ChatCompletionMessageFunctionToolCall(
             id=tool_call.id,
             type="function",
-            function=Function(
+            function=ChatCompletionMessageFunctionToolCall(
                 name=tool_call.function.name or "", arguments=tool_call.function.arguments
             ),
         )
