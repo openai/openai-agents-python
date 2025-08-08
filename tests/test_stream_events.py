@@ -14,6 +14,7 @@ async def foo() -> str:
     await asyncio.sleep(3)
     return "success!"
 
+
 @pytest.mark.asyncio
 async def test_stream_events_main():
     model = FakeModel()

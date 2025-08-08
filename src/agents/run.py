@@ -1034,7 +1034,6 @@ class AgentRunner:
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
     ) -> SingleStepResult:
-
         original_input = streamed_result.input
         pre_step_items = streamed_result.new_items
         event_queue = streamed_result._event_queue

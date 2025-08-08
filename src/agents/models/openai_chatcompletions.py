@@ -271,6 +271,19 @@ class OpenAIChatCompletionsModel(Model):
             self._get_client(), model_settings, stream=stream
         )
 
+        # Carry verbosity for Chat Completions using extra_body until
+        # official client types include it as a top-level param.
+        from typing import Any, cast
+        base_extra_body = cast(dict[str, Any], model_settings.extra_body or {})
+        extra_body = {
+            **base_extra_body,
+            **(
+                {"verbosity": model_settings.verbosity}
+                if model_settings.verbosity is not None
+                else {}
+            ),
+        }
+
         ret = await self._get_client().chat.completions.create(
             model=self.model,
             messages=converted_messages,
@@ -289,7 +302,7 @@ class OpenAIChatCompletionsModel(Model):
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
+            extra_body=extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),
             **(model_settings.extra_args or {}),
         )
