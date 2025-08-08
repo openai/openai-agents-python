@@ -26,8 +26,14 @@ from __future__ import annotations
 from typing import Literal, cast
 
 import pytest
-from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageToolCall
-from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.chat import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
+    Function,
+)
+from openai.types.chat.chat_completion_message_function_tool_call_param import (
+    ChatCompletionMessageFunctionToolCallParam,
+)
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
@@ -87,7 +93,7 @@ def test_message_to_output_items_with_tool_call():
     be reflected as separate `ResponseFunctionToolCall` items appended after
     the message item.
     """
-    tool_call = ChatCompletionMessageToolCall(
+    tool_call = ChatCompletionMessageFunctionToolCall(
         id="tool1",
         type="function",
         function=Function(name="myfn", arguments='{"x":1}'),
@@ -339,7 +345,7 @@ def test_tool_call_conversion():
     tool_calls = list(tool_msg.get("tool_calls", []))
     assert len(tool_calls) == 1
 
-    tool_call = tool_calls[0]
+    tool_call = cast(ChatCompletionMessageFunctionToolCallParam, tool_calls[0])
     assert tool_call["id"] == function_call["call_id"]
     assert tool_call["function"]["name"] == function_call["name"]
     assert tool_call["function"]["arguments"] == function_call["arguments"]
