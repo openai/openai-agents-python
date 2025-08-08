@@ -18,13 +18,19 @@ except ImportError as _e:
     ) from _e
 
 from openai import NOT_GIVEN, AsyncStream, NotGiven
-from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageToolCall
+from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import (
     Annotation,
     AnnotationURLCitation,
     ChatCompletionMessage,
 )
-from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.chat.chat_completion_message_custom_tool_call import (
+    ChatCompletionMessageCustomToolCall,
+)
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
+    Function,
+)
 from openai.types.responses import Response
 
 from ... import _debug
@@ -361,7 +367,9 @@ class LitellmConverter:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
 
-        tool_calls = (
+        tool_calls: (
+            list[ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall] | None
+        ) = (
             [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
             if message.tool_calls
             else None
@@ -412,8 +420,8 @@ class LitellmConverter:
     @classmethod
     def convert_tool_call_to_openai(
         cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
-    ) -> ChatCompletionMessageToolCall:
-        return ChatCompletionMessageToolCall(
+    ) -> ChatCompletionMessageFunctionToolCall:
+        return ChatCompletionMessageFunctionToolCall(
             id=tool_call.id,
             type="function",
             function=Function(
