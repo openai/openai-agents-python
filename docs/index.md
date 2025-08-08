@@ -4,6 +4,7 @@ The [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) enables 
 
 -   **Agents**, which are LLMs equipped with instructions and tools
 -   **Handoffs**, which allow agents to delegate to other agents for specific tasks
+-   **Bidirectional Handoffs**, which enable sub-agents to return control to their parent agent
 -   **Guardrails**, which enable the inputs to agents to be validated
 -   **Sessions**, which automatically maintains conversation history across agent runs
 
@@ -21,6 +22,7 @@ Here are the main features of the SDK:
 -   Agent loop: Built-in agent loop that handles calling tools, sending results to the LLM, and looping until the LLM is done.
 -   Python-first: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
 -   Handoffs: A powerful feature to coordinate and delegate between multiple agents.
+-   Bidirectional Handoffs: Enable orchestrator-like workflows where sub-agents can return control to their parent agent.
 -   Guardrails: Run input validations and checks in parallel to your agents, breaking early if the checks fail.
 -   Sessions: Automatic conversation history management across agent runs, eliminating manual state handling.
 -   Function tools: Turn any Python function into a tool, with automatic schema generation and Pydantic-powered validation.
@@ -52,3 +54,15 @@ print(result.final_output)
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
+
+## Documentation
+
+- [Quickstart](quickstart.md) - Get started with the Agents SDK
+- [Agents](agents.md) - Learn about creating and configuring agents
+- [Handoffs](handoffs.md) - Delegate tasks between agents
+- [Bidirectional Handoffs](bidirectional_handoffs.md) - Enable orchestrator-like workflows with return-to-parent functionality
+- [Tools](tools.md) - Create and use tools with your agents
+- [Guardrails](guardrails.md) - Validate inputs and outputs
+- [Sessions](sessions.md) - Manage conversation history
+- [Tracing](tracing.md) - Debug and monitor your workflows
+- [Examples](examples.md) - See examples of common patterns

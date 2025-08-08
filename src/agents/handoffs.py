@@ -126,6 +126,11 @@ class Handoff(Generic[TContext, TAgent]):
     agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
     a handoff based on your context/state."""
 
+    is_return_to_parent: bool = False
+    """Whether this handoff returns control to a parent agent. This enables bidirectional handoff
+    workflows where sub-agents can return control to their parent agent.
+    """
+
     def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
@@ -281,4 +286,135 @@ def handoff(
         input_filter=input_filter,
         agent_name=agent.name,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
+        is_return_to_parent=False,
     )
+
+
+def return_to_parent_handoff(
+    parent_agent: Agent[Any],
+    *,
+    tool_name_override: str | None = None,
+    tool_description_override: str | None = None,
+    input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]:
+    """Create a handoff that returns control to the parent agent.
+    
+    This enables bidirectional handoff workflows where sub-agents can return control to their
+    parent agent, allowing for orchestrator-like patterns where a parent agent coordinates
+    multiple sub-agents.
+    
+    Args:
+        parent_agent: The parent agent to return control to.
+        tool_name_override: Optional override for the name of the tool that represents the handoff.
+        tool_description_override: Optional override for the description of the tool that
+            represents the handoff.
+        input_filter: A function that filters the inputs that are passed to the parent agent.
+        is_enabled: Whether the handoff is enabled. Can be a bool or a callable that takes the run
+            context and agent and returns whether the handoff is enabled.
+    
+    Returns:
+        A Handoff object that returns control to the parent agent.
+    
+    Example:
+        ```python
+        # Create a financial agent that can return to its parent
+        financial_agent = Agent(
+            name="FinancialAgent",
+            instructions="Fetch and analyze financial data",
+            handoffs=[
+                return_to_parent_handoff(parent_agent)
+            ]
+        )
+        
+        # The financial agent can now return control to its parent
+        # after completing its task, allowing the parent to coordinate
+        # with other agents like a Google Docs agent.
+        ```
+    """
+    tool_name = tool_name_override or "return_to_parent"
+    tool_description = tool_description_override or (
+        f"Return control to the parent agent ({parent_agent.name}) to continue the workflow. "
+        "Use this when you have completed your task and want the parent agent to handle "
+        "the next steps in the workflow."
+    )
+
+    async def _invoke_return_to_parent(
+        ctx: RunContextWrapper[Any], input_json: str | None = None
+    ) -> Agent[Any]:
+        # Set the parent reference for the current agent if it's not already set
+        current_agent = ctx.agent if hasattr(ctx, 'agent') else None
+        if current_agent and hasattr(current_agent, 'set_parent'):
+            current_agent.set_parent(parent_agent)
+        
+        return parent_agent
+
+    return Handoff(
+        tool_name=tool_name,
+        tool_description=tool_description,
+        input_json_schema={},  # No input schema for return to parent
+        on_invoke_handoff=_invoke_return_to_parent,
+        input_filter=input_filter,
+        agent_name=parent_agent.name,
+        is_enabled=is_enabled,
+        is_return_to_parent=True,
+    )
+
+
+def create_bidirectional_handoff_workflow(
+    orchestrator_agent: Agent[Any],
+    sub_agents: list[Agent[Any]],
+    *,
+    enable_return_to_parent: bool = True,
+) -> tuple[Agent[Any], list[Agent[Any]]]:
+    """Create a bidirectional handoff workflow with an orchestrator and sub-agents.
+    
+    This function sets up a workflow where:
+    1. The orchestrator agent can hand off to any sub-agent
+    2. Each sub-agent can return control to the orchestrator
+    3. The orchestrator can then hand off to other sub-agents
+    
+    Args:
+        orchestrator_agent: The main orchestrator agent that coordinates the workflow.
+        sub_agents: List of sub-agents that can be called by the orchestrator.
+        enable_return_to_parent: Whether to enable return-to-parent functionality for sub-agents.
+    
+    Returns:
+        A tuple of (orchestrator_agent, sub_agents) with bidirectional handoffs configured.
+    
+    Example:
+        ```python
+        # Create agents
+        orchestrator = Agent(name="Orchestrator", instructions="Coordinate workflows")
+        financial_agent = Agent(name="FinancialAgent", instructions="Fetch financial data")
+        docs_agent = Agent(name="DocsAgent", instructions="Handle document operations")
+        
+        # Set up bidirectional workflow
+        orchestrator, sub_agents = create_bidirectional_handoff_workflow(
+            orchestrator_agent=orchestrator,
+            sub_agents=[financial_agent, docs_agent]
+        )
+        
+        # Now the orchestrator can hand off to financial_agent, which can return
+        # to orchestrator, which can then hand off to docs_agent
+        ```
+    """
+    # Set up handoffs from orchestrator to sub-agents
+    orchestrator_handoffs = []
+    for sub_agent in sub_agents:
+        # Set parent reference for sub-agent
+        if enable_return_to_parent:
+            sub_agent.set_parent(orchestrator_agent)
+        
+        # Add handoff from orchestrator to sub-agent
+        orchestrator_handoffs.append(handoff(sub_agent))
+    
+    orchestrator_agent.handoffs.extend(orchestrator_handoffs)
+    
+    # Set up return-to-parent handoffs for sub-agents
+    if enable_return_to_parent:
+        for sub_agent in sub_agents:
+            return_handoff = return_to_parent_handoff(orchestrator_agent)
+            sub_agent.handoffs.append(return_handoff)
+    
+    return orchestrator_agent, sub_agents
