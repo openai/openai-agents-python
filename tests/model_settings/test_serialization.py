@@ -53,7 +53,7 @@ def test_all_fields_serialization() -> None:
         parallel_tool_calls=True,
         truncation="auto",
         max_tokens=100,
-        reasoning=Reasoning(),
+        reasoning=Reasoning(effort="minimal"),
         metadata={"foo": "bar"},
         store=False,
         include_usage=False,

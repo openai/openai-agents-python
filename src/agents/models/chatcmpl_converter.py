@@ -20,6 +20,9 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_content_part_param import File, FileFile
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
+)
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.responses import (
@@ -126,15 +129,16 @@ class Converter:
 
         if message.tool_calls:
             for tool_call in message.tool_calls:
-                items.append(
-                    ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=tool_call.id,
-                        arguments=tool_call.function.arguments,
-                        name=tool_call.function.name,
-                        type="function_call",
+                if isinstance(tool_call, ChatCompletionMessageFunctionToolCall):
+                    items.append(
+                        ResponseFunctionToolCall(
+                            id=FAKE_RESPONSES_ID,
+                            call_id=tool_call.id,
+                            arguments=tool_call.function.arguments,
+                            name=tool_call.function.name,
+                            type="function_call",
+                        )
                     )
-                )
 
         return items
 
@@ -420,10 +424,10 @@ class Converter:
             elif file_search := cls.maybe_file_search_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
-                new_tool_call = ChatCompletionMessageToolCallParam(
-                    id=file_search["id"],
-                    type="function",
-                    function={
+                file_tool_call: ChatCompletionMessageToolCallParam = {
+                    "id": file_search["id"],
+                    "type": "function",
+                    "function": {
                         "name": "file_search_call",
                         "arguments": json.dumps(
                             {
@@ -432,23 +436,23 @@ class Converter:
                             }
                         ),
                     },
-                )
-                tool_calls.append(new_tool_call)
+                }
+                tool_calls.append(file_tool_call)
                 asst["tool_calls"] = tool_calls
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
-                new_tool_call = ChatCompletionMessageToolCallParam(
-                    id=func_call["call_id"],
-                    type="function",
-                    function={
+                func_tool_call: ChatCompletionMessageToolCallParam = {
+                    "id": func_call["call_id"],
+                    "type": "function",
+                    "function": {
                         "name": func_call["name"],
                         "arguments": arguments,
                     },
-                )
-                tool_calls.append(new_tool_call)
+                }
+                tool_calls.append(func_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
             elif func_output := cls.maybe_function_tool_call_output(item):

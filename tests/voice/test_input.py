@@ -1,5 +1,6 @@
 import io
 import wave
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -52,11 +53,11 @@ def test_buffer_to_audio_file_float32():
 
 def test_buffer_to_audio_file_invalid_dtype():
     # Create a buffer with invalid dtype (float64)
-    buffer = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    buffer = cast(Any, np.array([1.0, 2.0, 3.0], dtype=np.float64))
 
     with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
-        # Purposely ignore the type error
-        _buffer_to_audio_file(buffer)  # type: ignore
+        # Purposely pass invalid dtype buffer
+        _buffer_to_audio_file(buffer)
 
 
 class TestAudioInput:

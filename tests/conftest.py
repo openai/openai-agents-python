@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from agents.models import _openai_shared
@@ -32,6 +34,7 @@ def clear_openai_settings():
     _openai_shared._default_openai_key = None
     _openai_shared._default_openai_client = None
     _openai_shared._use_responses_by_default = True
+    os.environ.setdefault("OPENAI_API_KEY", "test")
 
 
 @pytest.fixture(autouse=True)
