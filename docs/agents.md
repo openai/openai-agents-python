@@ -113,6 +113,24 @@ agent = Agent[UserContext](
 
 Sometimes, you want to observe the lifecycle of an agent. For example, you may want to log events, or pre-fetch data when certain events occur. You can hook into the agent lifecycle with the `hooks` property. Subclass the [`AgentHooks`][agents.lifecycle.AgentHooks] class, and override the methods you're interested in.
 
+```python
+from agents import Agent, AgentHooks, RunContextWrapper
+from typing import Any
+
+class CustomAgentHooks(AgentHooks):
+    async def on_start(self, context: RunContextWrapper, agent: Agent) -> None:
+        """Called when the agent starts its run."""
+        print(f"Agent '{agent.name}' has started.")
+
+    async def on_end(self, context: RunContextWrapper, agent: Agent, output: Any) -> None:
+        """Called when the agent completes its run."""
+        print(f"Agent '{agent.name}' has finished. Final output type: {type(output)}")
+
+agent = Agent(
+    name="Lifecycle Agent",
+    hooks=CustomAgentHooks(),
+)
+
 ## Guardrails
 
 Guardrails allow you to run checks/validations on user input, in parallel to the agent running. For example, you could screen the user's input for relevance. Read more in the [guardrails](guardrails.md) documentation.
