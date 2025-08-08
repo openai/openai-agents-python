@@ -14,6 +14,7 @@ dependencies = [
     "requests>=2.0, <3",
     "types-requests>=2.0, <3",
     "mcp>=1.11.0, <2; python_version >= '3.10'",
+    "asyncpg>=0.30.0",
 ]
 classifiers = [
     "Typing :: Typed",
