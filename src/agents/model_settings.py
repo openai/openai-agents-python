@@ -116,6 +116,13 @@ class ModelSettings:
     """Additional output data to include in the model response.
     [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
 
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Controls response verbosity for supported models.
+    In Responses API this is sent as `text.verbosity`;
+    in Chat Completions it is top-level `verbosity`.
+    Values: "low", "medium", "high". Defaults to provider/model behavior if not set.
+    """
+
     extra_query: Query | None = None
     """Additional query fields to provide with the request.
     Defaults to None if not provided."""

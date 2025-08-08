@@ -247,6 +247,20 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
+        # Merge verbosity into the `text` param alongside any response format.
+        # Responses API expects verbosity under the `text` object.
+        if model_settings.verbosity is not None:
+            if response_format is NOT_GIVEN:
+                text_param: ResponseTextConfigParam | Any = {"verbosity": model_settings.verbosity}
+            else:
+                # response_format is a dict; augment it without mutating the original
+                from typing import cast
+
+                rf = cast(ResponseTextConfigParam, response_format)
+                text_param = {**rf, "verbosity": model_settings.verbosity}
+        else:
+            text_param = response_format
+
         include: list[ResponseIncludable] = converted_tools.includes
         if model_settings.response_include is not None:
             include = list({*include, *model_settings.response_include})
@@ -282,7 +296,7 @@ class OpenAIResponsesModel(Model):
             extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
-            text=response_format,
+            text=text_param,
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
             metadata=self._non_null_or_not_given(model_settings.metadata),
