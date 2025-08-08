@@ -44,7 +44,7 @@ from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .lifecycle import RunHooks
 from .logger import logger
-from .memory import Session
+from .memory import Session, SessionInputHandler
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -137,6 +137,14 @@ class RunConfig:
     trace_metadata: dict[str, Any] | None = None
     """
     An optional dictionary of additional metadata to include with the trace.
+    """
+
+    session_input_callback: SessionInputHandler = None
+    """Defines how to handle session history when new input is provided.
+
+    - `None` (default): The new input is appended to the session history.
+    - `SessionMixerCallable`: A custom function that receives the history and new input, and
+      returns the desired combined list of items.
     """
 
 
@@ -343,7 +351,9 @@ class AgentRunner:
             run_config = RunConfig()
 
         # Prepare input with session if enabled
-        prepared_input = await self._prepare_input_with_session(input, session)
+        prepared_input = await self._prepare_input_with_session(
+            input, session, run_config.session_input_callback
+        )
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -662,7 +672,9 @@ class AgentRunner:
 
         try:
             # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(starting_input, session)
+            prepared_input = await AgentRunner._prepare_input_with_session(
+                starting_input, session, run_config.session_input_callback
+            )
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
@@ -1238,18 +1250,18 @@ class AgentRunner:
         cls,
         input: str | list[TResponseInputItem],
         session: Session | None,
+        session_input_callback: SessionInputHandler,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
             return input
 
-        # Validate that we don't have both a session and a list input, as this creates
-        # ambiguity about whether the list should append to or replace existing session history
-        if isinstance(input, list):
+        # If the user doesn't explicitly specify a mode, raise an error
+        if isinstance(input, list) and not session_input_callback:
             raise UserError(
-                "Cannot provide both a session and a list of input items. "
-                "When using session memory, provide only a string input to append to the "
-                "conversation, or use session=None and provide a list to manually manage "
+                "You must specify the `session_input_callback` in the `RunConfig`. "
+                "Otherwise, when using session memory, provide only a string input to append to "
+                "the conversation, or use session=None and provide a list to manually manage "
                 "conversation history."
             )
 
@@ -1259,10 +1271,18 @@ class AgentRunner:
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
-        # Combine history with new input
-        combined_input = history + new_input_list
-
-        return combined_input
+        if session_input_callback is None:
+            return history + new_input_list
+        elif callable(session_input_callback):
+            res = session_input_callback(history, new_input_list)
+            if inspect.isawaitable(res):
+                return await res
+            return res
+        else:
+            raise UserError(
+                f"Invalid `session_input_callback` value: {session_input_callback}. "
+                "Choose between `None` or a custom callable function."
+            )
 
     @classmethod
     async def _save_result_to_session(
@@ -1271,7 +1291,11 @@ class AgentRunner:
         original_input: str | list[TResponseInputItem],
         result: RunResult,
     ) -> None:
-        """Save the conversation turn to session."""
+        """
+        Save the conversation turn to session.
+        It does not account for any filtering or modification performed by
+        `RunConfig.session_input_handling`.
+        """
         if session is None:
             return
 
