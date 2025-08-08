@@ -104,11 +104,11 @@ class ModelSettings:
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
-    store: bool | None = None
+    store: bool | None = True
     """Whether to store the generated model response for later retrieval.
     Defaults to True if not provided."""
 
-    include_usage: bool | None = None
+    include_usage: bool | None = True
     """Whether to include usage chunk.
     Defaults to True if not provided."""
 
