@@ -374,18 +374,19 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
 
-            # Send tool output to complete the handoff
+            # First, send the session update so the model receives the new instructions
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
+
+            # Then send tool output to complete the handoff (this triggers a new response)
+            transfer_message = handoff.get_transfer_message(result)
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
                     tool_call=event,
-                    output=f"Handed off to {self._current_agent.name}",
+                    output=transfer_message,
                     start_response=True,
                 )
-            )
-
-            # Send session update to model
-            await self._model.send_event(
-                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
             )
         else:
             raise ModelBehaviorError(f"Tool {event.name} not found")
@@ -443,7 +444,17 @@ class RealtimeSession(RealtimeModelListener):
 
     async def _run_output_guardrails(self, text: str) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
-        output_guardrails = self._run_config.get("output_guardrails", [])
+        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+            "output_guardrails", []
+        )
+        seen_ids: set[int] = set()
+        output_guardrails = []
+        for guardrail in combined_guardrails:
+            guardrail_id = id(guardrail)
+            if guardrail_id not in seen_ids:
+                output_guardrails.append(guardrail)
+                seen_ids.add(guardrail_id)
+
         if not output_guardrails or self._interrupted_by_guardrail:
             return False
 
