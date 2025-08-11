@@ -440,14 +440,16 @@ class Converter:
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
-                new_tool_call = ChatCompletionMessageToolCallParam(
-                    id=func_call["call_id"],
-                    type="function",
-                    function={
+                # Workaround for openai-python bug where ChatCompletionMessageToolCallParam is a typing.Union and can't be instantiated directly.
+                # Use dict instead, as it's compatible with the API.
+                new_tool_call = {
+                    "id": func_call["call_id"],
+                     "type": "function",
+                      "function": {
                         "name": func_call["name"],
-                        "arguments": arguments,
-                    },
-                )
+                        "arguments": func_call["arguments"],
+                },
+            }
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
