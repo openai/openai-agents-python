@@ -444,10 +444,15 @@ async def test_sqlite_session_special_characters_and_sql_injection():
             {"role": "user", "content": "Normal message"},
         ]
         await session.add_items(items)
+
+        # Retrieve all items and verify they are stored correctly
         retrieved = await session.get_items()
         assert len(retrieved) == len(items)
-        for i, item in enumerate(items):
-            assert retrieved[i].get("content") == item["content"]
+        assert retrieved[0].get("content") == "O'Reilly"
+        assert retrieved[1].get("content") == "DROP TABLE sessions;"
+        assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = \"admin\";"'
+        assert retrieved[3].get("content") == "Robert'); DROP TABLE students;--"
+        assert retrieved[4].get("content") == "Normal message"
         session.close()
 
 @pytest.mark.asyncio
