@@ -4,7 +4,8 @@ import json
 import logging
 import struct
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import TYPE_CHECKING, Any
+from typing_extensions import assert_never
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
