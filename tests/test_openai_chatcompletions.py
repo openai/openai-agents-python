@@ -9,7 +9,7 @@ from openai import NOT_GIVEN, AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_tool_call import (
+from openai.types.chat.chat_completion_message_tool_call import (  # type: ignore[attr-defined]
     ChatCompletionMessageFunctionToolCall,
     Function,
 )

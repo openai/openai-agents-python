@@ -341,8 +341,8 @@ def test_tool_call_conversion():
 
     tool_call = tool_calls[0]
     assert tool_call["id"] == function_call["call_id"]
-    assert tool_call["function"]["name"] == function_call["name"]
-    assert tool_call["function"]["arguments"] == function_call["arguments"]
+    assert tool_call["function"]["name"] == function_call["name"]  # type: ignore
+    assert tool_call["function"]["arguments"] == function_call["arguments"]  # type: ignore
 
 
 @pytest.mark.parametrize("role", ["user", "system", "developer"])
