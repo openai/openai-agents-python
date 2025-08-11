@@ -5,11 +5,11 @@ import logging
 import struct
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
-from typing_extensions import assert_never
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
 
