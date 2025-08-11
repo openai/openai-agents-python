@@ -32,17 +32,23 @@ agent = Agent(
 Agents are generic on their `context` type. Context is a dependency-injection tool: it's an object you create and pass to `Runner.run()`, that is passed to every agent, tool, handoff etc, and it serves as a grab bag of dependencies and state for the agent run. You can provide any Python object as the context.
 
 ```python
+from dataclasses import dataclass
+from agents import Agent
+
 @dataclass
 class UserContext:
     name: str
     uid: str
     is_pro_user: bool
 
-    async def fetch_purchases() -> list[Purchase]:
-        return ...
+    async def fetch_purchases(self) -> list[str]:
+        # Example async method returning a list of purchase (mock)
+        return ["purchase1", "purchase2"]
 
+# Create an agent with a typed context (UserContext)
 agent = Agent[UserContext](
-    ...,
+    name="Contextual Agent",
+    instructions="Use context info.",
 )
 ```
 
