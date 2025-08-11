@@ -4,7 +4,7 @@ The [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) enables 
 
 -   **Agents**, which are LLMs equipped with instructions and tools
 -   **Handoffs**, which allow agents to delegate to other agents for specific tasks
--   **Guardrails**, which enable the inputs to agents to be validated
+-   **Guardrails**, which enable validation of agent inputs and outputs
 -   **Sessions**, which automatically maintains conversation history across agent runs
 
 In combination with Python, these primitives are powerful enough to express complex relationships between tools and agents, and allow you to build real-world applications without a steep learning curve. In addition, the SDK comes with built-in **tracing** that lets you visualize and debug your agentic flows, as well as evaluate them and even fine-tune models for your application.

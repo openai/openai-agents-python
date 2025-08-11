@@ -104,6 +104,7 @@ def mock_agent():
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])
+    type(agent).output_guardrails = PropertyMock(return_value=[])
     return agent
 
 
@@ -1064,6 +1065,37 @@ class TestGuardrailFunctionality:
         assert guardrail_events[0].message == "this is more than ten characters"
 
     @pytest.mark.asyncio
+    async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
+        """Guardrails shared by agent and run config should execute once."""
+
+        call_count = 0
+
+        def guardrail_func(context, agent, output):
+            nonlocal call_count
+            call_count += 1
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        shared_guardrail = OutputGuardrail(
+            guardrail_function=guardrail_func, name="shared_guardrail"
+        )
+
+        agent = RealtimeAgent(name="agent", output_guardrails=[shared_guardrail])
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [shared_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="hello", response_id="resp_1")
+        )
+
+        await self._wait_for_guardrail_tasks(session)
+
+        assert call_count == 1
+
+    @pytest.mark.asyncio
     async def test_transcript_delta_multiple_thresholds_same_item(
         self, mock_model, mock_agent, triggered_guardrail
     ):
@@ -1209,6 +1241,36 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert len(guardrail_events[0].guardrail_results) == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_output_guardrails_triggered(self, mock_model, triggered_guardrail):
+        """Test that guardrails defined on the agent are executed."""
+        agent = RealtimeAgent(name="agent", output_guardrails=[triggered_guardrail])
+        run_config: RealtimeRunConfig = {
+            "guardrails_settings": {"debounce_text_length": 10},
+        }
+
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        transcript_event = RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="this is more than ten characters", response_id="resp_1"
+        )
+
+        await session.on_event(transcript_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert session._interrupted_by_guardrail is True
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_guardrail" in mock_model.sent_messages[0]
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "this is more than ten characters"
 
 
 class TestModelSettingsIntegration:
