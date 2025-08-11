@@ -126,15 +126,18 @@ class Converter:
 
         if message.tool_calls:
             for tool_call in message.tool_calls:
-                items.append(
-                    ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=tool_call.id,
-                        arguments=tool_call.function.arguments,
-                        name=tool_call.function.name,
-                        type="function_call",
+                if tool_call.type == "function":
+                    items.append(
+                        ResponseFunctionToolCall(
+                            id=FAKE_RESPONSES_ID,
+                            call_id=tool_call.id,
+                            arguments=tool_call.function.arguments,
+                            name=tool_call.function.name,
+                            type="function_call",
+                        )
                     )
-                )
+                elif tool_call.type == "custom":
+                    pass
 
         return items
 
