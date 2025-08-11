@@ -62,7 +62,7 @@ async def main():
             elif isinstance(event.data, ResponseFunctionCallArgumentsDeltaEvent):
                 if current_active_call_id and current_active_call_id in function_calls:
                     function_calls[current_active_call_id]['arguments'] += event.data.delta
-                    print(f"   + {event.data.delta}", end="", flush=True)
+                    print(event.data.delta, end="", flush=True)
 
             # Function call completed
             elif event.data.type == "response.output_item.done":
