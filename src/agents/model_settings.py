@@ -55,7 +55,6 @@ Headers: TypeAlias = Mapping[str, Union[str, Omit]]
 ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
 
 
-
 @dataclass
 class ModelSettings:
     """Settings to use when calling an LLM.
