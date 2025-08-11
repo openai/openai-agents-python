@@ -105,13 +105,14 @@ class ModelSettings:
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
-    store: bool | None = True
+    store: bool | None = None
     """Whether to store the generated model response for later retrieval.
-    Defaults to True if not provided."""
+    For Responses API: automatically enabled when not specified.
+    For Chat Completions API: disabled when not specified."""
 
-    include_usage: bool | None = True
+    include_usage: bool | None = None
     """Whether to include usage chunk.
-    Defaults to True if not provided."""
+    Only available for Chat Completions API."""
 
     response_include: list[ResponseIncludable] | None = None
     """Additional output data to include in the model response.
