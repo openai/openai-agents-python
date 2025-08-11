@@ -97,6 +97,34 @@ To customize this default setup, to send traces to alternative or additional bac
 1. [`add_trace_processor()`][agents.tracing.add_trace_processor] lets you add an **additional** trace processor that will receive traces and spans as they are ready. This lets you do your own processing in addition to sending traces to OpenAI's backend.
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
 
+
+## Tracing with Non-OpenAI Models
+
+You can use an OpenAI API key with non-OpenAI Models to enable free tracing in the OpenAI Traces dashboard without needing to disable tracing.
+
+```python
+import os
+from agents import set_tracing_export_api_key, Agent, Runner
+from agents.extensions.models.litellm_model import LitellmModel
+
+tracing_api_key = os.environ["OPENAI_API_KEY"]
+set_tracing_export_api_key(tracing_api_key)
+
+model = LitellmModel(
+    model="your-model-name",
+    api_key="your-api-key",
+)
+
+agent = Agent(
+    name="Assistant",
+    model=model,
+)
+```
+
+## Notes
+- View free traces at Openai Traces dashboard.
+
+
 ## External tracing processors list
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)

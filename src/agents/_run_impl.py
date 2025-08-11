@@ -774,6 +774,7 @@ class RunImpl:
                     else original_input,
                     pre_handoff_items=tuple(pre_step_items),
                     new_items=tuple(new_step_items),
+                    run_context=context_wrapper,
                 )
                 if not callable(input_filter):
                     _error_tracing.attach_error_to_span(
@@ -785,6 +786,8 @@ class RunImpl:
                     )
                     raise UserError(f"Invalid input filter: {input_filter}")
                 filtered = input_filter(handoff_input_data)
+                if inspect.isawaitable(filtered):
+                    filtered = await filtered
                 if not isinstance(filtered, HandoffInputData):
                     _error_tracing.attach_error_to_span(
                         span_handoff,
@@ -911,12 +914,12 @@ class RunImpl:
             return result
 
     @classmethod
-    def stream_step_result_to_queue(
+    def stream_step_items_to_queue(
         cls,
-        step_result: SingleStepResult,
+        new_step_items: list[RunItem],
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
-        for item in step_result.new_step_items:
+        for item in new_step_items:
             if isinstance(item, MessageOutputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
             elif isinstance(item, HandoffCallItem):
@@ -940,6 +943,14 @@ class RunImpl:
 
             if event:
                 queue.put_nowait(event)
+
+    @classmethod
+    def stream_step_result_to_queue(
+        cls,
+        step_result: SingleStepResult,
+        queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
+    ):
+        cls.stream_step_items_to_queue(step_result.new_step_items, queue)
 
     @classmethod
     async def _check_for_final_output_from_tools(

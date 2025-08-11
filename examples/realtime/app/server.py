@@ -4,43 +4,30 @@ import json
 import logging
 import struct
 from contextlib import asynccontextmanager
-from typing import Any, assert_never
+from typing import TYPE_CHECKING, Any, assert_never
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from agents import function_tool
-from agents.realtime import RealtimeAgent, RealtimeRunner, RealtimeSession, RealtimeSessionEvent
+from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
+
+# Import TwilioHandler class - handle both module and package use cases
+if TYPE_CHECKING:
+    # For type checking, use the relative import
+    from .agent import get_starting_agent
+else:
+    # At runtime, try both import styles
+    try:
+        # Try relative import first (when used as a package)
+        from .agent import get_starting_agent
+    except ImportError:
+        # Fall back to direct import (when run as a script)
+        from agent import get_starting_agent
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-@function_tool
-def get_weather(city: str) -> str:
-    """Get the weather in a city."""
-    return f"The weather in {city} is sunny."
-
-
-@function_tool
-def get_secret_number() -> int:
-    """Returns the secret number, if the user asks for it."""
-    return 71
-
-
-haiku_agent = RealtimeAgent(
-    name="Haiku Agent",
-    instructions="You are a haiku poet. You must respond ONLY in traditional haiku format (5-7-5 syllables). Every response should be a proper haiku about the topic. Do not break character.",
-    tools=[],
-)
-
-agent = RealtimeAgent(
-    name="Assistant",
-    instructions="If the user wants poetry or haikus, you can hand them off to the haiku agent via the transfer_to_haiku_agent tool.",
-    tools=[get_weather, get_secret_number],
-    handoffs=[haiku_agent],
-)
 
 
 class RealtimeWebSocketManager:
@@ -53,6 +40,7 @@ class RealtimeWebSocketManager:
         await websocket.accept()
         self.websockets[session_id] = websocket
 
+        agent = get_starting_agent()
         runner = RealtimeRunner(agent)
         session_context = await runner.run()
         session = await session_context.__aenter__()
