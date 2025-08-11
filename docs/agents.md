@@ -111,7 +111,7 @@ agent = Agent[UserContext](
 
 ## Lifecycle events (hooks)
 
-Sometimes, you want to observe the lifecycle of an agent. For example, you may want to log events, or pre-fetch data when certain events occur. You can hook into the agent lifecycle with the `hooks` property. Subclass the [`AgentHooks`][agents.lifecycle.AgentHooks] class, and override the methods you're interested in.
+Sometimes, you want to observe the lifecycle of an agent. For example, you may want to log events, or pre-fetch data when certain events occur. You can hook into the agent lifecycle with the `hooks` property. Subclass the [`AgentHooks`][agents.lifecycle.AgentHooks] class, and override the methods you're interested in. Read more in the [lifecycle](https://openai.github.io/openai-agents-python/ref/lifecycle/) documentation.
 
 ## Guardrails
 
