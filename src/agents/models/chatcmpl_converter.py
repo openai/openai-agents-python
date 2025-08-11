@@ -18,6 +18,8 @@ from openai.types.chat import (
     ChatCompletionToolChoiceOptionParam,
     ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
+    ChatCompletionMessageFunctionToolCallParam,
+    ChatCompletionMessageCustomToolCallParam,
 )
 from openai.types.chat.chat_completion_content_part_param import File, FileFile
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
@@ -440,14 +442,24 @@ class Converter:
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
-                new_tool_call = ChatCompletionMessageToolCallParam(
-                    id=func_call["call_id"],
-                    type="function",
-                    function={
-                        "name": func_call["name"],
-                        "arguments": arguments,
-                    },
-                )
+                if func_call.get("type") == "function_call":
+                    new_tool_call = ChatCompletionMessageFunctionToolCallParam(
+                        id=func_call["call_id"],
+                        type="function",
+                        function={
+                            "name": func_call["name"],
+                            "arguments": arguments,
+                        },
+                    )
+                else:
+                    new_tool_call = ChatCompletionMessageCustomToolCallParam(
+                        id=func_call["call_id"],
+                        type="function",
+                        custom={
+                            "name": func_call["name"],
+                            "arguments": arguments,
+                        },
+                    )
                 tool_calls.append(new_tool_call)
                 asst["tool_calls"] = tool_calls
             # 5) function call output => tool message
