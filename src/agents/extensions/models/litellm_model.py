@@ -18,13 +18,17 @@ except ImportError as _e:
     ) from _e
 
 from openai import NOT_GIVEN, AsyncStream, NotGiven
-from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageToolCall
+from openai.types.chat import (
+    ChatCompletionChunk,
+    ChatCompletionMessageFunctionToolCall,
+)
 from openai.types.chat.chat_completion_message import (
     Annotation,
     AnnotationURLCitation,
     ChatCompletionMessage,
 )
-from openai.types.chat.chat_completion_message_tool_call import Function
+from openai.types.chat.chat_completion_message_function_tool_call import Function
+from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.responses import Response
 
 from ... import _debug
@@ -321,6 +325,7 @@ class LitellmModel(Model):
             stream=stream,
             stream_options=stream_options,
             reasoning_effort=reasoning_effort,
+            top_logprobs=model_settings.top_logprobs,
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             api_key=self.api_key,
             base_url=self.base_url,
@@ -361,7 +366,7 @@ class LitellmConverter:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
 
-        tool_calls = (
+        tool_calls: list[ChatCompletionMessageToolCall] | None = (
             [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
             if message.tool_calls
             else None
@@ -412,11 +417,12 @@ class LitellmConverter:
     @classmethod
     def convert_tool_call_to_openai(
         cls, tool_call: litellm.types.utils.ChatCompletionMessageToolCall
-    ) -> ChatCompletionMessageToolCall:
-        return ChatCompletionMessageToolCall(
+    ) -> ChatCompletionMessageFunctionToolCall:
+        return ChatCompletionMessageFunctionToolCall(
             id=tool_call.id,
             type="function",
             function=Function(
-                name=tool_call.function.name or "", arguments=tool_call.function.arguments
+                name=tool_call.function.name or "",
+                arguments=tool_call.function.arguments,
             ),
         )
