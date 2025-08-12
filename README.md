@@ -40,6 +40,18 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```bash
 pip install openai-agents
 ```
+### Option 2: Install with UV  
+[`uv`](https://github.com/astral-sh/uv) is a modern package manager for Python that provides fast dependency resolution.  
+
+1. Initialize the directory with `uv`:  
+   ```
+   uv init --package sample_project
+   ```
+2. Install Agents SDK
+   ```
+   uv add openai-agents
+   ```
+
 
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
 
