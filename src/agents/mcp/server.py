@@ -6,7 +6,7 @@ import inspect
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -19,7 +19,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import ToolFilter, ToolFilterCallable, ToolFilterContext, ToolFilterStatic
+from .util import ToolFilter, ToolFilterContext, ToolFilterStatic
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
