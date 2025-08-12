@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from agents.agent import Agent, RunContextWrapper
+from agents import Agent, RunContextWrapper
 
 
 class TestInstructionsSignatureValidation:
