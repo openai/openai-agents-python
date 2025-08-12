@@ -39,7 +39,7 @@ class TestInstructionsSignatureValidation:
         def invalid_instructions(context):
             return "Should fail"
 
-        agent = Agent(name="test_agent", instructions=invalid_instructions)
+        agent = Agent(name="test_agent", instructions=invalid_instructions)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError) as exc_info:
             await agent.get_system_prompt(mock_run_context)
@@ -53,7 +53,7 @@ class TestInstructionsSignatureValidation:
         def invalid_instructions(context, agent, extra):
             return "Should fail"
 
-        agent = Agent(name="test_agent", instructions=invalid_instructions)
+        agent = Agent(name="test_agent", instructions=invalid_instructions)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError) as exc_info:
             await agent.get_system_prompt(mock_run_context)
@@ -67,7 +67,7 @@ class TestInstructionsSignatureValidation:
         def invalid_instructions():
             return "Should fail"
 
-        agent = Agent(name="test_agent", instructions=invalid_instructions)
+        agent = Agent(name="test_agent", instructions=invalid_instructions)  # type: ignore[arg-type]
 
         with pytest.raises(TypeError) as exc_info:
             await agent.get_system_prompt(mock_run_context)
@@ -76,16 +76,18 @@ class TestInstructionsSignatureValidation:
         assert "but got 0" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_function_with_args_kwargs_passes(self, mock_run_context):
-        """Test that function with *args/**kwargs still works (edge case)"""
+    async def test_function_with_args_kwargs_fails(self, mock_run_context):
+        """Test that function with *args/**kwargs fails validation"""
         def flexible_instructions(context, agent, *args, **kwargs):
             return "Flexible instructions"
 
         agent = Agent(name="test_agent", instructions=flexible_instructions)
-        # This should potentially pass as it can accept the 2 required args
-        # Adjust this test based on your desired behavior
-        result = await agent.get_system_prompt(mock_run_context)
-        assert result == "Flexible instructions"
+
+        with pytest.raises(TypeError) as exc_info:
+            await agent.get_system_prompt(mock_run_context)
+
+        assert "must accept exactly 2 arguments" in str(exc_info.value)
+        assert "but got" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_string_instructions_still_work(self, mock_run_context):
@@ -102,10 +104,10 @@ class TestInstructionsSignatureValidation:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_non_callable_instructions_log_error(self, mock_run_context, caplog):
-        """Test that non-callable instructions log an error"""
-        agent = Agent(name="test_agent", instructions=123)  # Invalid type
-        result = await agent.get_system_prompt(mock_run_context)
-        assert result is None
-        # Check that error was logged (adjust based on actual logging setup)
-        # assert "Instructions must be a string or a function" in caplog.text
+    async def test_non_callable_instructions_raises_error(self, mock_run_context):
+        """Test that non-callable instructions raise a TypeError during initialization"""
+        with pytest.raises(TypeError) as exc_info:
+            Agent(name="test_agent", instructions=123)  # type: ignore[arg-type]
+
+        assert "Agent instructions must be a string, callable, or None" in str(exc_info.value)
+        assert "got int" in str(exc_info.value)
