@@ -80,7 +80,7 @@ async def main():
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "Hi there!"}
     ]
-    await session.add_items(new_items)
+    await session.add_items(new_items) 
 
     # Remove and return the most recent item
     last_item = await session.pop_item()
