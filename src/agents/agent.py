@@ -414,7 +414,10 @@ class Agent(AgentBase, Generic[TContext]):
                 return cast(str, self.instructions(run_context, self))
 
         elif self.instructions is not None:
-            logger.error(f"Instructions must be a string or a callable function, got {type(self.instructions).__name__}")
+            logger.error(
+                f"Instructions must be a string or a callable function, "
+                f"got {type(self.instructions).__name__}"
+            )
 
         return None
 
