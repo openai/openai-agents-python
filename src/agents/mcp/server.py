@@ -175,10 +175,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
 
-        # Ensure we have a callable filter and cast to help mypy
+        # Ensure we have a callable filter
         if not callable(self.tool_filter):
             raise ValueError("Tool filter must be callable for dynamic filtering")
-        tool_filter_func = cast(ToolFilterCallable, self.tool_filter)
+        tool_filter_func = self.tool_filter
 
         # Create filter context
         filter_context = ToolFilterContext(
