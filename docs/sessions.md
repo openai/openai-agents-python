@@ -60,26 +60,38 @@ This eliminates the need to manually call `.to_input_list()` and manage conversa
 Sessions supports several operations for managing conversation history:
 
 ```python
+import asyncio
 from agents import SQLiteSession
 
-session = SQLiteSession("user_123", "conversations.db")
+# This is a minimal runnable example showing how to use SQLiteSession
+# to store, retrieve, and manage conversation history.
+# Just save this file and run it with: python example.py
 
-# Get all items in a session
-items = await session.get_items()
+async def main():
+    # Create a new SQLiteSession for the given user
+    session = SQLiteSession("user_123", "conversations.db")
 
-# Add new items to a session
-new_items = [
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hi there!"}
-]
-await session.add_items(new_items)
+    # Get all items in a session
+    items = await session.get_items()
+    print("Existing items:", items)
 
-# Remove and return the most recent item
-last_item = await session.pop_item()
-print(last_item)  # {"role": "assistant", "content": "Hi there!"}
+    # Add new items to a session
+    new_items = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi there!"}
+    ]
+    await session.add_items(new_items)
 
-# Clear all items from a session
-await session.clear_session()
+    # Remove and return the most recent item
+    last_item = await session.pop_item()
+    print("Last item removed:", last_item)  # {"role": "assistant", "content": "Hi there!"}
+
+    # Clear all items from a session
+    await session.clear_session()
+    print("Session cleared.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### Using pop_item for corrections
