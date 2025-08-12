@@ -393,16 +393,28 @@ class Agent(AgentBase, Generic[TContext]):
         return run_agent
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
-        """Get the system prompt for the agent."""
         if isinstance(self.instructions, str):
             return self.instructions
         elif callable(self.instructions):
+            # Inspect the signature of the instructions function
+            sig = inspect.signature(self.instructions)
+            params = list(sig.parameters.values())
+
+            # Enforce exactly 2 parameters
+            if len(params) != 2:
+                raise TypeError(
+                    f"'instructions' callable must accept exactly 2 arguments (context, agent), "
+                    f"but got {len(params)}: {[p.name for p in params]}"
+                )
+
+            # Call the instructions function properly
             if inspect.iscoroutinefunction(self.instructions):
                 return await cast(Awaitable[str], self.instructions(run_context, self))
             else:
                 return cast(str, self.instructions(run_context, self))
+
         elif self.instructions is not None:
-            logger.error(f"Instructions must be a string or a function, got {self.instructions}")
+            logger.error(f"Instructions must be a string or a callable function, got {type(self.instructions).__name__}")
 
         return None
 
