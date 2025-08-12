@@ -1463,7 +1463,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "1.97.1"
+version = "1.99.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1475,14 +1475,14 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/57/1c471f6b3efb879d26686d31582997615e969f3bb4458111c9705e56332e/openai-1.97.1.tar.gz", hash = "sha256:a744b27ae624e3d4135225da9b1c89c107a2a7e5bc4c93e5b7b5214772ce7a4e", size = 494267, upload-time = "2025-07-22T13:10:12.607Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/45/38a87bd6949236db5ae3132f41d5861824702b149f86d2627d6900919103/openai-1.99.6.tar.gz", hash = "sha256:f48f4239b938ef187062f3d5199a05b69711d8b600b9a9b6a3853cd271799183", size = 505364, upload-time = "2025-08-09T15:20:54.438Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/35/412a0e9c3f0d37c94ed764b8ac7adae2d834dbd20e69f6aca582118e0f55/openai-1.97.1-py3-none-any.whl", hash = "sha256:4e96bbdf672ec3d44968c9ea39d2c375891db1acc1794668d8149d5fa6000606", size = 764380, upload-time = "2025-07-22T13:10:10.689Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/dd/9aa956485c2856346b3181542fbb0aea4e5b457fa7a523944726746da8da/openai-1.99.6-py3-none-any.whl", hash = "sha256:e40d44b2989588c45ce13819598788b77b8fb80ba2f7ae95ce90d14e46f1bd26", size = 786296, upload-time = "2025-08-09T15:20:51.95Z" },
 ]
 
 [[package]]
 name = "openai-agents"
-version = "0.2.5"
+version = "0.2.6"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
@@ -1541,7 +1541,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.67.4.post1,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.11.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "openai", specifier = ">=1.97.1,<2" },
+    { name = "openai", specifier = ">=1.99.6,<2" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "types-requests", specifier = ">=2.0,<3" },
