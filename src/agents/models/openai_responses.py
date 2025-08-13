@@ -272,7 +272,7 @@ class OpenAIResponsesModel(Model):
             extra_args["top_logprobs"] = model_settings.top_logprobs
         if model_settings.verbosity is not None:
             if response_format != NOT_GIVEN:
-                response_format["verbosity"] = model_settings.verbosity
+                response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
             else:
                 response_format = {"verbosity": model_settings.verbosity}
 

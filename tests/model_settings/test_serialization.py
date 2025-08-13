@@ -59,6 +59,7 @@ def test_all_fields_serialization() -> None:
         include_usage=False,
         response_include=["reasoning.encrypted_content"],
         top_logprobs=1,
+        verbosity="low",
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
