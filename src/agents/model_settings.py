@@ -102,6 +102,10 @@ class ModelSettings:
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
+    """
+
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 

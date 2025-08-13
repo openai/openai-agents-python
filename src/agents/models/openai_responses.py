@@ -270,6 +270,11 @@ class OpenAIResponsesModel(Model):
         extra_args = dict(model_settings.extra_args or {})
         if model_settings.top_logprobs is not None:
             extra_args["top_logprobs"] = model_settings.top_logprobs
+        if model_settings.verbosity is not None:
+            if response_format != NOT_GIVEN:
+                response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
+            else:
+                response_format = {"verbosity": model_settings.verbosity}
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),

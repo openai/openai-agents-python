@@ -1050,7 +1050,6 @@ class TestGuardrailFunctionality:
         await self._wait_for_guardrail_tasks(session)
 
         # Should have triggered guardrail and interrupted
-        assert session._interrupted_by_guardrail is True
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         assert "triggered_guardrail" in mock_model.sent_messages[0]
@@ -1187,14 +1186,12 @@ class TestGuardrailFunctionality:
         # Wait for async guardrail tasks to complete
         await self._wait_for_guardrail_tasks(session)
 
-        assert session._interrupted_by_guardrail is True
         assert len(session._item_transcripts) == 1
 
         # End turn
         await session.on_event(RealtimeModelTurnEndedEvent())
 
         # State should be cleared
-        assert session._interrupted_by_guardrail is False
         assert len(session._item_transcripts) == 0
         assert len(session._item_guardrail_run_counts) == 0
 
@@ -1259,7 +1256,6 @@ class TestGuardrailFunctionality:
         await session.on_event(transcript_event)
         await self._wait_for_guardrail_tasks(session)
 
-        assert session._interrupted_by_guardrail is True
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         assert "triggered_guardrail" in mock_model.sent_messages[0]
@@ -1271,6 +1267,63 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_guardrail_tasks_interrupt_once_per_response(self, mock_model):
+        """Even if multiple guardrail tasks trigger concurrently for the same response_id,
+        only the first should interrupt and send a message."""
+        import asyncio
+
+        # Barrier to release both guardrail tasks at the same time
+        start_event = asyncio.Event()
+
+        async def async_trigger_guardrail(context, agent, output):
+            await start_event.wait()
+            return GuardrailFunctionOutput(
+                output_info={"reason": "concurrent"}, tripwire_triggered=True
+            )
+
+        concurrent_guardrail = OutputGuardrail(
+            guardrail_function=async_trigger_guardrail, name="concurrent_trigger"
+        )
+
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [concurrent_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+
+        # Use a minimal agent (guardrails from run_config)
+        agent = RealtimeAgent(name="agent")
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        # Two deltas for same item and response to enqueue two guardrail tasks
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="12345", response_id="resp_same"
+            )
+        )
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="67890", response_id="resp_same"
+            )
+        )
+
+        # Wait until both tasks are enqueued
+        for _ in range(50):
+            if len(session._guardrail_tasks) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        # Release both tasks concurrently
+        start_event.set()
+
+        # Wait for completion
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
+        # Only one interrupt and one message should be sent
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
 
 
 class TestModelSettingsIntegration:
