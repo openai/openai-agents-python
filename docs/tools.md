@@ -319,10 +319,6 @@ When you create a function tool via `@function_tool`, you can pass a `failure_er
 -   If you pass your own error function, it runs that instead, and sends the response to the LLM.
 -   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
 
-If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
-
-## Example: Custom Error Handling in Function Tools
-
 ```python
 from agents import function_tool, RunContextWrapper
 from typing import Any
@@ -343,3 +339,5 @@ def get_user_profile(user_id: str) -> str:
         raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
 
 ```
+
+If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
