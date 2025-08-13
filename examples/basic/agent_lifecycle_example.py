@@ -49,7 +49,7 @@ class CustomAgentHooks(AgentHooks):
 @function_tool
 def random_number(max: int) -> int:
     """
-    Generate a random number up to the provided maximum.
+    Generate a random number from 0 to max (inclusive).
     """
     return random.randint(0, max)
 
