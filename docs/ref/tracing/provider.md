@@ -1,3 +1,0 @@
-# `Provider`
-
-::: agents.tracing.provider

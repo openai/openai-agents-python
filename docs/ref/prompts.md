@@ -1,3 +1,0 @@
-# `Prompts`
-
-::: agents.prompts

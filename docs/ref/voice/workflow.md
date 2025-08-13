@@ -1,3 +1,0 @@
-# `Workflow`
-
-::: agents.voice.workflow

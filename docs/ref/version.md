@@ -1,3 +1,0 @@
-# `Version`
-
-::: agents.version
