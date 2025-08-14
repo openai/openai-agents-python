@@ -56,7 +56,7 @@ hooks = ExampleHooks()
 
 @function_tool
 def random_number(max: int) -> int:
-    """Generate a random number up to the provided max."""
+    """Generate a random number from 0 to max (inclusive)."""
     return random.randint(0, max)
 
 
