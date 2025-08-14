@@ -22,6 +22,7 @@ from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
 from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from openai.types.responses.response_output_text import ResponseOutputText
+from openai.types.responses.response_output_text_param import ResponseOutputTextParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
 from pydantic import TypeAdapter
@@ -116,7 +117,13 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
     # Given a list of message dictionaries, ensure the returned list is a deep copy.
     original = ResponseOutputMessageParam(
         id="a75654dc-7492-4d1c-bce0-89e8312fbdd7",
-        content=[{"type": "text", "text": "Hey, what's up?"}],
+        content=[
+            ResponseOutputTextParam(
+                type="output_text",
+                text="Hey, what's up?",
+                annotations=[],
+            )
+        ],
         role="assistant",
         status="completed",
         type="message",
@@ -125,15 +132,15 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
     output_item = TypeAdapter(ResponseOutputMessageParam).validate_json(original_json)
     new_list = ItemHelpers.input_to_new_input_list([output_item])
     assert len(new_list) == 1
-    assert new_list[0]["id"] == original["id"]
+    assert new_list[0]["id"] == original["id"]  # type: ignore
     size = 0
     for i, item in enumerate(original["content"]):
         size += 1  # pydantic_core._pydantic_core.ValidatorIterator does not support len()
-        assert item["type"] == original["content"][i]["type"]
-        assert item["text"] == original["content"][i]["text"]
+        assert item["type"] == original["content"][i]["type"]  # type: ignore
+        assert item["text"] == original["content"][i]["text"]  # type: ignore
     assert size == 1
-    assert new_list[0]["role"] == original["role"]
-    assert new_list[0]["status"] == original["status"]
+    assert new_list[0]["role"] == original["role"]  # type: ignore
+    assert new_list[0]["status"] == original["status"]  # type: ignore
     assert new_list[0]["type"] == original["type"]
 
 

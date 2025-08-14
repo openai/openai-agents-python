@@ -3,6 +3,7 @@ import datetime as dt
 import io
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -73,7 +74,7 @@ def test_deep_copy_for_nested_containers_of_primitives():
     cpy = safe_copy(orig)
 
     # mutate original deeply
-    orig["a"][2]["z"] = (99, 100)
+    orig["a"][2]["z"] = (99, 100)  # type: ignore
 
     assert cpy == {"a": [1, 2, {"z": (3, 4)}]}  # unaffected
 
@@ -96,7 +97,7 @@ def test_complex_leaf_is_only_shallow_copied():
 
     # mutating the leaf reflects in the copied structure
     leaf.val = 42
-    assert cpy["k"].val == 42
+    assert cpy["k"].val == 42  # type: ignore [attr-defined]
 
 
 def test_generator_is_preserved_and_not_consumed():
@@ -146,7 +147,7 @@ def test_frozenset_and_set_handling():
 
 def test_cycles_are_handled_without_recursion_error():
     # a -> (a,)
-    a = []
+    a: list[Any] = []
     t = (a,)
     a.append(t)
 
