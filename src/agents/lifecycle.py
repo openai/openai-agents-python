@@ -42,7 +42,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called before a tool is invoked."""
+        """Called concurrently with tool invocation."""
         pass
 
     async def on_tool_end(
@@ -93,7 +93,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called before a tool is invoked."""
+        """Called concurrently with tool invocation."""
         pass
 
     async def on_tool_end(

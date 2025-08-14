@@ -36,6 +36,7 @@ The [`handoff()`][agents.handoffs.handoff] function lets you customize things.
 -   `on_handoff`: A callback function executed when the handoff is invoked. This is useful for things like kicking off some data fetching as soon as you know a handoff is being invoked. This function receives the agent context, and can optionally also receive LLM generated input. The input data is controlled by the `input_type` param.
 -   `input_type`: The type of input expected by the handoff (optional).
 -   `input_filter`: This lets you filter the input received by the next agent. See below for more.
+-   `is_enabled`: Whether the handoff is enabled. This can be a boolean or a function that returns a boolean, allowing you to dynamically enable or disable the handoff at runtime.
 
 ```python
 from agents import Agent, handoff, RunContextWrapper

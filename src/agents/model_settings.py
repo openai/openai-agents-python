@@ -55,6 +55,7 @@ Headers: TypeAlias = Mapping[str, Union[str, Omit]]
 ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
 
 
+
 @dataclass
 class ModelSettings:
     """Settings to use when calling an LLM.
@@ -101,20 +102,29 @@ class ModelSettings:
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
+    """
+
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
-    Defaults to True if not provided."""
+    For Responses API: automatically enabled when not specified.
+    For Chat Completions API: disabled when not specified."""
 
     include_usage: bool | None = None
     """Whether to include usage chunk.
-    Defaults to True if not provided."""
+    Only available for Chat Completions API."""
 
     response_include: list[ResponseIncludable] | None = None
     """Additional output data to include in the model response.
     [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
+
+    top_logprobs: int | None = None
+    """Number of top tokens to return logprobs for. Setting this will
+    automatically include ``"message.output_text.logprobs"`` in the response."""
 
     extra_query: Query | None = None
     """Additional query fields to provide with the request.

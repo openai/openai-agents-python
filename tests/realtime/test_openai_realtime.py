@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -181,9 +180,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Malformed JSON should not crash the handler
         await model._handle_ws_event("invalid json {")
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        error_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
@@ -196,9 +195,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(invalid_event)
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        error_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        error_event = mock_listener.on_event.call_args_list[1][0][0]
         assert error_event.type == "error"
 
     @pytest.mark.asyncio
@@ -226,6 +225,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
 
+        # Set up audio format on the tracker before testing
+        model._audio_state_tracker.set_audio_format("pcm16")
+
         # Valid audio delta event (minimal required fields for OpenAI spec)
         audio_event = {
             "type": "response.audio.delta",
@@ -237,23 +239,22 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             "delta": "dGVzdCBhdWRpbw==",  # base64 encoded "test audio"
         }
 
-        with patch("agents.realtime.openai_realtime.datetime") as mock_datetime:
-            mock_now = datetime(2024, 1, 1, 12, 0, 0)
-            mock_datetime.now.return_value = mock_now
+        await model._handle_ws_event(audio_event)
 
-            await model._handle_ws_event(audio_event)
+        # Should emit raw server event and audio event to listeners
+        assert mock_listener.on_event.call_count == 2
+        emitted_event = mock_listener.on_event.call_args_list[1][0][0]
+        assert isinstance(emitted_event, RealtimeModelAudioEvent)
+        assert emitted_event.response_id == "resp_123"
+        assert emitted_event.data == b"test audio"  # decoded from base64
 
-            # Should emit audio event to listeners
-            mock_listener.on_event.assert_called_once()
-            emitted_event = mock_listener.on_event.call_args[0][0]
-            assert isinstance(emitted_event, RealtimeModelAudioEvent)
-            assert emitted_event.response_id == "resp_123"
-            assert emitted_event.data == b"test audio"  # decoded from base64
+        # Should update internal audio tracking state
+        assert model._current_item_id == "item_456"
 
-            # Should update internal audio tracking state
-            assert model._current_item_id == "item_456"
-            assert model._current_audio_content_index == 0
-            assert model._audio_start_time == mock_now
+        # Test that audio state is tracked in the tracker
+        audio_state = model._audio_state_tracker.get_state("item_456", 0)
+        assert audio_state is not None
+        assert audio_state.audio_length_ms > 0  # Should have some audio length
 
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
@@ -273,9 +274,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(error_event)
 
-        # Should emit error event to listeners
-        mock_listener.on_event.assert_called_once()
-        emitted_event = mock_listener.on_event.call_args[0][0]
+        # Should emit raw server event and error event to listeners
+        assert mock_listener.on_event.call_count == 2
+        emitted_event = mock_listener.on_event.call_args_list[1][0][0]
         assert isinstance(emitted_event, RealtimeModelErrorEvent)
 
     @pytest.mark.asyncio
@@ -302,12 +303,12 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         await model._handle_ws_event(tool_call_event)
 
-        # Should emit both item updated and tool call events
-        assert mock_listener.on_event.call_count == 2
+        # Should emit raw server event, item updated, and tool call events
+        assert mock_listener.on_event.call_count == 3
 
-        # First should be item updated, second should be tool call
+        # First should be raw server event, second should be item updated, third should be tool call
         calls = mock_listener.on_event.call_args_list
-        tool_call_emitted = calls[1][0][0]
+        tool_call_emitted = calls[2][0][0]
         assert isinstance(tool_call_emitted, RealtimeModelToolCallEvent)
         assert tool_call_emitted.name == "get_weather"
         assert tool_call_emitted.arguments == '{"location": "San Francisco"}'
@@ -318,6 +319,9 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         """Test that audio timing calculations are accurate for interruption handling."""
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
+
+        # Set up audio format on the tracker before testing
+        model._audio_state_tracker.set_audio_format("pcm16")
 
         # Send multiple audio deltas to test cumulative timing
         audio_deltas = [
@@ -344,21 +348,34 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         for event in audio_deltas:
             await model._handle_ws_event(event)
 
-        # Should accumulate audio length: 8 bytes / 24 / 2 = ~0.167ms per byte
-        # Total: 8 bytes / 24 / 2 = 0.167ms
-        expected_length = 8 / 24 / 2
-        assert abs(model._audio_length_ms - expected_length) < 0.001
+        # Should accumulate audio length: 8 bytes / 24 / 2 * 1000 = milliseconds
+        # Total: 8 bytes / 24 / 2 * 1000
+        expected_length = (8 / 24 / 2) * 1000
+
+        # Test through the actual audio state tracker
+        audio_state = model._audio_state_tracker.get_state("item_1", 0)
+        assert audio_state is not None
+        assert abs(audio_state.audio_length_ms - expected_length) < 0.001
 
     def test_calculate_audio_length_ms_pure_function(self, model):
         """Test the pure audio length calculation function."""
-        # Test various audio buffer sizes
-        assert model._calculate_audio_length_ms(b"test") == 4 / 24 / 2  # 4 bytes
-        assert model._calculate_audio_length_ms(b"") == 0  # empty
-        assert model._calculate_audio_length_ms(b"a" * 48) == 1.0  # exactly 1ms worth
+        from agents.realtime._util import calculate_audio_length_ms
+
+        # Test various audio buffer sizes for pcm16 format
+        assert calculate_audio_length_ms("pcm16", b"test") == (4 / 24 / 2) * 1000  # 4 bytes
+        assert calculate_audio_length_ms("pcm16", b"") == 0  # empty
+        assert calculate_audio_length_ms("pcm16", b"a" * 48) == 1000.0  # exactly 1000ms worth
+
+        # Test g711 format
+        assert calculate_audio_length_ms("g711_ulaw", b"test") == (4 / 8000) * 1000  # 4 bytes
+        assert calculate_audio_length_ms("g711_alaw", b"a" * 8) == (8 / 8000) * 1000  # 8 bytes
 
     @pytest.mark.asyncio
     async def test_handle_audio_delta_state_management(self, model):
         """Test that _handle_audio_delta properly manages internal state."""
+        # Set up audio format on the tracker before testing
+        model._audio_state_tracker.set_audio_format("pcm16")
+
         # Create mock parsed event
         mock_parsed = Mock()
         mock_parsed.content_index = 5
@@ -366,14 +383,16 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         mock_parsed.delta = "dGVzdA=="  # "test" in base64
         mock_parsed.response_id = "resp_123"
 
-        with patch("agents.realtime.openai_realtime.datetime") as mock_datetime:
-            mock_now = datetime(2024, 1, 1, 12, 0, 0)
-            mock_datetime.now.return_value = mock_now
+        await model._handle_audio_delta(mock_parsed)
 
-            await model._handle_audio_delta(mock_parsed)
+        # Check state was updated correctly
+        assert model._current_item_id == "test_item"
 
-            # Check state was updated correctly
-            assert model._current_audio_content_index == 5
-            assert model._current_item_id == "test_item"
-            assert model._audio_start_time == mock_now
-            assert model._audio_length_ms == 4 / 24 / 2  # 4 bytes
+        # Test that audio state is tracked correctly
+        audio_state = model._audio_state_tracker.get_state("test_item", 5)
+        assert audio_state is not None
+        assert audio_state.audio_length_ms == (4 / 24 / 2) * 1000  # 4 bytes in milliseconds
+
+        # Test that last audio item is tracked
+        last_item = model._audio_state_tracker.get_last_audio_item()
+        assert last_item == ("test_item", 5)

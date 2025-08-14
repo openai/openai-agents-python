@@ -130,6 +130,24 @@ For complete event details, see [`RealtimeSessionEvent`][agents.realtime.events.
 
 Only output guardrails are supported for realtime agents. These guardrails are debounced and run periodically (not on every word) to avoid performance issues during real-time generation. The default debounce length is 100 characters, but this is configurable.
 
+Guardrails can be attached directly to a `RealtimeAgent` or provided via the session's `run_config`. Guardrails from both sources run together.
+
+```python
+from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+
+def sensitive_data_check(context, agent, output):
+    return GuardrailFunctionOutput(
+        tripwire_triggered="password" in output,
+        output_info=None,
+    )
+
+agent = RealtimeAgent(
+    name="Assistant",
+    instructions="...",
+    output_guardrails=[OutputGuardrail(guardrail_function=sensitive_data_check)],
+)
+```
+
 When a guardrail is triggered, it generates a `guardrail_tripped` event and can interrupt the agent's current response. The debounce behavior helps balance safety with real-time performance requirements. Unlike text agents, realtime agents do **not** raise an Exception when guardrails are tripped.
 
 ## Audio processing

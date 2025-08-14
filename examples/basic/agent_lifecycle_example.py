@@ -49,7 +49,7 @@ class CustomAgentHooks(AgentHooks):
 @function_tool
 def random_number(max: int) -> int:
     """
-    Generate a random number up to the provided maximum.
+    Generate a random number from 0 to max (inclusive).
     """
     return random.randint(0, max)
 
@@ -84,10 +84,15 @@ start_agent = Agent(
 
 async def main() -> None:
     user_input = input("Enter a max number: ")
-    await Runner.run(
-        start_agent,
-        input=f"Generate a random number between 0 and {user_input}.",
-    )
+    try:
+        max_number = int(user_input)
+        await Runner.run(
+            start_agent,
+            input=f"Generate a random number between 0 and {max_number}.",
+        )
+    except ValueError:
+        print("Please enter a valid integer.")
+        return
 
     print("Done!")
 

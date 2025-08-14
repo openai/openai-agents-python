@@ -168,7 +168,7 @@ result2 = await Runner.run(
 
 You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
 
-````python
+```python
 from agents.memory import Session
 from typing import List
 
@@ -206,6 +206,7 @@ result = await Runner.run(
     "Hello",
     session=MyCustomSession("my_session")
 )
+```
 
 ## Session management
 
@@ -245,7 +246,7 @@ result2 = await Runner.run(
     "What are my charges?",
     session=session
 )
-````
+```
 
 ## Complete example
 

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 # logging.basicConfig(level=logging.INFO)
 # logging.getLogger("openai").setLevel(logging.DEBUG)
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o3")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
 ENABLE_CODE_SNIPPET_EXCLUSION = True
 # gpt-4.5 needed this for better quality
@@ -87,6 +87,7 @@ eng_to_non_eng_instructions = {
         "* The term 'primitives' can be translated as basic components.",
         "* When the terms 'instructions' and 'tools' are mentioned as API parameter names, they must be kept as is.",
         "* The terms 'temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty' as parameter names must be kept as is.",
+        "* Keep the original structure like `* **The thing**: foo`; this needs to be translated as `* **(translation)**: (translation)`",
     ],
     "ja": [
         "* The term 'result' in the Runner guide context must be translated like 'execution results'",
@@ -172,7 +173,7 @@ Follow the following workflow to translate the given markdown text data:
 
 1. Read the input markdown text given by the user.
 2. Translate the markdown file into {target_language}, carefully following the requirements above.
-3. Perform a self-review to evaluate the quality of the translation, focusing on naturalness, accuracy, and consistency in detail.
+3. Self-review your translation to ensure high quality, focusing on naturalness, accuracy, and consistency while avoiding unnecessary changes or spacing.
 4. If improvements are necessary, refine the content without changing the original meaning.
 5. Continue improving the translation until you are fully satisfied with the result.
 6. Once the final output is ready, return **only** the translated markdown text. No extra commentary.
@@ -222,7 +223,16 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     translated_content: list[str] = []
     for chunk in chunks:
         instructions = built_instructions(languages[lang_code], lang_code)
-        if OPENAI_MODEL.startswith("o"):
+        if OPENAI_MODEL.startswith("gpt-5"):
+            response = openai_client.responses.create(
+                model=OPENAI_MODEL,
+                instructions=instructions,
+                input=chunk,
+                reasoning={"effort": "low"},
+                text={"verbosity": "low"},
+            )
+            translated_content.append(response.output_text)
+        elif OPENAI_MODEL.startswith("o"):
             response = openai_client.responses.create(
                 model=OPENAI_MODEL,
                 instructions=instructions,

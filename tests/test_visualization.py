@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import Mock
 
 import graphviz  # type: ignore
@@ -11,6 +12,9 @@ from agents.extensions.visualization import (
     get_main_graph,
 )
 from agents.handoffs import Handoff
+
+if sys.version_info >= (3, 10):
+    from .mcp.helpers import FakeMCPServer
 
 
 @pytest.fixture
@@ -27,6 +31,10 @@ def mock_agent():
     agent.name = "Agent1"
     agent.tools = [tool1, tool2]
     agent.handoffs = [handoff1]
+    agent.mcp_servers = []
+
+    if sys.version_info >= (3, 10):
+        agent.mcp_servers = [FakeMCPServer(server_name="MCPServer1")]
 
     return agent
 
@@ -62,6 +70,7 @@ def test_get_main_graph(mock_agent):
         '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in result
     )
+    _assert_mcp_nodes(result)
 
 
 def test_get_all_nodes(mock_agent):
@@ -90,6 +99,7 @@ def test_get_all_nodes(mock_agent):
         '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in result
     )
+    _assert_mcp_nodes(result)
 
 
 def test_get_all_edges(mock_agent):
@@ -101,6 +111,7 @@ def test_get_all_edges(mock_agent):
     assert '"Agent1" -> "Tool2" [style=dotted, penwidth=1.5];' in result
     assert '"Tool2" -> "Agent1" [style=dotted, penwidth=1.5];' in result
     assert '"Agent1" -> "Handoff1";' in result
+    _assert_mcp_edges(result)
 
 
 def test_draw_graph(mock_agent):
@@ -134,6 +145,25 @@ def test_draw_graph(mock_agent):
         '"Handoff1" [label="Handoff1", shape=box, style=filled, style=rounded, '
         "fillcolor=lightyellow, width=1.5, height=0.8];" in graph.source
     )
+    _assert_mcp_nodes(graph.source)
+
+
+def _assert_mcp_nodes(source: str):
+    if sys.version_info < (3, 10):
+        assert "MCPServer1" not in source
+        return
+    assert (
+        '"MCPServer1" [label="MCPServer1", shape=box, style=filled, '
+        "fillcolor=lightgrey, width=1, height=0.5];" in source
+    )
+
+
+def _assert_mcp_edges(source: str):
+    if sys.version_info < (3, 10):
+        assert "MCPServer1" not in source
+        return
+    assert '"Agent1" -> "MCPServer1" [style=dashed, penwidth=1.5];' in source
+    assert '"MCPServer1" -> "Agent1" [style=dashed, penwidth=1.5];' in source
 
 
 def test_cycle_detection():

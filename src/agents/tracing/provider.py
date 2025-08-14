@@ -43,28 +43,40 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         Called when a trace is started.
         """
         for processor in self._processors:
-            processor.on_trace_start(trace)
+            try:
+                processor.on_trace_start(trace)
+            except Exception as e:
+                logger.error(f"Error in trace processor {processor} during on_trace_start: {e}")
 
     def on_trace_end(self, trace: Trace) -> None:
         """
         Called when a trace is finished.
         """
         for processor in self._processors:
-            processor.on_trace_end(trace)
+            try:
+                processor.on_trace_end(trace)
+            except Exception as e:
+                logger.error(f"Error in trace processor {processor} during on_trace_end: {e}")
 
     def on_span_start(self, span: Span[Any]) -> None:
         """
         Called when a span is started.
         """
         for processor in self._processors:
-            processor.on_span_start(span)
+            try:
+                processor.on_span_start(span)
+            except Exception as e:
+                logger.error(f"Error in trace processor {processor} during on_span_start: {e}")
 
     def on_span_end(self, span: Span[Any]) -> None:
         """
         Called when a span is finished.
         """
         for processor in self._processors:
-            processor.on_span_end(span)
+            try:
+                processor.on_span_end(span)
+            except Exception as e:
+                logger.error(f"Error in trace processor {processor} during on_span_end: {e}")
 
     def shutdown(self) -> None:
         """
@@ -72,14 +84,20 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         """
         for processor in self._processors:
             logger.debug(f"Shutting down trace processor {processor}")
-            processor.shutdown()
+            try:
+                processor.shutdown()
+            except Exception as e:
+                logger.error(f"Error shutting down trace processor {processor}: {e}")
 
     def force_flush(self):
         """
         Force the processors to flush their buffers.
         """
         for processor in self._processors:
-            processor.force_flush()
+            try:
+                processor.force_flush()
+            except Exception as e:
+                logger.error(f"Error flushing trace processor {processor}: {e}")
 
 
 class TraceProvider(ABC):
@@ -247,7 +265,7 @@ class DefaultTraceProvider(TraceProvider):
             current_trace = Scope.get_current_trace()
             if current_trace is None:
                 logger.error(
-                    "No active trace. Make sure to start a trace with `trace()` first"
+                    "No active trace. Make sure to start a trace with `trace()` first "
                     "Returning NoOpSpan."
                 )
                 return NoOpSpan(span_data)

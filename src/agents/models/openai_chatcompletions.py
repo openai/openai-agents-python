@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
 from openai.types import ChatModel
@@ -28,6 +28,7 @@ from .chatcmpl_helpers import HEADERS, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
+from .openai_responses import Converter as OpenAIResponsesConverter
 
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
@@ -286,6 +287,8 @@ class OpenAIChatCompletionsModel(Model):
             stream_options=self._non_null_or_not_given(stream_options),
             store=self._non_null_or_not_given(store),
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
+            verbosity=self._non_null_or_not_given(model_settings.verbosity),
+            top_logprobs=self._non_null_or_not_given(model_settings.top_logprobs),
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
@@ -296,15 +299,27 @@ class OpenAIChatCompletionsModel(Model):
         if isinstance(ret, ChatCompletion):
             return ret
 
+        responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
+            model_settings.tool_choice
+        )
+        if responses_tool_choice is None or responses_tool_choice == NOT_GIVEN:
+            # For Responses API data compatibility with Chat Completions patterns,
+            # we need to set "none" if tool_choice is absent.
+            # Without this fix, you'll get the following error:
+            # pydantic_core._pydantic_core.ValidationError: 4 validation errors for Response
+            # tool_choice.literal['none','auto','required']
+            #   Input should be 'none', 'auto' or 'required'
+            #   [type=literal_error, input_value=NOT_GIVEN, input_type=NotGiven]
+            # see also: https://github.com/openai/openai-agents-python/issues/980
+            responses_tool_choice = "auto"
+
         response = Response(
             id=FAKE_RESPONSES_ID,
             created_at=time.time(),
             model=self.model,
             object="response",
             output=[],
-            tool_choice=cast(Literal["auto", "required", "none"], tool_choice)
-            if tool_choice != NOT_GIVEN
-            else "auto",
+            tool_choice=responses_tool_choice,  # type: ignore[arg-type]
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
             tools=[],

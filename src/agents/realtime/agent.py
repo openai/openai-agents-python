@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast
 
 from ..agent import AgentBase
+from ..guardrail import OutputGuardrail
 from ..handoffs import Handoff
 from ..lifecycle import AgentHooksBase, RunHooksBase
 from ..logger import logger
@@ -60,6 +61,11 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
     and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
     modularity.
+    """
+
+    output_guardrails: list[OutputGuardrail[TContext]] = field(default_factory=list)
+    """A list of checks that run on the final output of the agent, after generating a response.
+    Runs only if the agent produces a final output.
     """
 
     hooks: RealtimeAgentHooks | None = None

@@ -22,7 +22,7 @@ class ConsoleSpanExporter(TracingExporter):
     def export(self, items: list[Trace | Span[Any]]) -> None:
         for item in items:
             if isinstance(item, Trace):
-                print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}, ")
+                print(f"[Exporter] Export trace_id={item.trace_id}, name={item.name}")
             else:
                 print(f"[Exporter] Export span: {item.export()}")
 
@@ -69,9 +69,12 @@ class BackendSpanExporter(TracingExporter):
             api_key: The OpenAI API key to use. This is the same key used by the OpenAI Python
                 client.
         """
-        # We're specifically setting the underlying cached property as well
+        # Clear the cached property if it exists
+        if 'api_key' in self.__dict__:
+            del self.__dict__['api_key']
+
+        # Update the private attribute
         self._api_key = api_key
-        self.api_key = api_key
 
     @cached_property
     def api_key(self):
@@ -121,7 +124,7 @@ class BackendSpanExporter(TracingExporter):
                     logger.debug(f"Exported {len(items)} items")
                     return
 
-                # If the response is a client error (4xx), we wont retry
+                # If the response is a client error (4xx), we won't retry
                 if 400 <= response.status_code < 500:
                     logger.error(
                         f"[non-fatal] Tracing client error {response.status_code}: {response.text}"
@@ -183,7 +186,7 @@ class BatchTraceProcessor(TracingProcessor):
         self._shutdown_event = threading.Event()
 
         # The queue size threshold at which we export immediately.
-        self._export_trigger_size = int(max_queue_size * export_trigger_ratio)
+        self._export_trigger_size = max(1, int(max_queue_size * export_trigger_ratio))
 
         # Track when we next *must* perform a scheduled export
         self._next_export_time = time.time() + self._schedule_delay
@@ -269,8 +272,7 @@ class BatchTraceProcessor(TracingProcessor):
 
     def _export_batches(self, force: bool = False):
         """Drains the queue and exports in batches. If force=True, export everything.
-        Otherwise, export up to `max_batch_size` repeatedly until the queue is empty or below a
-        certain threshold.
+        Otherwise, export up to `max_batch_size` repeatedly until the queue is completely empty.
         """
         while True:
             items_to_export: list[Span[Any] | Trace] = []

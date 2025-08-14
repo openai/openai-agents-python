@@ -29,6 +29,7 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
         input_history=filtered_history,
         pre_handoff_items=filtered_pre_handoff_items,
         new_items=filtered_new_items,
+        run_context=handoff_input_data.run_context,
     )
 
 

@@ -15,7 +15,7 @@ with the outline.
 story_outline_generator = Agent(
     name="story_outline_generator",
     instructions=(
-        "You generate a very short story outline based on the user's input."
+        "You generate a very short story outline based on the user's input. "
         "If there is any feedback provided, use it to improve the outline."
     ),
 )
@@ -30,9 +30,9 @@ class EvaluationFeedback:
 evaluator = Agent[None](
     name="evaluator",
     instructions=(
-        "You evaluate a story outline and decide if it's good enough."
-        "If it's not good enough, you provide feedback on what needs to be improved."
-        "Never give it a pass on the first try. After 5 attempts, you can give it a pass if story outline is good enough - do not go for perfection"
+        "You evaluate a story outline and decide if it's good enough. "
+        "If it's not good enough, you provide feedback on what needs to be improved. "
+        "Never give it a pass on the first try. After 5 attempts, you can give it a pass if the story outline is good enough - do not go for perfection"
     ),
     output_type=EvaluationFeedback,
 )

@@ -9,8 +9,8 @@ from openai import NOT_GIVEN, AsyncOpenAI
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_tool_call import (
-    ChatCompletionMessageToolCall,
+from openai.types.chat.chat_completion_message_tool_call import (  # type: ignore[attr-defined]
+    ChatCompletionMessageFunctionToolCall,
     Function,
 )
 from openai.types.completion_usage import (
@@ -152,7 +152,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     should append corresponding `ResponseFunctionToolCall` items after the
     assistant message item with matching name/arguments.
     """
-    tool_call = ChatCompletionMessageToolCall(
+    tool_call = ChatCompletionMessageFunctionToolCall(
         id="call-id",
         type="function",
         function=Function(name="do_thing", arguments="{'x':1}"),

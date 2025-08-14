@@ -20,6 +20,10 @@ cd examples/realtime/app && uv run python server.py
 
 Then open your browser to: http://localhost:8000
 
+## Customization
+
+To use the same UI with your own agents, edit `agent.py` and ensure get_starting_agent() returns the right starting agent for your use case.
+
 ## How to Use
 
 1. Click **Connect** to establish a realtime session

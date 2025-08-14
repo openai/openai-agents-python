@@ -78,8 +78,9 @@ class InputGuardrail(Generic[TContext]):
     You can use the `@input_guardrail()` decorator to turn a function into an `InputGuardrail`, or
     create an `InputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, the agent
-    execution will immediately stop and a `InputGuardrailTripwireTriggered` exception will be raised
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`,
+    the agent's execution will immediately stop, and
+    an `InputGuardrailTripwireTriggered` exception will be raised
     """
 
     guardrail_function: Callable[
@@ -132,7 +133,7 @@ class OutputGuardrail(Generic[TContext]):
     You can use the `@output_guardrail()` decorator to turn a function into an `OutputGuardrail`,
     or create an `OutputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, a
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, an
     `OutputGuardrailTripwireTriggered` exception will be raised.
     """
 
@@ -316,7 +317,7 @@ def output_guardrail(
     ) -> OutputGuardrail[TContext_co]:
         return OutputGuardrail(
             guardrail_function=f,
-            # Guardrail name defaults to function name when not specified (None).
+            # Guardrail name defaults to function's name when not specified (None).
             name=name if name else f.__name__,
         )
 

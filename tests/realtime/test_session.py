@@ -45,6 +45,7 @@ from agents.realtime.model_events import (
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
 )
+from agents.realtime.model_inputs import RealtimeModelSendSessionUpdate
 from agents.realtime.session import RealtimeSession
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
@@ -103,6 +104,7 @@ def mock_agent():
     agent.get_all_tools = AsyncMock(return_value=[])
 
     type(agent).handoffs = PropertyMock(return_value=[])
+    type(agent).output_guardrails = PropertyMock(return_value=[])
     return agent
 
 
@@ -157,15 +159,17 @@ class TestEventHandling:
         session = RealtimeSession(mock_model, mock_agent, None)
 
         # Test audio event
-        audio_event = RealtimeModelAudioEvent(data=b"audio_data", response_id="resp_1")
+        audio_event = RealtimeModelAudioEvent(
+            data=b"audio_data", response_id="resp_1", item_id="item_1", content_index=0
+        )
         await session.on_event(audio_event)
 
         # Test audio interrupted event
-        interrupted_event = RealtimeModelAudioInterruptedEvent()
+        interrupted_event = RealtimeModelAudioInterruptedEvent(item_id="item_1", content_index=0)
         await session.on_event(interrupted_event)
 
         # Test audio done event
-        done_event = RealtimeModelAudioDoneEvent()
+        done_event = RealtimeModelAudioDoneEvent(item_id="item_1", content_index=0)
         await session.on_event(done_event)
 
         # Should have 6 events total (2 per event: raw + transformed)
@@ -1046,7 +1050,6 @@ class TestGuardrailFunctionality:
         await self._wait_for_guardrail_tasks(session)
 
         # Should have triggered guardrail and interrupted
-        assert session._interrupted_by_guardrail is True
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         assert "triggered_guardrail" in mock_model.sent_messages[0]
@@ -1059,6 +1062,37 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_agent_and_run_config_guardrails_not_run_twice(self, mock_model):
+        """Guardrails shared by agent and run config should execute once."""
+
+        call_count = 0
+
+        def guardrail_func(context, agent, output):
+            nonlocal call_count
+            call_count += 1
+            return GuardrailFunctionOutput(output_info={}, tripwire_triggered=False)
+
+        shared_guardrail = OutputGuardrail(
+            guardrail_function=guardrail_func, name="shared_guardrail"
+        )
+
+        agent = RealtimeAgent(name="agent", output_guardrails=[shared_guardrail])
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [shared_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(item_id="item_1", delta="hello", response_id="resp_1")
+        )
+
+        await self._wait_for_guardrail_tasks(session)
+
+        assert call_count == 1
 
     @pytest.mark.asyncio
     async def test_transcript_delta_multiple_thresholds_same_item(
@@ -1152,14 +1186,12 @@ class TestGuardrailFunctionality:
         # Wait for async guardrail tasks to complete
         await self._wait_for_guardrail_tasks(session)
 
-        assert session._interrupted_by_guardrail is True
         assert len(session._item_transcripts) == 1
 
         # End turn
         await session.on_event(RealtimeModelTurnEndedEvent())
 
         # State should be cleared
-        assert session._interrupted_by_guardrail is False
         assert len(session._item_transcripts) == 0
         assert len(session._item_guardrail_run_counts) == 0
 
@@ -1206,6 +1238,92 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert len(guardrail_events[0].guardrail_results) == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_output_guardrails_triggered(self, mock_model, triggered_guardrail):
+        """Test that guardrails defined on the agent are executed."""
+        agent = RealtimeAgent(name="agent", output_guardrails=[triggered_guardrail])
+        run_config: RealtimeRunConfig = {
+            "guardrails_settings": {"debounce_text_length": 10},
+        }
+
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        transcript_event = RealtimeModelTranscriptDeltaEvent(
+            item_id="item_1", delta="this is more than ten characters", response_id="resp_1"
+        )
+
+        await session.on_event(transcript_event)
+        await self._wait_for_guardrail_tasks(session)
+
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
+        assert "triggered_guardrail" in mock_model.sent_messages[0]
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
+        assert len(guardrail_events) == 1
+        assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_guardrail_tasks_interrupt_once_per_response(self, mock_model):
+        """Even if multiple guardrail tasks trigger concurrently for the same response_id,
+        only the first should interrupt and send a message."""
+        import asyncio
+
+        # Barrier to release both guardrail tasks at the same time
+        start_event = asyncio.Event()
+
+        async def async_trigger_guardrail(context, agent, output):
+            await start_event.wait()
+            return GuardrailFunctionOutput(
+                output_info={"reason": "concurrent"}, tripwire_triggered=True
+            )
+
+        concurrent_guardrail = OutputGuardrail(
+            guardrail_function=async_trigger_guardrail, name="concurrent_trigger"
+        )
+
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [concurrent_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+
+        # Use a minimal agent (guardrails from run_config)
+        agent = RealtimeAgent(name="agent")
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        # Two deltas for same item and response to enqueue two guardrail tasks
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="12345", response_id="resp_same"
+            )
+        )
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="67890", response_id="resp_same"
+            )
+        )
+
+        # Wait until both tasks are enqueued
+        for _ in range(50):
+            if len(session._guardrail_tasks) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        # Release both tasks concurrently
+        start_event.set()
+
+        # Wait for completion
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
+        # Only one interrupt and one message should be sent
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
 
 
 class TestModelSettingsIntegration:
@@ -1486,3 +1604,24 @@ class TestModelSettingsPrecedence:
             assert model_settings["voice"] == "model_config_only_voice"
             assert model_settings["tool_choice"] == "required"
             assert model_settings["output_audio_format"] == "g711_ulaw"
+
+
+class TestUpdateAgentFunctionality:
+    """Tests for update agent functionality in RealtimeSession"""
+
+    @pytest.mark.asyncio
+    async def test_update_agent_creates_handoff_and_session_update_event(self, mock_model):
+        first_agent = RealtimeAgent(name="first", instructions="first", tools=[], handoffs=[])
+        second_agent = RealtimeAgent(name="second", instructions="second", tools=[], handoffs=[])
+
+        session = RealtimeSession(mock_model, first_agent, None)
+
+        await session.update_agent(second_agent)
+
+        # Should have sent session update
+        session_update_event = mock_model.sent_events[0]
+        assert isinstance(session_update_event, RealtimeModelSendSessionUpdate)
+        assert session_update_event.session_settings["instructions"] == "second"
+
+        # Check that the current agent and session settings are updated
+        assert session._current_agent == second_agent
