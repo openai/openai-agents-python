@@ -34,9 +34,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called immediately after the LLM call returns for this agent."""
         pass
 
-    async def on_agent_start(
-        self, context: RunContextWrapper[TContext], agent: TAgent
-    ) -> None:
+    async def on_agent_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
         """Called before the agent is invoked. Called each time the current agent changes."""
         pass
 
