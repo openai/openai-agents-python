@@ -4,9 +4,9 @@ search:
 ---
 # セッション
 
-Agents SDK は組み込みのセッションメモリーを提供しており、複数回のエージェント実行にわたって会話履歴を自動的に保持します。そのため、ターンごとに `.to_input_list()` を手動で扱う必要がありません。
+Agents SDK は、複数回のエージェント実行にわたって会話履歴を自動的に保持する組み込みのセッションメモリを提供し、ターン間で `.to_input_list()` を手動で扱う必要をなくします。
 
-セッションは特定のセッションに対する会話履歴を保存し、明示的な手動メモリー管理なしでコンテキストを保持できます。これは、エージェントに過去のやり取りを記憶させたいチャットアプリケーションや複数ターンの会話を構築する際に特に便利です。
+セッションは特定のセッションに対して会話履歴を保存し、エージェントが明示的な手動メモリ管理なしでコンテキストを維持できるようにします。これは、チャットアプリケーションや、エージェントに以前のやり取りを記憶させたいマルチターンの会話を構築する際に特に有用です。
 
 ## クイックスタート
 
@@ -47,21 +47,21 @@ result = Runner.run_sync(
 print(result.final_output)  # "Approximately 39 million"
 ```
 
-## 動作概要
+## 仕組み
 
-セッションメモリーが有効な場合:
+セッションメモリが有効な場合:
 
-1. **各実行の前**: runner はセッションの会話履歴を自動的に取得し、入力アイテムの先頭に追加します。  
-2. **各実行の後**: 実行中に生成された新しいアイテム（ユーザー入力、アシスタント応答、ツール呼び出しなど）はすべて自動的にセッションに保存されます。  
-3. **コンテキストの保持**: 同じセッションで次に実行するときは、完全な会話履歴が含まれるため、エージェントがコンテキストを維持できます。  
+1. **各実行の前**: ランナーがセッションの会話履歴を自動的に取得し、入力アイテムの先頭に付加します。
+2. **各実行の後**: 実行中に生成されたすべての新しいアイテム（ユーザー入力、アシスタントの応答、ツールコールなど）が自動的にセッションに保存されます。
+3. **コンテキストの保持**: 同じセッションでの後続の実行では完全な会話履歴が含まれ、エージェントはコンテキストを維持できます。
 
-これにより、実行間で `.to_input_list()` を手動で呼び出したり会話状態を管理したりする必要がなくなります。
+これにより、`.to_input_list()` を手動で呼び出して実行間の会話状態を管理する必要がなくなります。
 
-## メモリー操作
+## メモリ操作
 
 ### 基本操作
 
-セッションは会話履歴を管理するために、いくつかの操作をサポートしています:
+セッションは、会話履歴を管理するためのいくつかの操作をサポートします:
 
 ```python
 from agents import SQLiteSession
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### pop_item を使用した修正
+### 修正のための `pop_item` の使用
 
-会話の最後のアイテムを取り消したり修正したりしたい場合、`pop_item` メソッドが特に便利です:
+`pop_item` メソッドは、会話内の最後のアイテムを取り消したり変更したりしたい場合に特に便利です:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -117,16 +117,16 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## メモリーオプション
+## メモリオプション
 
-### メモリーなし（デフォルト）
+### メモリなし（デフォルト）
 
 ```python
 # Default behavior - no session memory
 result = await Runner.run(agent, "Hello")
 ```
 
-### SQLite メモリー
+### SQLite メモリ
 
 ```python
 from agents import SQLiteSession
@@ -168,9 +168,9 @@ result2 = await Runner.run(
 )
 ```
 
-## カスタムメモリー実装
+## カスタムメモリ実装
 
-独自のセッションメモリーを実装するには、[`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成します:
+[`Session`][agents.memory.session.Session] プロトコルに準拠するクラスを作成することで、独自のセッションメモリを実装できます:
 
 ```python
 from agents.memory import Session
@@ -216,17 +216,17 @@ result = await Runner.run(
 
 ### セッション ID の命名
 
-会話を整理しやすいわかりやすいセッション ID を使用してください:
+会話を整理するのに役立つ意味のあるセッション ID を使用します:
 
-- ユーザー単位: `"user_12345"`
-- スレッド単位: `"thread_abc123"`
-- コンテキスト単位: `"support_ticket_456"`
+-   ユーザー単位: `"user_12345"`
+-   スレッド単位: `"thread_abc123"`
+-   コンテキスト単位: `"support_ticket_456"`
 
-### メモリー永続化
+### メモリの永続化
 
-- 一時的な会話にはインメモリー SQLite（`SQLiteSession("session_id")`）を使用します  
-- 永続的な会話にはファイルベース SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用します  
-- 本番環境ではカスタムセッションバックエンド（Redis、PostgreSQL など）の実装を検討してください  
+-   一時的な会話にはインメモリ SQLite（`SQLiteSession("session_id")`）を使用します
+-   永続的な会話にはファイルベースの SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用します
+-   本番システムではカスタムセッションバックエンド（Redis、PostgreSQL など）の実装を検討します
 
 ### セッション管理
 
@@ -252,9 +252,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 完全な例
+## 完全なコード例
 
-セッションメモリーの動作を示す完全な例を以下に示します:
+セッションメモリの動作を示す完全な例です:
 
 ```python
 import asyncio
@@ -316,9 +316,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## API 参照
+## API リファレンス
 
-詳細な API ドキュメントは次を参照してください:
+詳細な API ドキュメントは以下を参照してください:
 
-- [`Session`][agents.memory.Session] - プロトコルインターフェース
-- [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
+-   [`Session`][agents.memory.Session] - プロトコルインターフェース
+-   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
