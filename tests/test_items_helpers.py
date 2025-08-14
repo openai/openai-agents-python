@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
@@ -22,6 +24,7 @@ from openai.types.responses.response_output_refusal import ResponseOutputRefusal
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from openai.types.responses.response_reasoning_item_param import ResponseReasoningItemParam
+from pydantic import TypeAdapter
 
 from agents import (
     Agent,
@@ -107,6 +110,31 @@ def test_input_to_new_input_list_deep_copies_lists() -> None:
     # Mutating the returned list should not mutate the original.
     new_list.pop()
     assert "content" in original[0] and original[0].get("content") == "abc"
+
+
+def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
+    # Given a list of message dictionaries, ensure the returned list is a deep copy.
+    original = ResponseOutputMessageParam(
+        id="a75654dc-7492-4d1c-bce0-89e8312fbdd7",
+        content=[{"type": "text", "text": "Hey, what's up?"}],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    original_json = json.dumps(original)
+    output_item = TypeAdapter(ResponseOutputMessageParam).validate_json(original_json)
+    new_list = ItemHelpers.input_to_new_input_list([output_item])
+    assert len(new_list) == 1
+    assert new_list[0]["id"] == original["id"]
+    size = 0
+    for i, item in enumerate(original["content"]):
+        size += 1  # pydantic_core._pydantic_core.ValidatorIterator does not support len()
+        assert item["type"] == original["content"][i]["type"]
+        assert item["text"] == original["content"][i]["text"]
+    assert size == 1
+    assert new_list[0]["role"] == original["role"]
+    assert new_list[0]["status"] == original["status"]
+    assert new_list[0]["type"] == original["type"]
 
 
 def test_text_message_output_concatenates_text_segments() -> None:

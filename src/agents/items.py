@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
 
@@ -41,6 +40,7 @@ from typing_extensions import TypeAlias
 
 from .exceptions import AgentsException, ModelBehaviorError
 from .usage import Usage
+from .util._safe_copy import safe_copy
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -277,7 +277,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return copy.deepcopy(input)
+        return safe_copy(input)
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:

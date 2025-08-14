@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast
@@ -56,6 +55,7 @@ from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
+from .util._safe_copy import safe_copy
 from .util._types import MaybeAwaitable
 
 DEFAULT_MAX_TURNS = 10
@@ -387,7 +387,7 @@ class AgentRunner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(prepared_input)
+            original_input: str | list[TResponseInputItem] = safe_copy(prepared_input)
             generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
@@ -446,7 +446,7 @@ class AgentRunner:
                                 starting_agent,
                                 starting_agent.input_guardrails
                                 + (run_config.input_guardrails or []),
-                                copy.deepcopy(prepared_input),
+                                safe_copy(prepared_input),
                                 context_wrapper,
                             ),
                             self._run_single_turn(
@@ -594,7 +594,7 @@ class AgentRunner:
         )
 
         streamed_result = RunResultStreaming(
-            input=copy.deepcopy(input),
+            input=safe_copy(input),
             new_items=[],
             current_agent=starting_agent,
             raw_responses=[],
@@ -786,7 +786,7 @@ class AgentRunner:
                         cls._run_input_guardrails_with_queue(
                             starting_agent,
                             starting_agent.input_guardrails + (run_config.input_guardrails or []),
-                            copy.deepcopy(ItemHelpers.input_to_new_input_list(prepared_input)),
+                            safe_copy(ItemHelpers.input_to_new_input_list(prepared_input)),
                             context_wrapper,
                             streamed_result,
                             current_span,
