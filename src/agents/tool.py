@@ -97,6 +97,9 @@ class FunctionTool:
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
+    stream_inner_events: bool = False
+    """Whether to stream inner events when used as an agent tool."""
+
 
 @dataclass
 class FileSearchTool:
