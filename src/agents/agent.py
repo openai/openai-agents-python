@@ -378,12 +378,16 @@ class Agent(AgentBase, Generic[TContext]):
             description_override=tool_description or "",
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
+            from .run import Runner, get_current_run_config
+
+            # Get the current run_config from context if available
+            current_run_config = get_current_run_config()
 
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                run_config=current_run_config,  # Pass inherited config
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
