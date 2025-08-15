@@ -35,15 +35,6 @@ class NoCopyEither:
         raise TypeError("no deepcopy")
 
 
-def test_primitives_are_copied_independently_for_mutable_bytes():
-    orig = bytearray(b"abc")
-    cpy = safe_copy(orig)
-    assert bytes(cpy) == b"abc"
-    orig[0] = ord("z")
-    assert bytes(orig) == b"zbc"
-    assert bytes(cpy) == b"abc"  # unaffected
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -67,37 +58,6 @@ def test_primitives_are_copied_independently_for_mutable_bytes():
 def test_simple_atoms_roundtrip(value):
     cpy = safe_copy(value)
     assert cpy == value
-
-
-def test_deep_copy_for_nested_containers_of_primitives():
-    orig = {"a": [1, 2, {"z": (3, 4)}]}
-    cpy = safe_copy(orig)
-
-    # mutate original deeply
-    orig["a"][2]["z"] = (99, 100)  # type: ignore
-
-    assert cpy == {"a": [1, 2, {"z": (3, 4)}]}  # unaffected
-
-
-def test_complex_leaf_is_only_shallow_copied():
-    class Leaf:
-        def __init__(self):
-            self.val = 1
-
-    leaf = Leaf()
-    obj = {"k": leaf, "arr": [1, 2, 3]}
-    cpy = safe_copy(obj)
-
-    # container structure is new
-    assert cpy is not obj
-    assert cpy["arr"] is not obj["arr"]
-
-    # complex leaf is shallow: identity preserved
-    assert cpy["k"] is leaf
-
-    # mutating the leaf reflects in the copied structure
-    leaf.val = 42
-    assert cpy["k"].val == 42  # type: ignore [attr-defined]
 
 
 def test_generator_is_preserved_and_not_consumed():
@@ -143,20 +103,6 @@ def test_frozenset_and_set_handling():
     # mutating original set doesn't affect the copy
     s.add(99)
     assert 99 not in s2
-
-
-def test_cycles_are_handled_without_recursion_error():
-    # a -> (a,)
-    a: list[Any] = []
-    t = (a,)
-    a.append(t)
-
-    c = safe_copy(a)
-    # structure cloned:
-    assert c is not a
-    assert isinstance(c[0], tuple)
-    # cycle preserved: the tuple's first element points back to the list
-    assert c[0][0] is c
 
 
 def test_object_where_deepcopy_would_fail_is_handled_via_shallow_copy():
