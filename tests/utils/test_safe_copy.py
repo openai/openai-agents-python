@@ -3,7 +3,6 @@ import datetime as dt
 import io
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any
 from uuid import UUID
 
 import pytest
