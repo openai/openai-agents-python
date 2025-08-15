@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from agents.memory.sqlite_session import SQLiteSession
 import asyncio
 import json
 import sqlite3
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
 
+session_store = SQLiteSession()
 
 @runtime_checkable
 class Session(Protocol):
