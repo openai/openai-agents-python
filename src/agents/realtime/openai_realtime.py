@@ -266,7 +266,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         """Send a raw message to the model."""
         assert self._websocket is not None, "Not connected"
 
-        await self._websocket.send(event.model_dump_json(exclude_none=True, exclude_unset=True))
+        json_str = event.model_dump_json(exclude_none=True, exclude_unset=True)
+
+        logger.debug(f"ZZZZZ Sending raw message of type {event.type}. Length: {len(json_str)}")
+
+        await self._websocket.send(json_str)
 
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
@@ -275,6 +279,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
         converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
+        input_audio_len = len(event.audio)
+        b64_audio_len = len(converted.audio)
+        logger.debug(
+            f"ZZZZZ Sending audio of length {input_audio_len}. "
+            f"Base64 encoded length: {b64_audio_len}"
+        )
+
         await self._send_raw_message(converted)
         if event.commit:
             await self._send_raw_message(
