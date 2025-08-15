@@ -647,7 +647,7 @@ class AgentRunner:
 
         try:
             model_input = ModelInputData(
-                input=copy.deepcopy(effective_input),
+                input=safe_copy(effective_input),
                 instructions=effective_instructions,
             )
             filter_payload: CallModelData[TContext] = CallModelData(
