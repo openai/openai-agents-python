@@ -22,6 +22,7 @@ from agents.realtime.events import (
     RealtimeToolStart,
 )
 from agents.realtime.items import (
+    AssistantAudio,
     AssistantMessageItem,
     AssistantText,
     InputAudio,
@@ -1625,3 +1626,65 @@ class TestUpdateAgentFunctionality:
 
         # Check that the current agent and session settings are updated
         assert session._current_agent == second_agent
+
+
+class TestTranscriptPreservation:
+    """Tests ensuring assistant transcripts are preserved across updates."""
+
+    @pytest.mark.asyncio
+    async def test_assistant_transcript_preserved_on_item_update(self, mock_model, mock_agent):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        # Initial assistant message with audio transcript present (e.g., from first turn)
+        initial_item = AssistantMessageItem(
+            item_id="assist_1",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript="Hello there")],
+        )
+        session._history = [initial_item]
+
+        # Later, the platform retrieves/updates the same item but without transcript populated
+        updated_without_transcript = AssistantMessageItem(
+            item_id="assist_1",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=updated_without_transcript))
+
+        # Transcript should be preserved from existing history
+        assert len(session._history) == 1
+        preserved_item = cast(AssistantMessageItem, session._history[0])
+        assert isinstance(preserved_item.content[0], AssistantAudio)
+        assert preserved_item.content[0].transcript == "Hello there"
+
+    @pytest.mark.asyncio
+    async def test_assistant_transcript_can_fallback_to_deltas(self, mock_model, mock_agent):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        # Simulate transcript deltas accumulated for an assistant item during generation
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="assist_2", delta="partial transcript", response_id="resp_2"
+            )
+        )
+
+        # Add initial assistant message without transcript
+        initial_item = AssistantMessageItem(
+            item_id="assist_2",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=initial_item))
+
+        # Later update still lacks transcript; merge should fallback to accumulated deltas
+        update_again = AssistantMessageItem(
+            item_id="assist_2",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=update_again))
+
+        preserved_item = cast(AssistantMessageItem, session._history[0])
+        assert isinstance(preserved_item.content[0], AssistantAudio)
+        assert preserved_item.content[0].transcript == "partial transcript"
