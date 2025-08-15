@@ -4,45 +4,45 @@ search:
 ---
 # コード例
 
-リポジトリの [code examples](https://github.com/openai/openai-agents-python/tree/main/examples) セクションで、 SDK のさまざまなサンプル実装をご覧ください。code examples は、異なるパターンや機能を示す複数のカテゴリーに整理されています。
-
+[リポジトリ](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションでは、SDK のさまざまなサンプル実装をご覧いただけます。異なるパターンや機能を示す複数のカテゴリーに整理されています。
 
 ## カテゴリー
 
--  **[エージェントパターン (agent_patterns)](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
-  このカテゴリーの例では、次のような一般的な エージェント の設計パターンを示します。
+- **[エージェントパターン](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
+  このカテゴリーの例は、一般的なエージェント設計パターンを示します。例:
 
     - 決定的なワークフロー
-    - ツールとしての エージェント
-    - エージェント の並列実行
+    - ツールとしてのエージェント
+    - エージェントの並列実行
 
--  **[基本 (basic)](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
-  これらの例は、次のような SDK の基礎的な機能を紹介します。
+- **[基本](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
+  このコード例は、SDK の基礎的な機能を紹介します。例:
 
-    - 動的な システムプロンプト
-    - ストリーミング 出力
+    - 動的なシステムプロンプト
+    - ストリーミング出力
     - ライフサイクルイベント
 
--  **[ツールのサンプルコード (tools)](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-  Web 検索 や ファイル検索 などの OpenAI がホストするツール の実装方法と、それらを エージェント に統合する方法を学べます。
+- **[ツールのコード例](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
+  Web 検索やファイル検索などの OpenAI がホストするツールの実装方法と、
+   それらをエージェントに統合する方法を学べます。
 
--  **[モデルプロバイダー (model_providers)](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
-  SDK で OpenAI 以外のモデルを使用する方法を探ります。
+- **[モデルプロバイダー](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
+  SDK で OpenAI 以外のモデルを使う方法を探索します。
 
--  **[ハンドオフ (handoffs)](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
-  エージェント の ハンドオフ の実用例をご覧ください。
+- **[ハンドオフ](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
+  エージェントのハンドオフの実用的な例をご覧ください。
 
--  **[MCP (mcp)](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
-  MCP で エージェント を構築する方法を学べます。
+- **[MCP](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
+  MCP でエージェントを構築する方法を学べます。
 
--  **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
-  実世界のアプリケーションを示す、さらに作り込まれたサンプルが 2 つあります。
+- **[カスタマーサービス](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[リサーチボット](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
+  実運用アプリケーションを示す、さらに作り込まれたコード例が 2 つあります
 
-    -  **customer_service** : 航空会社向けのカスタマーサービス システムのサンプル。
-    -  **research_bot** : シンプルな ディープリサーチ のクローン。
+    - **customer_service**: 航空会社向けのカスタマーサービス システムの例。
+    - **research_bot**: シンプルな ディープリサーチ クローン。
 
--  **[音声 (voice)](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
-  TTS と STT モデルを用いた音声 エージェント の例をご覧ください。
+- **[音声](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
+  当社の TTS と STT モデルを用いた音声エージェントの例をご覧ください。
 
--  **[リアルタイム (realtime)](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
-  SDK を使ってリアルタイム体験を構築する方法を示す code examples。
+- **[リアルタイム](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
+  SDK を使ってリアルタイムな体験を構築する方法の例です。
