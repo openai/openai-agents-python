@@ -16,7 +16,7 @@ async def main():
     print(result.final_output)
     # Code within the code,
     # Functions calling themselves,
-    # Infinite loop's dance.
+    # Infinite loop's dance
 ```
 
 Read more in the [results guide](results.md).
@@ -40,7 +40,7 @@ The runner then runs a loop:
 
 ## Streaming
 
-Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produces. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
+Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
 
 ## Run config
 
@@ -73,6 +73,7 @@ You can manually manage conversation history using the [`RunResultBase.to_input_
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
+    thread_id = "thread_123"  # Example thread ID
     with trace(workflow_name="Conversation", group_id=thread_id):
         # First turn
         result = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
@@ -119,12 +120,18 @@ Sessions automatically:
 
 See the [Sessions documentation](sessions.md) for more details.
 
+## Long running agents & human-in-the-loop
+
+You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8), and [view docs here](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents).
+
 ## Exceptions
 
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
 
--   [`AgentsException`][agents.exceptions.AgentsException] is the base class for all exceptions raised in the SDK.
--   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] is raised when the run exceeds the `max_turns` passed to the run methods.
--   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError] is raised when the model produces invalid outputs, e.g. malformed JSON or using non-existent tools.
--   [`UserError`][agents.exceptions.UserError] is raised when you (the person writing code using the SDK) make an error using the SDK.
--   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered], [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] is raised when a [guardrail](guardrails.md) is tripped.
+-   [`AgentsException`][agents.exceptions.AgentsException]: This is the base class for all exceptions raised within the SDK. It serves as a generic type from which all other specific exceptions are derived.
+-   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns.
+-   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]: This exception occurs when the underlying model (LLM) produces unexpected or invalid outputs. This can include:
+    -   Malformed JSON: When the model provides a malformed JSON structure for tool calls or in its direct output, especially if a specific `output_type` is defined.
+    -   Unexpected tool-related failures: When the model fails to use tools in an expected manner
+-   [`UserError`][agents.exceptions.UserError]: This exception is raised when you (the person writing code using the SDK) make an error while using the SDK. This typically results from incorrect code implementation, invalid configuration, or misuse of the SDK's API.
+-   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered], [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]: This exception is raised when the conditions of an input guardrail or output guardrail are met, respectively. Input guardrails check incoming messages before processing, while output guardrails check the agent's final response before delivery.

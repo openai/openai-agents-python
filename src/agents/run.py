@@ -5,7 +5,7 @@ import contextvars
 import copy
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Callable, Generic, cast
 
 from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.response_prompt_param import (
@@ -57,6 +57,7 @@ from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
+from .util._types import MaybeAwaitable
 
 _current_run_config: contextvars.ContextVar[RunConfig | None] = contextvars.ContextVar(
     "current_run_config", default=None
@@ -96,6 +97,27 @@ def get_default_agent_runner() -> AgentRunner:
     """
     global DEFAULT_AGENT_RUNNER
     return DEFAULT_AGENT_RUNNER
+
+
+@dataclass
+class ModelInputData:
+    """Container for the data that will be sent to the model."""
+
+    input: list[TResponseInputItem]
+    instructions: str | None
+
+
+@dataclass
+class CallModelData(Generic[TContext]):
+    """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
+
+    model_data: ModelInputData
+    agent: Agent[TContext]
+    context: TContext | None
+
+
+# Type alias for the optional input filter callback
+CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
 
 
 @dataclass
@@ -158,6 +180,16 @@ class RunConfig:
 
     pass_run_config_to_sub_agents: bool = False
     """Whether to pass the run configuration to sub-agents when using agent-as-tool pattern."""
+
+    call_model_input_filter: CallModelInputFilter | None = None
+    """
+    Optional callback that is invoked immediately before calling the model. It receives the current
+    agent, context and the model input (instructions and input items), and must return a possibly
+    modified `ModelInputData` to use for the model call.
+
+    This allows you to edit the input sent to the model e.g. to stay within a token limit.
+    For example, you can use this to add a system prompt to the input.
+    """
 
 
 class RunOptions(TypedDict, Generic[TContext]):
@@ -638,6 +670,47 @@ class AgentRunner:
                 set_current_run_config(context_token.old_value)
 
     @classmethod
+    async def _maybe_filter_model_input(
+        cls,
+        *,
+        agent: Agent[TContext],
+        run_config: RunConfig,
+        context_wrapper: RunContextWrapper[TContext],
+        input_items: list[TResponseInputItem],
+        system_instructions: str | None,
+    ) -> ModelInputData:
+        """Apply optional call_model_input_filter to modify model input.
+
+        Returns a `ModelInputData` that will be sent to the model.
+        """
+        effective_instructions = system_instructions
+        effective_input: list[TResponseInputItem] = input_items
+
+        if run_config.call_model_input_filter is None:
+            return ModelInputData(input=effective_input, instructions=effective_instructions)
+
+        try:
+            model_input = ModelInputData(
+                input=copy.deepcopy(effective_input),
+                instructions=effective_instructions,
+            )
+            filter_payload: CallModelData[TContext] = CallModelData(
+                model_data=model_input,
+                agent=agent,
+                context=context_wrapper.context,
+            )
+            maybe_updated = run_config.call_model_input_filter(filter_payload)
+            updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
+            if not isinstance(updated, ModelInputData):
+                raise UserError("call_model_input_filter must return a ModelInputData instance")
+            return updated
+        except Exception as e:
+            _error_tracing.attach_error_to_current_span(
+                SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
+            )
+            raise
+
+    @classmethod
     async def _run_input_guardrails_with_queue(
         cls,
         agent: Agent[Any],
@@ -907,10 +980,18 @@ class AgentRunner:
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
         input.extend([item.to_input_item() for item in streamed_result.new_items])
 
+        filtered = await cls._maybe_filter_model_input(
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+            input_items=input,
+            system_instructions=system_prompt,
+        )
+
         # 1. Stream the output events
         async for event in model.stream_response(
-            system_prompt,
-            input,
+            filtered.instructions,
+            filtered.input,
             model_settings,
             all_tools,
             output_schema,
@@ -948,10 +1029,9 @@ class AgentRunner:
             raise ModelBehaviorError("Model did not produce a final response!")
 
         # 3. Now, we can process the turn as we do in the non-streaming case
-        single_step_result = await cls._get_single_step_result_from_response(
+        return await cls._get_single_step_result_from_streamed_response(
             agent=agent,
-            original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            streamed_result=streamed_result,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -961,9 +1041,6 @@ class AgentRunner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
         )
-
-        RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
-        return single_step_result
 
     @classmethod
     async def _run_single_turn(
@@ -1068,6 +1145,56 @@ class AgentRunner:
         )
 
     @classmethod
+    async def _get_single_step_result_from_streamed_response(
+        cls,
+        *,
+        agent: Agent[TContext],
+        all_tools: list[Tool],
+        streamed_result: RunResultStreaming,
+        new_response: ModelResponse,
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        tool_use_tracker: AgentToolUseTracker,
+    ) -> SingleStepResult:
+        original_input = streamed_result.input
+        pre_step_items = streamed_result.new_items
+        event_queue = streamed_result._event_queue
+
+        processed_response = RunImpl.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=new_response,
+            output_schema=output_schema,
+            handoffs=handoffs,
+        )
+        new_items_processed_response = processed_response.new_items
+        tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+        RunImpl.stream_step_items_to_queue(new_items_processed_response, event_queue)
+
+        single_step_result = await RunImpl.execute_tools_and_side_effects(
+            agent=agent,
+            original_input=original_input,
+            pre_step_items=pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            output_schema=output_schema,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+        )
+        new_step_items = [
+            item
+            for item in single_step_result.new_step_items
+            if item not in new_items_processed_response
+        ]
+        RunImpl.stream_step_items_to_queue(new_step_items, event_queue)
+
+        return single_step_result
+
+    @classmethod
     async def _run_input_guardrails(
         cls,
         agent: Agent[Any],
@@ -1158,13 +1285,22 @@ class AgentRunner:
         previous_response_id: str | None,
         prompt_config: ResponsePromptParam | None,
     ) -> ModelResponse:
+        # Allow user to modify model input right before the call, if configured
+        filtered = await cls._maybe_filter_model_input(
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+            input_items=input,
+            system_instructions=system_prompt,
+        )
+
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
         new_response = await model.get_response(
-            system_instructions=system_prompt,
-            input=input,
+            system_instructions=filtered.instructions,
+            input=filtered.input,
             model_settings=model_settings,
             tools=all_tools,
             output_schema=output_schema,

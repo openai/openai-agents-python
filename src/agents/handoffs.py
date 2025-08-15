@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
 
 from pydantic import TypeAdapter
@@ -49,8 +49,24 @@ class HandoffInputData:
     handoff and the tool output message representing the response from the handoff output.
     """
 
+    run_context: RunContextWrapper[Any] | None = None
+    """
+    The run context at the time the handoff was invoked.
+    Note that, since this property was added later on, it's optional for backwards compatibility.
+    """
 
-HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], HandoffInputData]
+    def clone(self, **kwargs: Any) -> HandoffInputData:
+        """
+        Make a copy of the handoff input data, with the given arguments changed. For example, you
+        could do:
+        ```
+        new_handoff_input_data = handoff_input_data.clone(new_items=())
+        ```
+        """
+        return dataclasses_replace(self, **kwargs)
+
+
+HandoffInputFilter: TypeAlias = Callable[[HandoffInputData], MaybeAwaitable[HandoffInputData]]
 """A function that filters the input data passed to the next agent."""
 
 
@@ -103,9 +119,9 @@ class Handoff(Generic[TContext, TAgent]):
     True, as it increases the likelihood of correct JSON input.
     """
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = (
-        True
-    )
+    is_enabled: bool | Callable[
+        [RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]
+    ] = True
     """Whether the handoff is enabled. Either a bool or a Callable that takes the run context and
     agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
     a handoff based on your context/state."""
@@ -248,7 +264,7 @@ def handoff(
     async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
         from .agent import Agent
 
-        assert callable(is_enabled), "is_enabled must be non-null here"
+        assert callable(is_enabled), "is_enabled must be callable here"
         assert isinstance(agent_base, Agent), "Can't handoff to a non-Agent"
         result = is_enabled(ctx, agent_base)
 

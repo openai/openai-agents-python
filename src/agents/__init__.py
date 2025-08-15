@@ -5,7 +5,13 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from . import _config
-from .agent import Agent, AgentBase, ToolsToFinalOutputFunction, ToolsToFinalOutputResult
+from .agent import (
+    Agent,
+    AgentBase,
+    StopAtTools,
+    ToolsToFinalOutputFunction,
+    ToolsToFinalOutputResult,
+)
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .computer import AsyncComputer, Button, Computer, Environment
 from .exceptions import (
@@ -43,6 +49,7 @@ from .lifecycle import AgentHooks, RunHooks
 from .memory import Session, SQLiteSession
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
+from .models.multi_provider import MultiProvider
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
@@ -162,6 +169,7 @@ def enable_verbose_stdout_logging():
 __all__ = [
     "Agent",
     "AgentBase",
+    "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
     "Runner",
@@ -171,6 +179,7 @@ __all__ = [
     "ModelTracing",
     "ModelSettings",
     "OpenAIChatCompletionsModel",
+    "MultiProvider",
     "OpenAIProvider",
     "OpenAIResponsesModel",
     "AgentOutputSchema",

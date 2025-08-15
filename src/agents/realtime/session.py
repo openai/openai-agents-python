@@ -98,7 +98,7 @@ class RealtimeSession(RealtimeModelListener):
         self._stored_exception: Exception | None = None
 
         # Guardrails state tracking
-        self._interrupted_by_guardrail = False
+        self._interrupted_response_ids: set[str] = set()
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
@@ -107,6 +107,11 @@ class RealtimeSession(RealtimeModelListener):
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
 
+    @property
+    def model(self) -> RealtimeModel:
+        """Access the underlying model for adding listeners or other direct interaction."""
+        return self._model
+
     async def __aenter__(self) -> RealtimeSession:
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
@@ -114,8 +119,14 @@ class RealtimeSession(RealtimeModelListener):
         # Add ourselves as a listener
         self._model.add_listener(self)
 
+        model_config = self._model_config.copy()
+        model_config["initial_model_settings"] = await self._get_updated_model_settings_from_agent(
+            starting_settings=self._model_config.get("initial_model_settings", None),
+            agent=self._current_agent,
+        )
+
         # Connect to the model
-        await self._model.connect(self._model_config)
+        await self._model.connect(model_config)
 
         # Emit initial history update
         await self._put_event(
@@ -169,6 +180,19 @@ class RealtimeSession(RealtimeModelListener):
         """Interrupt the model."""
         await self._model.send_event(RealtimeModelSendInterrupt())
 
+    async def update_agent(self, agent: RealtimeAgent) -> None:
+        """Update the active agent for this session and apply its settings to the model."""
+        self._current_agent = agent
+
+        updated_settings = await self._get_updated_model_settings_from_agent(
+            starting_settings=None,
+            agent=self._current_agent,
+        )
+
+        await self._model.send_event(
+            RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+        )
+
     async def on_event(self, event: RealtimeModelEvent) -> None:
         await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
 
@@ -177,11 +201,26 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "function_call":
             await self._handle_tool_call(event)
         elif event.type == "audio":
-            await self._put_event(RealtimeAudio(info=self._event_info, audio=event))
+            await self._put_event(
+                RealtimeAudio(
+                    info=self._event_info,
+                    audio=event,
+                    item_id=event.item_id,
+                    content_index=event.content_index,
+                )
+            )
         elif event.type == "audio_interrupted":
-            await self._put_event(RealtimeAudioInterrupted(info=self._event_info))
+            await self._put_event(
+                RealtimeAudioInterrupted(
+                    info=self._event_info, item_id=event.item_id, content_index=event.content_index
+                )
+            )
         elif event.type == "audio_done":
-            await self._put_event(RealtimeAudioEnd(info=self._event_info))
+            await self._put_event(
+                RealtimeAudioEnd(
+                    info=self._event_info, item_id=event.item_id, content_index=event.content_index
+                )
+            )
         elif event.type == "input_audio_transcription_completed":
             self._history = RealtimeSession._get_new_history(self._history, event)
             await self._put_event(
@@ -203,7 +242,8 @@ class RealtimeSession(RealtimeModelListener):
 
             if current_length >= next_run_threshold:
                 self._item_guardrail_run_counts[item_id] += 1
-                self._enqueue_guardrail_task(self._item_transcripts[item_id])
+                # Pass response_id so we can ensure only a single interrupt per response
+                self._enqueue_guardrail_task(self._item_transcripts[item_id], event.response_id)
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
             self._history = self._get_new_history(self._history, event.item)
@@ -235,7 +275,6 @@ class RealtimeSession(RealtimeModelListener):
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
-            self._interrupted_by_guardrail = False
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -247,6 +286,8 @@ class RealtimeSession(RealtimeModelListener):
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
         elif event.type == "other":
+            pass
+        elif event.type == "raw_server_event":
             pass
         else:
             assert_never(event)
@@ -319,7 +360,10 @@ class RealtimeSession(RealtimeModelListener):
             self._current_agent = result
 
             # Get updated model settings from new agent
-            updated_settings = await self._get__updated_model_settings(self._current_agent)
+            updated_settings = await self._get_updated_model_settings_from_agent(
+                starting_settings=None,
+                agent=self._current_agent,
+            )
 
             # Send handoff event
             await self._put_event(
@@ -330,18 +374,19 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
 
-            # Send tool output to complete the handoff
+            # First, send the session update so the model receives the new instructions
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
+
+            # Then send tool output to complete the handoff (this triggers a new response)
+            transfer_message = handoff.get_transfer_message(result)
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
                     tool_call=event,
-                    output=f"Handed off to {self._current_agent.name}",
+                    output=transfer_message,
                     start_response=True,
                 )
-            )
-
-            # Send session update to model
-            await self._model.send_event(
-                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
             )
         else:
             raise ModelBehaviorError(f"Tool {event.name} not found")
@@ -397,10 +442,21 @@ class RealtimeSession(RealtimeModelListener):
         # Otherwise, add it to the end
         return old_history + [event]
 
-    async def _run_output_guardrails(self, text: str) -> bool:
+    async def _run_output_guardrails(self, text: str, response_id: str) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
-        output_guardrails = self._run_config.get("output_guardrails", [])
-        if not output_guardrails or self._interrupted_by_guardrail:
+        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+            "output_guardrails", []
+        )
+        seen_ids: set[int] = set()
+        output_guardrails = []
+        for guardrail in combined_guardrails:
+            guardrail_id = id(guardrail)
+            if guardrail_id not in seen_ids:
+                output_guardrails.append(guardrail)
+                seen_ids.add(guardrail_id)
+
+        # If we've already interrupted this response, skip
+        if not output_guardrails or response_id in self._interrupted_response_ids:
             return False
 
         triggered_results = []
@@ -420,8 +476,12 @@ class RealtimeSession(RealtimeModelListener):
                 continue
 
         if triggered_results:
-            # Mark as interrupted to prevent multiple interrupts
-            self._interrupted_by_guardrail = True
+            # Double-check: bail if already interrupted for this response
+            if response_id in self._interrupted_response_ids:
+                return False
+
+            # Mark as interrupted immediately (before any awaits) to minimize race window
+            self._interrupted_response_ids.add(response_id)
 
             # Emit guardrail tripped event
             await self._put_event(
@@ -447,10 +507,10 @@ class RealtimeSession(RealtimeModelListener):
 
         return False
 
-    def _enqueue_guardrail_task(self, text: str) -> None:
+    def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
 
-        task = asyncio.create_task(self._run_output_guardrails(text))
+        task = asyncio.create_task(self._run_output_guardrails(text, response_id))
         self._guardrail_tasks.add(task)
 
         # Add callback to remove completed tasks and handle exceptions
@@ -495,18 +555,30 @@ class RealtimeSession(RealtimeModelListener):
         # Mark as closed
         self._closed = True
 
-    async def _get__updated_model_settings(
-        self, new_agent: RealtimeAgent
+    async def _get_updated_model_settings_from_agent(
+        self,
+        starting_settings: RealtimeSessionModelSettings | None,
+        agent: RealtimeAgent,
     ) -> RealtimeSessionModelSettings:
-        updated_settings: RealtimeSessionModelSettings = {}
+        # Start with run config model settings as base
+        run_config_settings = self._run_config.get("model_settings", {})
+        updated_settings: RealtimeSessionModelSettings = run_config_settings.copy()
+        # Apply starting settings (from model config) next
+        if starting_settings:
+            updated_settings.update(starting_settings)
+
         instructions, tools, handoffs = await asyncio.gather(
-            new_agent.get_system_prompt(self._context_wrapper),
-            new_agent.get_all_tools(self._context_wrapper),
-            self._get_handoffs(new_agent, self._context_wrapper),
+            agent.get_system_prompt(self._context_wrapper),
+            agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(agent, self._context_wrapper),
         )
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
+
+        disable_tracing = self._run_config.get("tracing_disabled", False)
+        if disable_tracing:
+            updated_settings["tracing"] = None
 
         return updated_settings
 

@@ -101,7 +101,7 @@ class AgentBase(Generic[TContext]):
             self.mcp_servers, convert_schemas_to_strict, run_context, self
         )
 
-    async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
+    async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
         mcp_tools = await self.get_mcp_tools(run_context)
 
@@ -201,31 +201,153 @@ class Agent(AgentBase, Generic[TContext]):
     tool_use_behavior: (
         Literal["run_llm_again", "stop_on_first_tool"] | StopAtTools | ToolsToFinalOutputFunction
     ) = "run_llm_again"
-    """This lets you configure how tool use is handled.
+    """
+    This lets you configure how tool use is handled.
     - "run_llm_again": The default behavior. Tools are run, and then the LLM receives the results
         and gets to respond.
     - "stop_on_first_tool": The output of the first tool call is used as the final output. This
         means that the LLM does not process the result of the tool call.
-    - A list of tool names: The agent will stop running if any of the tools in the list are called.
-        The final output will be the output of the first matching tool call. The LLM does not
-        process the result of the tool call.
+    - A StopAtTools object: The agent will stop running if any of the tools listed in
+        `stop_at_tool_names` is called.
+        The final output will be the output of the first matching tool call.
+        The LLM does not process the result of the tool call.
     - A function: If you pass a function, it will be called with the run context and the list of
       tool results. It must return a `ToolsToFinalOutputResult`, which determines whether the tool
       calls result in a final output.
 
       NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
-      web search, etc are always processed by the LLM.
+      web search, etc. are always processed by the LLM.
     """
 
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+    def __post_init__(self):
+        from typing import get_origin
+
+        if not isinstance(self.name, str):
+            raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
+
+        if self.handoff_description is not None and not isinstance(self.handoff_description, str):
+            raise TypeError(
+                f"Agent handoff_description must be a string or None, "
+                f"got {type(self.handoff_description).__name__}"
+            )
+
+        if not isinstance(self.tools, list):
+            raise TypeError(f"Agent tools must be a list, got {type(self.tools).__name__}")
+
+        if not isinstance(self.mcp_servers, list):
+            raise TypeError(
+                f"Agent mcp_servers must be a list, got {type(self.mcp_servers).__name__}"
+            )
+
+        if not isinstance(self.mcp_config, dict):
+            raise TypeError(
+                f"Agent mcp_config must be a dict, got {type(self.mcp_config).__name__}"
+            )
+
+        if (
+            self.instructions is not None
+            and not isinstance(self.instructions, str)
+            and not callable(self.instructions)
+        ):
+            raise TypeError(
+                f"Agent instructions must be a string, callable, or None, "
+                f"got {type(self.instructions).__name__}"
+            )
+
+        if (
+            self.prompt is not None
+            and not callable(self.prompt)
+            and not hasattr(self.prompt, "get")
+        ):
+            raise TypeError(
+                f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
+                f"got {type(self.prompt).__name__}"
+            )
+
+        if not isinstance(self.handoffs, list):
+            raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
+
+        if self.model is not None and not isinstance(self.model, str):
+            from .models.interface import Model
+
+            if not isinstance(self.model, Model):
+                raise TypeError(
+                    f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
+                )
+
+        if not isinstance(self.model_settings, ModelSettings):
+            raise TypeError(
+                f"Agent model_settings must be a ModelSettings instance, "
+                f"got {type(self.model_settings).__name__}"
+            )
+
+        if not isinstance(self.input_guardrails, list):
+            raise TypeError(
+                f"Agent input_guardrails must be a list, got {type(self.input_guardrails).__name__}"
+            )
+
+        if not isinstance(self.output_guardrails, list):
+            raise TypeError(
+                f"Agent output_guardrails must be a list, "
+                f"got {type(self.output_guardrails).__name__}"
+            )
+
+        if self.output_type is not None:
+            from .agent_output import AgentOutputSchemaBase
+
+            if not (
+                isinstance(self.output_type, (type, AgentOutputSchemaBase))
+                or get_origin(self.output_type) is not None
+            ):
+                raise TypeError(
+                    f"Agent output_type must be a type, AgentOutputSchemaBase, or None, "
+                    f"got {type(self.output_type).__name__}"
+                )
+
+        if self.hooks is not None:
+            from .lifecycle import AgentHooksBase
+
+            if not isinstance(self.hooks, AgentHooksBase):
+                raise TypeError(
+                    f"Agent hooks must be an AgentHooks instance or None, "
+                    f"got {type(self.hooks).__name__}"
+                )
+
+        if (
+            not (
+                isinstance(self.tool_use_behavior, str)
+                and self.tool_use_behavior in ["run_llm_again", "stop_on_first_tool"]
+            )
+            and not isinstance(self.tool_use_behavior, dict)
+            and not callable(self.tool_use_behavior)
+        ):
+            raise TypeError(
+                f"Agent tool_use_behavior must be 'run_llm_again', 'stop_on_first_tool', "
+                f"StopAtTools dict, or callable, got {type(self.tool_use_behavior).__name__}"
+            )
+
+        if not isinstance(self.reset_tool_choice, bool):
+            raise TypeError(
+                f"Agent reset_tool_choice must be a boolean, "
+                f"got {type(self.reset_tool_choice).__name__}"
+            )
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
-        """Make a copy of the agent, with the given arguments changed. For example, you could do:
-        ```
-        new_agent = agent.clone(instructions="New instructions")
-        ```
+        """Make a copy of the agent, with the given arguments changed.
+        Notes:
+            - Uses `dataclasses.replace`, which performs a **shallow copy**.
+            - Mutable attributes like `tools` and `handoffs` are shallow-copied:
+              new list objects are created only if overridden, but their contents
+              (tool functions and handoff objects) are shared with the original.
+            - To modify these independently, pass new lists when calling `clone()`.
+        Example:
+            ```python
+            new_agent = agent.clone(instructions="New instructions")
+            ```
         """
         return dataclasses.replace(self, **kwargs)
 
@@ -275,16 +397,31 @@ class Agent(AgentBase, Generic[TContext]):
         return run_agent
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
-        """Get the system prompt for the agent."""
         if isinstance(self.instructions, str):
             return self.instructions
         elif callable(self.instructions):
+            # Inspect the signature of the instructions function
+            sig = inspect.signature(self.instructions)
+            params = list(sig.parameters.values())
+
+            # Enforce exactly 2 parameters
+            if len(params) != 2:
+                raise TypeError(
+                    f"'instructions' callable must accept exactly 2 arguments (context, agent), "
+                    f"but got {len(params)}: {[p.name for p in params]}"
+                )
+
+            # Call the instructions function properly
             if inspect.iscoroutinefunction(self.instructions):
                 return await cast(Awaitable[str], self.instructions(run_context, self))
             else:
                 return cast(str, self.instructions(run_context, self))
+
         elif self.instructions is not None:
-            logger.error(f"Instructions must be a string or a function, got {self.instructions}")
+            logger.error(
+                f"Instructions must be a string or a callable function, "
+                f"got {type(self.instructions).__name__}"
+            )
 
         return None
 
@@ -293,30 +430,3 @@ class Agent(AgentBase, Generic[TContext]):
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
         return await PromptUtil.to_model_input(self.prompt, run_context, self)
-
-    async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
-        """Fetches the available tools from the MCP servers."""
-        convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
-        return await MCPUtil.get_all_function_tools(
-            self.mcp_servers, convert_schemas_to_strict, run_context, self
-        )
-
-    async def get_all_tools(self, run_context: RunContextWrapper[Any]) -> list[Tool]:
-        """All agent tools, including MCP tools and function tools."""
-        mcp_tools = await self.get_mcp_tools(run_context)
-
-        async def _check_tool_enabled(tool: Tool) -> bool:
-            if not isinstance(tool, FunctionTool):
-                return True
-
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, self)
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
-
-        results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        return [*mcp_tools, *enabled]
