@@ -86,3 +86,55 @@ async def test_agent_model_object_is_used_when_present() -> None:
     # the FakeModel on the agent.
     assert provider.last_requested is None
     assert result.final_output == "from-agent-object"
+
+
+def test_trace_include_sensitive_data_defaults_to_true_when_env_not_set(monkeypatch):
+    """By default, trace_include_sensitive_data should be True when the env is not set."""
+    monkeypatch.delenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", raising=False)
+    config = RunConfig()
+    assert config.trace_include_sensitive_data is True
+
+
+@pytest.mark.parametrize(
+    "env_value,expected",
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+    ],
+    ids=[
+        "lowercase-true",
+        "capital-True",
+        "numeric-1",
+        "text-yes",
+        "text-on",
+        "lowercase-false",
+        "capital-False",
+        "numeric-0",
+        "text-no",
+        "text-off",
+    ],
+)
+def test_trace_include_sensitive_data_follows_env_value(env_value, expected, monkeypatch):
+    """trace_include_sensitive_data should follow the environment variable if not explicitly set."""
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", env_value)
+    config = RunConfig()
+    assert config.trace_include_sensitive_data is expected
+
+
+def test_trace_include_sensitive_data_explicit_override_takes_precedence(monkeypatch):
+    """Explicit value passed to RunConfig should take precedence over the environment variable."""
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "false")
+    config = RunConfig(trace_include_sensitive_data=True)
+    assert config.trace_include_sensitive_data is True
+
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    config = RunConfig(trace_include_sensitive_data=False)
+    assert config.trace_include_sensitive_data is False
