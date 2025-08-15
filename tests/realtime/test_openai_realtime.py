@@ -396,3 +396,65 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Test that last audio item is tracked
         last_item = model._audio_state_tracker.get_last_audio_item()
         assert last_item == ("test_item", 5)
+
+
+class TestAudioChunking(TestOpenAIRealtimeWebSocketModel):
+    """Tests for chunking behavior when sending audio to avoid large WS frames."""
+
+    @pytest.mark.asyncio
+    async def test_send_audio_small_single_chunk_with_commit(self, model):
+        from agents.realtime.model_inputs import RealtimeModelSendAudio
+
+        # Use a small payload below the chunk threshold
+        small_audio = b"a" * 1024
+
+        with patch.object(model, "_send_raw_message") as mock_send_raw_message:
+            await model._send_audio(RealtimeModelSendAudio(audio=small_audio, commit=True))
+
+            # Should send append once and then commit once
+            assert mock_send_raw_message.call_count == 2
+            append_event = mock_send_raw_message.call_args_list[0].args[0]
+            commit_event = mock_send_raw_message.call_args_list[1].args[0]
+            assert getattr(append_event, "type", None) == "input_audio_buffer.append"
+            assert getattr(commit_event, "type", None) == "input_audio_buffer.commit"
+
+    @pytest.mark.asyncio
+    async def test_send_audio_is_chunked_and_committed(self, model):
+        from agents.realtime.model_inputs import RealtimeModelSendAudio
+        from agents.realtime.openai_realtime import _MAX_RAW_AUDIO_CHUNK_SIZE_BYTES
+
+        # Construct a payload that requires multiple chunks (2 full + 1 partial)
+        total_size = (_MAX_RAW_AUDIO_CHUNK_SIZE_BYTES * 2) + (_MAX_RAW_AUDIO_CHUNK_SIZE_BYTES // 2)
+        audio_bytes = b"b" * total_size
+
+        with patch.object(model, "_send_raw_message") as mock_send_raw_message:
+            await model._send_audio(RealtimeModelSendAudio(audio=audio_bytes, commit=True))
+
+            # Expect 3 append events + 1 commit event
+            assert mock_send_raw_message.call_count == 4
+
+            # All but last should be append events
+            for call in mock_send_raw_message.call_args_list[:-1]:
+                event = call.args[0]
+                assert getattr(event, "type", None) == "input_audio_buffer.append"
+
+            # Last should be commit event
+            last_event = mock_send_raw_message.call_args_list[-1].args[0]
+            assert getattr(last_event, "type", None) == "input_audio_buffer.commit"
+
+    @pytest.mark.asyncio
+    async def test_send_audio_chunked_without_commit(self, model):
+        from agents.realtime.model_inputs import RealtimeModelSendAudio
+        from agents.realtime.openai_realtime import _MAX_RAW_AUDIO_CHUNK_SIZE_BYTES
+
+        total_size = (_MAX_RAW_AUDIO_CHUNK_SIZE_BYTES * 2) + 10
+        audio_bytes = b"c" * total_size
+
+        with patch.object(model, "_send_raw_message") as mock_send_raw_message:
+            await model._send_audio(RealtimeModelSendAudio(audio=audio_bytes, commit=False))
+
+            # Expect only append events (no commit)
+            assert mock_send_raw_message.call_count == 3
+            for call in mock_send_raw_message.call_args_list:
+                event = call.args[0]
+                assert getattr(event, "type", None) == "input_audio_buffer.append"
