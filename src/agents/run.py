@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast
@@ -387,7 +386,7 @@ class AgentRunner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(prepared_input)
+            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
             generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
@@ -446,7 +445,7 @@ class AgentRunner:
                                 starting_agent,
                                 starting_agent.input_guardrails
                                 + (run_config.input_guardrails or []),
-                                copy.deepcopy(prepared_input),
+                                _copy_str_or_list(prepared_input),
                                 context_wrapper,
                             ),
                             self._run_single_turn(
@@ -594,7 +593,7 @@ class AgentRunner:
         )
 
         streamed_result = RunResultStreaming(
-            input=copy.deepcopy(input),
+            input=_copy_str_or_list(input),
             new_items=[],
             current_agent=starting_agent,
             raw_responses=[],
@@ -647,7 +646,7 @@ class AgentRunner:
 
         try:
             model_input = ModelInputData(
-                input=copy.deepcopy(effective_input),
+                input=_copy_str_or_list(effective_input),
                 instructions=effective_instructions,
             )
             filter_payload: CallModelData[TContext] = CallModelData(
@@ -786,7 +785,7 @@ class AgentRunner:
                         cls._run_input_guardrails_with_queue(
                             starting_agent,
                             starting_agent.input_guardrails + (run_config.input_guardrails or []),
-                            copy.deepcopy(ItemHelpers.input_to_new_input_list(prepared_input)),
+                            ItemHelpers.input_to_new_input_list(prepared_input),
                             context_wrapper,
                             streamed_result,
                             current_span,
@@ -1376,3 +1375,9 @@ class AgentRunner:
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
+
+
+def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
+    if isinstance(input, str):
+        return input
+    return input.copy()

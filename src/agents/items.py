@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
 
@@ -277,7 +276,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return copy.deepcopy(input)
+        return input.copy()
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:
