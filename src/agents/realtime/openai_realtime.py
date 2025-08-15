@@ -170,7 +170,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "OpenAI-Beta": "realtime=v1",
         }
         self._websocket = await websockets.connect(
-            url, user_agent_header=_USER_AGENT, additional_headers=headers
+            url,
+            user_agent_header=_USER_AGENT,
+            additional_headers=headers,
+            max_size=None,  # Allow any size of message
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
