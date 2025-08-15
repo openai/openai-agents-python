@@ -104,6 +104,10 @@ from .model_inputs import (
 
 _USER_AGENT = f"Agents/Python {__version__}"
 
+# Conservative maximum raw audio bytes per websocket message before base64
+# expansion and JSON wrapping, to stay well below typical 1 MiB frame limits.
+_MAX_RAW_AUDIO_CHUNK_SIZE_BYTES = 256_000
+
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
     "modalities": ["text", "audio"],
@@ -274,8 +278,27 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         await self._send_raw_message(OpenAIResponseCreateEvent(type="response.create"))
 
     async def _send_audio(self, event: RealtimeModelSendAudio) -> None:
-        converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
-        await self._send_raw_message(converted)
+        audio_bytes = event.audio or b""
+
+        # Chunk large audio payloads to avoid exceeding WebSocket frame limits
+        # when base64-encoding into JSON messages.
+        if len(audio_bytes) <= _MAX_RAW_AUDIO_CHUNK_SIZE_BYTES:
+            converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(event)
+            await self._send_raw_message(converted)
+        else:
+            start_index = 0
+            total_length = len(audio_bytes)
+            while start_index < total_length:
+                end_index = min(start_index + _MAX_RAW_AUDIO_CHUNK_SIZE_BYTES, total_length)
+                chunk = audio_bytes[start_index:end_index]
+                start_index = end_index
+
+                chunk_event = RealtimeModelSendAudio(audio=chunk, commit=False)
+                converted = _ConversionHelper.convert_audio_to_input_audio_buffer_append(
+                    chunk_event
+                )
+                await self._send_raw_message(converted)
+
         if event.commit:
             await self._send_raw_message(
                 OpenAIInputAudioBufferCommitEvent(type="input_audio_buffer.commit")
