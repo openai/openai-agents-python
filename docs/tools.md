@@ -181,6 +181,8 @@ Sometimes, you don't want to use a Python function as a tool. You can directly c
 -   `description`
 -   `params_json_schema`, which is the JSON schema for the arguments
 -   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
+-   `strict_json_schema`: Whether the JSON schema is in strict mode. It's recommended to set this to `True`.
+-   `is_enabled`: Whether the tool is enabled. This can be a boolean or a callable that takes the run context and agent, and returns whether the tool is enabled.
 
 ```python
 from typing import Any
