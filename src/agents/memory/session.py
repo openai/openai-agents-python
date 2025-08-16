@@ -118,6 +118,10 @@ class SQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        *,
+        structured: bool = False,
+        conversation_table: str = "agent_conversation_messages",
+        tool_calls_table: str = "agent_tool_calls",
     ):
         """Initialize the SQLite session.
 
@@ -127,11 +131,20 @@ class SQLiteSession(SessionABC):
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
+            structured: If True, enables structured storage mode, creating
+                additional tables for messages and tool calls. Defaults to False.
+            conversation_table: Name for the structured conversation messages table.
+                Defaults to 'agent_conversation_messages'.
+            tool_calls_table: Name for the structured tool calls table.
+                Defaults to 'agent_tool_calls'.
         """
         self.session_id = session_id
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
+        self.structured = structured
+        self.conversation_table = conversation_table
+        self.tool_calls_table = tool_calls_table
         self._local = threading.local()
         self._lock = threading.Lock()
 
@@ -141,11 +154,13 @@ class SQLiteSession(SessionABC):
         if self._is_memory_db:
             self._shared_connection = sqlite3.connect(":memory:", check_same_thread=False)
             self._shared_connection.execute("PRAGMA journal_mode=WAL")
+            self._shared_connection.execute("PRAGMA foreign_keys=ON")
             self._init_db_for_connection(self._shared_connection)
         else:
             # For file databases, initialize the schema once since it persists
             init_conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             init_conn.execute("PRAGMA journal_mode=WAL")
+            init_conn.execute("PRAGMA foreign_keys=ON")
             self._init_db_for_connection(init_conn)
             init_conn.close()
 
@@ -162,6 +177,7 @@ class SQLiteSession(SessionABC):
                     check_same_thread=False,
                 )
                 self._local.connection.execute("PRAGMA journal_mode=WAL")
+                self._local.connection.execute("PRAGMA foreign_keys=ON")
             assert isinstance(self._local.connection, sqlite3.Connection), (
                 f"Expected sqlite3.Connection, got {type(self._local.connection)}"
             )
@@ -200,6 +216,63 @@ class SQLiteSession(SessionABC):
         )
 
         conn.commit()
+
+        # Create additional structured tables if enabled
+        if getattr(self, "structured", False):
+            # Conversation messages table
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.conversation_table} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    raw_event_id INTEGER NOT NULL,
+                    role TEXT,
+                    content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES {self.sessions_table} (session_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (raw_event_id) REFERENCES {self.messages_table} (id)
+                        ON DELETE CASCADE
+                )
+            """
+            )
+
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.conversation_table}_session_id
+                ON {self.conversation_table} (session_id, created_at)
+            """
+            )
+
+            # Tool calls table
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.tool_calls_table} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    raw_event_id INTEGER NOT NULL,
+                    call_id TEXT,
+                    tool_name TEXT,
+                    arguments JSON,
+                    output JSON,
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (session_id) REFERENCES {self.sessions_table} (session_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (raw_event_id) REFERENCES {self.messages_table} (id)
+                        ON DELETE CASCADE
+                )
+            """
+            )
+
+            conn.execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{self.tool_calls_table}_session_id
+                ON {self.tool_calls_table} (session_id, created_at)
+            """
+            )
+
+            conn.commit()
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -278,13 +351,86 @@ class SQLiteSession(SessionABC):
                 )
 
                 # Add items
-                message_data = [(self.session_id, json.dumps(item)) for item in items]
-                conn.executemany(
-                    f"""
-                    INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
-                """,
-                    message_data,
-                )
+                if not self.structured:
+                    # Flat storage: bulk insert for performance
+                    message_data = [(self.session_id, json.dumps(item)) for item in items]
+                    conn.executemany(
+                        f"""
+                        INSERT INTO {self.messages_table} (session_id, message_data) VALUES (?, ?)
+                    """,
+                        message_data,
+                    )
+                else:
+                    # Structured storage: insert each item individually so we can capture rowid
+                    for item in items:
+                        raw_json = json.dumps(item)
+                        cursor = conn.execute(
+                            f"""
+                            INSERT INTO {self.messages_table} (session_id, message_data)
+                            VALUES (?, ?)
+                            RETURNING id
+                        """,
+                            (self.session_id, raw_json),
+                        )
+                        raw_event_id = cursor.fetchone()[0]
+
+                        # Handle structured inserts
+                        if "role" in item:
+                            role = item.get("role")
+                            content_val = item.get("content")
+                            try:
+                                content_str = (
+                                    json.dumps(content_val)
+                                    if content_val is not None
+                                    else None
+                                )
+                            except TypeError:
+                                content_str = str(content_val)
+
+                            conn.execute(
+                                f"""
+                                INSERT INTO {self.conversation_table}
+                                (session_id, raw_event_id, role, content)
+                                VALUES (?, ?, ?, ?)
+                            """,
+                                (self.session_id, raw_event_id, role, content_str),
+                            )
+
+                        event_type = item.get("type")
+                        if event_type == "function_call":
+                            call_id = item.get("call_id")
+                            tool_name = item.get("name")
+                            arguments_val = item.get("arguments")
+                            conn.execute(
+                                f"""
+                                INSERT INTO {self.tool_calls_table}
+                                (session_id, raw_event_id, call_id, tool_name, arguments, status)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                                (
+                                    self.session_id,
+                                    raw_event_id,
+                                    call_id,
+                                    tool_name,
+                                    arguments_val,
+                                    item.get("status"),
+                                ),
+                            )
+                        elif event_type == "function_call_output":
+                            call_id = item.get("call_id")
+                            output_val = item.get("output")
+                            conn.execute(
+                                f"""
+                                UPDATE {self.tool_calls_table}
+                                SET output = ?, status = 'completed'
+                                WHERE session_id = ? AND call_id = ?
+                            """,
+                                (
+                                    json.dumps(output_val) if output_val is not None else None,
+                                    self.session_id,
+                                    call_id,
+                                ),
+                            )
 
                 # Update session timestamp
                 conn.execute(
@@ -326,6 +472,7 @@ class SQLiteSession(SessionABC):
                 )
 
                 result = cursor.fetchone()
+
                 conn.commit()
 
                 if result:
@@ -334,7 +481,6 @@ class SQLiteSession(SessionABC):
                         item = json.loads(message_data)
                         return item
                     except json.JSONDecodeError:
-                        # Return None for corrupted JSON entries (already deleted)
                         return None
 
                 return None
