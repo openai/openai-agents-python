@@ -1,7 +1,7 @@
 import asyncio
 
-from src.agents import Agent, Runner
-from src.agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from agents import Agent, Runner
+from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 
 
 async def main():
