@@ -6,7 +6,7 @@ import inspect
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -19,7 +19,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import ToolFilter, ToolFilterCallable, ToolFilterContext, ToolFilterStatic
+from .util import ToolFilter, ToolFilterContext, ToolFilterStatic
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
@@ -175,10 +175,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     ) -> list[MCPTool]:
         """Apply dynamic tool filtering using a callable filter function."""
 
-        # Ensure we have a callable filter and cast to help mypy
+        # Ensure we have a callable filter
         if not callable(self.tool_filter):
             raise ValueError("Tool filter must be callable for dynamic filtering")
-        tool_filter_func = cast(ToolFilterCallable, self.tool_filter)
+        tool_filter_func = self.tool_filter
 
         # Create filter context
         filter_context = ToolFilterContext(

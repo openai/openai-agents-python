@@ -20,6 +20,7 @@ except ImportError as _e:
 from openai import NOT_GIVEN, AsyncStream, NotGiven
 from openai.types.chat import (
     ChatCompletionChunk,
+    ChatCompletionMessageCustomToolCall,
     ChatCompletionMessageFunctionToolCall,
 )
 from openai.types.chat.chat_completion_message import (
@@ -28,7 +29,6 @@ from openai.types.chat.chat_completion_message import (
     ChatCompletionMessage,
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
-from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
 from openai.types.responses import Response
 
 from ... import _debug
@@ -366,7 +366,9 @@ class LitellmConverter:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
 
-        tool_calls: list[ChatCompletionMessageToolCall] | None = (
+        tool_calls: list[
+            ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall
+        ] | None = (
             [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
             if message.tool_calls
             else None
