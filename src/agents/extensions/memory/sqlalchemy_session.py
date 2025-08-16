@@ -8,12 +8,14 @@ Usage::
     session = SQLAlchemySession.from_url(
         session_id="user-123",
         url="postgresql+asyncpg://app:secret@db.example.com/agents",
+        create_tables=True, # If you want to auto-create tables, set to True.
     )
 
     # Or pass an existing AsyncEngine that your application already manages
     session = SQLAlchemySession(
         session_id="user-123",
         engine=my_async_engine,
+        create_tables=True, # If you want to auto-create tables, set to True.
     )
 
     await Runner.run(agent, "Hello", session=session)
