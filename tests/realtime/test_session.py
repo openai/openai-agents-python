@@ -22,6 +22,7 @@ from agents.realtime.events import (
     RealtimeToolStart,
 )
 from agents.realtime.items import (
+    AssistantAudio,
     AssistantMessageItem,
     AssistantText,
     InputAudio,
@@ -1050,7 +1051,6 @@ class TestGuardrailFunctionality:
         await self._wait_for_guardrail_tasks(session)
 
         # Should have triggered guardrail and interrupted
-        assert session._interrupted_by_guardrail is True
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         assert "triggered_guardrail" in mock_model.sent_messages[0]
@@ -1187,14 +1187,12 @@ class TestGuardrailFunctionality:
         # Wait for async guardrail tasks to complete
         await self._wait_for_guardrail_tasks(session)
 
-        assert session._interrupted_by_guardrail is True
         assert len(session._item_transcripts) == 1
 
         # End turn
         await session.on_event(RealtimeModelTurnEndedEvent())
 
         # State should be cleared
-        assert session._interrupted_by_guardrail is False
         assert len(session._item_transcripts) == 0
         assert len(session._item_guardrail_run_counts) == 0
 
@@ -1259,7 +1257,6 @@ class TestGuardrailFunctionality:
         await session.on_event(transcript_event)
         await self._wait_for_guardrail_tasks(session)
 
-        assert session._interrupted_by_guardrail is True
         assert mock_model.interrupts_called == 1
         assert len(mock_model.sent_messages) == 1
         assert "triggered_guardrail" in mock_model.sent_messages[0]
@@ -1271,6 +1268,63 @@ class TestGuardrailFunctionality:
         guardrail_events = [e for e in events if isinstance(e, RealtimeGuardrailTripped)]
         assert len(guardrail_events) == 1
         assert guardrail_events[0].message == "this is more than ten characters"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_guardrail_tasks_interrupt_once_per_response(self, mock_model):
+        """Even if multiple guardrail tasks trigger concurrently for the same response_id,
+        only the first should interrupt and send a message."""
+        import asyncio
+
+        # Barrier to release both guardrail tasks at the same time
+        start_event = asyncio.Event()
+
+        async def async_trigger_guardrail(context, agent, output):
+            await start_event.wait()
+            return GuardrailFunctionOutput(
+                output_info={"reason": "concurrent"}, tripwire_triggered=True
+            )
+
+        concurrent_guardrail = OutputGuardrail(
+            guardrail_function=async_trigger_guardrail, name="concurrent_trigger"
+        )
+
+        run_config: RealtimeRunConfig = {
+            "output_guardrails": [concurrent_guardrail],
+            "guardrails_settings": {"debounce_text_length": 5},
+        }
+
+        # Use a minimal agent (guardrails from run_config)
+        agent = RealtimeAgent(name="agent")
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        # Two deltas for same item and response to enqueue two guardrail tasks
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="12345", response_id="resp_same"
+            )
+        )
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="item_1", delta="67890", response_id="resp_same"
+            )
+        )
+
+        # Wait until both tasks are enqueued
+        for _ in range(50):
+            if len(session._guardrail_tasks) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        # Release both tasks concurrently
+        start_event.set()
+
+        # Wait for completion
+        if session._guardrail_tasks:
+            await asyncio.gather(*session._guardrail_tasks, return_exceptions=True)
+
+        # Only one interrupt and one message should be sent
+        assert mock_model.interrupts_called == 1
+        assert len(mock_model.sent_messages) == 1
 
 
 class TestModelSettingsIntegration:
@@ -1572,3 +1626,65 @@ class TestUpdateAgentFunctionality:
 
         # Check that the current agent and session settings are updated
         assert session._current_agent == second_agent
+
+
+class TestTranscriptPreservation:
+    """Tests ensuring assistant transcripts are preserved across updates."""
+
+    @pytest.mark.asyncio
+    async def test_assistant_transcript_preserved_on_item_update(self, mock_model, mock_agent):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        # Initial assistant message with audio transcript present (e.g., from first turn)
+        initial_item = AssistantMessageItem(
+            item_id="assist_1",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript="Hello there")],
+        )
+        session._history = [initial_item]
+
+        # Later, the platform retrieves/updates the same item but without transcript populated
+        updated_without_transcript = AssistantMessageItem(
+            item_id="assist_1",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=updated_without_transcript))
+
+        # Transcript should be preserved from existing history
+        assert len(session._history) == 1
+        preserved_item = cast(AssistantMessageItem, session._history[0])
+        assert isinstance(preserved_item.content[0], AssistantAudio)
+        assert preserved_item.content[0].transcript == "Hello there"
+
+    @pytest.mark.asyncio
+    async def test_assistant_transcript_can_fallback_to_deltas(self, mock_model, mock_agent):
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        # Simulate transcript deltas accumulated for an assistant item during generation
+        await session.on_event(
+            RealtimeModelTranscriptDeltaEvent(
+                item_id="assist_2", delta="partial transcript", response_id="resp_2"
+            )
+        )
+
+        # Add initial assistant message without transcript
+        initial_item = AssistantMessageItem(
+            item_id="assist_2",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=initial_item))
+
+        # Later update still lacks transcript; merge should fallback to accumulated deltas
+        update_again = AssistantMessageItem(
+            item_id="assist_2",
+            role="assistant",
+            content=[AssistantAudio(audio=None, transcript=None)],
+        )
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=update_again))
+
+        preserved_item = cast(AssistantMessageItem, session._history[0])
+        assert isinstance(preserved_item.content[0], AssistantAudio)
+        assert preserved_item.content[0].transcript == "partial transcript"
