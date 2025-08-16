@@ -58,7 +58,7 @@ class SQLAlchemySession(SessionABC):
         session_id: str,
         *,
         engine: AsyncEngine,
-        create_tables: bool = True,
+        create_tables: bool = False,
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
     ):  # noqa: D401 – short description on the class-level docstring
@@ -73,8 +73,9 @@ class SQLAlchemySession(SessionABC):
             created with an async driver (``postgresql+asyncpg://``,
             ``mysql+aiomysql://`` or ``sqlite+aiosqlite://``).
         create_tables
-            Whether to automatically create the required tables & indexes.  Set
-            this to *False* if your migrations take care of schema management.
+            Whether to automatically create the required tables & indexes.
+            Defaults to *False* for production use. Set to *True* for development
+            and testing when migrations aren't used.
         sessions_table, messages_table
             Override default table names if needed.
         """

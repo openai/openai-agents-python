@@ -25,7 +25,7 @@ def agent() -> Agent:
 async def test_sqlalchemy_session_direct_ops(agent: Agent):
     """Test direct database operations of SQLAlchemySession."""
     session_id = "direct_ops_test"
-    session = SQLAlchemySession.from_url(session_id, url=DB_URL)
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
     # 1. Add items
     items: list[TResponseInputItem] = [
@@ -57,7 +57,7 @@ async def test_sqlalchemy_session_direct_ops(agent: Agent):
 async def test_runner_integration(agent: Agent):
     """Test that SQLAlchemySession works correctly with the agent Runner."""
     session_id = "runner_integration_test"
-    session = SQLAlchemySession.from_url(session_id, url=DB_URL)
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
     # First turn
     assert isinstance(agent.model, FakeModel)
@@ -83,10 +83,10 @@ async def test_runner_integration(agent: Agent):
 async def test_session_isolation(agent: Agent):
     """Test that different session IDs result in isolated conversation histories."""
     session_id_1 = "session_1"
-    session1 = SQLAlchemySession.from_url(session_id_1, url=DB_URL)
+    session1 = SQLAlchemySession.from_url(session_id_1, url=DB_URL, create_tables=True)
 
     session_id_2 = "session_2"
-    session2 = SQLAlchemySession.from_url(session_id_2, url=DB_URL)
+    session2 = SQLAlchemySession.from_url(session_id_2, url=DB_URL, create_tables=True)
 
     # Interact with session 1
     assert isinstance(agent.model, FakeModel)
@@ -107,7 +107,7 @@ async def test_session_isolation(agent: Agent):
 async def test_get_items_with_limit(agent: Agent):
     """Test the limit parameter in get_items."""
     session_id = "limit_test"
-    session = SQLAlchemySession.from_url(session_id, url=DB_URL)
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
     items: list[TResponseInputItem] = [
         {"role": "user", "content": "1"},
@@ -134,7 +134,7 @@ async def test_get_items_with_limit(agent: Agent):
 
 async def test_pop_from_empty_session():
     """Test that pop_item returns None on an empty session."""
-    session = SQLAlchemySession.from_url("empty_session", url=DB_URL)
+    session = SQLAlchemySession.from_url("empty_session", url=DB_URL, create_tables=True)
     popped = await session.pop_item()
     assert popped is None
 
@@ -142,7 +142,7 @@ async def test_pop_from_empty_session():
 async def test_add_empty_items_list():
     """Test that adding an empty list of items is a no-op."""
     session_id = "add_empty_test"
-    session = SQLAlchemySession.from_url(session_id, url=DB_URL)
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
     initial_items = await session.get_items()
     assert len(initial_items) == 0
