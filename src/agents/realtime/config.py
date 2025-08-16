@@ -97,6 +97,9 @@ class RealtimeSessionModelSettings(TypedDict):
     speed: NotRequired[float]
     """The speed of the model's responses."""
 
+    idle_timeout_ms: NotRequired[int]
+    """The idle timeout before the session is closed, in milliseconds."""
+
     input_audio_format: NotRequired[RealtimeAudioFormat]
     """The format for input audio streams."""
 

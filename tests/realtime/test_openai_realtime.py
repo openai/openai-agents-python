@@ -8,6 +8,7 @@ from agents.exceptions import UserError
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
+    RealtimeModelInputAudioBufferTimeoutEvent,
     RealtimeModelToolCallEvent,
 )
 from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
@@ -28,6 +29,15 @@ class TestOpenAIRealtimeWebSocketModel:
         mock_ws.send = AsyncMock()
         mock_ws.close = AsyncMock()
         return mock_ws
+
+
+class TestSessionConfig(TestOpenAIRealtimeWebSocketModel):
+    """Test session configuration helpers."""
+
+    def test_get_session_config_includes_idle_timeout_ms(self, model):
+        """Test that _get_session_config includes idle_timeout_ms when provided."""
+        session_obj = model._get_session_config({"idle_timeout_ms": 1234})
+        assert session_obj.idle_timeout_ms == 1234
 
 
 class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
@@ -218,6 +228,32 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
             # If it fails validation, it should log; if it passes but type is
             # unknown, it should be ignored
             pass
+
+    @pytest.mark.asyncio
+    async def test_handle_idle_timeout_event_emits_timeout_event(self, model):
+        """Test that input audio buffer timeouts are passed through."""
+        mock_listener = AsyncMock()
+        model.add_listener(mock_listener)
+
+        timeout_event = {
+            "type": "input_audio_buffer.timeout_triggered",
+            "event_id": "evt_123",
+            "audio_start_ms": 100,
+            "audio_end_ms": 200,
+            "item_id": "item_1",
+        }
+
+        await model._handle_ws_event(timeout_event)
+
+        assert mock_listener.on_event.call_count == 2
+        raw_event = mock_listener.on_event.call_args_list[0][0][0]
+        assert raw_event.type == "raw_server_event"
+        timeout = mock_listener.on_event.call_args_list[1][0][0]
+        assert isinstance(timeout, RealtimeModelInputAudioBufferTimeoutEvent)
+        assert timeout.event_id == timeout_event["event_id"]
+        assert timeout.audio_start_ms == timeout_event["audio_start_ms"]
+        assert timeout.audio_end_ms == timeout_event["audio_end_ms"]
+        assert timeout.item_id == timeout_event["item_id"]
 
     @pytest.mark.asyncio
     async def test_handle_audio_delta_event_success(self, model):
