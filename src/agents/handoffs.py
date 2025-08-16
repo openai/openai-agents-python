@@ -119,9 +119,9 @@ class Handoff(Generic[TContext, TAgent]):
     True, as it increases the likelihood of correct JSON input.
     """
 
-    is_enabled: bool | Callable[
-        [RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]
-    ] = True
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = (
+        True
+    )
     """Whether the handoff is enabled. Either a bool or a Callable that takes the run context and
     agent and returns whether the handoff is enabled. You can use this to dynamically enable/disable
     a handoff based on your context/state."""
