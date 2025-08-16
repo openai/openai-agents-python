@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from typing_extensions import TypedDict
 
-from agents.agent import Agent
+from agents.agent import Action, Agent
 from agents.lifecycle import AgentHooks
 from agents.run import Runner
 from agents.run_context import RunContextWrapper, TContext
@@ -53,7 +53,7 @@ class AgentHooksForTests(AgentHooks):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        tool: Tool,
+        action: Action,
     ) -> None:
         self.events["on_tool_start"] += 1
 
