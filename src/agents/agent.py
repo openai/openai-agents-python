@@ -356,6 +356,8 @@ class Agent(AgentBase, Generic[TContext]):
         tool_name: str | None,
         tool_description: str | None,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+        is_enabled: bool
+        | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -371,11 +373,15 @@ class Agent(AgentBase, Generic[TContext]):
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
                 provided, the last message from the agent will be used.
+            is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
+                context and agent and returns whether the tool is enabled. Disabled tools are hidden
+                from the LLM at runtime.
         """
 
         @function_tool(
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
+            is_enabled=is_enabled,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner

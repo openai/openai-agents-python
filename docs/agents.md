@@ -115,7 +115,7 @@ Sometimes, you want to observe the lifecycle of an agent. For example, you may w
 
 ## Guardrails
 
-Guardrails allow you to run checks/validations on user input, in parallel to the agent running. For example, you could screen the user's input for relevance. Read more in the [guardrails](guardrails.md) documentation.
+Guardrails allow you to run checks/validations on user input in parallel to the agent running, and on the agent's output once it is produced. For example, you could screen the user's input and agent's output for relevance. Read more in the [guardrails](guardrails.md) documentation.
 
 ## Cloning/copying agents
 

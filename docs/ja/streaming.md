@@ -4,15 +4,15 @@ search:
 ---
 # ストリーミング
 
-ストリーミングを使用すると、エージェントの実行が進行するにつれてその更新を購読できます。これはエンドユーザーに進捗状況や部分的なレスポンスを表示するのに便利です。
+ストリーミングを使うと、進行中のエージェントの実行に対するアップデートを購読できます。これは、エンドユーザーに進捗や部分的な応答を表示するのに役立ちます。
 
-ストリーミングを行うには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が返されます。続いて `result.stream_events()` を呼び出すと、後述する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが取得できます。
+ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これは [`RunResultStreaming`][agents.result.RunResultStreaming] を返します。`result.stream_events()` を呼ぶと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
 
-## Raw response events
+## raw レスポンスイベント
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これらは OpenAI Responses API フォーマットであり、各イベントには `response.created` や `response.output_text.delta` などの type とデータが含まれます。生成されたレスポンス メッセージを即座にユーザーへストリーミングしたい場合に便利です。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw なイベントです。形式は OpenAI Responses API で、各イベントには `response.created` や `response.output_text.delta` などの type とデータがあります。これらのイベントは、生成され次第、ユーザーにレスポンスメッセージをストリーミングしたい場合に有用です。
 
-たとえば、次の例は LLM が生成したテキストをトークンごとに出力します。
+たとえば、次の例は LLM が生成するテキストをトークンごとに出力します。
 
 ```python
 import asyncio
@@ -35,11 +35,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Run item イベントとエージェント イベント
+## Run item イベントとエージェントイベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを通知し、各トークンではなく「メッセージが生成された」「ツールが実行された」といったレベルで進捗を更新できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] はハンドオフの結果として現在のエージェントが変更されたときなどに更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを知らせます。これにより、各トークンではなく「メッセージが生成された」「ツールが実行された」などの粒度で進捗を更新できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変更されたとき（例: ハンドオフの結果として）の更新を提供します。
 
-たとえば、次の例では raw イベントを無視してユーザーへ更新のみをストリーミングします。
+たとえば、次の例は raw なイベントを無視し、ユーザーにアップデートをストリーミングします。
 
 ```python
 import asyncio

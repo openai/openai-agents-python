@@ -287,6 +287,7 @@ class OpenAIChatCompletionsModel(Model):
             stream_options=self._non_null_or_not_given(stream_options),
             store=self._non_null_or_not_given(store),
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
+            verbosity=self._non_null_or_not_given(model_settings.verbosity),
             top_logprobs=self._non_null_or_not_given(model_settings.top_logprobs),
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             extra_query=model_settings.extra_query,

@@ -91,7 +91,10 @@ class ModelSettings:
     """
 
     truncation: Literal["auto", "disabled"] | None = None
-    """The truncation strategy to use when calling the model."""
+    """The truncation strategy to use when calling the model.
+    See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
+    for more details.
+    """
 
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
@@ -99,6 +102,10 @@ class ModelSettings:
     reasoning: Reasoning | None = None
     """Configuration options for
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
+    """
+
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
     """
 
     metadata: dict[str, str] | None = None
