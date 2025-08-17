@@ -961,7 +961,10 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> ToolsToFinalOutputResult:
-        """Returns (i, final_output)."""
+        """Determine if tool results should produce a final output.
+        Returns:
+            ToolsToFinalOutputResult: Indicates whether final output is ready, and the output value.
+        """
         if not tool_results:
             return _NOT_FINAL_OUTPUT
 
