@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 
+[manifest]
+members = [
+    "examples-2",
+    "openai-agents",
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -464,6 +470,17 @@ name = "evdev"
 version = "1.9.1"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d1/99/4d24bb6db12fc170a5f209f4c9108054a2c84d289d1e7f743e979b202023/evdev-1.9.1.tar.gz", hash = "sha256:dc640a064cb1c9fe1f8b970dc2039945a2a275d7b7ee62284bf427238abe45ee", size = 33349, upload-time = "2025-02-22T11:07:44.248Z" }
+
+[[package]]
+name = "examples-2"
+version = "0.1.0"
+source = { virtual = "examples_2" }
+dependencies = [
+    { name = "openai-agents" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "openai-agents", editable = "." }]
 
 [[package]]
 name = "exceptiongroup"
