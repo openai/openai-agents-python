@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from agents import Agent, AgentHooks, RunContextWrapper, Runner, Tool, function_tool
 
-
+#agent lifecyle in 5 steps
 class CustomAgentHooks(AgentHooks):
     def __init__(self, display_name: str):
         self.event_counter = 0
