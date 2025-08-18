@@ -37,8 +37,16 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 2. Install Agents SDK
 
+-   Option A: Using pip (traditional method)
+
 ```bash
 pip install openai-agents
+```
+
+-   Option B: Using uv (recommended)
+
+```bash
+uv add openai-agents
 ```
 
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
