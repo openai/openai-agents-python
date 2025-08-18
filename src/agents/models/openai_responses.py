@@ -12,7 +12,7 @@ from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseIncludable,
     ResponseStreamEvent,
-    ResponseTextConfigParam,
+    ResponseFormatTextConfigParam,
     ToolParam,
     WebSearchToolParam,
     response_create_params,
@@ -127,7 +127,11 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error getting response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": (
+                                str(e)
+                                if tracing.include_data()
+                                else e.__class__.__name__
+                            ),
                         },
                     )
                 )
@@ -186,7 +190,11 @@ class OpenAIResponsesModel(Model):
                     SpanError(
                         message="Error streaming response",
                         data={
-                            "error": str(e) if tracing.include_data() else e.__class__.__name__,
+                            "error": (
+                                str(e)
+                                if tracing.include_data()
+                                else e.__class__.__name__
+                            ),
                         },
                     )
                 )
@@ -238,9 +246,7 @@ class OpenAIResponsesModel(Model):
         parallel_tool_calls = (
             True
             if model_settings.parallel_tool_calls and tools and len(tools) > 0
-            else False
-            if model_settings.parallel_tool_calls is False
-            else NOT_GIVEN
+            else False if model_settings.parallel_tool_calls is False else NOT_GIVEN
         )
 
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
@@ -316,7 +322,8 @@ class ConvertedTools:
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
+        cls,
+        tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None,
     ) -> response_create_params.ToolChoice | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
@@ -365,7 +372,7 @@ class Converter:
     @classmethod
     def get_response_format(
         cls, output_schema: AgentOutputSchemaBase | None
-    ) -> ResponseTextConfigParam | NotGiven:
+    ) -> ResponseFormatTextConfigParam | NotGiven:
         if output_schema is None or output_schema.is_plain_text():
             return NOT_GIVEN
         else:
@@ -389,7 +396,9 @@ class Converter:
 
         computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
         if len(computer_tools) > 1:
-            raise UserError(f"You can only provide one computer tool. Got {len(computer_tools)}")
+            raise UserError(
+                f"You can only provide one computer tool. Got {len(computer_tools)}"
+            )
 
         for tool in tools:
             converted_tool, include = cls._convert_tool(tool)
@@ -435,7 +444,9 @@ class Converter:
             if tool.filters:
                 converted_tool["filters"] = tool.filters
 
-            includes = "file_search_call.results" if tool.include_search_results else None
+            includes = (
+                "file_search_call.results" if tool.include_search_results else None
+            )
         elif isinstance(tool, ComputerTool):
             converted_tool = {
                 "type": "computer_use_preview",
