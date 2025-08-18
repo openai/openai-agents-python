@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 
+[manifest]
+members = [
+    "openai-agents",
+    "practice",
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -1639,6 +1645,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/96/2d/02d4312c973c6050a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/5f/e351af9a41f866ac3f1fac4ca0613908d9a41741cfcf2228f4ad853b697d/pluggy-1.5.0-py3-none-any.whl", hash = "sha256:44e1ad92c8ca002de6377e165f3e0f1be63266ab4d554740532335b9d75ea669", size = 20556, upload-time = "2024-04-20T21:34:40.434Z" },
 ]
+
+[[package]]
+name = "practice"
+version = "0.1.0"
+source = { virtual = "practice" }
+dependencies = [
+    { name = "openai-agents" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "openai-agents", editable = "." }]
 
 [[package]]
 name = "propcache"
