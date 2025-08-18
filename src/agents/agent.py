@@ -205,8 +205,9 @@ class Agent(AgentBase, Generic[TContext]):
     This lets you configure how tool use is handled.
     - "run_llm_again": The default behavior. Tools are run, and then the LLM receives the results
         and gets to respond.
-    - "stop_on_first_tool": The output of the first tool call is used as the final output. This
-        means that the LLM does not process the result of the tool call.
+    - "stop_on_first_tool": The output from the first tool call is treated as the final result.
+        In other words, it isn’t sent back to the LLM for further processing but is used directly
+        as the final output.
     - A StopAtTools object: The agent will stop running if any of the tools listed in
         `stop_at_tool_names` is called.
         The final output will be the output of the first matching tool call.
