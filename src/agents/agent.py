@@ -417,7 +417,7 @@ class Agent(AgentBase, Generic[TContext]):
             return ItemHelpers.text_message_outputs(output_run.new_items)
 
         tool = run_agent
-        tool.stream_inner_events = stream_inner_events
+        tool.stream_inner_events = stream_inner_events  # type: ignore[attr-defined]
         return tool
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
