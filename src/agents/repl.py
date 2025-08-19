@@ -8,10 +8,13 @@ from .agent import Agent
 from .items import TResponseInputItem
 from .result import RunResultBase
 from .run import Runner
+from .run_context import TContext
 from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
 
 
-async def run_demo_loop(agent: Agent[Any], *, stream: bool = True, context: Any = None) -> None:
+async def run_demo_loop(
+    agent: Agent[Any], *, stream: bool = True, context: TContext | None = None
+) -> None:
     """Run a simple REPL loop with the given agent.
 
     This utility allows quick manual testing and debugging of an agent from the
