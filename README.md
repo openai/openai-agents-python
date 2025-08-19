@@ -90,6 +90,9 @@ async def main():
     print(result.final_output)
     # ¡Hola! Estoy bien, gracias por preguntar. ¿Y tú, cómo estás?
 
+    # Tells the name of the agent that responded after handoff
+    print(f"\nResponded by: {result.last_agent.name}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
