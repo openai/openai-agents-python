@@ -935,6 +935,7 @@ class AgentRunner:
         input = ItemHelpers.input_to_new_input_list(streamed_result.input)
         input.extend([item.to_input_item() for item in streamed_result.new_items])
 
+        # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
             agent=agent,
             run_config=run_config,
@@ -942,6 +943,12 @@ class AgentRunner:
             input_items=input,
             system_instructions=system_prompt,
         )
+
+        # Call hook just before the model is invoked, with the correct system_prompt.
+        if agent.hooks:
+            await agent.hooks.on_llm_start(
+                context_wrapper, agent, filtered.instructions, filtered.input
+            )
 
         # 1. Stream the output events
         async for event in model.stream_response(
@@ -978,6 +985,10 @@ class AgentRunner:
                 context_wrapper.usage.add(usage)
 
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
+        # Call hook just after the model response is finalized.
+        if agent.hooks and final_response is not None:
+            await agent.hooks.on_llm_end(context_wrapper, agent, final_response)
 
         # 2. At this point, the streaming is complete for this turn of the agent loop.
         if not final_response:
@@ -1252,6 +1263,14 @@ class AgentRunner:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+        # If the agent has hooks, we need to call them before and after the LLM call
+        if agent.hooks:
+            await agent.hooks.on_llm_start(
+                context_wrapper,
+                agent,
+                filtered.instructions,  # Use filtered instructions
+                filtered.input,  # Use filtered input
+            )
 
         new_response = await model.get_response(
             system_instructions=filtered.instructions,
@@ -1266,6 +1285,9 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             prompt=prompt_config,
         )
+        # If the agent has hooks, we need to call them after the LLM call
+        if agent.hooks:
+            await agent.hooks.on_llm_end(context_wrapper, agent, new_response)
 
         context_wrapper.usage.add(new_response.usage)
 

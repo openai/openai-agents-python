@@ -68,6 +68,7 @@ plugins:
                 - context.md
                 - guardrails.md
                 - multi_agent.md
+                - usage.md
                 - Models:
                     - models/index.md
                     - models/litellm.md
@@ -165,6 +166,7 @@ plugins:
                 - context.md
                 - guardrails.md
                 - multi_agent.md
+                - usage.md
                 - モデル:
                     - models/index.md
                     - models/litellm.md
