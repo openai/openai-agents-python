@@ -1,6 +1,6 @@
+import asyncio
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional, Union
-import asyncio
 
 from openai.types.responses import ResponseFunctionToolCall
 
