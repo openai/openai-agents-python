@@ -1,6 +1,6 @@
 import pytest
 
-from agents import Agent, Runner, function_tool, RunConfig, ModelSettings
+from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 
 
