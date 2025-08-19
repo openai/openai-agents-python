@@ -1,3 +1,5 @@
+# Usage
+
 The Agents SDK automatically tracks token usage for every run. You can access it from the run context and use it to monitor costs, enforce limits, or record analytics.
 
 ## What is tracked

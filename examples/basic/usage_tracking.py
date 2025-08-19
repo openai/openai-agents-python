@@ -2,7 +2,7 @@ import asyncio
 
 from pydantic import BaseModel
 
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner, Usage, function_tool
 
 
 class Weather(BaseModel):
@@ -17,7 +17,7 @@ def get_weather(city: str) -> Weather:
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
 
 
-def print_usage(usage) -> None:
+def print_usage(usage: Usage) -> None:
     print("\n=== Usage ===")
     print(f"Requests: {usage.requests}")
     print(f"Input tokens: {usage.input_tokens}")
@@ -43,5 +43,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
