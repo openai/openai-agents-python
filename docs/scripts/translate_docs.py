@@ -4,6 +4,12 @@ import sys
 import argparse
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List, Optional
+
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None  # PyYAML may not be available in some environments
 
 # import logging
 # logging.basicConfig(level=logging.INFO)
@@ -26,8 +32,16 @@ search:
 source_dir = "docs"
 languages = {
     "ja": "Japanese",
+    "ko": "Korean",
     # Add more languages here, e.g., "fr": "French"
 }
+
+# Comma-separated list to restrict which languages to translate (e.g., "ko" or "ja,ko")
+ONLY_LANGS = [
+    s.strip()
+    for s in (os.environ.get("ONLY_LANG") or os.environ.get("LANGS") or "").split(",")
+    if s.strip()
+]
 
 # Initialize OpenAI client
 api_key = os.getenv("PROD_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -79,6 +93,39 @@ eng_to_non_eng_mapping = {
         "Python first": "Python ファースト",
         # Add more Japanese mappings here
     },
+    "ko": {
+        "agents": "에이전트",
+        "computer use": "컴퓨터 사용",
+        "OAI hosted tools": "OpenAI 호스트하는 도구",
+        "well formed data": "적절한 형식의 데이터",
+        "guardrail": "가드레일",
+        "orchestrating multiple agents": "멀티 에이전트 오케스트레이션",
+        "handoffs": "핸드오프",
+        "function tools": "함수 도구",
+        "function calling": "함수 호출",
+        "tracing": "트레이싱",
+        "code examples": "코드 예제",
+        "vector store": "벡터 스토어",
+        "deep research": "딥 리서치",
+        "category": "카테고리",
+        "user": "사용자",
+        "parameter": "매개변수",
+        "processor": "프로세서",
+        "server": "서버",
+        "web search": "웹 검색",
+        "file search": "파일 검색",
+        "streaming": "스트리밍",
+        "system prompt": "시스템 프롬프트",
+        "interruption": "인터럽션(중단 처리)",
+        "TypeScript-first": "TypeScript 우선",
+        "Human in the loop": "휴먼인더루프 (HITL)",
+        "Hosted tool": "호스티드 툴",
+        "Hosted MCP server tools": "호스티드 MCP 서버 도구",
+        "raw": "원문",
+        "Realtime Agents": "실시간 에이전트",
+        "Build your first agent in minutes.": "단 몇 분 만에 첫 에이전트를 만들 수 있습니다",
+        "Let's build": "시작하기",
+    },
     # Add more languages here
 }
 eng_to_non_eng_instructions = {
@@ -95,11 +142,81 @@ eng_to_non_eng_instructions = {
         "* You must consistently use polite wording such as です/ます rather than である/なのだ.",
         # Add more Japanese mappings here
     ],
+    "ko": [
+        "* 공손하고 중립적인 문체(합니다/입니다체)를 일관되게 사용하세요.",
+        "* 개발자 문서이므로 자연스러운 의역을 허용하되 정확성을 유지하세요.",
+        "* 'instructions', 'tools' 같은 API 매개변수와 temperature, top_p, max_tokens, presence_penalty, frequency_penalty 등은 영문 그대로 유지하세요.",
+        "* 문장이 아닌 불릿 항목 끝에는 마침표를 찍지 마세요.",
+    ],
     # Add more languages here
 }
 
 
-def built_instructions(target_language: str, lang_code: str) -> str:
+def _extract_sidebar_translations(lang_code: str) -> Dict[str, Dict[str, Optional[str]]]:
+    """Extract mapping of doc file paths to labels/translations from mkdocs.yml.
+
+    Returns a map: { path: { "label": str, "translation": str|None } }
+    """
+    sidebar_map: Dict[str, Dict[str, Optional[str]]] = {}
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
+    if yaml is None:
+        return sidebar_map
+    try:
+        with open(mkdocs_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return sidebar_map
+
+    try:
+        languages_block = []
+        for plugin in data.get("plugins", []):
+            if isinstance(plugin, dict) and "i18n" in plugin:
+                languages_block = plugin["i18n"].get("languages", [])
+                break
+        if not languages_block:
+            return sidebar_map
+
+        nav_by_locale: Dict[str, Any] = {}
+        for lang in languages_block:
+            locale = lang.get("locale")
+            nav_by_locale[locale] = lang.get("nav")
+
+        en_nav = nav_by_locale.get("en")
+        tgt_nav = nav_by_locale.get(lang_code)
+
+        def collect(nav: Any) -> Dict[str, str]:
+            result: Dict[str, str] = {}
+            if not isinstance(nav, list):
+                return result
+            for item in nav:
+                if isinstance(item, dict):
+                    for label, value in item.items():
+                        if isinstance(value, str):
+                            result[value] = str(label)
+                        else:
+                            result.update(collect(value))
+                elif isinstance(item, str):
+                    continue
+            return result
+
+        en_map = collect(en_nav) if en_nav else {}
+        tgt_map = collect(tgt_nav) if tgt_nav else {}
+        for path_key, en_label in en_map.items():
+            sidebar_map[path_key] = {
+                "label": en_label,
+                "translation": tgt_map.get(path_key),
+            }
+    except Exception:
+        return {}
+    return sidebar_map
+
+
+def built_instructions(
+    target_language: str,
+    lang_code: str,
+    sidebar_map: Optional[Dict[str, Dict[str, Optional[str]]]] = None,
+) -> str:
     do_not_translate_terms = "\n".join(do_not_translate)
     specific_terms = "\n".join(
         [f"* {k} -> {v}" for k, v in eng_to_non_eng_mapping.get(lang_code, {}).items()]
@@ -108,6 +225,23 @@ def built_instructions(target_language: str, lang_code: str) -> str:
         eng_to_non_eng_instructions.get("common", [])
         + eng_to_non_eng_instructions.get(lang_code, [])
     )
+    sidebar_labels_block = ""
+    if sidebar_map:
+        label_lines: List[str] = []
+        for link, entry in sidebar_map.items():
+            if entry.get("translation"):
+                label_lines.append(
+                    f"- {link}: {entry['translation']} (sidebar translation)"
+                )
+            elif entry.get("label"):
+                label_lines.append(f"- {link}: {entry['label']} (sidebar label)")
+        if label_lines:
+            sidebar_labels_block = (
+                "\n\n#########################\n##  PAGE TITLES        ##\n#########################\n"
+                "When you see links to another page, consistently use the following labels:\n"
+                + "\n".join(label_lines)
+                + "\n\nAlways use these canonical translations for page titles and references."
+            )
     return f"""You are an expert technical translator.
 
 Your task: translate the markdown passed as a user input from English into {target_language}.
@@ -135,6 +269,8 @@ You must return **only** the translated markdown. Do not include any commentary,
   - Inline code surrounded by single back‑ticks ( `like_this` ).
   - Fenced code blocks delimited by ``` or ~~~, including all comments inside them.
   - Link URLs inside `[label](URL)` – translate the label, never the URL.
+- When translating Markdown tables, preserve the exact table structure, including all delimiters (|), header separators (---), and row/column counts. Only translate the cell contents. Do not add, remove, or reorder columns or rows.
+{sidebar_labels_block}
 
 #########################
 ##  LANGUAGE‑SPECIFIC  ##
@@ -142,6 +278,9 @@ You must return **only** the translated markdown. Do not include any commentary,
 *(applies only when {target_language} = Japanese)*  
 - Insert a half‑width space before and after all alphanumeric terms.  
 - Add a half‑width space just outside markdown emphasis markers: ` **太字** ` (good) vs `** 太字 **` (bad).
+*(applies only when {target_language} = Korean)*  
+- Do not alter spaces around code/identifiers; keep them as in the original.  
+- Do not add stray spaces around markdown emphasis: `**굵게**` (good) vs `** 굵게 **` (bad).
 
 #########################
 ##  DO NOT TRANSLATE   ##
@@ -196,6 +335,15 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     code_blocks: list[str] = []
     code_block_chunks: list[str] = []
     for line in lines:
+        # Treat single-line import statements as code blocks to avoid accidental translation
+        if (
+            ENABLE_CODE_SNIPPET_EXCLUSION is True
+            and (in_code_block is False)
+            and line.startswith("import ")
+        ):
+            code_blocks.append(line)
+            current_chunk.append(f"CODE_BLOCK_{(len(code_blocks) - 1):02}")
+            continue
         if (
             ENABLE_SMALL_CHUNK_TRANSLATION is True
             and len(current_chunk) >= 120  # required for gpt-4.5
@@ -222,7 +370,11 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     # Translate each chunk separately and combine results
     translated_content: list[str] = []
     for chunk in chunks:
-        instructions = built_instructions(languages[lang_code], lang_code)
+        instructions = built_instructions(
+            languages[lang_code],
+            lang_code,
+            sidebar_map=_extract_sidebar_translations(lang_code),
+        )
         if OPENAI_MODEL.startswith("gpt-5"):
             response = openai_client.responses.create(
                 model=OPENAI_MODEL,
@@ -261,10 +413,18 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
 
 def translate_single_source_file(file_path: str) -> None:
     relative_path = os.path.relpath(file_path, source_dir)
-    if "ref/" in relative_path or not file_path.endswith(".md"):
+    if "ref/" in relative_path or not (
+        file_path.endswith(".md") or file_path.endswith(".mdx")
+    ):
         return
 
-    for lang_code in languages:
+    # Determine target languages
+    target_langs = (
+        [code for code in ONLY_LANGS if code in languages]
+        if ONLY_LANGS
+        else list(languages.keys())
+    )
+    for lang_code in target_langs:
         target_dir = os.path.join(source_dir, lang_code)
         target_path = os.path.join(target_dir, relative_path)
 

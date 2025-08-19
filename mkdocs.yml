@@ -180,17 +180,56 @@ plugins:
                     - realtime/quickstart.md
                     - realtime/guide.md
 
+        - locale: ko
+          name: 한국어
+          build: true
+          nav:
+            - 소개: index.md
+            - 빠른 시작: quickstart.md
+            - 코드 예제: examples.md
+            - 문서:
+                - agents.md
+                - running_agents.md
+                - sessions.md
+                - results.md
+                - streaming.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - 모델:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - 음성 에이전트:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - 실시간 에이전트:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+
 extra:
   # Remove material generation message in footer
   generator: false
   language: en
   alternate:
     - name: English
-      link: /openai-agents-python/
+      link: ./
       lang: en
     - name: 日本語
-      link: /openai-agents-python/ja/
+      link: ./ja/
       lang: ja
+    - name: 한국어
+      link: ./ko/
+      lang: ko
 
 markdown_extensions:
   - pymdownx.superfences:
