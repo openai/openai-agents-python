@@ -299,8 +299,8 @@ class Agent(AgentBase, Generic[TContext]):
                 is_gpt_5_default() is True
                 # However, the specified model is not a gpt-5 model
                 and (
-                    isinstance(self.model, Model)
-                    or gpt_5_reasoning_settings_required(self.model) is False
+                    isinstance(self.model, str) is False
+                    or gpt_5_reasoning_settings_required(self.model) is False  # type: ignore
                 )
                 # The model settings are not customized for the specified model
                 and self.model_settings == get_default_model_settings()
