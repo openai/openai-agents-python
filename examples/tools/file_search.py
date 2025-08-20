@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 from openai import OpenAI
 

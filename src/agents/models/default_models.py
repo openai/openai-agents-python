@@ -1,5 +1,6 @@
 import copy
 import os
+from typing import Optional
 
 from openai.types.shared.reasoning import Reasoning
 
@@ -45,7 +46,7 @@ def get_default_model() -> str:
     return os.getenv(OPENAI_DEFAULT_MODEL_ENV_VARIABLE_NAME, "gpt-4.1").lower()
 
 
-def get_default_model_settings(model: str | None = None) -> ModelSettings:
+def get_default_model_settings(model: Optional[str] = None) -> ModelSettings:
     """
     Returns the default model settings.
     If the default model is a GPT-5 model, returns the GPT-5 default model settings.
