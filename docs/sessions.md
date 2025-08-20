@@ -141,26 +141,27 @@ result = await Runner.run(
 )
 ```
 
-### Structured storage
+### Structured metadata
 
-By default, SQLiteSession stores all conversation events as JSON blobs in a single table. You can enable structured storage to create additional tables for messages and tool calls:
+By default, `SQLiteSession` stores all conversation events as JSON blobs in a single table. You can enable structured metadata to create additional tables for messages, tool calls, and per-response usage:
 
 ```python
 from agents import SQLiteSession
 
-# Enable structured storage
+# Enable structured metadata storage
 session = SQLiteSession(
-    "user_123", 
-    "conversations.db", 
-    structured=True
+    "user_123",
+    "conversations.db",
+    structured_metadata=True,
 )
 
 # This creates additional tables:
-# - agent_conversation_messages: stores user, assistant, system messages
+# - agent_conversation_messages: stores user, assistant, and system messages
 # - agent_tool_calls: stores tool call requests and outputs
+# - agent_usage: stores per-response usage (model name, token counts) with trace/span attribution
 ```
 
-With structured storage enabled, you can query conversations using standard SQL:
+With structured metadata enabled, you can query conversations and usage using standard SQL:
 
 ```sql
 -- Get all user messages in a session
@@ -171,6 +172,13 @@ WHERE session_id = 'user_123' AND role = 'user';
 SELECT tool_name, arguments, output, status 
 FROM agent_tool_calls 
 WHERE session_id = 'user_123';
+
+-- Inspect usage records (model, token counts) and spans
+SELECT response_id, model, requests, input_tokens, output_tokens, total_tokens,
+       trace_id, span_id, created_at
+FROM agent_usage
+WHERE session_id = 'user_123'
+ORDER BY created_at DESC;
 ```
 
 ### Multiple sessions

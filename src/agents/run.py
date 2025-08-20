@@ -500,6 +500,13 @@ class AgentRunner:
 
                         # Save the conversation to session if enabled
                         await self._save_result_to_session(session, input, result)
+                        # Optionally persist usage if the session supports it (non-breaking)
+                        if session is not None and hasattr(session, "add_usage_records"):
+                            try:
+                                await session.add_usage_records(model_responses)
+                            except Exception:
+                                # Do not fail the run on usage write errors
+                                pass
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -855,6 +862,12 @@ class AgentRunner:
                         await AgentRunner._save_result_to_session(
                             session, starting_input, temp_result
                         )
+                        # Optionally persist usage if supported
+                        if session is not None and hasattr(session, "add_usage_records"):
+                            try:
+                                await session.add_usage_records(streamed_result.raw_responses)
+                            except Exception:
+                                pass
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):

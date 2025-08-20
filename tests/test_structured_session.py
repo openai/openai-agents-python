@@ -18,13 +18,11 @@ async def test_structured_session_creation():
     """Test that structured session creates the additional tables."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_structured.db"
-        session = SQLiteSession("test_session", db_path, structured=True)
+        session = SQLiteSession("test_session", db_path, structured_metadata=True)
 
         # Check that the structured tables were created
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = [row[0] for row in cursor.fetchall()]
         conn.close()
 
@@ -33,6 +31,7 @@ async def test_structured_session_creation():
             "agent_messages",
             "agent_sessions",
             "agent_tool_calls",
+            "agent_usage",
         ]
         for table in expected_tables:
             assert table in tables
@@ -45,13 +44,11 @@ async def test_structured_session_disabled_by_default():
     """Test that structured tables are not created when structured=False."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_flat.db"
-        session = SQLiteSession("test_session", db_path, structured=False)
+        session = SQLiteSession("test_session", db_path, structured_metadata=False)
 
         # Check that only the basic tables were created
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = [row[0] for row in cursor.fetchall()]
         conn.close()
 
@@ -62,6 +59,7 @@ async def test_structured_session_disabled_by_default():
         # Structured tables should not exist
         assert "agent_conversation_messages" not in tables
         assert "agent_tool_calls" not in tables
+        assert "agent_usage" not in tables
 
         session.close()
 
@@ -71,7 +69,7 @@ async def test_structured_session_conversation_flow():
     """Test a full conversation flow with structured storage."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_conversation.db"
-        session = SQLiteSession("test_session", db_path, structured=True)
+        session = SQLiteSession("test_session", db_path, structured_metadata=True)
 
         # Create a simple tool for testing
         @function_tool
@@ -85,11 +83,7 @@ async def test_structured_session_conversation_flow():
         # Simulate a simple message without tool calls for this test
         model.set_next_output([get_text_message("I'll pick a random number: 42")])
 
-        await Runner.run(
-            agent,
-            "Pick a random number",
-            session=session
-        )
+        await Runner.run(agent, "Pick a random number", session=session)
 
         # Check that data was stored in structured tables
         conn = sqlite3.connect(str(db_path))
@@ -98,7 +92,7 @@ async def test_structured_session_conversation_flow():
         cursor = conn.execute(
             """SELECT role, content FROM agent_conversation_messages
                WHERE session_id = ? ORDER BY created_at""",
-            ("test_session",)
+            ("test_session",),
         )
         conversation_rows = cursor.fetchall()
 
@@ -109,11 +103,16 @@ async def test_structured_session_conversation_flow():
 
         # Check tool calls table (should be empty for this simple message test)
         cursor = conn.execute(
-            "SELECT COUNT(*) FROM agent_tool_calls WHERE session_id = ?",
-            ("test_session",)
+            "SELECT COUNT(*) FROM agent_tool_calls WHERE session_id = ?", ("test_session",)
         )
         tool_call_count = cursor.fetchone()[0]
         assert tool_call_count == 0  # No tool calls in this simple test
+
+        # Usage table exists; rows may be 0 depending on provider, but schema should be present
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_usage'"
+        )
+        assert cursor.fetchone() is not None
 
         conn.close()
         session.close()
@@ -124,7 +123,7 @@ async def test_structured_session_backward_compatibility():
     """Test that structured=True doesn't break existing functionality."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_compat.db"
-        session = SQLiteSession("test_session", db_path, structured=True)
+        session = SQLiteSession("test_session", db_path, structured_metadata=True)
 
         model = FakeModel()
         agent = Agent(name="test", model=model)
@@ -151,7 +150,7 @@ async def test_structured_session_pop_item():
     """Test that pop_item works correctly with structured storage."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_pop.db"
-        session = SQLiteSession("test_session", db_path, structured=True)
+        session = SQLiteSession("test_session", db_path, structured_metadata=True)
 
         # Add some test items
         items: list[TResponseInputItem] = [
@@ -170,7 +169,7 @@ async def test_structured_session_pop_item():
         conn = sqlite3.connect(str(db_path))
         cursor = conn.execute(
             "SELECT COUNT(*) FROM agent_conversation_messages WHERE session_id = ?",
-            ("test_session",)
+            ("test_session",),
         )
         count = cursor.fetchone()[0]
         conn.close()
@@ -186,7 +185,7 @@ async def test_structured_session_clear():
     """Test that clear_session works correctly with structured storage."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_clear.db"
-        session = SQLiteSession("test_session", db_path, structured=True)
+        session = SQLiteSession("test_session", db_path, structured_metadata=True)
 
         # Add some test items
         items: list[TResponseInputItem] = [
@@ -197,8 +196,8 @@ async def test_structured_session_clear():
                 "call_id": "call_123",
                 "name": "test_tool",
                 "arguments": '{"param": "value"}',
-                "status": "completed"
-            }
+                "status": "completed",
+            },
         ]
         await session.add_items(items)
 
@@ -209,20 +208,23 @@ async def test_structured_session_clear():
         conn = sqlite3.connect(str(db_path))
 
         cursor = conn.execute(
-            "SELECT COUNT(*) FROM agent_messages WHERE session_id = ?",
-            ("test_session",)
+            "SELECT COUNT(*) FROM agent_messages WHERE session_id = ?", ("test_session",)
         )
         assert cursor.fetchone()[0] == 0
 
         cursor = conn.execute(
             "SELECT COUNT(*) FROM agent_conversation_messages WHERE session_id = ?",
-            ("test_session",)
+            ("test_session",),
         )
         assert cursor.fetchone()[0] == 0
 
         cursor = conn.execute(
-            "SELECT COUNT(*) FROM agent_tool_calls WHERE session_id = ?",
-            ("test_session",)
+            "SELECT COUNT(*) FROM agent_tool_calls WHERE session_id = ?", ("test_session",)
+        )
+        assert cursor.fetchone()[0] == 0
+
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM agent_usage WHERE session_id = ?", ("test_session",)
         )
         assert cursor.fetchone()[0] == 0
 
@@ -237,8 +239,12 @@ async def test_flat_vs_structured_storage_equivalence():
         db_path_flat = Path(temp_dir) / "test_flat.db"
         db_path_structured = Path(temp_dir) / "test_structured.db"
 
-        session_flat = SQLiteSession("test_session", db_path_flat, structured=False)
-        session_structured = SQLiteSession("test_session", db_path_structured, structured=True)
+        session_flat = SQLiteSession("test_session", db_path_flat, structured_metadata=False)
+        session_structured = SQLiteSession(
+            "test_session",
+            db_path_structured,
+            structured_metadata=True,
+        )
 
         # Add the same items to both sessions
         items: list[TResponseInputItem] = [
@@ -249,13 +255,9 @@ async def test_flat_vs_structured_storage_equivalence():
                 "call_id": "call_123",
                 "name": "test_tool",
                 "arguments": '{"param": "value"}',
-                "status": "completed"
+                "status": "completed",
             },
-            {
-                "type": "function_call_output",
-                "call_id": "call_123",
-                "output": "result"
-            }
+            {"type": "function_call_output", "call_id": "call_123", "output": "result"},
         ]
 
         await session_flat.add_items(items)

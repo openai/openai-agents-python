@@ -1,8 +1,13 @@
-"""A script to test and demonstrate the structured session storage feature."""
+"""A script to test and demonstrate the structured metadata session storage feature."""
 
 import asyncio
+import os
 import random
 import sqlite3
+import sys
+
+# Add the parent directory to the path to import from the local package
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from agents import Agent, Runner, SQLiteSession, function_tool
 
@@ -23,41 +28,29 @@ async def main():
 
     # Create a session with structured storage enabled
     db_path = "structured_conversation_demo.db"
-    session = SQLiteSession("demo_session", db_path, structured=True)
+    session = SQLiteSession("demo_session", db_path, structured_metadata=True)
 
     print("=== Structured Session Storage Demo ===")
     print("This demo shows structured storage that makes conversations easy to query.\n")
 
     # First turn
     print("First turn:")
-    print("User: Pick a random number between 0 and 100")
-    result = await Runner.run(
-        agent,
-        "Pick a random number between 0 and 100",
-        session=session
-    )
+    print("User: Pick 3 random numbers between 0 and 100")
+    result = await Runner.run(agent, "Pick 3 random numbers between 0 and 100", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 
     # Second turn - the agent will remember the previous conversation
     print("Second turn:")
     print("User: What number did you pick for me?")
-    result = await Runner.run(
-        agent,
-        "What number did you pick for me?",
-        session=session
-    )
+    result = await Runner.run(agent, "What number did you pick for me?", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 
     # Third turn - another tool call
     print("Third turn:")
-    print("User: Now pick a number between 0 and 50")
-    result = await Runner.run(
-        agent,
-        "Now pick a number between 0 and 50",
-        session=session
-    )
+    print("User: Now pick one more number between 0 and 50")
+    result = await Runner.run(agent, "Now pick one more number between 0 and 50", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 
@@ -111,17 +104,29 @@ async def main():
         print(f"   {role}: {count} messages")
     print()
 
+    # Show usage rows with model and spans
+    print("4. Usage records (per model response):")
+    cursor = conn.execute(
+        """
+        SELECT response_id, model, requests, input_tokens, output_tokens, total_tokens, trace_id, span_id, created_at
+        FROM agent_usage
+        WHERE session_id = 'demo_session'
+        ORDER BY created_at
+        """
+    )
+    usage_rows = cursor.fetchall()
+    if not usage_rows:
+        print("   (no usage rows found — ensure your model/provider returns usage)")
+    for row in usage_rows:
+        response_id, model, requests, in_toks, out_toks, total, trace_id, span_id, created_at = row
+        print(
+            f"   model={model} resp_id={response_id} reqs={requests} in={in_toks} out={out_toks} total={total}"
+        )
+        print(f"   trace={trace_id} span={span_id} at={created_at}")
+        print()
+
     conn.close()
     session.close()
-
-    print("=== Query Examples ===")
-    print("You can now run SQL queries like:")
-    print("• SELECT * FROM agent_conversation_messages WHERE role = 'user';")
-    print("• SELECT tool_name, COUNT(*) FROM agent_tool_calls GROUP BY tool_name;")
-    print("• SELECT * FROM agent_tool_calls WHERE status = 'completed';")
-    print()
-    print("This makes conversation analysis, debugging, and building editing")
-    print("tools much easier than parsing JSON blobs!")
 
 
 if __name__ == "__main__":
