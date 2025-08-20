@@ -627,8 +627,8 @@ class SQLiteSession(SessionABC):
     async def add_usage_records(self, responses: list[ModelResponse]) -> None:
         """Optionally store usage rows for a set of model responses.
 
-        This is best-effort and only active when structured=True. It is safe to call even if
-        structured=False.
+        Best-effort and only active when structured_metadata=True. It is safe to call even if
+        structured_metadata=False.
         """
         if not self.structured_metadata or not responses:
             return
@@ -695,8 +695,8 @@ class SQLiteSession(SessionABC):
                         pass
 
                     conn.execute(
-                        """
-                        INSERT INTO agent_usage (
+                        f"""
+                        INSERT INTO {self.usage_table} (
                             session_id, response_id, model, requests, input_tokens,
                             output_tokens, total_tokens, input_tokens_details,
                             output_tokens_details, trace_id, span_id

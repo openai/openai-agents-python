@@ -41,7 +41,7 @@ async def test_structured_session_creation():
 
 @pytest.mark.asyncio
 async def test_structured_session_disabled_by_default():
-    """Test that structured tables are not created when structured=False."""
+    """Test that structured tables are not created when structured_metadata=False."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_flat.db"
         session = SQLiteSession("test_session", db_path, structured_metadata=False)
@@ -120,7 +120,7 @@ async def test_structured_session_conversation_flow():
 
 @pytest.mark.asyncio
 async def test_structured_session_backward_compatibility():
-    """Test that structured=True doesn't break existing functionality."""
+    """Test that structured_metadata=True doesn't break existing functionality."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_compat.db"
         session = SQLiteSession("test_session", db_path, structured_metadata=True)
