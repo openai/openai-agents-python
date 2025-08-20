@@ -10,13 +10,14 @@ Tools let agents take actions: things like fetching data, running code, calling 
 
 OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]:
 
--   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
--   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
--   The [`ComputerTool`][agents.tool.ComputerTool] allows automating computer use tasks.
--   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
--   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
--   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
--   The [`LocalShellTool`][agents.tool.LocalShellTool] runs shell commands on your machine.
+- The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web for real-time information.  
+- The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores or uploaded files.  
+- The [`ComputerTool`][agents.tool.ComputerTool] enables automating computer tasks programmatically.  
+- The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code safely in a sandboxed environment.  
+- The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the agent.  
+- The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from text prompts using a hosted service.  
+- The [`LocalShellTool`][agents.tool.LocalShellTool] allows running shell commands on your **local machine**. ⚠️ **This is not a hosted tool** — be careful with permissions and security.  
+
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
