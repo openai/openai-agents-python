@@ -407,42 +407,6 @@ class SQLiteSession(SessionABC):
             """
             )
 
-            # Best-effort migration: add missing columns if the tables already existed
-            def _ensure_column(table: str, name: str, col_type: str) -> None:
-                cur = conn.execute(f"PRAGMA table_info({table})")
-                cols = [row[1] for row in cur.fetchall()]
-                if name not in cols:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
-
-            for t, cols in (
-                (
-                    self.conversation_table,
-                    (
-                        ("parent_raw_event_id", "INTEGER"),
-                        ("trace_id", "TEXT"),
-                        ("span_id", "TEXT"),
-                    ),
-                ),
-                (
-                    self.tool_calls_table,
-                    (
-                        ("trace_id", "TEXT"),
-                        ("span_id", "TEXT"),
-                    ),
-                ),
-                (
-                    self.usage_table,
-                    (
-                        ("trace_id", "TEXT"),
-                        ("span_id", "TEXT"),
-                    ),
-                ),
-            ):
-                for name, col_type in cols:
-                    _ensure_column(t, name, col_type)
-
-            conn.commit()
-
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
