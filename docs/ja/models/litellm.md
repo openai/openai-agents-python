@@ -2,13 +2,13 @@
 search:
   exclude: true
 ---
-# LiteLLM による任意モデルの利用
+# LiteLLM 経由での任意のモデル利用
 
 !!! note
 
-    LiteLLM 統合はベータ版です。特に小規模なモデルプロバイダーで問題が発生する可能性があります。問題があれば [GitHub Issues](https://github.com/openai/openai-agents-python/issues) に報告してください。迅速に修正します。
+    LiteLLM 統合はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題がありましたら [GitHub issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に対応します。
 
-[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100 以上のモデルを利用できるライブラリです。Agents SDK で任意の AI モデルを使えるよう、LiteLLM 統合を追加しました。
+[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ のモデルを利用できるライブラリです。Agents SDK で任意の AI モデルを使えるように、LiteLLM 統合を追加しました。
 
 ## セットアップ
 
@@ -18,7 +18,7 @@ search:
 pip install "openai-agents[litellm]"
 ```
 
-完了したら、どの エージェント でも [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
+完了したら、任意の エージェント で [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
 
 ## 例
 
@@ -28,7 +28,7 @@ pip install "openai-agents[litellm]"
 -   モデルに `anthropic/claude-3-5-sonnet-20240620`、API キーに Anthropic の API キー
 -   など
 
-LiteLLM でサポートされているモデルの一覧は、[litellm providers docs](https://docs.litellm.ai/docs/providers) を参照してください。
+LiteLLM でサポートされているモデルの全リストは、[litellm プロバイダーのドキュメント](https://docs.litellm.ai/docs/providers) を参照してください。
 
 ```python
 from __future__ import annotations
