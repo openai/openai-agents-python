@@ -111,6 +111,8 @@ class RealtimeWebSocketManager:
             }
         elif event.type == "error":
             base_event["error"] = str(event.error) if hasattr(event, "error") else "Unknown error"
+        elif event.type == "input_audio_timeout_triggered":
+            pass
         else:
             assert_never(event)
 

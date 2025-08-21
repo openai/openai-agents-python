@@ -28,6 +28,7 @@ from .events import (
     RealtimeHandoffEvent,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
+    RealtimeInputAudioTimeoutTriggered,
     RealtimeRawModelEvent,
     RealtimeSessionEvent,
     RealtimeToolEnd,
@@ -226,6 +227,12 @@ class RealtimeSession(RealtimeModelListener):
             self._history = RealtimeSession._get_new_history(self._history, event)
             await self._put_event(
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+            )
+        elif event.type == "input_audio_timeout_triggered":
+            await self._put_event(
+                RealtimeInputAudioTimeoutTriggered(
+                    info=self._event_info,
+                )
             )
         elif event.type == "transcript_delta":
             # Accumulate transcript text for guardrail debouncing per item_id
