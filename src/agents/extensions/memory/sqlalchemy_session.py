@@ -171,6 +171,10 @@ class SQLAlchemySession(SessionABC):
         """Serialize an item to JSON string. Can be overridden by subclasses."""
         return json.dumps(item, separators=(",", ":"))
 
+    def _deserialize_item(self, item: str) -> TResponseInputItem:
+        """Deserialize a JSON string to an item. Can be overridden by subclasses."""
+        return json.loads(item)
+
     # ------------------------------------------------------------------
     # Session protocol implementation
     # ------------------------------------------------------------------
@@ -209,7 +213,7 @@ class SQLAlchemySession(SessionABC):
             items: list[TResponseInputItem] = []
             for raw in rows:
                 try:
-                    items.append(json.loads(raw))
+                    items.append(self._deserialize_item(raw))
                 except json.JSONDecodeError:
                     # Skip corrupted rows
                     continue
@@ -278,7 +282,7 @@ class SQLAlchemySession(SessionABC):
                 if row is None:
                     return None
                 try:
-                    return json.loads(row)  # type: ignore[no-any-return]
+                    return self._deserialize_item(row)  # type: ignore[no-any-return]
                 except json.JSONDecodeError:
                     return None
 
