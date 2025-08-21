@@ -167,6 +167,10 @@ class SQLAlchemySession(SessionABC):
         engine = create_async_engine(url, **engine_kwargs)
         return cls(session_id, engine=engine, **kwargs)
 
+    def _serialize_item(self, item: TResponseInputItem) -> str:
+        """Serialize an item to JSON string. Can be overridden by subclasses."""
+        return json.dumps(item, separators=(",", ":"))
+
     # ------------------------------------------------------------------
     # Session protocol implementation
     # ------------------------------------------------------------------
@@ -219,7 +223,7 @@ class SQLAlchemySession(SessionABC):
         payload = [
             {
                 "session_id": self.session_id,
-                "message_data": json.dumps(item, separators=(",", ":")),
+                "message_data": self._serialize_item(item),
             }
             for item in items
         ]
