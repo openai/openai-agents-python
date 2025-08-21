@@ -78,6 +78,9 @@ class RealtimeTurnDetectionConfig(TypedDict):
     threshold: NotRequired[float]
     """The threshold for voice activity detection."""
 
+    idle_timeout_ms: NotRequired[int]
+    """Threshold for server-vad to trigger a response if the user is idle for this duration."""
+
 
 class RealtimeSessionModelSettings(TypedDict):
     """Model settings for a realtime model session."""

@@ -42,7 +42,13 @@ class RealtimeWebSocketManager:
 
         agent = get_starting_agent()
         runner = RealtimeRunner(agent)
-        session_context = await runner.run()
+        session_context = await runner.run(
+            model_config={
+                "initial_model_settings": {
+                    "turn_detection": {"type": "server_vad", "idle_timeout_ms": 5000}
+                }
+            }
+        )
         session = await session_context.__aenter__()
         self.active_sessions[session_id] = session
         self.session_contexts[session_id] = session_context
@@ -111,6 +117,8 @@ class RealtimeWebSocketManager:
             }
         elif event.type == "error":
             base_event["error"] = str(event.error) if hasattr(event, "error") else "Unknown error"
+        elif event.type == "input_audio_timeout_triggered":
+            pass
         else:
             assert_never(event)
 
