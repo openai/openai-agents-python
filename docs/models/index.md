@@ -9,7 +9,7 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 
 When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1), which offers a strong balance of predictability for agentic workflows and low latency.
 
-If you want to switch to other models like [`gpt-5`](https://platform.openai.com/docs/models/gpt-5), there are two ways to configure your agents.
+If you want to switch to other models like [`gpt-5`](https://platform.openai.com/docs/models/gpt-5), follow the steps in the next section.
 
 ### Default OpenAI model
 
