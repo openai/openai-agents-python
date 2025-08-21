@@ -167,11 +167,11 @@ class SQLAlchemySession(SessionABC):
         engine = create_async_engine(url, **engine_kwargs)
         return cls(session_id, engine=engine, **kwargs)
 
-    def _serialize_item(self, item: TResponseInputItem) -> str:
+    async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
         return json.dumps(item, separators=(",", ":"))
 
-    def _deserialize_item(self, item: str) -> TResponseInputItem:
+    async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
         return json.loads(item)  # type: ignore[no-any-return]
 
@@ -213,7 +213,7 @@ class SQLAlchemySession(SessionABC):
             items: list[TResponseInputItem] = []
             for raw in rows:
                 try:
-                    items.append(self._deserialize_item(raw))
+                    items.append(await self._deserialize_item(raw))
                 except json.JSONDecodeError:
                     # Skip corrupted rows
                     continue
@@ -227,7 +227,7 @@ class SQLAlchemySession(SessionABC):
         payload = [
             {
                 "session_id": self.session_id,
-                "message_data": self._serialize_item(item),
+                "message_data": await self._serialize_item(item),
             }
             for item in items
         ]
@@ -282,7 +282,7 @@ class SQLAlchemySession(SessionABC):
                 if row is None:
                     return None
                 try:
-                    return self._deserialize_item(row)
+                    return await self._deserialize_item(row)
                 except json.JSONDecodeError:
                     return None
 
