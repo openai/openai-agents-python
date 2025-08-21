@@ -31,6 +31,7 @@ from sqlalchemy import (
     TIMESTAMP,
     Column,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
@@ -122,16 +123,12 @@ class SQLAlchemySession(SessionABC):
                 server_default=sql_text("CURRENT_TIMESTAMP"),
                 nullable=False,
             ),
+            Index(
+                f"idx_{messages_table}_session_time",
+                "session_id",
+                "created_at",
+            ),
             sqlite_autoincrement=True,
-        )
-
-        # Index for efficient retrieval of messages per session ordered by time
-        from sqlalchemy import Index
-
-        Index(
-            f"idx_{messages_table}_session_time",
-            self._messages.c.session_id,
-            self._messages.c.created_at,
         )
 
         # Async session factory
