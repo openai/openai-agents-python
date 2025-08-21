@@ -337,6 +337,8 @@ class RealtimeSession(RealtimeModelListener):
         elif event.type == "exception":
             # Store the exception to be raised in __aiter__
             self._stored_exception = event.exception
+        elif event.type == "input_audio_buffer.timeout_triggered":
+            pass
         elif event.type == "other":
             pass
         elif event.type == "raw_server_event":

@@ -83,6 +83,7 @@ from .model_events import (
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
+    RealtimeModelInputAudioBufferTimeoutEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
@@ -459,6 +460,16 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
+        if isinstance(event, dict) and event.get("type") == "input_audio_buffer.timeout_triggered":
+            await self._emit_event(
+                RealtimeModelInputAudioBufferTimeoutEvent(
+                    event_id=event["event_id"],
+                    audio_start_ms=event["audio_start_ms"],
+                    audio_end_ms=event["audio_end_ms"],
+                    item_id=event["item_id"],
+                )
+            )
+            return
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
@@ -580,6 +591,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             ),
             voice=model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice")),
             speed=model_settings.get("speed", None),
+            idle_timeout_ms=model_settings.get("idle_timeout_ms", None),
             modalities=model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities")),
             input_audio_format=model_settings.get(
                 "input_audio_format",

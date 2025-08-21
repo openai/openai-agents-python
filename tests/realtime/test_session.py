@@ -37,6 +37,7 @@ from agents.realtime.model_events import (
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelConnectionStatusEvent,
     RealtimeModelErrorEvent,
+    RealtimeModelInputAudioBufferTimeoutEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
@@ -366,6 +367,25 @@ class TestEventHandling:
         for _ in range(3):
             event = await session._event_queue.get()
             assert isinstance(event, RealtimeRawModelEvent)
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_event_forwarded(self, mock_model, mock_agent):
+        """Test that idle timeout events are forwarded as raw model events."""
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        timeout_event = RealtimeModelInputAudioBufferTimeoutEvent(
+            event_id="evt_1",
+            audio_start_ms=0,
+            audio_end_ms=500,
+            item_id="item_1",
+        )
+
+        await session.on_event(timeout_event)
+
+        assert session._event_queue.qsize() == 1
+        event = await session._event_queue.get()
+        assert isinstance(event, RealtimeRawModelEvent)
+        assert event.data == timeout_event
 
     @pytest.mark.asyncio
     async def test_function_call_event_triggers_tool_handling(self, mock_model, mock_agent):
@@ -1357,6 +1377,27 @@ class TestModelSettingsIntegration:
         assert initial_settings["instructions"] == "Test agent instructions"
         assert initial_settings["tools"] == [{"type": "function", "name": "test_tool"}]
         assert initial_settings["handoffs"] == []
+
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_ms_passed_to_model(self):
+        """Test that idle_timeout_ms is forwarded to the model connect settings."""
+        mock_model = Mock(spec=RealtimeModel)
+        mock_model.connect = AsyncMock()
+        mock_model.add_listener = Mock()
+
+        agent = Mock(spec=RealtimeAgent)
+        agent.get_system_prompt = AsyncMock(return_value="")
+        agent.get_all_tools = AsyncMock(return_value=[])
+        agent.handoffs = []
+
+        run_config: RealtimeRunConfig = {"model_settings": {"idle_timeout_ms": 1000}}
+        session = RealtimeSession(mock_model, agent, None, run_config=run_config)
+
+        await session.__aenter__()
+        connect_config = mock_model.connect.call_args[0][0]
+        assert connect_config["initial_model_settings"]["idle_timeout_ms"] == 1000
 
         await session.__aexit__(None, None, None)
 
