@@ -19,29 +19,28 @@ Explore the [examples](examples) directory to see the SDK in action, and read ou
 
 ## Get started
 
-1. Set up your Python environment
+To get started, set up your Python environment (Python 3.9 or newer required), and then install OpenAI Agents SDK package.
 
--   Option A: Using venv (traditional method)
-
-```bash
-python -m venv env
-source env/bin/activate  # On Windows: env\Scripts\activate
-```
-
--   Option B: Using uv (recommended)
+### venv
 
 ```bash
-uv venv
+python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-2. Install Agents SDK
-
-```bash
 pip install openai-agents
 ```
 
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
+
+### uv
+
+If you're familiar with [uv](https://docs.astral.sh/uv/), using the tool would be even similar:
+
+```bash
+uv init
+uv add openai-agents
+```
+
+For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`.
 
 ## Hello world example
 

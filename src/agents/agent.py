@@ -205,8 +205,9 @@ class Agent(AgentBase, Generic[TContext]):
     This lets you configure how tool use is handled.
     - "run_llm_again": The default behavior. Tools are run, and then the LLM receives the results
         and gets to respond.
-    - "stop_on_first_tool": The output of the first tool call is used as the final output. This
-        means that the LLM does not process the result of the tool call.
+    - "stop_on_first_tool": The output from the first tool call is treated as the final result.
+        In other words, it isn’t sent back to the LLM for further processing but is used directly
+        as the final output.
     - A StopAtTools object: The agent will stop running if any of the tools listed in
         `stop_at_tool_names` is called.
         The final output will be the output of the first matching tool call.
@@ -356,6 +357,8 @@ class Agent(AgentBase, Generic[TContext]):
         tool_name: str | None,
         tool_description: str | None,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+        is_enabled: bool
+        | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -371,11 +374,15 @@ class Agent(AgentBase, Generic[TContext]):
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
                 provided, the last message from the agent will be used.
+            is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
+                context and agent and returns whether the tool is enabled. Disabled tools are hidden
+                from the LLM at runtime.
         """
 
         @function_tool(
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
+            is_enabled=is_enabled,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner

@@ -216,6 +216,16 @@ class RealtimeGuardrailTripped:
     type: Literal["guardrail_tripped"] = "guardrail_tripped"
 
 
+@dataclass
+class RealtimeInputAudioTimeoutTriggered:
+    """Called when the model detects a period of inactivity/silence from the user."""
+
+    info: RealtimeEventInfo
+    """Common info for all events, such as the context."""
+
+    type: Literal["input_audio_timeout_triggered"] = "input_audio_timeout_triggered"
+
+
 RealtimeSessionEvent: TypeAlias = Union[
     RealtimeAgentStartEvent,
     RealtimeAgentEndEvent,
@@ -230,5 +240,6 @@ RealtimeSessionEvent: TypeAlias = Union[
     RealtimeHistoryUpdated,
     RealtimeHistoryAdded,
     RealtimeGuardrailTripped,
+    RealtimeInputAudioTimeoutTriggered,
 ]
 """An event emitted by the realtime session."""
