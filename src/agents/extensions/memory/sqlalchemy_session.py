@@ -190,6 +190,8 @@ class SQLAlchemySession(SessionABC):
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
+                    # Use DESC + LIMIT to get the latest N
+                    # then reverse later for chronological order.
                     .order_by(self._messages.c.created_at.desc())
                     .limit(limit)
                 )
@@ -198,7 +200,7 @@ class SQLAlchemySession(SessionABC):
             rows: list[str] = [row[0] for row in result.all()]
 
             if limit is not None:
-                rows.reverse()  # chronological order
+                rows.reverse()
 
             items: list[TResponseInputItem] = []
             for raw in rows:
