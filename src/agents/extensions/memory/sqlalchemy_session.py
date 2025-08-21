@@ -173,7 +173,7 @@ class SQLAlchemySession(SessionABC):
 
     def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
-        return json.loads(item)
+        return json.loads(item)  # type: ignore[no-any-return]
 
     # ------------------------------------------------------------------
     # Session protocol implementation
@@ -282,7 +282,7 @@ class SQLAlchemySession(SessionABC):
                 if row is None:
                     return None
                 try:
-                    return self._deserialize_item(row)  # type: ignore[no-any-return]
+                    return self._deserialize_item(row)
                 except json.JSONDecodeError:
                     return None
 
