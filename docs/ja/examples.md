@@ -36,6 +36,13 @@ search:
 - **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
   MCP を使って エージェント を構築する方法を学べます。
 
+- **[workflows](https://github.com/openai/openai-agents-python/tree/main/examples/workflows):**
+  マルチエージェントの相互作用を調整する宣言的ワークフローシステムの例：
+
+    - 宣言的ワークフロー定義
+    - 複数の接続タイプ（ハンドオフ、ツール、シーケンシャル、条件付き、並列）
+    - 複雑なマルチエージェントオーケストレーションパターン
+
 - **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service)** と **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
   実運用のユースケースを示す、作り込まれたコード例が 2 つあります。
 

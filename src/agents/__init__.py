@@ -122,6 +122,16 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
+from .workflow import (
+    ConditionalConnection,
+    Connection,
+    HandoffConnection,
+    ParallelConnection,
+    SequentialConnection,
+    ToolConnection,
+    Workflow,
+    WorkflowResult,
+)
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
@@ -290,4 +300,12 @@ __all__ = [
     "gen_span_id",
     "default_tool_error_function",
     "__version__",
+    "Connection",
+    "ConditionalConnection",
+    "HandoffConnection",
+    "ParallelConnection",
+    "SequentialConnection",
+    "ToolConnection",
+    "Workflow",
+    "WorkflowResult",
 ]

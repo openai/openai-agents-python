@@ -64,6 +64,7 @@ plugins:
                 - tools.md
                 - mcp.md
                 - handoffs.md
+                - workflows.md
                 - tracing.md
                 - context.md
                 - guardrails.md
@@ -94,6 +95,7 @@ plugins:
                     - ref/result.md
                     - ref/stream_events.md
                     - ref/handoffs.md
+                    - ref/workflow.md
                     - ref/lifecycle.md
                     - ref/items.md
                     - ref/run_context.md
@@ -162,6 +164,7 @@ plugins:
                 - tools.md
                 - mcp.md
                 - handoffs.md
+                - workflows.md
                 - tracing.md
                 - context.md
                 - guardrails.md

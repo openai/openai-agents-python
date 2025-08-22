@@ -132,9 +132,7 @@ class SQLAlchemySession(SessionABC):
         )
 
         # Async session factory
-        self._session_factory = async_sessionmaker(
-            self._engine, expire_on_commit=False
-        )
+        self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
         self._create_tables = create_tables
 

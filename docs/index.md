@@ -4,6 +4,7 @@ The [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) enables 
 
 -   **Agents**, which are LLMs equipped with instructions and tools
 -   **Handoffs**, which allow agents to delegate to other agents for specific tasks
+-   **Workflows**, which provide declarative orchestration of multi-agent interactions
 -   **Guardrails**, which enable validation of agent inputs and outputs
 -   **Sessions**, which automatically maintains conversation history across agent runs
 
@@ -21,6 +22,7 @@ Here are the main features of the SDK:
 -   Agent loop: Built-in agent loop that handles calling tools, sending results to the LLM, and looping until the LLM is done.
 -   Python-first: Use built-in language features to orchestrate and chain agents, rather than needing to learn new abstractions.
 -   Handoffs: A powerful feature to coordinate and delegate between multiple agents.
+-   Workflows: Declarative orchestration system for complex multi-agent interactions with multiple connection patterns.
 -   Guardrails: Run input validations and checks in parallel to your agents, breaking early if the checks fail.
 -   Sessions: Automatic conversation history management across agent runs, eliminating manual state handling.
 -   Function tools: Turn any Python function into a tool, with automatic schema generation and Pydantic-powered validation.
