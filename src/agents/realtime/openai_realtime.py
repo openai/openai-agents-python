@@ -148,7 +148,7 @@ AllRealtimeServerEvents = Annotated[
 ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
 
 
-def get_server_event_type_adapter():
+def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
     global ServerEventTypeAdapter
     if not ServerEventTypeAdapter:
         ServerEventTypeAdapter = TypeAdapter(AllRealtimeServerEvents)
@@ -490,7 +490,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
-            parsed: OpenAIRealtimeServerEvent = self._server_event_type_adapter.validate_python(
+            parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(
                 event
             )
         except pydantic.ValidationError as e:
