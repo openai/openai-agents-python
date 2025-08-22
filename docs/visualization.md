@@ -82,6 +82,10 @@ The generated graph includes:
   - **Dashed arrows** for MCP server invocations.
 - An **end node** (`__end__`) indicating where execution terminates.
 
+**Note:** MCP servers are rendered in recent versions of the
+`agents` package (verified in **v0.2.8**). If you don’t see MCP boxes
+in your visualization, upgrade to the latest release.
+
 ## Customizing the Graph
 
 ### Showing the Graph

@@ -291,7 +291,7 @@ def function_schema(
             # Default factory to empty list
             fields[name] = (
                 ann,
-                Field(default_factory=list, description=field_description),  # type: ignore
+                Field(default_factory=list, description=field_description),
             )
 
         elif param.kind == param.VAR_KEYWORD:
@@ -309,7 +309,7 @@ def function_schema(
 
             fields[name] = (
                 ann,
-                Field(default_factory=dict, description=field_description),  # type: ignore
+                Field(default_factory=dict, description=field_description),
             )
 
         else:
