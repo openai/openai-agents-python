@@ -264,7 +264,11 @@ LocalShellExecutor = Callable[[LocalShellCommandRequest], MaybeAwaitable[str]]
 
 @dataclass
 class LocalShellTool:
-    """A tool that allows the LLM to execute commands on a shell."""
+    """A tool that allows the LLM to execute commands on a shell.
+
+    For more details, see:
+    https://platform.openai.com/docs/guides/tools-local-shell
+    """
 
     executor: LocalShellExecutor
     """A function that executes a command on a shell."""

@@ -4,11 +4,12 @@ import json
 import logging
 import struct
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, assert_never
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
 
@@ -111,6 +112,8 @@ class RealtimeWebSocketManager:
             }
         elif event.type == "error":
             base_event["error"] = str(event.error) if hasattr(event, "error") else "Unknown error"
+        elif event.type == "input_audio_timeout_triggered":
+            pass
         else:
             assert_never(event)
 
