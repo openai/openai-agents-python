@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -143,6 +144,12 @@ class RunResultStreaming(RunResultBase):
     is_complete: bool = False
     """Whether the agent has finished running."""
 
+    _emit_status_events: bool = False
+    """Whether to emit RunUpdatedStreamEvent status updates.
+
+    Defaults to False for backward compatibility.
+    """
+
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
         default_factory=asyncio.Queue, repr=False
@@ -164,17 +171,45 @@ class RunResultStreaming(RunResultBase):
         """
         return self.current_agent
 
-    def cancel(self) -> None:
-        """Cancels the streaming run, stopping all background tasks and marking the run as
-        complete."""
-        self._cleanup_tasks()  # Cancel all running tasks
-        self.is_complete = True  # Mark the run as complete to stop event streaming
+    def cancel(self, reason: str | None = None) -> None:
+        # 1) Signal cooperative cancel to the runner
+        active = getattr(self, "_active_run", None)
+        if active:
+            with contextlib.suppress(Exception):
+                active.cancel(reason)
+        # 2) Do NOT cancel the background task; let the loop unwind cooperatively
+        # task = getattr(self, "_run_impl_task", None)
+        # if task and not task.done():
+        #     with contextlib.suppress(Exception):
+        #         task.cancel()
 
-        # Optionally, clear the event queue to prevent processing stale events
-        while not self._event_queue.empty():
-            self._event_queue.get_nowait()
-        while not self._input_guardrail_queue.empty():
-            self._input_guardrail_queue.get_nowait()
+        # 4) Mark complete; flushing only when status events are disabled
+        self.is_complete = True
+        if not getattr(self, "_emit_status_events", False):
+            with contextlib.suppress(Exception):
+                while not self._event_queue.empty():
+                    self._event_queue.get_nowait()
+                    self._event_queue.task_done()
+            with contextlib.suppress(Exception):
+                while not self._input_guardrail_queue.empty():
+                    self._input_guardrail_queue.get_nowait()
+                    self._input_guardrail_queue.task_done()
+
+    def inject(self, items: list[TResponseInputItem]) -> None:
+        """
+        Inject new input items mid-run. They will be consumed at the start of the next step.
+        """
+        active = getattr(self, "_active_run", None)
+        if active is not None:
+            try:
+                active.inject(items)
+            except Exception:
+                pass
+
+    @property
+    def active_run(self):
+        """Access the underlying ActiveRun handle (may be None early in startup)."""
+        return getattr(self, "_active_run", None)
 
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """Stream deltas for new items as they are generated. We're using the types from the
@@ -243,21 +278,33 @@ class RunResultStreaming(RunResultBase):
         # Check the tasks for any exceptions
         if self._run_impl_task and self._run_impl_task.done():
             run_impl_exc = self._run_impl_task.exception()
-            if run_impl_exc and isinstance(run_impl_exc, Exception):
+            if (
+                run_impl_exc
+                and isinstance(run_impl_exc, Exception)
+                and not isinstance(run_impl_exc, asyncio.CancelledError)
+            ):
                 if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
                     run_impl_exc.run_data = self._create_error_details()
                 self._stored_exception = run_impl_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
             in_guard_exc = self._input_guardrails_task.exception()
-            if in_guard_exc and isinstance(in_guard_exc, Exception):
+            if (
+                in_guard_exc
+                and isinstance(in_guard_exc, Exception)
+                and not isinstance(in_guard_exc, asyncio.CancelledError)
+            ):
                 if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
                     in_guard_exc.run_data = self._create_error_details()
                 self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
             out_guard_exc = self._output_guardrails_task.exception()
-            if out_guard_exc and isinstance(out_guard_exc, Exception):
+            if (
+                out_guard_exc
+                and isinstance(out_guard_exc, Exception)
+                and not isinstance(out_guard_exc, asyncio.CancelledError)
+            ):
                 if isinstance(out_guard_exc, AgentsException) and out_guard_exc.run_data is None:
                     out_guard_exc.run_data = self._create_error_details()
                 self._stored_exception = out_guard_exc
