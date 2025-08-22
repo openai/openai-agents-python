@@ -136,6 +136,7 @@ class _InputAudioBufferTimeoutTriggeredEvent(BaseModel):
     audio_end_ms: int
     item_id: str
 
+
 AllRealtimeServerEvents = Annotated[
     Union[
         OpenAIRealtimeServerEvent,
@@ -143,6 +144,15 @@ AllRealtimeServerEvents = Annotated[
     ],
     Field(discriminator="type"),
 ]
+
+ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
+
+
+def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
+    global ServerEventTypeAdapter
+    if not ServerEventTypeAdapter:
+        ServerEventTypeAdapter = TypeAdapter(AllRealtimeServerEvents)
+    return ServerEventTypeAdapter
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -159,6 +169,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionObject | None = None
+        self._server_event_type_adapter = get_server_event_type_adapter()
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -490,9 +501,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
-            parsed: AllRealtimeServerEvents = TypeAdapter(
-                AllRealtimeServerEvents
-            ).validate_python(event)
+            parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(
+                event
+            )
         except pydantic.ValidationError as e:
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
             await self._emit_event(
