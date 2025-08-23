@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, TypeVar, cast
 from ..agent import Agent
 from ..exceptions import UserError
 from ..handoffs import HandoffInputData, handoff
+from ..items import HandoffOutputItem
 from ..result import RunResult
 from ..run_context import RunContextWrapper
 from ..util._types import MaybeAwaitable
@@ -55,6 +56,37 @@ class Connection(abc.ABC, Generic[TContext]):
         """
         pass
 
+    def should_execute(
+        self,
+        context: RunContextWrapper[TContext],
+        previous_result: RunResult | None = None,
+    ) -> bool:
+        """Determine if this connection should be executed.
+
+        Args:
+            context: The run context wrapper
+            previous_result: Result from the previous step in the workflow
+
+        Returns:
+            True if the connection should be executed, False to skip
+        """
+        return True
+
+    def _handoff_occurred(self, result: RunResult, target_agent_name: str) -> bool:
+        """Check if a handoff to the target agent occurred in the result.
+
+        Args:
+            result: The run result to check
+            target_agent_name: Name of the target agent to check for
+
+        Returns:
+            True if a handoff to the target agent occurred
+        """
+        for item in result.new_items:
+            if isinstance(item, HandoffOutputItem) and item.target_agent.name == target_agent_name:
+                return True
+        return False
+
 
 @dataclass
 class HandoffConnection(Connection[TContext]):
@@ -62,6 +94,9 @@ class HandoffConnection(Connection[TContext]):
 
     The target agent takes over the conversation and sees the full conversation history.
     This is useful for routing tasks to specialized agents.
+
+    If the handoff does not occur during execution, subsequent connections that depend
+    on the target agent may be skipped in the workflow.
     """
 
     tool_name_override: str | None = None
@@ -115,6 +150,9 @@ class ToolConnection(Connection[TContext]):
 
     The source agent calls the target agent as a tool and continues with the result.
     This is useful for modular functionality and parallel processing.
+
+    If the from_agent matches a target agent from a previous handoff connection,
+    this connection will only execute if that handoff actually occurred.
     """
 
     tool_name: str | None = None
@@ -143,6 +181,31 @@ class ToolConnection(Connection[TContext]):
 
         # Clone the from_agent and add the tool
         return self.from_agent.clone(tools=[*self.from_agent.tools, tool])
+
+    def should_execute(
+        self,
+        context: RunContextWrapper[TContext],
+        previous_result: RunResult | None = None,
+    ) -> bool:
+        """Determine if this tool connection should be executed.
+
+        Tool connections are conditional - they only execute if the from_agent
+        is currently active (either as the last agent or via handoff).
+
+        Args:
+            context: The run context wrapper
+            previous_result: Result from the previous step in the workflow
+
+        Returns:
+            True if the connection should be executed, False to skip
+        """
+        if previous_result is None:
+            return True
+
+        # Execute if the from_agent is the last active agent or was handed off to.
+        return previous_result.last_agent.name == self.from_agent.name or self._handoff_occurred(
+            previous_result, self.from_agent.name
+        )
 
     async def execute(
         self,
@@ -177,6 +240,9 @@ class SequentialConnection(Connection[TContext]):
 
     This creates a pipeline where each agent processes the result of the previous one.
     Useful for multi-step transformations and processing chains.
+
+    If the from_agent matches a target agent from a previous handoff connection,
+    this connection will only execute if that handoff actually occurred.
     """
 
     output_transformer: Callable[[RunResult], Any] | None = None
@@ -184,6 +250,31 @@ class SequentialConnection(Connection[TContext]):
     def prepare_agent(self, context: RunContextWrapper[TContext]) -> Agent[TContext]:
         """Return the target agent as-is for sequential execution."""
         return self.to_agent
+
+    def should_execute(
+        self,
+        context: RunContextWrapper[TContext],
+        previous_result: RunResult | None = None,
+    ) -> bool:
+        """Determine if this sequential connection should be executed.
+
+        Sequential connections are conditional - they only execute if the from_agent
+        is currently active (either as the last agent or via handoff).
+
+        Args:
+            context: The run context wrapper
+            previous_result: Result from the previous step in the workflow
+
+        Returns:
+            True if the connection should be executed, False to skip
+        """
+        if previous_result is None:
+            return True
+
+        # Execute if the from_agent is the last active agent or was handed off to.
+        return previous_result.last_agent.name == self.from_agent.name or self._handoff_occurred(
+            previous_result, self.from_agent.name
+        )
 
     async def execute(
         self,

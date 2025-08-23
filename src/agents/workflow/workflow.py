@@ -29,6 +29,9 @@ class WorkflowResult(Generic[TContext]):
     context: TContext
     """The final context state after workflow execution."""
 
+    skipped_connections: list[int] = field(default_factory=list)
+    """Indices of connections that were skipped during execution."""
+
 
 @dataclass
 class Workflow(Generic[TContext]):
@@ -37,8 +40,10 @@ class Workflow(Generic[TContext]):
     !!! warning "Beta Feature"
         The Workflow system is currently in beta. The API may change in future releases.
 
-    Workflows define a sequence of agent connections that are executed in order.
+    Workflows define a sequence of agent connections that are executed conditionally.
     Each connection specifies how agents interact (handoff, tool call, sequential, etc.).
+    Connections may be skipped if their preconditions are not met (e.g., required handoffs
+    did not occur).
 
     Example:
         ```python
@@ -70,6 +75,24 @@ class Workflow(Generic[TContext]):
     step_results: list[RunResult] = field(default_factory=list, init=False)
     """Internal storage for step results during execution."""
 
+    _skipped_connections: list[int] = field(default_factory=list, init=False)
+    """Internal storage for skipped connection indices during execution."""
+
+    def _get_all_handoff_targets(self) -> set[str]:
+        """Get all agent names that have been handoff targets in this workflow.
+
+        Returns:
+            Set of agent names that have been handoff targets
+        """
+        from ..items import HandoffOutputItem
+
+        handoff_targets = set()
+        for result in self.step_results:
+            for item in result.new_items:
+                if isinstance(item, HandoffOutputItem):
+                    handoff_targets.add(item.target_agent.name)
+        return handoff_targets
+
     def __post_init__(self) -> None:
         """Validate workflow configuration."""
         if not self.connections:
@@ -100,18 +123,30 @@ class Workflow(Generic[TContext]):
 
         async def _execute_workflow() -> WorkflowResult[TContext]:
             self.step_results = []
+            self._skipped_connections = []
             current_result: RunResult | None = None
 
             for i, connection in enumerate(self.connections):
                 if i >= self.max_steps:
                     raise UserError(f"Workflow exceeded maximum steps ({self.max_steps})")
 
+                # Check if this connection should be executed.
+                if not connection.should_execute(cast(Any, context_wrapper), current_result):
+                    self._skipped_connections.append(i)
+                    continue
+
                 try:
+                    # Determine input for this connection.
+                    connection_input = input_data
+                    if i > 0 and current_result is not None:
+                        connection_input = current_result.final_output
+                    elif i > 0 and current_result is None:
+                        # Previous connections were skipped, use original input.
+                        connection_input = input_data
+
                     current_result = await connection.execute(
                         cast(Any, context_wrapper),
-                        input_data
-                        if i == 0
-                        else (current_result.final_output if current_result else input_data),
+                        connection_input,
                         current_result,
                     )
                     self.step_results.append(current_result)
@@ -131,6 +166,7 @@ class Workflow(Generic[TContext]):
                     TContext,
                     execution_context if execution_context is not None else context_wrapper.context,
                 ),
+                skipped_connections=self._skipped_connections.copy(),
             )
 
         if self.trace_workflow:

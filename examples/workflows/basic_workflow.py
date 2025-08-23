@@ -1,10 +1,13 @@
 """
-Basic workflow example demonstrating different connection types.
+Basic workflow example demonstrating conditional connection execution.
 
 This example shows how to create a workflow that:
-1. Uses handoff to route to a specialized agent
-2. Uses tool connection to get analysis
-3. Uses sequential connection to generate final output
+1. Uses handoff to conditionally route to a specialized agent
+2. Uses tool connection that only executes if handoff occurred
+3. Uses sequential connection that only executes if handoff occurred
+
+Connections are now conditional - if the handoff doesn't occur,
+subsequent connections that depend on the target agent will be skipped.
 """
 
 import asyncio
@@ -32,7 +35,9 @@ triage_agent = Agent[WorkflowContext](
     name="Triage Agent",
     instructions=(
         "You are a triage agent that routes requests to appropriate specialists. "
-        "Analyze the user's request and handoff to the content agent for processing."
+        "Analyze the user's request and decide if you should handoff to the content agent. "
+        "Only handoff if the request is complex and requires specialized content processing. "
+        "For simple requests, handle them yourself without handoff."
     ),
     handoff_description="Routes requests to appropriate specialists",
 )
@@ -135,6 +140,14 @@ async def main():
             print(f"\nStep {i}: {step_result.last_agent.name}")
             print(f"Output: {str(step_result.final_output)[:200]}...")
 
+        if result.skipped_connections:
+            print(f"\nSkipped connections: {result.skipped_connections}")
+            print(
+                "These connections were skipped due to unmet conditions (e.g., handoff didn't occur)."
+            )
+        else:
+            print("\nAll connections were executed.")
+
     except Exception as e:
         print(f"Workflow failed: {e}")
 
@@ -160,6 +173,8 @@ async def demo_sync_execution():
     # Run synchronously
     result = simple_workflow.run_sync("Tell me about AI agents")
     print(f"Sync result: {result.final_result.final_output}")
+    if result.skipped_connections:
+        print(f"Skipped connections in sync workflow: {result.skipped_connections}")
 
 
 if __name__ == "__main__":
