@@ -28,6 +28,7 @@ from .run_context import RunContextWrapper, TContext
 from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
 from .util import _transforms
 from .util._types import MaybeAwaitable
+from .prompts import Prompt, DynamicPromptFunction
 
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
@@ -267,12 +268,12 @@ class Agent(AgentBase, Generic[TContext]):
         if (
             self.prompt is not None
             and not callable(self.prompt)
-            and not hasattr(self.prompt, "get")
-        ):
-            raise TypeError(
-                f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
-                f"got {type(self.prompt).__name__}"
-            )
+            and not isinstance(self.prompt, Prompt)
+       ):
+         raise TypeError(
+              f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
+              f"got {type(self.prompt).__name__}"
+           )
 
         if not isinstance(self.handoffs, list):
             raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
