@@ -4,9 +4,9 @@ search:
 ---
 # セッション
 
-Agents SDK は、複数のエージェント実行にまたがる会話履歴を自動的に維持する組み込みのセッション メモリを提供し、ターン間で手動で `.to_input_list()` を扱う必要をなくします。
+Agents SDK には、複数のエージェント実行（ runs ）にわたって会話履歴を自動的に維持する組み込みのセッション メモリがあり、ターンごとに手動で `.to_input_list()` を扱う必要がなくなります。
 
-セッションは特定のセッションの会話履歴を保存し、明示的な手動メモリ管理なしにエージェントがコンテキストを維持できるようにします。これは、エージェントに過去のやり取りを記憶させたいチャット アプリケーションやマルチターン会話の構築に特に有用です。
+セッションは特定のセッションの会話履歴を保存し、明示的な手動メモリ管理なしでエージェントが文脈を維持できるようにします。これは、チャット アプリケーションや、エージェントに過去のやり取りを記憶させたいマルチターンの会話を構築する際に特に有用です。
 
 ## クイックスタート
 
@@ -49,13 +49,13 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 仕組み
 
-セッション メモリが有効な場合:
+セッション メモリを有効にすると:
 
-1.  **各実行の前** : ランナーはセッションの会話履歴を自動的に取得し、入力アイテムの先頭に付加します。
-2.  **各実行の後** : 実行中に生成されたすべての新規アイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）が自動的にセッションに保存されます。
-3.  **コンテキストの保持** : 同じセッションでの後続の各実行には会話履歴全体が含まれ、エージェントはコンテキストを維持できます。
+1. ** 各実行の前 **: ランナーはセッションの会話履歴を自動的に取得し、入力アイテムの先頭に付加します。
+2. ** 各実行の後 **: 実行中に生成されたすべての新しいアイテム（ ユーザー 入力、アシスタントの応答、ツール呼び出しなど ）が自動的にセッションに保存されます。
+3. ** コンテキストの保持 **: 同じセッションでの後続の実行には完全な会話履歴が含まれ、エージェントが文脈を維持できます。
 
-これにより、ターン間で `.to_input_list()` を手動で呼び出したり、会話状態を管理したりする必要がなくなります。
+これにより、`.to_input_list()` を手動で呼び出したり、実行間で会話状態を管理したりする必要がなくなります。
 
 ## メモリ操作
 
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### 修正のための pop_item の使用
+### 修正における pop_item の使用
 
-`pop_item` メソッドは、会話の最後のアイテムを取り消したり変更したりしたい場合に特に役立ちます:
+`pop_item` メソッドは、会話の最後のアイテムを取り消したり修正したりしたいときに特に便利です:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -168,6 +168,64 @@ result2 = await Runner.run(
 )
 ```
 
+### SQLAlchemy ベースのセッション
+
+より高度なユースケースでは、 SQLAlchemy ベースのセッション バックエンドを使用できます。これにより、セッション ストレージに SQLAlchemy がサポートする任意のデータベース（ PostgreSQL、MySQL、SQLite など ）を使用できます。
+
+ ** 例 1: `from_url` を使用したインメモリ SQLite **
+
+これは最も簡単な開始方法で、開発とテストに最適です。
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+
+async def main():
+    agent = Agent("Assistant")
+    session = SQLAlchemySession.from_url(
+        "user-123",
+        url="sqlite+aiosqlite:///:memory:",
+        create_tables=True,  # Auto-create tables for the demo
+    )
+
+    result = await Runner.run(agent, "Hello", session=session)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+ ** 例 2: 既存の SQLAlchemy エンジンの使用 **
+
+本番アプリケーションでは、すでに SQLAlchemy `AsyncEngine` インスタンスを持っていることが多いです。これをセッションに直接渡せます。
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from sqlalchemy.ext.asyncio import create_async_engine
+
+async def main():
+    # In your application, you would use your existing engine
+    engine = create_async_engine("sqlite+aiosqlite:///conversations.db")
+
+    agent = Agent("Assistant")
+    session = SQLAlchemySession(
+        "user-456",
+        engine=engine,
+        create_tables=True,  # Auto-create tables for the demo
+    )
+
+    result = await Runner.run(agent, "Hello", session=session)
+    print(result.final_output)
+
+    await engine.dispose()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+
 ## カスタム メモリ実装
 
 [`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成することで、独自のセッション メモリを実装できます:
@@ -216,7 +274,7 @@ result = await Runner.run(
 
 ### セッション ID の命名
 
-会話を整理するのに役立つ意味のあるセッション ID を使用します:
+会話の整理に役立つ意味のあるセッション ID を使用します:
 
 -   ユーザー ベース: `"user_12345"`
 -   スレッド ベース: `"thread_abc123"`
@@ -226,7 +284,7 @@ result = await Runner.run(
 
 -   一時的な会話にはインメモリ SQLite（`SQLiteSession("session_id")`）を使用します
 -   永続的な会話にはファイル ベースの SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用します
--   本番システム向けにはカスタム セッション バックエンド（Redis、PostgreSQL など）の実装を検討します
+-   本番システム向けにはカスタム セッション バックエンド（ Redis、PostgreSQL など ）の実装を検討します
 
 ### セッション管理
 
@@ -252,9 +310,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 完全な例
+## 完全なコード例
 
-セッション メモリが実際に動作する完全な例を次に示します:
+セッション メモリの動作を示す完全な例です:
 
 ```python
 import asyncio
@@ -318,7 +376,7 @@ if __name__ == "__main__":
 
 ## API リファレンス
 
-詳細な API ドキュメントは以下をご覧ください:
+詳細な API ドキュメントは以下を参照してください:
 
 -   [`Session`][agents.memory.Session] - プロトコル インターフェース
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
