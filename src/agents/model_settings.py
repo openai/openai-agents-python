@@ -93,8 +93,16 @@ class ModelSettings:
 
     truncation: Literal["auto", "disabled"] | None = None
     """The truncation strategy to use when calling the model.
+
+    - "auto": If the context (this response + previous ones) exceeds the model's
+    context window, older input items in the *middle* of the conversation will
+    be dropped so the request still fits. Streaming continues normally.
+    - "disabled" (default): Do not truncate. If input exceeds the model's
+    context window, the request fails with HTTP 400 (no streaming).
+    - None: Defer to the provider's default behavior (typically "disabled").
+
     See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
-    for more details.
+    for details.
     """
 
     max_tokens: int | None = None
