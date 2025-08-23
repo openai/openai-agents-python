@@ -8,6 +8,16 @@ Workflows provide a declarative way to orchestrate complex multi-agent interacti
 
 A workflow consists of a sequence of **connections** that define how agents interact with each other. Each connection type implements a different interaction pattern, from simple handoffs to parallel processing.
 
+## Conditional Execution
+
+Workflows now support **conditional execution** - connections may be skipped if their preconditions are not met. For example:
+
+- **SequentialConnection** and **ToolConnection** will only execute if their `from_agent` is currently active
+- If a **HandoffConnection** doesn't result in an actual handoff, subsequent connections depending on the target agent will be skipped
+- This enables more intelligent workflow routing based on runtime decisions
+
+The workflow execution engine tracks which connections were skipped and reports them in the `WorkflowResult.skipped_connections` field.
+
 ## Basic Usage
 
 Here's a simple workflow that chains three agents together:
@@ -50,6 +60,8 @@ connection = HandoffConnection(
 )
 ```
 
+**Conditional Behavior**: If the `from_agent` chooses not to use the handoff tool, the handoff will not occur, and subsequent connections that depend on the `to_agent` may be skipped.
+
 **Use cases**: Routing, delegation, specialization
 
 ### ToolConnection
@@ -68,6 +80,8 @@ connection = ToolConnection(
 )
 ```
 
+**Conditional Behavior**: This connection will only execute if the `from_agent` is currently active (either as the last agent or as a handoff target from a previous connection).
+
 **Use cases**: Modular functions, analysis, data processing
 
 ### SequentialConnection
@@ -83,6 +97,8 @@ connection = SequentialConnection(
     output_transformer=lambda result: f"Research findings: {result.final_output}",
 )
 ```
+
+**Conditional Behavior**: This connection will only execute if the `from_agent` is currently active (either as the last agent or as a handoff target from a previous connection).
 
 **Use cases**: Data pipelines, multi-step transformations, processing chains
 
@@ -182,6 +198,7 @@ result = await workflow.run("Your input here")
 # Access results
 print(result.final_result.final_output)  # Final output
 print(len(result.step_results))          # Number of steps executed
+print(result.skipped_connections)        # Indices of skipped connections
 print(result.context)                    # Final context state
 ```
 
@@ -210,6 +227,28 @@ async for event in result.stream_events():
 ```
 
 ## Advanced Patterns
+
+### Conditional Execution Example
+
+Create workflows where connections are conditionally executed based on handoff decisions:
+
+```python
+workflow = Workflow([
+    HandoffConnection(triage_agent, specialist_agent),
+    # This will only execute if the handoff above actually occurred
+    SequentialConnection(specialist_agent, summary_agent),
+])
+
+result = await workflow.run("Simple request")
+
+# If triage_agent handled the request without handoff:
+print(result.skipped_connections)  # [1] - second connection was skipped
+print(result.final_result.last_agent.name)  # "Triage Agent"
+
+# If triage_agent performed the handoff:
+print(result.skipped_connections)  # [] - no connections skipped
+print(result.final_result.last_agent.name)  # "Summary Agent"
+```
 
 ### Dynamic Workflow Construction
 
