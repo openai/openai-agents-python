@@ -68,7 +68,12 @@ class ModelSettings:
     """
 
     temperature: float | None = None
-    """The temperature to use when calling the model."""
+    """The temperature to use when calling the model.
+
+    Limits:
+    - 0 → fully deterministic (always the same output).
+    - 1 → highly creative and diverse outputs.
+    """
 
     top_p: float | None = None
     """The top_p to use when calling the model."""
