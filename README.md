@@ -33,7 +33,7 @@ For voice support, install with the optional `voice` group: `pip install 'openai
 
 ### uv
 
-If you're familiar with [uv](https://docs.astral.sh/uv/), using the tool would be even similar:
+If you're familiar with [uv](https://docs.astral.sh/uv/), using it to install OpenAI Agents SDK is just as straightforward:
 
 ```bash
 uv init
