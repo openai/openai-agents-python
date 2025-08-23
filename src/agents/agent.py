@@ -38,13 +38,14 @@ if TYPE_CHECKING:
 @dataclass
 class ToolsToFinalOutputResult:
     is_final_output: bool
-    """Whether this is the final output. If False, the LLM will run again and receive the tool call
-    output.
+    """If True, this is the final output;
+    if False, LLM will run again and receive the tool call output.
     """
 
     final_output: Any | None = None
-    """The final output. Can be None if `is_final_output` is False, otherwise must match the
-    `output_type` of the agent.
+    """The final output value.
+    - Must be non-None and match the agent's `output_type` if `is_final_output` is True.
+    - Must be None if `is_final_output` is False.
     """
 
 
