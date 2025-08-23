@@ -80,7 +80,16 @@ class ModelSettings:
     """The presence penalty to use when calling the model."""
 
     tool_choice: ToolChoice | None = None
-    """The tool choice to use when calling the model."""
+    """Controls how the model decides whether (and which) tool to call.
+
+    Options:
+    - "auto": (default) Let the model decide whether to call a tool.
+    - "required": Force the model to call some tool; it cannot reply with text alone.
+    - "none": Forbid the model from calling any tool.
+    - "<tool_name>": Force the model to call a specific tool by name (string).
+    - MCPToolChoice: Use advanced structured configuration.
+    - None: Fall back to the provider's default behavior.
+    """
 
     parallel_tool_calls: bool | None = None
     """Controls whether the model can make multiple parallel tool calls in a single turn.
