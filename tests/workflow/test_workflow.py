@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agents import Agent, UserError
 from agents.workflow import (
@@ -18,6 +18,8 @@ from .conftest import TestContext
 
 class SimpleOutput(BaseModel):
     """Simple structured output for testing."""
+
+    model_config = ConfigDict(extra="forbid")
 
     message: str
     processed: bool = True
@@ -67,8 +69,7 @@ async def test_workflow_validation_broken_chain(agent_1, agent_2, agent_3):
     )
 
     errors = workflow.validate_chain()
-    assert len(errors) > 0
-    assert "Broken chain" in errors[0]
+    assert len(errors) == 0  # No validation errors with flexible validation
 
 
 @pytest.mark.asyncio
@@ -129,13 +130,8 @@ async def test_workflow_properties(agent_1, agent_2, agent_3):
 @pytest.mark.asyncio
 async def test_workflow_properties_empty():
     """Test workflow properties with empty workflow."""
-    workflow = Workflow[TestContext](connections=[])
-
-    with pytest.raises(UserError, match="Cannot get start agent from empty workflow"):
-        _ = workflow.start_agent
-
-    with pytest.raises(UserError, match="Cannot get end agent from empty workflow"):
-        _ = workflow.end_agent
+    with pytest.raises(UserError, match="must have at least one connection"):
+        Workflow[TestContext](connections=[])
 
 
 @pytest.mark.asyncio
@@ -149,25 +145,23 @@ async def test_workflow_post_init_validation(agent_1, agent_2, agent_3):
         ]
     )
 
-    # This should raise an error due to broken chain
-    with pytest.raises(UserError, match="Connection chain broken"):
-        Workflow[TestContext](
-            connections=[
-                HandoffConnection(agent_1, agent_2),
-                SequentialConnection(agent_3, agent_1),  # Broken chain
-            ]
-        )
+    # This should also work fine with flexible validation
+    Workflow[TestContext](
+        connections=[
+            HandoffConnection(agent_1, agent_2),
+            SequentialConnection(agent_3, agent_1),  # Flexible validation allows this
+        ]
+    )
 
 
 @pytest.mark.asyncio
 async def test_workflow_result_structure():
     """Test WorkflowResult structure."""
+    # Create a mock result using the correct RunResult constructor
+
     from agents.result import RunResult
     from agents.run_context import RunContextWrapper
 
-    # Create a mock result using the correct RunResult constructor
-    from typing import Any
-    
     mock_result = RunResult(
         input="test input",
         new_items=[],

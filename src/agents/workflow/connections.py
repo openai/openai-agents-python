@@ -14,7 +14,7 @@ from ..result import RunResult
 from ..run_context import RunContextWrapper
 from ..util._types import MaybeAwaitable
 
-TContext = TypeVar("TContext", default=Any)
+TContext = TypeVar("TContext", bound=Any)
 
 
 @dataclass
@@ -194,18 +194,28 @@ class SequentialConnection(Connection[TContext]):
         """Execute the sequential connection."""
         from ..run import Runner
 
+        # First execute the from_agent
         if previous_result is not None:
-            # Transform the output if a transformer is provided
-            if self.output_transformer:
-                transformed_input = self.output_transformer(previous_result)
-            else:
-                transformed_input = previous_result.final_output
+            # Use previous result as input
+            first_input = previous_result.final_output
         else:
-            transformed_input = input_data
+            first_input = input_data
+
+        first_result = await Runner.run(
+            starting_agent=self.from_agent,
+            input=first_input,
+            context=context.context,
+        )
+
+        # Then execute the to_agent with the result from from_agent
+        if self.output_transformer:
+            second_input = self.output_transformer(first_result)
+        else:
+            second_input = first_result.final_output
 
         return await Runner.run(
             starting_agent=self.to_agent,
-            input=transformed_input,
+            input=second_input,
             context=context.context,
         )
 

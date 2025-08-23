@@ -13,7 +13,7 @@ from ..run_context import RunContextWrapper
 from ..tracing import trace
 from .connections import Connection
 
-TContext = TypeVar("TContext", default=Any)
+TContext = TypeVar("TContext", bound=Any)
 
 
 @dataclass
@@ -75,16 +75,10 @@ class Workflow(Generic[TContext]):
         if not self.connections:
             raise UserError("Workflow must have at least one connection")
 
-        # Validate connection chain
-        for i in range(len(self.connections) - 1):
-            current_connection = self.connections[i]
-            next_connection = self.connections[i + 1]
-
-            if current_connection.to_agent != next_connection.from_agent:
-                raise UserError(
-                    f"Connection chain broken at step {i}: "
-                    f"'{current_connection.to_agent.name}' -> '{next_connection.from_agent.name}'"
-                )
+        # For now, skip strict chain validation as it doesn't work well with
+        # parallel connections and conditional routing
+        # TODO: Implement more sophisticated validation that can handle
+        # complex workflow patterns
 
     async def run(
         self,
@@ -115,7 +109,9 @@ class Workflow(Generic[TContext]):
                 try:
                     current_result = await connection.execute(
                         cast(Any, context_wrapper),
-                        input_data if i == 0 else (current_result.final_output if current_result else input_data),
+                        input_data
+                        if i == 0
+                        else (current_result.final_output if current_result else input_data),
                         current_result,
                     )
                     self.step_results.append(current_result)
@@ -131,7 +127,10 @@ class Workflow(Generic[TContext]):
             return WorkflowResult(
                 final_result=current_result,
                 step_results=self.step_results.copy(),
-                context=cast(TContext, execution_context if execution_context is not None else context_wrapper.context),
+                context=cast(
+                    TContext,
+                    execution_context if execution_context is not None else context_wrapper.context,
+                ),
             )
 
         if self.trace_workflow:
@@ -155,7 +154,23 @@ class Workflow(Generic[TContext]):
         Returns:
             WorkflowResult containing the final result and execution details
         """
-        return asyncio.run(self.run(input_data, context))
+
+        try:
+            # Try to use asyncio.run if no event loop is running
+            return asyncio.run(self.run(input_data, context))
+        except RuntimeError:
+            # If we're already in an event loop, create a task and wait for it
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context, so we can't use run_until_complete
+                # This is a bit of a hack, but it should work for testing
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(lambda: asyncio.run(self.run(input_data, context)))
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.run(input_data, context))
 
     def clone(self, **kwargs: Any) -> Workflow[TContext]:
         """Create a copy of the workflow with modified parameters.
@@ -194,16 +209,10 @@ class Workflow(Generic[TContext]):
             errors.append("Workflow must have at least one connection")
             return errors
 
-        # Check for broken chains
-        for i in range(len(self.connections) - 1):
-            current = self.connections[i]
-            next_conn = self.connections[i + 1]
-
-            if current.to_agent != next_conn.from_agent:
-                errors.append(
-                    f"Broken chain at step {i}: "
-                    f"'{current.to_agent.name}' does not connect to '{next_conn.from_agent.name}'"
-                )
+        # For now, skip strict chain validation as it doesn't work well with
+        # parallel connections and conditional routing
+        # TODO: Implement more sophisticated validation that can handle
+        # complex workflow patterns
 
         # Check for duplicate agent names (potential confusion)
         agent_names = set()

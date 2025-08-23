@@ -7,7 +7,7 @@ from .items import ModelResponse, TResponseInputItem
 from .run_context import RunContextWrapper, TContext
 from .tool import Tool
 
-TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
+TAgent = TypeVar("TAgent", bound=AgentBase)
 
 
 class RunHooksBase(Generic[TContext, TAgent]):

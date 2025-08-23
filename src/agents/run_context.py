@@ -5,7 +5,7 @@ from typing_extensions import TypeVar
 
 from .usage import Usage
 
-TContext = TypeVar("TContext", default=Any)
+TContext = TypeVar("TContext", bound=Any)
 
 
 @dataclass

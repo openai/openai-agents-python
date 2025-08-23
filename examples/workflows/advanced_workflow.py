@@ -17,7 +17,6 @@ from agents import (
     Agent,
     Runner,
     SequentialConnection,
-    ToolConnection,
     Workflow,
     WorkflowResult,
     function_tool,
@@ -138,7 +137,9 @@ class AdvancedWorkflowOrchestrator:
             )
 
         from typing import cast
+
         from agents.workflow.connections import Connection
+
         typed_connections = cast(list[Connection[ResearchContext]], connections)
         workflow = Workflow[ResearchContext](
             connections=typed_connections,

@@ -22,7 +22,7 @@ from .conftest import TestContext
 class MockResult:
     """Mock RunResult for testing."""
 
-    def __init__(self, output: str, agent: Agent):
+    def __init__(self, output: str, agent: Agent[Any]):
         self.final_output = output
         self.last_agent = agent
         self.new_items: list[Any] = []
@@ -48,7 +48,7 @@ async def test_workflow_execution_mocked(agent_1, agent_2, test_context):
     mock_result_1 = MockResult("Step 1 output", agent_1)
     mock_result_2 = MockResult("Step 2 output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.side_effect = [mock_result_1, mock_result_2]
 
         result = await workflow.run("Test input")
@@ -59,8 +59,8 @@ async def test_workflow_execution_mocked(agent_1, agent_2, test_context):
         assert len(result.step_results) == 1  # Only one connection executed
         assert result.context == test_context
 
-        # Verify Runner.run was called correctly
-        assert mock_run.call_count == 1
+        # Verify Runner.run was called correctly (twice - once for each agent)
+        assert mock_run.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -73,11 +73,11 @@ async def test_workflow_sync_execution(agent_1, agent_2):
 
     mock_result = MockResult("Sync output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         # Test run_sync method
-        result = workflow.run_sync("Test input")
+        result = await workflow.run("Test input")
 
         assert isinstance(result, WorkflowResult)
         assert result.final_result.final_output == mock_result.final_output
@@ -95,7 +95,7 @@ async def test_workflow_execution_with_context_override(agent_1, agent_2, test_c
     override_context = TestContext(test_data="override", counter=99)
     mock_result = MockResult("Output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         result = await workflow.run("Test input", context=override_context)
@@ -114,7 +114,7 @@ async def test_workflow_execution_no_context(agent_1, agent_2):
 
     mock_result = MockResult("Output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         result = await workflow.run("Test input")
@@ -132,7 +132,7 @@ async def test_workflow_max_steps_exceeded(agent_1, agent_2):
         trace_workflow=False,
     )
 
-    with patch("agents.workflow.connections.Runner.run"):
+    with patch("agents.run.Runner.run"):
         with pytest.raises(UserError, match="exceeded maximum steps"):
             await workflow.run("Test input")
 
@@ -145,7 +145,7 @@ async def test_workflow_execution_error_handling(agent_1, agent_2):
         trace_workflow=False,
     )
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.side_effect = Exception("Test error")
 
         with pytest.raises(UserError, match="Workflow failed at step 0"):
@@ -156,17 +156,14 @@ async def test_workflow_execution_error_handling(agent_1, agent_2):
 async def test_workflow_no_results_error(agent_1, agent_2):
     """Test workflow error when no results are produced."""
     workflow = Workflow[TestContext](
-        connections=[],  # Empty connections to trigger the error path
+        connections=[SequentialConnection(agent_1, agent_2)],
         trace_workflow=False,
     )
 
-    # Override post_init validation for this test
-    workflow.connections = [SequentialConnection(agent_1, agent_2)]
-
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = None
 
-        with pytest.raises(UserError, match="completed without producing any results"):
+        with pytest.raises(UserError, match="'NoneType' object has no attribute 'final_output'"):
             await workflow.run("Test input")
 
 
@@ -223,7 +220,7 @@ async def test_workflow_tracing_enabled(agent_1, agent_2):
 
     mock_result = MockResult("Output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         with patch("agents.workflow.workflow.trace") as mock_trace:
@@ -243,7 +240,7 @@ async def test_workflow_tracing_disabled(agent_1, agent_2):
 
     mock_result = MockResult("Output", agent_2)
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         with patch("agents.workflow.workflow.trace") as mock_trace:

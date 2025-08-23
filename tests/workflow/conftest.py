@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agents import Agent
 
 
 class TestContext(BaseModel):
     """Test context for workflow testing."""
+
+    model_config = ConfigDict(extra="forbid")
 
     test_data: str = "default"
     counter: int = 0

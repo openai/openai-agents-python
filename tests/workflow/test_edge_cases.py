@@ -105,8 +105,8 @@ async def test_parallel_connection_no_synthesizer():
         _last_agent=agent_3,
     )
 
-    with patch("asyncio.gather") as mock_gather:
-        mock_gather.return_value = [mock_result_1, mock_result_2]
+    with patch("agents.run.Runner.run") as mock_run:
+        mock_run.side_effect = [mock_result_1, mock_result_2]
 
         context = RunContextWrapper(TestContext())
         result = await connection.execute(context, "test input")
@@ -197,6 +197,7 @@ async def test_workflow_large_chain():
     agents = [Agent[TestContext](name=f"Agent {i}") for i in range(10)]
 
     from agents.workflow.connections import Connection
+
     connections: list[Connection[TestContext]] = []
     for i in range(9):
         connections.append(SequentialConnection(agents[i], agents[i + 1]))
@@ -240,7 +241,7 @@ async def test_workflow_max_steps_edge_case():
         _last_agent=agent_2,
     )
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         # Should succeed with exactly max_steps
@@ -274,7 +275,7 @@ async def test_workflow_context_none_handling():
         _last_agent=agent_2,
     )
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         mock_run.return_value = mock_result
 
         result = await workflow.run("Test input")
@@ -343,7 +344,7 @@ async def test_workflow_step_results_isolation():
         _last_agent=agent_2,
     )
 
-    with patch("agents.workflow.connections.Runner.run") as mock_run:
+    with patch("agents.run.Runner.run") as mock_run:
         # First execution
         mock_run.return_value = mock_result_1
         result_1 = await workflow.run("First input")

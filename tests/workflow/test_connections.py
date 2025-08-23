@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from agents import Agent, RunContextWrapper
 from agents.workflow import (
@@ -20,6 +20,8 @@ from .conftest import TestContext
 
 class TestOutput(BaseModel):
     """Test output structure."""
+
+    model_config = ConfigDict(extra="forbid")
 
     content: str
     source_agent: str
