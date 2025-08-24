@@ -164,6 +164,64 @@ result2 = await Runner.run(
 )
 ```
 
+### SQLAlchemy-powered sessions
+
+For more advanced use cases, you can use a SQLAlchemy-powered session backend. This allows you to use any database supported by SQLAlchemy (PostgreSQL, MySQL, SQLite, etc.) for session storage.
+
+**Example 1: Using `from_url` with in-memory SQLite**
+
+This is the simplest way to get started, ideal for development and testing.
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+
+async def main():
+    agent = Agent("Assistant")
+    session = SQLAlchemySession.from_url(
+        "user-123",
+        url="sqlite+aiosqlite:///:memory:",
+        create_tables=True,  # Auto-create tables for the demo
+    )
+
+    result = await Runner.run(agent, "Hello", session=session)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Example 2: Using an existing SQLAlchemy engine**
+
+In a production application, you likely already have a SQLAlchemy `AsyncEngine` instance. You can pass it directly to the session.
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
+from sqlalchemy.ext.asyncio import create_async_engine
+
+async def main():
+    # In your application, you would use your existing engine
+    engine = create_async_engine("sqlite+aiosqlite:///conversations.db")
+
+    agent = Agent("Assistant")
+    session = SQLAlchemySession(
+        "user-456",
+        engine=engine,
+        create_tables=True,  # Auto-create tables for the demo
+    )
+
+    result = await Runner.run(agent, "Hello", session=session)
+    print(result.final_output)
+
+    await engine.dispose()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+
 ## Custom memory implementations
 
 You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
@@ -222,7 +280,8 @@ Use meaningful session IDs that help you organize conversations:
 
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
--   Consider implementing custom session backends for production systems (Redis, PostgreSQL, etc.)
+-   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
+-   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
 
 ### Session management
 
@@ -318,3 +377,4 @@ For detailed API documentation, see:
 
 -   [`Session`][agents.memory.Session] - Protocol interface
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
+-   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
