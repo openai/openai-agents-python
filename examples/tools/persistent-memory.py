@@ -15,11 +15,11 @@ Usage:
 import asyncio
 from textwrap import dedent
 
-from agents import Agent, Runner, function_tool
-
 from memori import Memori, create_memory_tool
 
-print("🧠 Initializing Memori memory system...")
+from agents import Agent, Runner, function_tool
+
+print("Initializing Memori memory system...")
 
 # Initialize Memori for persistent memory
 memory_system = Memori(
@@ -35,7 +35,7 @@ memory_system.enable()
 # Create memory tool for agents
 memory_tool = create_memory_tool(memory_system)
 
-print("🤖 Creating memory-enhanced OpenAI Agent...")
+print("Creating memory-enhanced OpenAI Agent...")
 
 
 @function_tool
@@ -138,10 +138,10 @@ async def chat_with_memory(user_input: str) -> str:
 
 async def main():
     """Main interaction loop"""
-    print("✅ Setup complete! Chat with your memory-enhanced OpenAI Agent.")
+    print("Setup complete! Chat with your memory-enhanced OpenAI Agent.")
     print("Type 'quit', 'exit', or 'bye' to end the conversation.\n")
 
-    print("💡 Try asking about:")
+    print("Try asking about:")
     print("- Your past conversations")
     print("- Share your preferences (I'll remember them!)")
     print("- Ask about topics we've discussed before")
@@ -177,7 +177,7 @@ async def main():
             print(f"\nError: {str(e)}")
             print("Please try again.\n")
 
-    print("\n📊 Session Summary:")
+    print("\nSession Summary:")
     print(f"- Conversations processed: {conversation_count}")
     print("- Memory database: openai_agent_memory.db")
     print("- Namespace: openai_agent_example")
