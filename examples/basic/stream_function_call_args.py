@@ -35,7 +35,7 @@ async def main():
 
     result = Runner.run_streamed(
         agent,
-        input="Create a Python web project called 'my-app' with FastAPI. Version 1.0.0, dependencies: fastapi, uvicorn"
+        input="Create a Python web project called 'my-app' with FastAPI. Version 1.0.0, dependencies: fastapi, uvicorn",
     )
 
     # Track function calls for detailed output
@@ -50,10 +50,7 @@ async def main():
                     function_name = getattr(event.data.item, "name", "unknown")
                     call_id = getattr(event.data.item, "call_id", "unknown")
 
-                    function_calls[call_id] = {
-                        'name': function_name,
-                        'arguments': ""
-                    }
+                    function_calls[call_id] = {"name": function_name, "arguments": ""}
                     current_active_call_id = call_id
                     print(f"\n📞 Function call streaming started: {function_name}()")
                     print("📝 Arguments building...")
@@ -61,12 +58,12 @@ async def main():
             # Real-time argument streaming
             elif isinstance(event.data, ResponseFunctionCallArgumentsDeltaEvent):
                 if current_active_call_id and current_active_call_id in function_calls:
-                    function_calls[current_active_call_id]['arguments'] += event.data.delta
+                    function_calls[current_active_call_id]["arguments"] += event.data.delta
                     print(event.data.delta, end="", flush=True)
 
             # Function call completed
             elif event.data.type == "response.output_item.done":
-                if hasattr(event.data.item, 'call_id'):
+                if hasattr(event.data.item, "call_id"):
                     call_id = getattr(event.data.item, "call_id", "unknown")
                     if call_id in function_calls:
                         function_info = function_calls[call_id]
