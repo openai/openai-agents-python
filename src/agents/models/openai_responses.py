@@ -122,6 +122,23 @@ class OpenAIResponsesModel(Model):
                 if tracing.include_data():
                     span_response.span_data.response = response
                     span_response.span_data.input = input
+                # Register this model response span so sessions can attribute rows correctly
+                try:
+                    # noqa: WPS433 import inside to avoid circular dependency
+                    from ..memory.session import register_response_model, register_response_span
+
+                    register_response_span(
+                        response_id=response.id,
+                        trace_id=span_response.trace_id,
+                        span_id=span_response.span_id,
+                    )
+                    register_response_model(
+                        response_id=response.id,
+                        trace_id=span_response.trace_id,
+                        model=str(self.model) if self.model is not None else None,
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 span_response.set_error(
                     SpanError(
@@ -180,6 +197,22 @@ class OpenAIResponsesModel(Model):
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
+                # Register the span using final response (if any). Some providers omit IDs.
+                try:
+                    from ..memory.session import register_response_model, register_response_span
+
+                    register_response_span(
+                        response_id=(final_response.id if final_response else None),
+                        trace_id=span_response.trace_id,
+                        span_id=span_response.span_id,
+                    )
+                    register_response_model(
+                        response_id=(final_response.id if final_response else None),
+                        trace_id=span_response.trace_id,
+                        model=str(self.model) if self.model is not None else None,
+                    )
+                except Exception:
+                    pass
 
             except Exception as e:
                 span_response.set_error(

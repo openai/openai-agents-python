@@ -548,6 +548,14 @@ class RunImpl:
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
+                # Register span info so session storage can attribute this tool call
+                try:
+                    # noqa: WPS433 import inside to avoid circular dependency
+                    from .memory.session import register_tool_call_span
+
+                    register_tool_call_span(tool_call.call_id, span_fn.trace_id, span_fn.span_id)
+                except Exception:
+                    pass  # Non-critical
                 tool_context = ToolContext.from_agent_context(
                     context_wrapper,
                     tool_call.call_id,

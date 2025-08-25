@@ -127,6 +127,24 @@ class OpenAIChatCompletionsModel(Model):
 
             items = Converter.message_to_output_items(message) if message is not None else []
 
+            # Register this generation span and model so sessions can attribute rows correctly
+            try:
+                # noqa: WPS433 import inside to avoid circular dependency
+                from ..memory.session import register_response_model, register_response_span
+
+                register_response_span(
+                    response_id=None,  # Chat Completions doesn't produce a Response ID
+                    trace_id=span_generation.trace_id,
+                    span_id=span_generation.span_id,
+                )
+                register_response_model(
+                    response_id=None,
+                    trace_id=span_generation.trace_id,
+                    model=str(self.model) if self.model is not None else None,
+                )
+            except Exception:
+                pass
+
             return ModelResponse(
                 output=items,
                 usage=usage,
@@ -181,6 +199,23 @@ class OpenAIChatCompletionsModel(Model):
                     "input_tokens": final_response.usage.input_tokens,
                     "output_tokens": final_response.usage.output_tokens,
                 }
+
+            # Register this generation span and model as last seen for the current trace
+            try:
+                from ..memory.session import register_response_model, register_response_span
+
+                register_response_span(
+                    response_id=None,
+                    trace_id=span_generation.trace_id,
+                    span_id=span_generation.span_id,
+                )
+                register_response_model(
+                    response_id=None,
+                    trace_id=span_generation.trace_id,
+                    model=str(self.model) if self.model is not None else None,
+                )
+            except Exception:
+                pass
 
     @overload
     async def _fetch_response(
