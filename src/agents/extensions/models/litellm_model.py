@@ -82,7 +82,8 @@ class LitellmModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,  # unused
+        conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
     ) -> ModelResponse:
         with generation_span(
@@ -171,7 +172,8 @@ class LitellmModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,  # unused
+        conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(

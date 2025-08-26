@@ -74,7 +74,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
@@ -86,7 +87,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=False,
                     prompt=prompt,
                 )
@@ -149,7 +151,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,  # unused
+        conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
@@ -164,7 +167,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=True,
                     prompt=prompt,
                 )
@@ -202,6 +206,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[True],
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
@@ -216,6 +221,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[False],
         prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
@@ -228,7 +234,8 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         stream: Literal[True] | Literal[False] = False,
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
@@ -264,6 +271,7 @@ class OpenAIResponsesModel(Model):
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
                 f"Previous response id: {previous_response_id}\n"
+                f"Conversation id: {conversation_id}\n"
             )
 
         extra_args = dict(model_settings.extra_args or {})
@@ -277,6 +285,7 @@ class OpenAIResponsesModel(Model):
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
+            conversation=self._non_null_or_not_given(conversation_id),
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
