@@ -185,10 +185,14 @@ class ChatCmplStreamHandler:
                     )
 
                     # Create a new summary with updated text
-                    current_content = state.reasoning_content_index_and_output[1].content[0]
-                    updated_text = current_content.text + reasoning_text
-                    new_content = Content(text=updated_text, type="reasoning_text")
-                    state.reasoning_content_index_and_output[1].content[0] = new_content
+                    if state.reasoning_content_index_and_output[1].content is None:
+                        state.reasoning_content_index_and_output[1].content = [
+                            Content(text="", type="reasoning_text")
+                        ]
+                    current_text = state.reasoning_content_index_and_output[1].content[0]
+                    updated_text = current_text.text + reasoning_text
+                    new_text_content = Content(text=updated_text, type="reasoning_text")
+                    state.reasoning_content_index_and_output[1].content[0] = new_text_content
 
             # Handle regular content
             if delta.content is not None:
