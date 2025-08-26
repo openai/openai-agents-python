@@ -227,10 +227,11 @@ if __name__ == "__main__":
 You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
 
 ```python
+from agents.memory.session import SessionABC
 from agents.items import TResponseInputItem
 from typing import List
 
-class MyCustomSession:
+class MyCustomSession(SessionABC):
     """Custom session implementation following the Session protocol."""
 
     def __init__(self, session_id: str):
