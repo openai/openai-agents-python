@@ -1,6 +1,7 @@
 import abc
 from dataclasses import dataclass
 from typing import Any
+import os   # 👈 Added for env-flag
 
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import TypedDict, get_args, get_origin
@@ -76,6 +77,9 @@ class AgentOutputSchema(AgentOutputSchemaBase):
     as it increases the likelihood of correct JSON input.
     """
 
+    _force_text_for_structured: bool
+    """Force text/plain output even if structured output is set (Gemini tools fix)."""
+
     def __init__(self, output_type: type[Any], strict_json_schema: bool = True):
         """
         Args:
@@ -85,6 +89,11 @@ class AgentOutputSchema(AgentOutputSchemaBase):
         """
         self.output_type = output_type
         self._strict_json_schema = strict_json_schema
+
+        # 👇 Flag: if set, Gemini tools won't send application/json (avoids 400 error)
+        self._force_text_for_structured = os.getenv(
+            "AGENTS_FORCE_TEXT_FOR_STRUCTURED", ""
+        ).strip() not in ("", "0", "false", "False")
 
         if output_type is None or output_type is str:
             self._is_wrapped = False
@@ -121,6 +130,9 @@ class AgentOutputSchema(AgentOutputSchemaBase):
 
     def is_plain_text(self) -> bool:
         """Whether the output type is plain text (versus a JSON object)."""
+        if getattr(self, "_force_text_for_structured", False):
+            # ✅ Gemini tools fix: force text/plain request
+            return True
         return self.output_type is None or self.output_type is str
 
     def is_strict_json_schema(self) -> bool:
