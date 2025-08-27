@@ -12,13 +12,14 @@ from openai.types.chat import (
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCallParam,
     ChatCompletionMessageParam,
-    ChatCompletionMessageToolCallParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolChoiceOptionParam,
     ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
+from openai.types.chat.chat_completion_content_part_param import File, FileFile
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
 from openai.types.chat.completion_create_params import ResponseFormat
 from openai.types.responses import (
@@ -27,6 +28,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
     ResponseInputContentParam,
+    ResponseInputFileParam,
     ResponseInputImageParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
@@ -34,6 +36,7 @@ from openai.types.responses import (
     ResponseOutputRefusal,
     ResponseOutputText,
     ResponseReasoningItem,
+    ResponseReasoningItemParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_reasoning_item import Summary
@@ -42,6 +45,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
+from ..model_settings import MCPToolChoice
 from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
@@ -49,10 +53,12 @@ from .fake_id import FAKE_RESPONSES_ID
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | None
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> ChatCompletionToolChoiceOptionParam | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
+        elif isinstance(tool_choice, MCPToolChoice):
+            raise UserError("MCPToolChoice is not supported for Chat Completions models")
         elif tool_choice == "auto":
             return "auto"
         elif tool_choice == "required":
@@ -120,15 +126,18 @@ class Converter:
 
         if message.tool_calls:
             for tool_call in message.tool_calls:
-                items.append(
-                    ResponseFunctionToolCall(
-                        id=FAKE_RESPONSES_ID,
-                        call_id=tool_call.id,
-                        arguments=tool_call.function.arguments,
-                        name=tool_call.function.name,
-                        type="function_call",
+                if tool_call.type == "function":
+                    items.append(
+                        ResponseFunctionToolCall(
+                            id=FAKE_RESPONSES_ID,
+                            call_id=tool_call.id,
+                            arguments=tool_call.function.arguments,
+                            name=tool_call.function.name,
+                            type="function_call",
+                        )
                     )
-                )
+                elif tool_call.type == "custom":
+                    pass
 
         return items
 
@@ -206,6 +215,12 @@ class Converter:
         return None
 
     @classmethod
+    def maybe_reasoning_message(cls, item: Any) -> ResponseReasoningItemParam | None:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(ResponseReasoningItemParam, item)
+        return None
+
+    @classmethod
     def extract_text_content(
         cls, content: str | Iterable[ResponseInputContentParam]
     ) -> str | list[ChatCompletionContentPartTextParam]:
@@ -251,7 +266,24 @@ class Converter:
                     )
                 )
             elif isinstance(c, dict) and c.get("type") == "input_file":
-                raise UserError(f"File uploads are not supported for chat completions {c}")
+                casted_file_param = cast(ResponseInputFileParam, c)
+                if "file_data" not in casted_file_param or not casted_file_param["file_data"]:
+                    raise UserError(
+                        f"Only file_data is supported for input_file {casted_file_param}"
+                    )
+                if "filename" not in casted_file_param or not casted_file_param["filename"]:
+                    raise UserError(
+                        f"filename must be provided for input_file {casted_file_param}"
+                    )
+                out.append(
+                    File(
+                        type="file",
+                        file=FileFile(
+                            file_data=casted_file_param["file_data"],
+                            filename=casted_file_param["filename"],
+                        ),
+                    )
+                )
             else:
                 raise UserError(f"Unknown content: {c}")
         return out
@@ -396,7 +428,7 @@ class Converter:
             elif file_search := cls.maybe_file_search_call(item):
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
-                new_tool_call = ChatCompletionMessageToolCallParam(
+                new_tool_call = ChatCompletionMessageFunctionToolCallParam(
                     id=file_search["id"],
                     type="function",
                     function={
@@ -416,7 +448,7 @@ class Converter:
                 asst = ensure_assistant_message()
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
-                new_tool_call = ChatCompletionMessageToolCallParam(
+                new_tool_call = ChatCompletionMessageFunctionToolCallParam(
                     id=func_call["call_id"],
                     type="function",
                     function={
@@ -442,7 +474,11 @@ class Converter:
                     f"Encountered an item_reference, which is not supported: {item_ref}"
                 )
 
-            # 7) If we haven't recognized it => fail or ignore
+            # 7) reasoning message => not handled
+            elif cls.maybe_reasoning_message(item):
+                pass
+
+            # 8) If we haven't recognized it => fail or ignore
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 
@@ -467,7 +503,7 @@ class Converter:
         )
 
     @classmethod
-    def convert_handoff_tool(cls, handoff: Handoff[Any]) -> ChatCompletionToolParam:
+    def convert_handoff_tool(cls, handoff: Handoff[Any, Any]) -> ChatCompletionToolParam:
         return {
             "type": "function",
             "function": {

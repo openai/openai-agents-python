@@ -1,3 +1,4 @@
+import inspect
 import json
 from typing import Any
 
@@ -220,6 +221,7 @@ def test_handoff_input_data():
         input_history="",
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 1
 
@@ -227,6 +229,7 @@ def test_handoff_input_data():
         input_history=({"role": "user", "content": "foo"},),
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 1
 
@@ -237,6 +240,7 @@ def test_handoff_input_data():
         ),
         pre_handoff_items=(),
         new_items=(),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 2
 
@@ -250,6 +254,7 @@ def test_handoff_input_data():
             message_item("bar", agent),
             message_item("baz", agent),
         ),
+        run_context=RunContextWrapper(context=()),
     )
     assert get_len(data) == 5
 
@@ -263,6 +268,7 @@ def test_handoff_input_data():
             message_item("baz", agent),
             message_item("qux", agent),
         ),
+        run_context=RunContextWrapper(context=()),
     )
 
     assert get_len(data) == 5
@@ -318,6 +324,8 @@ async def test_handoff_is_enabled_callable():
     handoff_callable_enabled = handoff(agent, is_enabled=always_enabled)
     assert callable(handoff_callable_enabled.is_enabled)
     result = handoff_callable_enabled.is_enabled(RunContextWrapper(agent), agent)
+    assert inspect.isawaitable(result)
+    result = await result
     assert result is True
 
     # Test callable that returns False
@@ -327,6 +335,8 @@ async def test_handoff_is_enabled_callable():
     handoff_callable_disabled = handoff(agent, is_enabled=always_disabled)
     assert callable(handoff_callable_disabled.is_enabled)
     result = handoff_callable_disabled.is_enabled(RunContextWrapper(agent), agent)
+    assert inspect.isawaitable(result)
+    result = await result
     assert result is False
 
     # Test async callable

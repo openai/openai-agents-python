@@ -7,6 +7,10 @@ format:
 	uv run ruff format
 	uv run ruff check --fix
 
+.PHONY: format-check
+format-check:
+	uv run ruff format --check
+
 .PHONY: lint
 lint: 
 	uv run ruff check
@@ -40,6 +44,7 @@ old_version_tests:
 
 .PHONY: build-docs
 build-docs:
+	uv run docs/scripts/generate_ref_files.py
 	uv run mkdocs build
 
 .PHONY: build-full-docs
@@ -55,5 +60,5 @@ serve-docs:
 deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
-	
-	
+.PHONY: check
+check: format-check lint mypy tests

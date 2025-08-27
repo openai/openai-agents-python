@@ -24,14 +24,14 @@ from .function_schema import DocstringStyle, function_schema
 from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
 from .tracing import SpanError
 from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-
-    from .agent import Agent
+    from .agent import Agent, AgentBase
 
 ToolParams = ParamSpec("ToolParams")
 
@@ -88,10 +88,14 @@ class FunctionTool:
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
+
+    def __post_init__(self):
+        if self.strict_json_schema:
+            self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
 
 @dataclass
@@ -201,7 +205,7 @@ MCPToolApprovalFunction = Callable[
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
-    call tools, without requiring a a round trip back to your code.
+    call tools, without requiring a round trip back to your code.
     If you want to run MCP servers locally via stdio, in a VPC or other non-publicly-accessible
     environment, or you just prefer to run tool calls locally, then you can instead use the servers
     in `agents.mcp` and pass `Agent(mcp_servers=[...])` to the agent."""
@@ -260,7 +264,11 @@ LocalShellExecutor = Callable[[LocalShellCommandRequest], MaybeAwaitable[str]]
 
 @dataclass
 class LocalShellTool:
-    """A tool that allows the LLM to execute commands on a shell."""
+    """A tool that allows the LLM to execute commands on a shell.
+
+    For more details, see:
+    https://platform.openai.com/docs/guides/tools-local-shell
+    """
 
     executor: LocalShellExecutor
     """A function that executes a command on a shell."""
@@ -301,7 +309,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -316,7 +324,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -331,7 +339,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:

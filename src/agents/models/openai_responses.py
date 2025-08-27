@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
 from openai.types import ChatModel
@@ -25,6 +25,7 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
+from ..model_settings import MCPToolChoice
 from ..tool import (
     CodeInterpreterTool,
     ComputerTool,
@@ -246,9 +247,12 @@ class OpenAIResponsesModel(Model):
         converted_tools = Converter.convert_tools(tools, handoffs)
         response_format = Converter.get_response_format(output_schema)
 
-        include: list[ResponseIncludable] = converted_tools.includes
+        include_set: set[str] = set(converted_tools.includes)
         if model_settings.response_include is not None:
-            include = list({*include, *model_settings.response_include})
+            include_set.update(model_settings.response_include)
+        if model_settings.top_logprobs is not None:
+            include_set.add("message.output_text.logprobs")
+        include = cast(list[ResponseIncludable], list(include_set))
 
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
@@ -262,6 +266,15 @@ class OpenAIResponsesModel(Model):
                 f"Response format: {response_format}\n"
                 f"Previous response id: {previous_response_id}\n"
             )
+
+        extra_args = dict(model_settings.extra_args or {})
+        if model_settings.top_logprobs is not None:
+            extra_args["top_logprobs"] = model_settings.top_logprobs
+        if model_settings.verbosity is not None:
+            if response_format != NOT_GIVEN:
+                response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
+            else:
+                response_format = {"verbosity": model_settings.verbosity}
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
@@ -285,7 +298,7 @@ class OpenAIResponsesModel(Model):
             store=self._non_null_or_not_given(model_settings.store),
             reasoning=self._non_null_or_not_given(model_settings.reasoning),
             metadata=self._non_null_or_not_given(model_settings.metadata),
-            **(model_settings.extra_args or {}),
+            **extra_args,
         )
 
     def _get_client(self) -> AsyncOpenAI:
@@ -303,10 +316,16 @@ class ConvertedTools:
 class Converter:
     @classmethod
     def convert_tool_choice(
-        cls, tool_choice: Literal["auto", "required", "none"] | str | None
+        cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> response_create_params.ToolChoice | NotGiven:
         if tool_choice is None:
             return NOT_GIVEN
+        elif isinstance(tool_choice, MCPToolChoice):
+            return {
+                "server_label": tool_choice.server_label,
+                "type": "mcp",
+                "name": tool_choice.name,
+            }
         elif tool_choice == "required":
             return "required"
         elif tool_choice == "auto":
@@ -334,9 +353,9 @@ class Converter:
                 "type": "code_interpreter",
             }
         elif tool_choice == "mcp":
-            return {
-                "type": "mcp",
-            }
+            # Note that this is still here for backwards compatibility,
+            # but migrating to MCPToolChoice is recommended.
+            return {"type": "mcp"}  # type: ignore [typeddict-item]
         else:
             return {
                 "type": "function",
@@ -363,7 +382,7 @@ class Converter:
     def convert_tools(
         cls,
         tools: list[Tool],
-        handoffs: list[Handoff[Any]],
+        handoffs: list[Handoff[Any, Any]],
     ) -> ConvertedTools:
         converted_tools: list[ToolParam] = []
         includes: list[ResponseIncludable] = []

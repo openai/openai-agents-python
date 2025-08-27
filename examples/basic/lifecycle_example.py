@@ -56,7 +56,7 @@ hooks = ExampleHooks()
 
 @function_tool
 def random_number(max: int) -> int:
-    """Generate a random number up to the provided max."""
+    """Generate a random number from 0 to max (inclusive)."""
     return random.randint(0, max)
 
 
@@ -88,11 +88,16 @@ start_agent = Agent(
 
 async def main() -> None:
     user_input = input("Enter a max number: ")
-    await Runner.run(
-        start_agent,
-        hooks=hooks,
-        input=f"Generate a random number between 0 and {user_input}.",
-    )
+    try:
+        max_number = int(user_input)
+        await Runner.run(
+            start_agent,
+            hooks=hooks,
+            input=f"Generate a random number between 0 and {max_number}.",
+        )
+    except ValueError:
+        print("Please enter a valid integer.")
+        return
 
     print("Done!")
 
@@ -105,14 +110,12 @@ $ python examples/basic/lifecycle_example.py
 Enter a max number: 250
 ### 1: Agent Start Agent started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens
 ### 2: Tool random_number started. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 3: Tool random_number ended with result 101. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 4: Agent Start Agent started. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 5: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 6: Agent Multiply Agent started. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 7: Tool multiply_by_two started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 8: Tool multiply_by_two ended with result 202. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 9: Agent Multiply Agent started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 10: Agent Multiply Agent ended with output number=202. Usage: 4 requests, 714 input tokens, 63 output tokens, 777 total tokens
+### 3: Tool random_number ended with result 101. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total token
+### 4: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
+### 5: Agent Multiply Agent started. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
+### 6: Tool multiply_by_two started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
+### 7: Tool multiply_by_two ended with result 202. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
+### 8: Agent Multiply Agent ended with output number=202. Usage: 4 requests, 714 input tokens, 63 output tokens, 777 total tokens
 Done!
 
 """
