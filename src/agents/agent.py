@@ -411,16 +411,17 @@ class Agent(AgentBase, Generic[TContext]):
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
-
-            output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
-            )
-            if custom_output_extractor:
-                return await custom_output_extractor(output)
-
-            return ItemHelpers.text_message_outputs(output.new_items)
+            try:
+                output = await Runner.run(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                )
+                if custom_output_extractor:
+                    return await custom_output_extractor(output)
+                return ItemHelpers.text_message_outputs(output.new_items)
+            except Exception as e:
+                return f"Error: {str(e)}"
 
         return run_agent
 
