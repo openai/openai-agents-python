@@ -1,17 +1,19 @@
-
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 from .run_context import RunContextWrapper, TContext
 
+
 def _assert_must_pass_tool_name() -> str:
     raise ValueError("Tool name must be passed")
+
 
 def _assert_must_pass_tool_call_id() -> str:
     raise ValueError("Tool call ID must be passed")
 
+
 @dataclass
-class ToolContext(RunContextWrapper[Any]):
+class ToolContext(RunContextWrapper[TContext]):
     """The context of a tool call."""
 
     tool_name: str = field(default_factory=_assert_must_pass_tool_name)
@@ -28,7 +30,7 @@ class ToolContext(RunContextWrapper[Any]):
         cls,
         context: RunContextWrapper[TContext],
         tool_call_id: str,
-        tool_call: Any = None,  # Should be Optional[ResponseFunctionToolCall], but keep generic for now
+        tool_call: Any = None,
     ) -> "ToolContext":
         """
         Create a ToolContext from a RunContextWrapper.
