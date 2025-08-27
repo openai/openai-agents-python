@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+import secrets
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -234,6 +235,73 @@ class OpenAIResponsesModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
+
+        # --- Defensive normalization for reasoning items
+        # Server requires: every reasoning item must be immediately followed by an assistant
+        # message. We preserve all reasoning items (needed for references) and, when the next
+        # item is NOT a message, we synthesize a minimal placeholder assistant message.
+        # This prevents 400 errors like:
+        #   "Item '<id>' of type 'reasoning' was provided without its required following item."
+        # and also preserves required reasoning when a subsequent function_call references it.
+        def _ensure_reasoning_followed(seq: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """Ensure each reasoning item is immediately followed by an allowed follower.
+
+            Allowed followers (no placeholder inserted):
+              - message (assistant response text)
+              - function_call (the model decided to call a tool directly)
+              - code_interpreter_call (direct code interpreter invocation)
+
+            We only synthesize a placeholder assistant message when the next item is
+            missing or is NOT one of the allowed follower types. This preserves the
+            original adjacency requirements enforced by the Responses API.
+            """
+            existing_ids = {d.get("id") for d in seq if isinstance(d, dict)}
+            allowed_followers = {"message", "function_call", "code_interpreter_call"}
+            out: list[dict[str, Any]] = []
+            for idx, item in enumerate(seq):
+                out.append(item)
+                if not isinstance(item, dict) or item.get("type") != "reasoning":
+                    continue
+                nxt = seq[idx + 1] if idx + 1 < len(seq) else None
+                if isinstance(nxt, dict) and nxt.get("type") in allowed_followers:
+                    continue  # already satisfied by allowed follower
+                # Insert placeholder assistant message (safe follower)
+                placeholder_id = None
+                for _ in range(5):
+                    cand = f"msg_{secrets.token_hex(24)}"
+                    if cand not in existing_ids:
+                        placeholder_id = cand
+                        existing_ids.add(cand)
+                        break
+                if not placeholder_id:
+                    placeholder_id = "msg_placeholder"
+                out.append(
+                    {
+                        "id": placeholder_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "(placeholder – reasoning context)",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                )
+            return out
+
+        try:
+            # list_input is List[TResponseInputItem]; we only mutate dict entries.
+            list_input = [dict(x) if isinstance(x, dict) else x for x in list_input]  # shallow copy
+            # Only fix if there exists at least one reasoning item.
+            if any(isinstance(x, dict) and x.get("type") == "reasoning" for x in list_input):
+                dict_seq = [x for x in list_input if isinstance(x, dict)]
+                fixed = _ensure_reasoning_followed(dict_seq)
+                list_input = fixed  # type: ignore[assignment]
+        except Exception as _norm_exc:  # fail-open
+            logger.debug(f"Reasoning normalization skipped due to error: {_norm_exc}")
 
         parallel_tool_calls = (
             True
