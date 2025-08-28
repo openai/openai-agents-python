@@ -84,6 +84,10 @@ packages = ["src/agents"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+exclude = [
+    "dfp-bot/**",    # nested unrelated project; exclude from linting
+    "logs/**",       # local logs
+]
 
 [tool.ruff.lint]
 select = [
@@ -101,7 +105,12 @@ isort = { combine-as-imports = true, known-first-party = ["agents"] }
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["E501"]
+"examples/**/*.py" = [
+    "E501",  # allow long lines in examples
+    "UP006", # allow legacy typing aliases in examples
+    "UP007", # allow Optional[T] in examples
+    "UP035", # allow typing.List/Dict in examples
+]
 
 [tool.mypy]
 strict = true
