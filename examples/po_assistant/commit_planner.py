@@ -37,7 +37,7 @@ def _fetch_on_hand_for_options(
 
 
 def build_plan(client: AirtableClient, req: PlanRequest) -> PlanResult:
-    option_ids = [l.product_option_id for l in req.lines]
+    option_ids = [line.product_option_id for line in req.lines]
     on_hand = _fetch_on_hand_for_options(client, option_ids)
 
     computed: List[PlanLineComputed] = []
