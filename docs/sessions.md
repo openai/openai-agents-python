@@ -227,27 +227,28 @@ if __name__ == "__main__":
 You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
 
 ```python
-from agents.memory import Session
+from agents.memory.session import SessionABC
+from agents.items import TResponseInputItem
 from typing import List
 
-class MyCustomSession:
+class MyCustomSession(SessionABC):
     """Custom session implementation following the Session protocol."""
 
     def __init__(self, session_id: str):
         self.session_id = session_id
         # Your initialization here
 
-    async def get_items(self, limit: int | None = None) -> List[dict]:
+    async def get_items(self, limit: int | None = None) -> List[TResponseInputItem]:
         """Retrieve conversation history for this session."""
         # Your implementation here
         pass
 
-    async def add_items(self, items: List[dict]) -> None:
+    async def add_items(self, items: List[TResponseInputItem]) -> None:
         """Store new items for this session."""
         # Your implementation here
         pass
 
-    async def pop_item(self) -> dict | None:
+    async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from this session."""
         # Your implementation here
         pass

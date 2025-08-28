@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast, get_args
 
@@ -91,6 +92,12 @@ def get_default_agent_runner() -> AgentRunner:
     return DEFAULT_AGENT_RUNNER
 
 
+def _default_trace_include_sensitive_data() -> bool:
+    """Returns the default value for trace_include_sensitive_data based on environment variable."""
+    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class ModelInputData:
     """Container for the data that will be sent to the model."""
@@ -145,7 +152,9 @@ class RunConfig:
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
     """
 
-    trace_include_sensitive_data: bool = True
+    trace_include_sensitive_data: bool = field(
+        default_factory=_default_trace_include_sensitive_data
+    )
     """Whether we include potentially sensitive data (for example: inputs/outputs of tool calls or
     LLM generations) in traces. If False, we'll still create spans for these events, but the
     sensitive data will not be included.
