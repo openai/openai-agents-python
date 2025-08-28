@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast
+from typing import Any, Callable, Generic, cast, get_args
 
-from openai.types.responses import ResponseCompletedEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+)
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
@@ -40,7 +44,14 @@ from .guardrail import (
     OutputGuardrailResult,
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
-from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
+from .items import (
+    ItemHelpers,
+    ModelResponse,
+    RunItem,
+    ToolCallItem,
+    ToolCallItemTypes,
+    TResponseInputItem,
+)
 from .lifecycle import RunHooks
 from .logger import logger
 from .memory import Session
@@ -49,7 +60,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
-from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
+from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -79,6 +90,12 @@ def get_default_agent_runner() -> AgentRunner:
     """
     global DEFAULT_AGENT_RUNNER
     return DEFAULT_AGENT_RUNNER
+
+
+def _default_trace_include_sensitive_data() -> bool:
+    """Returns the default value for trace_include_sensitive_data based on environment variable."""
+    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -135,7 +152,9 @@ class RunConfig:
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
     """
 
-    trace_include_sensitive_data: bool = True
+    trace_include_sensitive_data: bool = field(
+        default_factory=_default_trace_include_sensitive_data
+    )
     """Whether we include potentially sensitive data (for example: inputs/outputs of tool calls or
     LLM generations) in traces. If False, we'll still create spans for these events, but the
     sensitive data will not be included.
@@ -905,6 +924,8 @@ class AgentRunner:
         all_tools: list[Tool],
         previous_response_id: str | None,
     ) -> SingleStepResult:
+        emitted_tool_call_ids: set[str] = set()
+
         if should_run_agent_start_hooks:
             await asyncio.gather(
                 hooks.on_agent_start(context_wrapper, agent),
@@ -984,6 +1005,25 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(usage)
 
+            if isinstance(event, ResponseOutputItemAddedEvent):
+                output_item = event.item
+
+                if isinstance(output_item, _TOOL_CALL_TYPES):
+                    call_id: str | None = getattr(
+                        output_item, "call_id", getattr(output_item, "id", None)
+                    )
+
+                    if call_id and call_id not in emitted_tool_call_ids:
+                        emitted_tool_call_ids.add(call_id)
+
+                        tool_item = ToolCallItem(
+                            raw_item=cast(ToolCallItemTypes, output_item),
+                            agent=agent,
+                        )
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                        )
+
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
         # Call hook just after the model response is finalized.
@@ -995,9 +1035,10 @@ class AgentRunner:
             raise ModelBehaviorError("Model did not produce a final response!")
 
         # 3. Now, we can process the turn as we do in the non-streaming case
-        return await cls._get_single_step_result_from_streamed_response(
+        single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
-            streamed_result=streamed_result,
+            original_input=streamed_result.input,
+            pre_step_items=streamed_result.new_items,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -1007,6 +1048,34 @@ class AgentRunner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
         )
+
+        if emitted_tool_call_ids:
+            import dataclasses as _dc
+
+            filtered_items = [
+                item
+                for item in single_step_result.new_step_items
+                if not (
+                    isinstance(item, ToolCallItem)
+                    and (
+                        call_id := getattr(
+                            item.raw_item, "call_id", getattr(item.raw_item, "id", None)
+                        )
+                    )
+                    and call_id in emitted_tool_call_ids
+                )
+            ]
+
+            single_step_result_filtered = _dc.replace(
+                single_step_result, new_step_items=filtered_items
+            )
+
+            RunImpl.stream_step_result_to_queue(
+                single_step_result_filtered, streamed_result._event_queue
+            )
+        else:
+            RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        return single_step_result
 
     @classmethod
     async def _run_single_turn(
@@ -1397,9 +1466,11 @@ class AgentRunner:
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
+_TOOL_CALL_TYPES: tuple[type, ...] = get_args(ToolCallItemTypes)
 
 
 def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
     if isinstance(input, str):
         return input
     return input.copy()
+

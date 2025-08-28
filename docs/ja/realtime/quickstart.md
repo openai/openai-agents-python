@@ -4,10 +4,10 @@ search:
 ---
 # クイックスタート
 
-Realtime エージェントは、 OpenAI の Realtime API を使用して AI エージェントとの音声会話を可能にします。ここでは、最初の Realtime 音声エージェントを作成する手順を説明します。
+リアルタイム エージェント は、OpenAI の Realtime API を使って AI エージェント との音声会話を可能にします。このガイドでは、最初の リアルタイム 音声 エージェント の作成手順を説明します。
 
-!!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装の改善に伴い、破壊的な変更が発生する場合があります。
+!!! warning "Beta feature"
+リアルタイム エージェント はベータ版です。実装の改善に伴い、破壊的な変更が発生する可能性があります。
 
 ## 前提条件
 
@@ -17,13 +17,13 @@ Realtime エージェントはベータ版です。実装の改善に伴い、�
 
 ## インストール
 
-まだの場合は、 OpenAI Agents SDK をインストールします:
+まだの場合は、OpenAI Agents SDK をインストールします:
 
 ```bash
 pip install openai-agents
 ```
 
-## 最初の Realtime エージェントの作成
+## 最初の リアルタイム エージェント の作成
 
 ### 1. 必要なコンポーネントのインポート
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. Realtime エージェントの作成
+### 2. リアルタイム エージェント の作成
 
 ```python
 agent = RealtimeAgent(
@@ -135,34 +135,34 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 設定オプション
+## 構成オプション
 
 ### モデル設定
 
--   `model_name`: 利用可能な Realtime モデルから選択 (例: `gpt-4o-realtime-preview`)
+-   `model_name`: 利用可能な リアルタイム モデルから選択 (例: `gpt-4o-realtime-preview`)
 -   `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: テキストおよび/または音声を有効化 (`["text", "audio"]`)
+-   `modalities`: テキストや音声を有効化 (`["text", "audio"]`)
 
-### 音声設定
+### オーディオ設定
 
 -   `input_audio_format`: 入力音声の形式 (`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: 出力音声の形式
--   `input_audio_transcription`: 文字起こしの設定
+-   `input_audio_transcription`: 文字起こしの構成
 
 ### ターン検出
 
--   `type`: 検出方式 (`server_vad`, `semantic_vad`)
--   `threshold`: 音声活動のしきい値 (0.0-1.0)
+-   `type`: 検出方法 (`server_vad`, `semantic_vad`)
+-   `threshold`: 音声活動のしきい値 (0.0–1.0)
 -   `silence_duration_ms`: ターン終了を検出する無音時間
 -   `prefix_padding_ms`: 発話前の音声パディング
 
 ## 次のステップ
 
--   [Realtime エージェントの詳細](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダの動作するコード例を確認
--   エージェントにツールを追加
--   エージェント間のハンドオフを実装
--   安全のためのガードレールを設定
+-   [リアルタイム エージェント について詳しく学ぶ](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダにある動作する code examples を確認
+-   エージェント にツールを追加
+-   エージェント 間の ハンドオフ を実装
+-   安全性のための ガードレール を設定
 
 ## 認証
 
@@ -172,7 +172,7 @@ OpenAI API キーが環境に設定されていることを確認してくださ
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-または、セッションを作成するときに直接渡します:
+または、セッション作成時に直接渡します:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

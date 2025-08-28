@@ -64,23 +64,19 @@ class SQLAlchemySession(SessionABC):
         create_tables: bool = False,
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
-    ):  # noqa: D401 – short description on the class-level docstring
-        """Create a new session.
+    ):
+        """Initializes a new SQLAlchemySession.
 
-        Parameters
-        ----------
-        session_id
-            Unique identifier for the conversation.
-        engine
-            A pre-configured SQLAlchemy *async* engine.  The engine **must** be
-            created with an async driver (``postgresql+asyncpg://``,
-            ``mysql+aiomysql://`` or ``sqlite+aiosqlite://``).
-        create_tables
-            Whether to automatically create the required tables & indexes.
-            Defaults to *False* for production use. Set to *True* for development
-            and testing when migrations aren't used.
-        sessions_table, messages_table
-            Override default table names if needed.
+        Args:
+            session_id (str): Unique identifier for the conversation.
+            engine (AsyncEngine): A pre-configured SQLAlchemy async engine. The engine
+                must be created with an async driver (e.g., 'postgresql+asyncpg://',
+                'mysql+aiomysql://', or 'sqlite+aiosqlite://').
+            create_tables (bool, optional): Whether to automatically create the required
+                tables and indexes. Defaults to False for production use. Set to True for
+                development and testing when migrations aren't used.
+            sessions_table (str, optional): Override the default table name for sessions if needed.
+            messages_table (str, optional): Override the default table name for messages if needed.
         """
         self.session_id = session_id
         self._engine = engine
@@ -132,9 +128,7 @@ class SQLAlchemySession(SessionABC):
         )
 
         # Async session factory
-        self._session_factory = async_sessionmaker(
-            self._engine, expire_on_commit=False
-        )
+        self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
 
         self._create_tables = create_tables
 
@@ -152,16 +146,16 @@ class SQLAlchemySession(SessionABC):
     ) -> SQLAlchemySession:
         """Create a session from a database URL string.
 
-        Parameters
-        ----------
-        session_id
-            Conversation ID.
-        url
-            Any SQLAlchemy async URL – e.g. ``"postgresql+asyncpg://user:pass@host/db"``.
-        engine_kwargs
-            Additional kwargs forwarded to :pyfunc:`sqlalchemy.ext.asyncio.create_async_engine`.
-        kwargs
-            Forwarded to the main constructor (``create_tables``, custom table names, …).
+        Args:
+            session_id (str): Conversation ID.
+            url (str): Any SQLAlchemy async URL, e.g. "postgresql+asyncpg://user:pass@host/db".
+            engine_kwargs (dict[str, Any] | None): Additional keyword arguments forwarded to
+                sqlalchemy.ext.asyncio.create_async_engine.
+            **kwargs: Additional keyword arguments forwarded to the main constructor
+                (e.g., create_tables, custom table names, etc.).
+
+        Returns:
+            SQLAlchemySession: An instance of SQLAlchemySession connected to the specified database.
         """
         engine_kwargs = engine_kwargs or {}
         engine = create_async_engine(url, **engine_kwargs)
@@ -186,6 +180,15 @@ class SQLAlchemySession(SessionABC):
             self._create_tables = False  # Only create once
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        """Retrieve the conversation history for this session.
+
+        Args:
+            limit: Maximum number of items to retrieve. If None, retrieves all items.
+                   When specified, returns the latest N items in chronological order.
+
+        Returns:
+            List of input items representing the conversation history
+        """
         await self._ensure_tables()
         async with self._session_factory() as sess:
             if limit is None:
@@ -220,6 +223,11 @@ class SQLAlchemySession(SessionABC):
             return items
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        """Add new items to the conversation history.
+
+        Args:
+            items: List of input items to add to the history
+        """
         if not items:
             return
 
@@ -258,6 +266,11 @@ class SQLAlchemySession(SessionABC):
                 )
 
     async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the session.
+
+        Returns:
+            The most recent item if it exists, None if the session is empty
+        """
         await self._ensure_tables()
         async with self._session_factory() as sess:
             async with sess.begin():
@@ -286,7 +299,8 @@ class SQLAlchemySession(SessionABC):
                 except json.JSONDecodeError:
                     return None
 
-    async def clear_session(self) -> None:  # noqa: D401 – imperative mood is fine
+    async def clear_session(self) -> None:
+        """Clear all items for this session."""
         await self._ensure_tables()
         async with self._session_factory() as sess:
             async with sess.begin():
