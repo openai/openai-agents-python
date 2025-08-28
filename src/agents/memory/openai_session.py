@@ -1,4 +1,3 @@
-from token import OP
 from typing import Optional
 
 from openai import AsyncOpenAI
