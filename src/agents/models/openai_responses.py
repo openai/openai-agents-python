@@ -335,6 +335,10 @@ class Converter:
             return {
                 "type": "file_search",
             }
+        elif tool_choice == "web_search":
+            return {
+                "type": "web_search",
+            }
         elif tool_choice == "web_search_preview":
             return {
                 "type": "web_search_preview",
