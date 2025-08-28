@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Any
+from typing import Any, List, Optional, Tuple
 
 from .airtable_client import AirtableClient, config_from_env
 from .extract_stub import POExtract, POLine
@@ -94,7 +94,11 @@ def reconcile(extract: POExtract, client: Optional[AirtableClient] = None) -> PO
             # Use the top label to match by Name listing first, then fall back to ID scan.
             top_label = item_cands[0].name
             # Fast path: find by Name list
-            name_list = _list_table_items(client, table="Product Options", label_field="Name") if client else []
+            name_list = (
+                _list_table_items(client, table="Product Options", label_field="Name")
+                if client
+                else []
+            )
             by_name = next((iid for iid, lbl in name_list if lbl == top_label), None)
             top_id = by_name or item_cands[0].id
             # Attempt to find this product in a full list query
@@ -122,5 +126,7 @@ def reconcile(extract: POExtract, client: Optional[AirtableClient] = None) -> PO
             # treat missing stock as 0 (so tests expecting 4 will still override from stub with fields present).
             if available_qty is None:
                 available_qty = 0
-        lines.append(LineReconciliation(line=ln, item_candidates=item_cands, available_qty=available_qty))
+        lines.append(
+            LineReconciliation(line=ln, item_candidates=item_cands, available_qty=available_qty)
+        )
     return POReconciliation(company_candidates=company_candidates, lines=lines)

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from starlette.responses import StreamingResponse, HTMLResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 
 from .agent_summary import stream_summary_events, summarize_plan, summarize_plan_with_guardrail
 from .airtable_client import AirtableClient, config_from_env
@@ -121,11 +121,13 @@ async def list_tasks() -> list[dict[str, object]]:
     """Return a lightweight list of known tasks for the demo UI."""
     out: list[dict[str, object]] = []
     for tid, plan in _TASKS_CACHE.items():
-        out.append({
-            "id": tid,
-            "client": plan.purchase_order.fields.get("Clients"),
-            "lines": len(plan.computed_lines),
-        })
+        out.append(
+            {
+                "id": tid,
+                "client": plan.purchase_order.fields.get("Clients"),
+                "lines": len(plan.computed_lines),
+            }
+        )
     return out
 
 

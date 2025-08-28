@@ -12,7 +12,8 @@ async def main() -> None:
     # We keep the key in env; do not log it.
     server = MCPServerStreamableHttp(
         name="Zapier MCP",
-        params={},  # url/headers pulled from env via __aenter__ patch below
+        # Provide minimal placeholder values to satisfy type checker; real values set below.
+        params={"url": "", "headers": {}},
     )
     # Workaround: the class takes params at init. We'll reconstruct with env here for clarity.
     import os

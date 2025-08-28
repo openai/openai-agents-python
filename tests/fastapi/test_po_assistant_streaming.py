@@ -7,13 +7,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from agents import Agent, Runner
+from examples.po_assistant.airtable_client import AirtableConfig
+from examples.po_assistant.app import app
 from examples.po_assistant.commit_models import (
     PlanLineComputed,
     PlanResult,
     PurchaseOrderCreate,
 )
-from examples.po_assistant.airtable_client import AirtableConfig
-from examples.po_assistant.app import app
 
 
 @pytest.mark.asyncio
@@ -55,8 +55,8 @@ async def test_streamed_summary_endpoint(monkeypatch):
                 item=type("I", (), {"type": "message_output_item"})(),
             )
 
-    def fake_run_streamed(agent: Agent[Any], input: Any, **kwargs):  # type: ignore[override]
-        return DummyStream()  # type: ignore[return-value]
+    def fake_run_streamed(agent: Agent[Any], input: Any, **kwargs):
+        return DummyStream()
 
     monkeypatch.setattr(Runner, "run_streamed", staticmethod(fake_run_streamed))
 
@@ -77,7 +77,9 @@ async def test_streamed_summary_endpoint(monkeypatch):
             )
         ]
         return PlanResult(
-            idempotency_key=req["idempotency_key"] if isinstance(req, dict) else req.idempotency_key,
+            idempotency_key=req["idempotency_key"]
+            if isinstance(req, dict)
+            else req.idempotency_key,
             purchase_order=PurchaseOrderCreate(fields={"Clients": ["recClient"]}),
             computed_lines=polines,
             notes=None,
@@ -116,7 +118,7 @@ async def test_guarded_summary_pass_and_fail(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_run(agent: Agent[Any], input: Any, **kwargs):  # type: ignore[override]
+    async def fake_run(agent: Agent[Any], input: Any, **kwargs):
         calls.append("run")
         # Return output attached to result-like object
         return DummyResult("All-in 100% of capital")
@@ -140,7 +142,9 @@ async def test_guarded_summary_pass_and_fail(monkeypatch):
             )
         ]
         return PlanResult(
-            idempotency_key=req["idempotency_key"] if isinstance(req, dict) else req.idempotency_key,
+            idempotency_key=req["idempotency_key"]
+            if isinstance(req, dict)
+            else req.idempotency_key,
             purchase_order=PurchaseOrderCreate(fields={"Clients": ["recClient"]}),
             computed_lines=polines,
             notes=None,
@@ -162,11 +166,13 @@ async def test_guarded_summary_pass_and_fail(monkeypatch):
         r1 = await ac.post("/po/plan/summary/guarded", json=payload)
         assert r1.status_code == 200
         j1 = r1.json()
-        assert j1["ok"] is False or ("violations" in j1 and j1["violations"])  # guardrail may return ok=False or violations
+        assert j1["ok"] is False or (
+            "violations" in j1 and j1["violations"]
+        )  # guardrail may return ok=False or violations
         assert "violations" in j1 and j1["violations"]
 
         # Now return a safe, longer message
-        async def fake_run_safe(agent: Agent[Any], input: Any, **kwargs):  # type: ignore[override]
+        async def fake_run_safe(agent: Agent[Any], input: Any, **kwargs):
             return DummyResult(
                 "Plan preview: reserve partial quantities; no guarantees or leverage."
             )

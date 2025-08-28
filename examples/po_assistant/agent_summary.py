@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from agents import Agent, GuardrailFunctionOutput, OutputGuardrail, Runner, RunConfig
+from agents import Agent, GuardrailFunctionOutput, OutputGuardrail, RunConfig, Runner
 
 from .commit_models import PlanResult
 from .trace_logger import TraceLogger
@@ -92,7 +92,7 @@ async def summarize_plan_with_guardrail(result: PlanResult) -> dict[str, Any]:
         gr = _risk_guardrail_function(None, None, summary_text)
         if gr.tripwire_triggered:
             info = gr.output_info if isinstance(gr.output_info, dict) else {}
-            return {"ok": False, "violations": info.get("violations", ["guardrail_failed"]) }
+            return {"ok": False, "violations": info.get("violations", ["guardrail_failed"])}
         return {"ok": True, "summary": summary_text}
     except Exception as ex:  # Guardrail tripwire or other errors
         # Extract violations if available.
