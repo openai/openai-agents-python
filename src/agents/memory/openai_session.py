@@ -20,7 +20,7 @@ async def start_openai_session(openai_client: Optional[AsyncOpenAI] = None) -> s
 class OpenAISession(SessionABC):
     def __init__(
         self,
-        session_id: str | None = None,
+        session_id: Optional[str] = None,
         openai_client: Optional[AsyncOpenAI] = None,
     ):
         # this implementation allows to set this value later
