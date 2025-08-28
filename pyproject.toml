@@ -71,7 +71,7 @@ dev = [
 members = ["agents"]
 
 [tool.uv.sources]
-agents = { workspace = true }
+openai-agents = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

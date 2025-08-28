@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
-
+from typing import List, Optional, Tuple
 
 _non_alnum = re.compile(r"[^A-Za-z0-9]+")
 
@@ -30,7 +30,9 @@ class MatchCandidate:
     confidence: float
 
 
-def best_matches(query: str, items: Iterable[Tuple[str, str]], top_k: int = 5) -> List[MatchCandidate]:
+def best_matches(
+    query: str, items: Iterable[Tuple[str, str]], top_k: int = 5
+) -> List[MatchCandidate]:
     scored: List[Tuple[float, str, str]] = []
     for item_id, label in items:
         conf = string_similarity(query, label)
@@ -40,7 +42,9 @@ def best_matches(query: str, items: Iterable[Tuple[str, str]], top_k: int = 5) -
     return [MatchCandidate(id=i, label=lbl, confidence=conf) for conf, i, lbl in scored[:top_k]]
 
 
-def exact_or_best(query: Optional[str], items: Iterable[Tuple[str, str]], top_k: int = 5) -> List[MatchCandidate]:
+def exact_or_best(
+    query: Optional[str], items: Iterable[Tuple[str, str]], top_k: int = 5
+) -> List[MatchCandidate]:
     items_list = list(items)
     if not query:
         # If no query, return top labels (alphabetically) without confidence.
@@ -53,5 +57,3 @@ def exact_or_best(query: Optional[str], items: Iterable[Tuple[str, str]], top_k:
         if _norm(label) == qn:
             return [MatchCandidate(id=item_id, label=label, confidence=1.0)]
     return best_matches(query, items_list, top_k=top_k)
-
-

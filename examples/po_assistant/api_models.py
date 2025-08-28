@@ -27,5 +27,3 @@ class SyncRequest(BaseModel):
     # For now, allow either a base64-encoded PDF or plain text stub.
     po_bytes_base64: Optional[str] = None
     text_stub: Optional[str] = None
-
-

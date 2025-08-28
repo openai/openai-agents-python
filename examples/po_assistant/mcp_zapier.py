@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from agents.mcp import MCPServerStreamableHttp
 
@@ -20,5 +19,3 @@ def zapier_mcp_from_env() -> MCPServerStreamableHttp:
         },
         cache_tools_list=True,
     )
-
-

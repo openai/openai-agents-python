@@ -5,14 +5,15 @@ from typing import Dict, List, Optional
 from .airtable_client import AirtableClient
 from .commit_models import (
     PlanLineComputed,
-    PlanLineRequest,
     PlanRequest,
     PlanResult,
     PurchaseOrderCreate,
 )
 
 
-def _fetch_on_hand_for_options(client: AirtableClient, option_ids: List[str]) -> Dict[str, Optional[int]]:
+def _fetch_on_hand_for_options(
+    client: AirtableClient, option_ids: List[str]
+) -> Dict[str, Optional[int]]:
     # Minimal pass: fetch Product Options by IDs, get On Hand Rollup/Stock if present via fields.
     # Fallback: None when unavailable.
     # For now, we list all and filter locally to minimize extra endpoints.
@@ -72,5 +73,3 @@ def build_plan(client: AirtableClient, req: PlanRequest) -> PlanResult:
         computed_lines=computed,
         notes="Preview only. Nothing written until commit.",
     )
-
-

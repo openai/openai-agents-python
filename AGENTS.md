@@ -81,7 +81,7 @@ This repository includes a reference example under `examples/po_assistant` that 
 Key components:
 
 - `examples/po_assistant/app.py`: FastAPI app with routes.
-- `examples/po_assistant/routes.py`: Endpoints including `/po/sync`, `/po/plan`, `/po/plan/summary`, `/mcp/tools`, `/airtable/schema`.
+- `examples/po_assistant/routes.py`: Endpoints including `/po/sync`, `/po/plan`, `/po/plan/summary`, `/po/plan/summary/stream`, `/po/plan/summary/guarded`, `/mcp/tools`, `/airtable/schema`.
 - `examples/po_assistant/agent_summary.py`: Summary agent using `gpt-5-2025-08-07` via `Runner.run`.
 - `examples/po_assistant/mcp_zapier.py`: Helper to instantiate `MCPServerStreamableHttp` using `ZAPIER_MCP_URL` and `ZAPIER_MCP_KEY`.
 - `examples/po_assistant/reconcile.py`: Airtable-backed reconciliation with fuzzy matching.
@@ -110,8 +110,10 @@ Endpoints:
 - `/po/sync`: PDF extract (stub) → Airtable reconciliation (companies/items).
 - `/po/plan`: Computes a preview of reserve/backorder per line (no writes).
 - `/po/plan/summary`: Agent-generated summary for the preview.
+- `/po/plan/summary/stream`: Streamed events (NDJSON) from the summary agent for UI.
+- `/po/plan/summary/guarded`: Summary with an output guardrail; returns violations on fail.
 - `/mcp/tools`: Lists Zapier MCP tools.
-- `/airtable/schema`: Fetches schema via Zapier MCP.
+- `POST /airtable/schema` – live schema via Zapier MCP.
 
 Future work (tracked in TODOs):
 
@@ -130,6 +132,8 @@ Future work (tracked in TODOs):
   - `POST /airtable/schema?base_id=$AIRTABLE_BASE_ID`
   - `POST /po/sync` (empty body ok)
   - `POST /po/plan` and `/po/plan/summary`
+  - `POST /po/plan/summary/stream` (observe `application/x-ndjson` lines)
+  - `POST /po/plan/summary/guarded` (returns `{ ok, summary | violations }`)
 
 ### Branch & commit checklist
 - Scope small, focused changes.
@@ -143,6 +147,22 @@ Future work (tracked in TODOs):
 - MCP endpoints OK with valid `ZAPIER_MCP_KEY`.
 - Error paths return helpful messages (missing envs, base not found).
 - Idempotency keys logged in plan responses.
+
+### Streaming traces & files
+
+The streamed summary endpoint emits semantic events using the Agents SDK streaming model:
+
+- `agent_updated_stream_event` when the active agent changes.
+- `raw_response_event` for LLM deltas (we forward only text and reasoning deltas).
+- `run_item_stream_event` for items such as messages and tool calls.
+
+Lightweight trace logs are persisted under `logs/po_assistant_traces/{idempotency_key}.jsonl`.
+Each line is a JSON object: `{ ts, type, payload }`. Likely secrets are redacted.
+
+### Output guardrails
+
+The summary agent is wrapped with an output guardrail that flags unsafe/invalid summaries and
+returns structured violations via `/po/plan/summary/guarded` instead of raising.
 
 ## Quick reference: endpoints
 - `GET /healthz` – service alive.

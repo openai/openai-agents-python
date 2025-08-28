@@ -37,5 +37,3 @@ class PlanResult(BaseModel):
     purchase_order: PurchaseOrderCreate
     computed_lines: List[PlanLineComputed]
     notes: Optional[str] = None
-
-

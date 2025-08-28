@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -17,12 +18,16 @@ class AirtableClient:
     def __init__(self, config: AirtableConfig) -> None:
         self.config = config
         self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {self.config.pat}",
-            "Content-Type": "application/json",
-        })
+        self._session.headers.update(
+            {
+                "Authorization": f"Bearer {self.config.pat}",
+                "Content-Type": "application/json",
+            }
+        )
 
-    def list_records(self, table_name: str, fields: Optional[Iterable[str]] = None, page_size: int = 100) -> List[Dict[str, Any]]:
+    def list_records(
+        self, table_name: str, fields: Optional[Iterable[str]] = None, page_size: int = 100
+    ) -> List[Dict[str, Any]]:
         url = f"https://api.airtable.com/v0/{self.config.base_id}/{table_name}"
         params: Dict[str, Any] = {"pageSize": page_size}
         if fields:
@@ -48,5 +53,3 @@ def config_from_env() -> AirtableConfig:
     if not pat:
         raise RuntimeError("Missing AIRTABLE_PAT env var.")
     return AirtableConfig(base_id=base_id, pat=pat)
-
-

@@ -67,5 +67,3 @@ def load_schema_from_json(path: str | Path) -> BaseSchema:
     # Try to infer base_id from the filename pattern ..._appXXXX_schema.json
     base_id = p.stem.split("_")[-2] if "_" in p.stem and p.stem.endswith("schema") else ""
     return BaseSchema(base_id=base_id, tables=tables)
-
-

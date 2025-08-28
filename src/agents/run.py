@@ -1473,4 +1473,3 @@ def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResp
     if isinstance(input, str):
         return input
     return input.copy()
-

@@ -34,5 +34,3 @@ def extract_from_pdf_bytes(_: bytes) -> POExtract:
         POLine(raw_description="Item B", sku=None, vendor_part=None, quantity=2, unit_price=None),
     ]
     return POExtract(header=header, lines=lines)
-
-
