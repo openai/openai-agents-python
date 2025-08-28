@@ -162,14 +162,14 @@ def test_convert_tools_basic_types_and_includes():
     types = [ct["type"] for ct in converted.tools]
     assert "function" in types
     assert "file_search" in types
-    assert "web_search_preview" in types
+    assert "web_search" in types
     assert "computer_use_preview" in types
     # Verify file search tool contains max_num_results and vector_store_ids
     file_params = next(ct for ct in converted.tools if ct["type"] == "file_search")
     assert file_params.get("max_num_results") == file_tool.max_num_results
     assert file_params.get("vector_store_ids") == file_tool.vector_store_ids
     # Verify web search tool contains user_location and search_context_size
-    web_params = next(ct for ct in converted.tools if ct["type"] == "web_search_preview")
+    web_params = next(ct for ct in converted.tools if ct["type"] == "web_search")
     assert web_params.get("user_location") == web_tool.user_location
     assert web_params.get("search_context_size") == web_tool.search_context_size
     # Verify computer tool contains environment and computed dimensions

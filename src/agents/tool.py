@@ -12,6 +12,7 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
+from openai.types.responses.tool import WebSearchToolFilters
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import ValidationError
@@ -132,6 +133,9 @@ class WebSearchTool:
 
     user_location: UserLocation | None = None
     """Optional location for the search. Lets you customize results to be relevant to a location."""
+
+    filters: WebSearchToolFilters | None = None
+    """A filter to apply based on file attributes."""
 
     search_context_size: Literal["low", "medium", "high"] = "medium"
     """The amount of context to use for the search."""

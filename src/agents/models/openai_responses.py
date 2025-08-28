@@ -14,7 +14,6 @@ from openai.types.responses import (
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
-    WebSearchToolParam,
     response_create_params,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -416,12 +415,12 @@ class Converter:
             }
             includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
-            ws: WebSearchToolParam = {
-                "type": "web_search_preview",
-                "user_location": tool.user_location,
+            converted_tool = {
+                "type": "web_search",
+                "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
+                "user_location": tool.user_location,  # type: ignore [typeddict-item]
                 "search_context_size": tool.search_context_size,
             }
-            converted_tool = ws
             includes = None
         elif isinstance(tool, FileSearchTool):
             converted_tool = {
