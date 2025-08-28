@@ -1,3 +1,4 @@
+from token import OP
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -65,7 +66,7 @@ class OpenAISession(SessionABC):
             items=items,
         )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(self) -> Optional[TResponseInputItem]:
         await self._ensure_session_id()
         items = await self.get_items(limit=1)
         if not items:
