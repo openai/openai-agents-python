@@ -93,6 +93,13 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    # Tool-specific guardrails
+    tool_input_guardrails: list["ToolInputGuardrail[Any]"] | None = None
+    """Optional list of input guardrails to run before invoking this tool."""
+
+    tool_output_guardrails: list["ToolOutputGuardrail[Any]"] | None = None
+    """Optional list of output guardrails to run after invoking this tool."""
+
     def __post_init__(self):
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
