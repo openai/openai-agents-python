@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, cast
 
 from .airtable_client import AirtableClient, config_from_env
 from .extract_stub import POExtract, POLine
@@ -73,7 +73,9 @@ def _detect_stock_from_fields(fields: dict[str, Any]) -> Optional[int]:
 
 
 def reconcile(extract: POExtract, client: Optional[AirtableClient] = None) -> POReconciliation:
-    client = client or (config_from_env() and AirtableClient(config_from_env()))
+    if client is None:
+        cfg = config_from_env()
+        client = AirtableClient(cfg)
     # Company candidates from Clients table (by Client Name).
     client_items = _list_table_items(client, table="Clients", label_field="Client Name")
     company_mc: List[MatchCandidate] = exact_or_best(extract.header.company_name, client_items)
@@ -94,15 +96,11 @@ def reconcile(extract: POExtract, client: Optional[AirtableClient] = None) -> PO
             # Use the top label to match by Name listing first, then fall back to ID scan.
             top_label = item_cands[0].name
             # Fast path: find by Name list
-            name_list = (
-                _list_table_items(client, table="Product Options", label_field="Name")
-                if client
-                else []
-            )
+            name_list = _list_table_items(client, table="Product Options", label_field="Name")
             by_name = next((iid for iid, lbl in name_list if lbl == top_label), None)
             top_id = by_name or item_cands[0].id
             # Attempt to find this product in a full list query
-            records = client.list_records("Product Options") if client else []
+            records = client.list_records("Product Options")
             for r in records:
                 if r.get("id") == top_id:
                     fields = r.get("fields", {})
@@ -117,7 +115,8 @@ def reconcile(extract: POExtract, client: Optional[AirtableClient] = None) -> PO
                 try:
                     fetch_single = getattr(client, "get_record_by_id", None)
                     if callable(fetch_single):
-                        rec = fetch_single("Product Options", top_id)  # type: ignore[misc]
+                        fetch_single_typed = cast(Callable[[str, str], dict[str, Any]], fetch_single)
+                        rec = fetch_single_typed("Product Options", top_id)
                         if isinstance(rec, dict):
                             available_qty = _detect_stock_from_fields(rec.get("fields", {}))
                 except Exception:

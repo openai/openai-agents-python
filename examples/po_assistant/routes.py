@@ -4,7 +4,7 @@ import json
 import os
 from base64 import b64decode
 from collections.abc import AsyncIterator
-from typing import Optional
+from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException
 from starlette.responses import HTMLResponse, StreamingResponse
@@ -108,7 +108,7 @@ async def po_plan_summary_stream(req: PlanRequest):
 
 
 @routes.post("/po/plan/summary/guarded")
-async def po_plan_summary_guarded(req: PlanRequest) -> dict:
+async def po_plan_summary_guarded(req: PlanRequest) -> dict[str, object]:
     """Run summary with output guardrail and return structured result."""
     client = AirtableClient(config_from_env())
     plan = build_plan(client, req)
@@ -234,7 +234,7 @@ async def mcp_list_tools() -> dict[str, list[str]]:
 
 
 @routes.post("/airtable/schema")
-async def airtable_schema_via_mcp(base_id: Optional[str] = None) -> dict:
+async def airtable_schema_via_mcp(base_id: Optional[str] = None) -> dict[str, Any]:
     base_id = base_id or os.getenv("AIRTABLE_BASE_ID", "appIQpYvYVDlVtAPS")
     async with zapier_mcp_from_env() as server:
         res = await server.call_tool(
@@ -253,7 +253,8 @@ async def airtable_schema_via_mcp(base_id: Optional[str] = None) -> dict:
             text = getattr(first, "text", None)
         if isinstance(text, str):
             try:
-                return json.loads(text)
+                parsed = json.loads(text)
+                return cast(dict[str, Any], parsed)
             except Exception:
                 return {"raw": text}
         return {"raw": str(content)}
