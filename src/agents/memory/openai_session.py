@@ -33,7 +33,7 @@ class OpenAISession(SessionABC):
         if self.session_id is None:
             self.session_id = await start_openai_session(self.openai_client)
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(self, limit: Optional[int] = None) -> list[TResponseInputItem]:
         await self._ensure_session_id()
 
         all_items = []
