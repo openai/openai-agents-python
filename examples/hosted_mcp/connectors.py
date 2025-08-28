@@ -14,7 +14,7 @@ async def main(verbose: bool, stream: bool):
     # 1. Visit https://developers.google.com/oauthplayground/
     # 2. Input https://www.googleapis.com/auth/calendar.events as the required scope
     # 3. Grab the acccess token starting with "ya29."
-    authorization = os.getenv("GOOGLE_CALENDAR_AUTHORIZATION")
+    authorization = os.environ["GOOGLE_CALENDAR_AUTHORIZATION"]
     agent = Agent(
         name="Assistant",
         instructions="You are a helpful assistant that can help a user with their calendar.",
