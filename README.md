@@ -17,6 +17,77 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 
 Explore the [examples](examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
 
+## Airtable setup (PO Assistant example)
+
+The example under `examples/po_assistant` can connect to an Airtable base for reconciliation and planning.
+
+- Set up env vars (recommended via `.env`):
+  - Copy `.env.example` to `.env` and set `AIRTABLE_PAT` and `AIRTABLE_BASE_ID`.
+  - Minimum scopes for the PAT: `data.records:read`. Optional for schema fetch: `schema.bases:read`.
+
+Quick start:
+
+```bash
+set -a; source .env; set +a   # load env vars
+uv run python -m uvicorn examples.po_assistant.app:app --reload
+# In another terminal:
+curl http://127.0.0.1:8000/healthz
+```
+
+Endpoints:
+
+- `GET /healthz`: Basic health check.
+- `GET /schema/overview`: Static overview of tables (from local schema).
+- `POST /po/sync`: Body `{ po_bytes_base64?: string, text_stub?: string }`. Returns company/item candidates from Airtable.
+- `POST /po/plan`: Body `{ idempotency_key, po_number?, client_id, lines:[{product_option_id, requested_qty, reserve_now?}] }`. Computes reserve/backorder plan (preview only, no writes).
+- `POST /po/plan/summary`: Same body as `/po/plan`. Returns a human-readable agent summary using model `gpt-5-2025-08-07`.
+- `GET /mcp/tools`: Lists available Zapier MCP tools.
+- `POST /airtable/schema?base_id=...` (optional): Fetches live Airtable base schema via Zapier MCP (`base_id` defaults to `AIRTABLE_BASE_ID`).
+
+Environment variables:
+
+- Airtable (direct API used for read-only list calls during sync/plan):
+  - `AIRTABLE_PAT` (required)
+  - `AIRTABLE_BASE_ID` (default: `appIQpYvYVDlVtAPS`)
+- Zapier MCP (for live Airtable tool calls):
+  - `ZAPIER_MCP_URL` (default: `https://mcp.zapier.com/api/mcp/mcp`)
+  - `ZAPIER_MCP_KEY` (required to enable MCP endpoints)
+- OpenAI (for agent summary):
+  - `OPENAI_API_KEY` (required to use `gpt-5-2025-08-07`)
+
+Examples:
+
+```bash
+# Health & tools
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/mcp/tools | jq .
+
+# Live schema via MCP
+curl -s -X POST "http://127.0.0.1:8000/airtable/schema?base_id=${AIRTABLE_BASE_ID}" | jq '.results[0:1]'
+
+# Sync (stubbed PDF)
+curl -s -X POST http://127.0.0.1:8000/po/sync -H 'Content-Type: application/json' -d '{}' | jq .
+
+# Plan & summary
+curl -s -X POST http://127.0.0.1:8000/po/plan -H 'Content-Type: application/json' -d '{
+  "idempotency_key":"demo-1",
+  "po_number":"PO-1001",
+  "client_id":"recCLIENTID",
+  "lines":[{"product_option_id":"recITEMID","requested_qty":3}]
+}' | jq .
+
+curl -s -X POST http://127.0.0.1:8000/po/plan/summary -H 'Content-Type: application/json' -d '{
+  "idempotency_key":"demo-1",
+  "client_id":"recCLIENTID",
+  "lines":[{"product_option_id":"recITEMID","requested_qty":3}]
+}' | jq -r .summary
+```
+
+Notes:
+
+- The PO Assistant follows a preview-first design: it never writes to Airtable until an explicit commit endpoint (to be added) is called.
+- Zapier MCP tools often require an `instructions` parameter; the app fills this automatically in `/airtable/schema`.
+
 ## Get started
 
 To get started, set up your Python environment (Python 3.9 or newer required), and then install OpenAI Agents SDK package.

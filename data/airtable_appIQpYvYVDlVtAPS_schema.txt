@@ -1,0 +1,1004 @@
+Table: Users (id: tblGahduWXHJpBOya)
+Primary field: fldPMhvn8eGemwXHT (id: fldPMhvn8eGemwXHT)
+Fields:
+- Name [singleLineText] (id: fldPMhvn8eGemwXHT)
+- Profile Photo [multipleAttachments] (id: fldKzs96OV3CfHx9I)
+- Email [email] (id: flddfRBkiVXmiBrRR)
+- UserID [formula] (id: fldy3zcnLexE8FfRv) formula: RECORD_ID() resultType=singleLineText
+- ClientID (from Client) [multipleLookupValues] (id: fldsrl2xA0BkeJ14n) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fld6Fg795NxGfR196, resultType=singleLineText
+- Role [singleSelect] (id: fldtxRT8epf0298g6) choices: Admin, Consultant, Client
+- Phone [phoneNumber] (id: fld1wtEqkf9Rj0sXl)
+- Address [singleLineText] (id: fldLQEkuUIEMe5rnZ)
+- Client [multipleRecordLinks] (id: fld1ZIzbVzFzXVRpb) link: linkedTableId=tblgb089XAV7s8Etu, inverse=fldII30irwkMbPW42, single=false
+- Address (from Client) [multipleLookupValues] (id: fldI4fd3a68uJg2k5) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fldWIoQuYZSHxyERH, resultType=singleLineText
+- City (from Client) [multipleLookupValues] (id: fldRZsADiW2jWVejL) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fld4FGLzf5wGXEPfW, resultType=singleLineText
+- State/Province (from Client) [multipleLookupValues] (id: fldA7V8jEtYfLJMyV) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fldSZ688xuXckIqza, resultType=singleLineText
+- Country (from Client) [multipleLookupValues] (id: fldZ9TKlf3fJkZyIn) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fldRtk9ac0Rd79s05, resultType=singleLineText
+- ZIP Code (from Client) [multipleLookupValues] (id: fldhOzupS0AgTXzWe) lookup: recordLinkFieldId=fld1ZIzbVzFzXVRpb, fieldIdInLinkedTable=fldOkFBOXXNAnt0I7, resultType=singleLineText
+- Created time [createdTime] (id: flda17kxqhr5khvQF) resultType=dateTime
+- Expertise [singleSelect] (id: flddYRvkR5WQepKB0) choices: Design, Content, SEO, Video, Copywriting
+- Projects Assigned [multipleRecordLinks] (id: fldfTgud6y8mWArrQ) link: linkedTableId=tbl2Ll9gzf0kXlpuR, inverse=fldR37P4xCUS6E5pi, single=false
+- Invoices Requested [multipleRecordLinks] (id: fldKJcuYzEXW0xb85) link: linkedTableId=tblRS6S3eItPw2pVv, inverse=fld9SV9i8YzbTxOO5, single=false
+- Purchase Orders [singleLineText] (id: fldSL0XTmPTfrgKaQ)
+- Purchase Orders 2 [multipleRecordLinks] (id: fldubGNPFsVIWtorK) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldVICPX9huWOfSq0, single=false
+Views:
+- All [grid] (id: viwKYUQqCwiA9JOPY)
+- Consultants [grid] (id: viwmEWeqWo2iFmRpO)
+- Admins [grid] (id: viwX1laHMz0b59bUb)
+- Clients [grid] (id: viwHsCaAjlUmrOmn6)
+
+----------------------------------------
+
+Table: Clients (id: tblgb089XAV7s8Etu)
+Primary field: flduQzenoNT93BVqN (id: flduQzenoNT93BVqN)
+Fields:
+- Client Name [singleLineText] (id: flduQzenoNT93BVqN)
+- Payment Tier [singleSelect] (id: fldnrKD2zV6qbU1LX) choices: Net 30, Net 35, Net 60, Net 90, Advance, CC Payment, Net 45
+- Flagged [singleSelect] (id: fldQOCCrD3VMLNUkb) choices: No, Yes
+- Flag Reason [richText] (id: fldmePqAvUhEKsMY7)
+- Logo [multipleAttachments] (id: fldPJCWI9rBUZdtxG)
+- Address [singleLineText] (id: fldWIoQuYZSHxyERH)
+- City [singleLineText] (id: fld4FGLzf5wGXEPfW)
+- State/Province [singleLineText] (id: fldSZ688xuXckIqza)
+- Country [singleLineText] (id: fldRtk9ac0Rd79s05)
+- Location [singleSelect] (id: fld5zXIJdibVZpCuI) choices: North America, South America
+- ZIP Code [singleLineText] (id: fldOkFBOXXNAnt0I7)
+- Website [url] (id: fldMQ0DTdi8iJtLYc)
+- Contacts [multipleRecordLinks] (id: fldII30irwkMbPW42) link: linkedTableId=tblGahduWXHJpBOya, inverse=fld1ZIzbVzFzXVRpb, single=false
+- Email (from Contacts) [multipleLookupValues] (id: fldsPGOschvhxXah0) lookup: recordLinkFieldId=fldII30irwkMbPW42, fieldIdInLinkedTable=flddfRBkiVXmiBrRR, resultType=email
+- Projects [multipleRecordLinks] (id: fldm013HIUA0Qrhcp) link: linkedTableId=tbl2Ll9gzf0kXlpuR, inverse=fldenizFEKaB2Rpul, single=false
+- Purchase Orders [multipleRecordLinks] (id: fld5EAnPiTvVHnThO) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldM8pVmYgGBoOs9I, single=false
+- Purchase Orders 2 [singleLineText] (id: fldrqS2hYcSrUuUyb)
+- ClientID [formula] (id: fld6Fg795NxGfR196) formula: RECORD_ID() resultType=singleLineText
+- News & Notifications [multipleRecordLinks] (id: fld6iLqfpeiTSl160) link: linkedTableId=tblcB0ne41eYOMEoL, inverse=flduEx8zBBWuFnKaj, single=false
+- News & Notifications copy [singleLineText] (id: flduN6Ki90L99SY1X)
+Views:
+- Grid view [grid] (id: viwL0vPEJX7xp6Cqa)
+
+----------------------------------------
+
+Table: Projects (id: tbl2Ll9gzf0kXlpuR)
+Primary field: fldkhT1mMUAWl7i1N (id: fldkhT1mMUAWl7i1N)
+Fields:
+- Project Name [singleLineText] (id: fldkhT1mMUAWl7i1N)
+- Project Image [multipleAttachments] (id: fldwaFQBdh5DBnemZ)
+- Project Status [singleSelect] (id: fldLpRJ3ohgLdeQo7) choices: Planned, In Progress, Finished
+- Client [multipleRecordLinks] (id: fldenizFEKaB2Rpul) link: linkedTableId=tblgb089XAV7s8Etu, inverse=fldm013HIUA0Qrhcp, single=true
+- Assignee [multipleRecordLinks] (id: fldR37P4xCUS6E5pi) link: linkedTableId=tblGahduWXHJpBOya, inverse=fldfTgud6y8mWArrQ, single=false
+- Assignee Name [multipleLookupValues] (id: fldt91dTKJoaVfdLe) lookup: recordLinkFieldId=fldR37P4xCUS6E5pi, fieldIdInLinkedTable=fldPMhvn8eGemwXHT, resultType=singleLineText
+- Assignee Email [multipleLookupValues] (id: fldiUjtbT6deKnVMs) lookup: recordLinkFieldId=fldR37P4xCUS6E5pi, fieldIdInLinkedTable=flddfRBkiVXmiBrRR, resultType=email
+- Tasks [multipleRecordLinks] (id: fldoiRVuYIykzER57) link: linkedTableId=tblO1kjwtvaCcnphd, inverse=fldfRj8L6xQUcbOok, single=false
+- Invoices [multipleRecordLinks] (id: fldZEd3nAI4tTrBi8) link: linkedTableId=tblRS6S3eItPw2pVv, inverse=fldWCgr7bQpmab5Kw, single=false
+Views:
+- Grid view [grid] (id: viwifAawShIA05pSu)
+
+----------------------------------------
+
+Table: Tasks (id: tblO1kjwtvaCcnphd)
+Primary field: fldIFBN6Knrnvq0Ml (id: fldIFBN6Knrnvq0Ml)
+Fields:
+- Task Name [singleLineText] (id: fldIFBN6Knrnvq0Ml)
+- Task Description [multilineText] (id: fldCNWRqtgCORZGNm)
+- Project [multipleRecordLinks] (id: fldfRj8L6xQUcbOok) link: linkedTableId=tbl2Ll9gzf0kXlpuR, inverse=fldoiRVuYIykzER57, single=false
+- Project Name [multipleLookupValues] (id: fldoXeShdThIAv5pO) lookup: recordLinkFieldId=fldfRj8L6xQUcbOok, fieldIdInLinkedTable=fldkhT1mMUAWl7i1N, resultType=singleLineText
+- Task Status [singleSelect] (id: fldwMHJP3KSuMw8Xg) choices: Done, In Progress, Not Started
+- Due Date [date] (id: fld8gfKKhF0ygvIkE)
+Views:
+- Grid view [grid] (id: viwS0KzcrHi4g8WWW)
+
+----------------------------------------
+
+Table: Invoices (id: tblRS6S3eItPw2pVv)
+Primary field: fld62fo2xOwjie3XK (id: fld62fo2xOwjie3XK)
+Fields:
+- Invoice Name [formula] (id: fld62fo2xOwjie3XK) formula: {fldWCgr7bQpmab5Kw} & ' — ' & DATETIME_FORMAT({fldEN3pK3clbgVETp},'YYYY-MM-DD') & ' — ' & '$' & {fldOOku4usAz1URQq} resultType=singleLineText
+- Requested by [multipleRecordLinks] (id: fld9SV9i8YzbTxOO5) link: linkedTableId=tblGahduWXHJpBOya, inverse=fldKJcuYzEXW0xb85, single=true
+- Requester Name [multipleLookupValues] (id: fldhGlE7rEMi9Bgas) lookup: recordLinkFieldId=fld9SV9i8YzbTxOO5, fieldIdInLinkedTable=fldPMhvn8eGemwXHT, resultType=singleLineText
+- Requester Email [multipleLookupValues] (id: fld4xAUDlapvOGmu6) lookup: recordLinkFieldId=fld9SV9i8YzbTxOO5, fieldIdInLinkedTable=flddfRBkiVXmiBrRR, resultType=email
+- Project [multipleRecordLinks] (id: fldWCgr7bQpmab5Kw) link: linkedTableId=tbl2Ll9gzf0kXlpuR, inverse=fldZEd3nAI4tTrBi8, single=true
+- Project Name [multipleLookupValues] (id: fld6zNeTtlMwg95l0) lookup: recordLinkFieldId=fldWCgr7bQpmab5Kw, fieldIdInLinkedTable=fldkhT1mMUAWl7i1N, resultType=singleLineText
+- Client [multipleLookupValues] (id: fldWBcl8YjnqkJnGC) lookup: recordLinkFieldId=fldWCgr7bQpmab5Kw, fieldIdInLinkedTable=fldenizFEKaB2Rpul, resultType=multipleRecordLinks
+- Invoice Date [date] (id: fldEN3pK3clbgVETp)
+- Due Date [date] (id: fld58kFEEnfdHz2H4)
+- Total Cost [currency] (id: fldOOku4usAz1URQq)
+- Invoice [multipleAttachments] (id: fldLxwRamkYgqXLyJ)
+- Payment Status [singleSelect] (id: fldYc4PrcOPgsOBFq) choices: Paid, Open
+- Payment URL [url] (id: fld7x5rl4LjgJX3Al)
+Views:
+- All [grid] (id: viwKkRmSX2o8aOp4o)
+
+----------------------------------------
+
+Table: Purchase Orders (id: tblcCpM7WcMmtjRGc)
+Primary field: fldiHmb7XQDx0snrv (id: fldiHmb7XQDx0snrv)
+Fields:
+- PO Number [singleLineText] (id: fldiHmb7XQDx0snrv)
+- Company Name [formula] (id: fldmqBfO0PXc7u2Tf) formula: {fldDvBzRJTgrCVR5J} resultType=singleLineText
+- Name [singleLineText] (id: fldUggnhXnL4QCY2Q)
+- Items Ordered [formula] (id: fld2H5rN0lQ2ueh47) formula: IF({fldqLEFsE2SFRuTGk}, {fld1F3zCvwxeJWTrI} & " - " & {fldqLEFsE2SFRuTGk}, "") &
+IF(AND({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}), "\n" & {fldoMhZeh7j0immcM} & " - " & {fldHaTYYk80YsDWSh}, IF({fldHaTYYk80YsDWSh}, {fldoMhZeh7j0immcM} & " " & {fldHaTYYk80YsDWSh}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}), {fldZosuMsZ4zbL8rH}), "\n" & {fld80LoP4506Pc0rD} & " - " & {fldZosuMsZ4zbL8rH}, IF({fldZosuMsZ4zbL8rH}, {fld80LoP4506Pc0rD} & " " & {fldZosuMsZ4zbL8rH}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}), {fldHsZbcyyDYiMAtX}), "\n" & {flddnPgQ3LRXMQYnh} & " - " & {fldHsZbcyyDYiMAtX}, IF({fldHsZbcyyDYiMAtX}, {flddnPgQ3LRXMQYnh} & " " & {fldHsZbcyyDYiMAtX}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}), {fldxQvbNT8ZBh4dXG}), "\n" & {fld6oFgdoMCG9ywlX} & " - " & {fldxQvbNT8ZBh4dXG}, IF({fldxQvbNT8ZBh4dXG}, {fld6oFgdoMCG9ywlX} & " " & {fldxQvbNT8ZBh4dXG}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}, {fldxQvbNT8ZBh4dXG}), {fldyFCDcmByONlq5h}), "\n" & {fld2ETkOS1I84Xrii} & " - " & {fldyFCDcmByONlq5h}, IF({fldyFCDcmByONlq5h}, {fld2ETkOS1I84Xrii} & " " & {fldyFCDcmByONlq5h}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}, {fldxQvbNT8ZBh4dXG}, {fldyFCDcmByONlq5h}), {fldAs0WeMv8FbPoDL}), "\n" & {fldQyrSfiXXXPDfJg} & " - " & {fldAs0WeMv8FbPoDL}, IF({fldAs0WeMv8FbPoDL}, {fldQyrSfiXXXPDfJg} & " " & {fldAs0WeMv8FbPoDL}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}, {fldxQvbNT8ZBh4dXG}, {fldyFCDcmByONlq5h}, {fldAs0WeMv8FbPoDL}), {fldiqkXXAytD8H6SO}), "\n" & {fldB5o5hxzuaRSo9V} & " - " & {fldiqkXXAytD8H6SO}, IF({fldiqkXXAytD8H6SO}, {fldB5o5hxzuaRSo9V} & " " & {fldiqkXXAytD8H6SO}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}, {fldxQvbNT8ZBh4dXG}, {fldyFCDcmByONlq5h}, {fldAs0WeMv8FbPoDL}, {fldiqkXXAytD8H6SO}), {fld9IZi13vrq8iXcX}), "\n" & {fldCQqpWdZb7K3I3Y} & " - " & {fld9IZi13vrq8iXcX}, IF({fld9IZi13vrq8iXcX}, {fldCQqpWdZb7K3I3Y} & " " & {fld9IZi13vrq8iXcX}, "")) &
+IF(AND(OR({fldqLEFsE2SFRuTGk}, {fldHaTYYk80YsDWSh}, {fldZosuMsZ4zbL8rH}, {fldHsZbcyyDYiMAtX}, {fldxQvbNT8ZBh4dXG}, {fldyFCDcmByONlq5h}, {fldAs0WeMv8FbPoDL}, {fldiqkXXAytD8H6SO}, {fld9IZi13vrq8iXcX}), {flduQU2PoGySsiBxI}), "\n" & {fldRpcF4jhAtaSoAT} & " - " & {flduQU2PoGySsiBxI}, IF({flduQU2PoGySsiBxI}, {fldRpcF4jhAtaSoAT} & " " & {flduQU2PoGySsiBxI}, ""))
+ resultType=singleLineText
+- Clients [multipleRecordLinks] (id: fldM8pVmYgGBoOs9I) link: linkedTableId=tblgb089XAV7s8Etu, inverse=fld5EAnPiTvVHnThO, single=true
+- Location (from Clients) [multipleLookupValues] (id: fldX3znaL0Zl1QBC8) lookup: recordLinkFieldId=fldM8pVmYgGBoOs9I, fieldIdInLinkedTable=fld5zXIJdibVZpCuI, resultType=singleSelect
+- Client Name (from Clients) [multipleLookupValues] (id: fldDvBzRJTgrCVR5J) lookup: recordLinkFieldId=fldM8pVmYgGBoOs9I, fieldIdInLinkedTable=flduQzenoNT93BVqN, resultType=singleLineText
+- Status [singleSelect] (id: fld7qVJGhiNcrSp9q) choices: Pending, Pending Backorder, Reviewed, Reviewed for Backorder, Confirmed, Partial, Backorder, Shipped, Completed
+- Error Status [singleSelect] (id: fldGckMUthMxFeisc) choices: Stock Issue, Action Required, Pending Items
+- ⚠️ Error Items [formula] (id: fldBVtDbq3ySyry4b) formula: IF({fld2ytv0Fyd9qmGJi}, {fld2ytv0Fyd9qmGJi}, "") &
+IF(AND({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}), "\n" & {fldxtmPAHkkquAYDS}, IF({fldxtmPAHkkquAYDS}, {fldxtmPAHkkquAYDS}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}), {fldVtkSddBB8o1Q1n}), "\n" & {fldVtkSddBB8o1Q1n}, IF({fldVtkSddBB8o1Q1n}, {fldVtkSddBB8o1Q1n}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}), {fldwgLcIwYXOoF0cw}), "\n" & {fldwgLcIwYXOoF0cw}, IF({fldwgLcIwYXOoF0cw}, {fldwgLcIwYXOoF0cw}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}), {fldnV6t783sk4yr3s}), "\n" & {fldnV6t783sk4yr3s}, IF({fldnV6t783sk4yr3s}, {fldnV6t783sk4yr3s}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}, {fldnV6t783sk4yr3s}), {fldkA5axuclkT6XQ6}), "\n" & {fldkA5axuclkT6XQ6}, IF({fldkA5axuclkT6XQ6}, {fldkA5axuclkT6XQ6}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}, {fldnV6t783sk4yr3s}, {fldkA5axuclkT6XQ6}), {fldS8N8UngyRDF51t}), "\n" & {fldS8N8UngyRDF51t}, IF({fldS8N8UngyRDF51t}, {fldS8N8UngyRDF51t}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}, {fldnV6t783sk4yr3s}, {fldkA5axuclkT6XQ6}, {fldS8N8UngyRDF51t}), {fldLw9K4m6MEk5HKB}), "\n" & {fldLw9K4m6MEk5HKB}, IF({fldLw9K4m6MEk5HKB}, {fldLw9K4m6MEk5HKB}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}, {fldnV6t783sk4yr3s}, {fldkA5axuclkT6XQ6}, {fldS8N8UngyRDF51t}, {fldLw9K4m6MEk5HKB}), {fldtaw0YObWBA1uby}), "\n" & {fldtaw0YObWBA1uby}, IF({fldtaw0YObWBA1uby}, {fldtaw0YObWBA1uby}, "")) &
+IF(AND(OR({fld2ytv0Fyd9qmGJi}, {fldxtmPAHkkquAYDS}, {fldVtkSddBB8o1Q1n}, {fldwgLcIwYXOoF0cw}, {fldnV6t783sk4yr3s}, {fldkA5axuclkT6XQ6}, {fldS8N8UngyRDF51t}, {fldLw9K4m6MEk5HKB}, {fldtaw0YObWBA1uby}), {fldNhot3HyEnhkvOz}), "\n" & {fldNhot3HyEnhkvOz}, IF({fldNhot3HyEnhkvOz}, {fldNhot3HyEnhkvOz}, "")) &
+"\n" resultType=singleLineText
+- ⚠️ Expected Backorder [formula] (id: fldLplVPBIhGnCed9) formula: IF({fldjdccyVDCxvjEFZ}, {fldjdccyVDCxvjEFZ}, "") &
+IF(AND({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}), "\n" & {fld9hkzzh4dyTKFYA}, IF({fld9hkzzh4dyTKFYA}, {fld9hkzzh4dyTKFYA}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}), {fldKjS5e27PrDqjNd}), "\n" & {fldKjS5e27PrDqjNd}, IF({fldKjS5e27PrDqjNd}, {fldKjS5e27PrDqjNd}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}), {fldi3FSebva9Ph0jX}), "\n" & {fldi3FSebva9Ph0jX}, IF({fldi3FSebva9Ph0jX}, {fldi3FSebva9Ph0jX}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}), {fldgKvvnS97nfpzIv}), "\n" & {fldgKvvnS97nfpzIv}, IF({fldgKvvnS97nfpzIv}, {fldgKvvnS97nfpzIv}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}, {fldgKvvnS97nfpzIv}), {fldRnCPIpeEVYTyCu}), "\n" & {fldRnCPIpeEVYTyCu}, IF({fldRnCPIpeEVYTyCu}, {fldRnCPIpeEVYTyCu}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}, {fldgKvvnS97nfpzIv}, {fldRnCPIpeEVYTyCu}), {fld4rgNhSuoWEHyMs}), "\n" & {fld4rgNhSuoWEHyMs}, IF({fld4rgNhSuoWEHyMs}, {fld4rgNhSuoWEHyMs}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}, {fldgKvvnS97nfpzIv}, {fldRnCPIpeEVYTyCu}, {fld4rgNhSuoWEHyMs}), {fldh3BZO7y2ikziDQ}), "\n" & {fldh3BZO7y2ikziDQ}, IF({fldh3BZO7y2ikziDQ}, {fldh3BZO7y2ikziDQ}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}, {fldgKvvnS97nfpzIv}, {fldRnCPIpeEVYTyCu}, {fld4rgNhSuoWEHyMs}, {fldh3BZO7y2ikziDQ}), {fldU6JwjIF95tAZIi}), "\n" & {fldU6JwjIF95tAZIi}, IF({fldU6JwjIF95tAZIi}, {fldU6JwjIF95tAZIi}, "")) &
+IF(AND(OR({fldjdccyVDCxvjEFZ}, {fld9hkzzh4dyTKFYA}, {fldKjS5e27PrDqjNd}, {fldi3FSebva9Ph0jX}, {fldgKvvnS97nfpzIv}, {fldRnCPIpeEVYTyCu}, {fld4rgNhSuoWEHyMs}, {fldh3BZO7y2ikziDQ}, {fldU6JwjIF95tAZIi}), {fldjammfWXXgR2wtn}), "\n" & {fldjammfWXXgR2wtn}, IF({fldjammfWXXgR2wtn}, {fldjammfWXXgR2wtn}, ""))
+
+ resultType=singleLineText
+- Date/Time [createdTime] (id: fldgxAC8ZuYHO3K0z) resultType=dateTime
+- Date [date] (id: fldRcQgbhJYWIgWoG)
+- ETA [singleLineText] (id: fld5SIY49SNW6Weyj)
+- Tracking Number [singleLineText] (id: fld61FdImJeBbNUYy)
+- Sales Order Number [singleLineText] (id: fldpHg3qlHIAsxrTX)
+- Invoice Number [singleLineText] (id: fldtxVwpLQkla81bx)
+- Order Number [singleLineText] (id: fld8Tw0BW944pSqyO)
+- Ship to Company [multilineText] (id: fldX8FvyQmmeNziP9)
+- ATN (Attention To Name) [singleLineText] (id: fldkmfNPsrpe4excd)
+- Address [singleLineText] (id: fldxhzJ6yIJJxHC52)
+- Ship To [multilineText] (id: flds4SQbwmtGL6NuB)
+- Street Address [singleLineText] (id: fldvHxAwPs1si4xZS)
+- City [singleLineText] (id: fldxn7vkHqBdyIbHS)
+- State [singleLineText] (id: fldu5gdlA26rm2Qcf)
+- Country [singleLineText] (id: fldofdM1KxFIdVMnh)
+- ZIP/Postal Code [singleLineText] (id: fldWPFpX18ZRhUBYY)
+- Ship To Address [formula] (id: fldKcLjaAxZcZMeNJ) formula: ({fldX8FvyQmmeNziP9}&"\n"&{fldkmfNPsrpe4excd}&"\n"&{flds4SQbwmtGL6NuB}) resultType=singleLineText
+- Contact Phone Number [phoneNumber] (id: fldTKUlOkX5AMDROJ)
+- Contact Email [email] (id: fld0owF0rPLV2dz6W)
+- Use Radwag Shipping? [singleSelect] (id: fldoso9IsFU4R6knv) choices: Yes, No
+- Shipping Account Number [singleLineText] (id: fldP8mp6AT1HaKgBQ)
+- Shipping Company [singleSelect] (id: fldXVQJQWqwRo673F) choices: Fedex, UPS, DHL, USPS, Freight
+- Shipping Speed Option [singleSelect] (id: fldee7mJVqP3LHSsA) choices: Standard Shipping, Expedited Shipping
+- Lift Gate? [singleSelect] (id: flduRjhgWINzGcxjf) choices: No, Yes
+- Shipping Account Type [singleSelect] (id: fld1GxRz2Q0iBUM4c) choices: Third Party, Receiver
+- Shipping Company Name [singleLineText] (id: fldP6LQRqUFg1VHLs)
+- Account Billing Zip Code [singleLineText] (id: fldvzEwERb7tiZWj0)
+- Shipping Insurance [checkbox] (id: fldRenBFKWPjCDDKE)
+- Shipping Signature [checkbox] (id: fldJX8cgMYSJgLri3)
+- Item [multipleRecordLinks] (id: fldqLEFsE2SFRuTGk) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldNGsNOIS2XBC35z, single=true
+- Price (from Product Table) (from Item) [multipleLookupValues] (id: fld95MwHcMyoAUXct) lookup: recordLinkFieldId=fldqLEFsE2SFRuTGk, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- Item Quantity [number] (id: fld1F3zCvwxeJWTrI)
+- Item Price [formula] (id: fldg48Dbb6gvafZZE) formula: IF(
+  {fldqLEFsE2SFRuTGk},
+  {fld95MwHcMyoAUXct} * {fld1F3zCvwxeJWTrI},
+  BLANK()
+)
+
+ resultType=currency
+- Item2 [multipleRecordLinks] (id: fldHaTYYk80YsDWSh) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldqt9sU59sa3PWt8, single=true
+- Item2 Quantity [number] (id: fldoMhZeh7j0immcM)
+- Item2 Price [formula] (id: fldnjCdVFUiuLj2Lg) formula: IF(
+  {fldHaTYYk80YsDWSh},
+  {fldTX6P1ffhHQoQeV} * {fldoMhZeh7j0immcM},
+  BLANK()
+)
+
+ resultType=currency
+- Item3 [multipleRecordLinks] (id: fldZosuMsZ4zbL8rH) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldzI8e52Y0KloQwQ, single=true
+- Item3 Quantity [number] (id: fld80LoP4506Pc0rD)
+- Item3 Price [formula] (id: fldKqVykOLIvl8Faw) formula: IF(
+  {fldZosuMsZ4zbL8rH},
+  {fldLeygsq18jPKtfO} * {fld80LoP4506Pc0rD},
+  BLANK()
+)
+
+ resultType=currency
+- Item4 [multipleRecordLinks] (id: fldHsZbcyyDYiMAtX) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldqcx2Sub7mZOW9i, single=true
+- Item4 Quantity [number] (id: flddnPgQ3LRXMQYnh)
+- Item4 Price [formula] (id: fldPumLNrZRmbxZv7) formula: IF(
+  {fldHsZbcyyDYiMAtX},
+  {fldVhCo4ryMvmLtqH} * {flddnPgQ3LRXMQYnh},
+  BLANK()
+)
+ resultType=currency
+- Item5 [multipleRecordLinks] (id: fldxQvbNT8ZBh4dXG) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldQZnmp44Kdy1ZGa, single=true
+- Item5 Quantity [number] (id: fld6oFgdoMCG9ywlX)
+- Item5 Price [formula] (id: fldyV0Cd57jOTAu8y) formula: IF(
+  {fldxQvbNT8ZBh4dXG},
+  {fldIVCd8csnEq1hnQ} * {fld6oFgdoMCG9ywlX},
+  BLANK()
+)
+
+ resultType=currency
+- Item6 [multipleRecordLinks] (id: fldyFCDcmByONlq5h) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fld1U50Gi14ML5LHD, single=true
+- Item6 Quantity [number] (id: fld2ETkOS1I84Xrii)
+- Item6 Price [formula] (id: fld99Zscus6kkVlT1) formula: IF(
+  {fldyFCDcmByONlq5h},
+  {fldDMeq4P8fN0tG2W} * {fld2ETkOS1I84Xrii},
+  BLANK()
+)
+
+ resultType=currency
+- Item7 [multipleRecordLinks] (id: fldAs0WeMv8FbPoDL) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldWicbFiMTfgErSt, single=true
+- Item7 Quantity [number] (id: fldQyrSfiXXXPDfJg)
+- Item7 Price [formula] (id: fldGxeJgYlH3rCgxQ) formula: IF(
+  {fldAs0WeMv8FbPoDL},
+  {fldN25IFzPLEX3CX4} * {fldQyrSfiXXXPDfJg},
+  BLANK()
+)
+ resultType=currency
+- Item8 [multipleRecordLinks] (id: fldiqkXXAytD8H6SO) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldCV5aa2dluUyJpL, single=true
+- Item8 Quantity [number] (id: fldB5o5hxzuaRSo9V)
+- Item8 Price [formula] (id: fldQkqguobAb0vsUn) formula: IF(
+  {fldiqkXXAytD8H6SO},
+  {fldexNgfUZtt1RSsS} * {fldB5o5hxzuaRSo9V},
+  BLANK()
+)
+
+ resultType=currency
+- Item9 [multipleRecordLinks] (id: fld9IZi13vrq8iXcX) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=flduGeroom7bQS0Nu, single=true
+- Item9 Quantity [number] (id: fldCQqpWdZb7K3I3Y)
+- Item9 Price [formula] (id: fldJkcYer7V8IlvYn) formula: IF(
+  {fld9IZi13vrq8iXcX},
+  {fldjEzLFqKqzRKC3J} * {fldCQqpWdZb7K3I3Y},
+  BLANK()
+)
+ resultType=currency
+- Item10 [multipleRecordLinks] (id: flduQU2PoGySsiBxI) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldxgxZp4Xj42ir2M, single=true
+- Item10 Quantity [number] (id: fldRpcF4jhAtaSoAT)
+- Item10 Price [formula] (id: fldVZYOIRivTA12QJ) formula: IF(
+  {flduQU2PoGySsiBxI},
+  {fldzv0oTho7Bj21vZ} * {fldRpcF4jhAtaSoAT},
+  BLANK()
+)
+ resultType=currency
+- Notes [multilineText] (id: fldpV2dAytskoh7YG)
+- Seller Notes [richText] (id: fldVjinzXKv9ftFAc)
+- Shipping Rate Fee [currency] (id: fldm5X3gPBfJx4kxU)
+- NTEP Fee [currency] (id: fldjoomnGBNLrG3mT)
+- Additional Fees [currency] (id: fldN7qjja0d91HIsT)
+- Handling Fee [currency] (id: fldy1v75C6lSbW8t8)
+- Taxes [currency] (id: fldDvckeu26oqwxpS)
+- Discount Amount [currency] (id: fldlty1SPEHUIXzwF)
+- Override Total Price [currency] (id: fldKhxDWUATbb805A)
+- Total Order Price [formula] (id: fld5UsL59NP8O3Z7x) formula: IF(
+  {fldKhxDWUATbb805A},
+  {fldKhxDWUATbb805A},
+  (
+    ({fldg48Dbb6gvafZZE}) +
+    ({fldnjCdVFUiuLj2Lg}) +
+    ({fldKqVykOLIvl8Faw}) +
+    ({fldPumLNrZRmbxZv7}) +
+    ({fldyV0Cd57jOTAu8y}) +
+    ({fld99Zscus6kkVlT1}) +
+    ({fldGxeJgYlH3rCgxQ}) +
+    ({fldQkqguobAb0vsUn}) +
+    ({fldJkcYer7V8IlvYn}) +
+    ({fldVZYOIRivTA12QJ}) +
+    ({fldm5X3gPBfJx4kxU}) +
+    ({fldy1v75C6lSbW8t8}) +
+    ({fldjoomnGBNLrG3mT}) +
+    ({fldDvckeu26oqwxpS}) +
+    ({fldN7qjja0d91HIsT})
+  ) - {fldlty1SPEHUIXzwF}
+) resultType=currency
+- Monthly Insight [formula] (id: fldinDwpb4tSqNjnR) formula: DATETIME_FORMAT({fldRcQgbhJYWIgWoG}, 'YYYY/MM, MMM')
+ resultType=singleLineText
+- Order Placed today? [formula] (id: fld0SHZQFlWlE07pK) formula: IF(IS_SAME({fldRcQgbhJYWIgWoG}, TODAY(), 'day'), 1, 0)
+ resultType=number
+- Upload File [multipleAttachments] (id: fldrgAAJAxwy2nlWO)
+- Admin Upload File [multipleAttachments] (id: fldsNRvB7PLvz9w3S)
+- Download PO [multipleAttachments] (id: fldEKXiZS9dznaS2I)
+- Terms & Conditions [checkbox] (id: fldNsAbE7ofSQ7ymX)
+- Payment Submitted Amount [currency] (id: fldvzlXcMi2v9be6V)
+- Amount Due [formula] (id: fldvbAZsrQ8r0hx8m) formula: {fld5UsL59NP8O3Z7x} - {fldvzlXcMi2v9be6V} resultType=currency
+- Serial Number [singleLineText] (id: fldJXH6spiHQ8jw1J)
+- Repair Kit Notes [multilineText] (id: fldup8bNtBlswXiln)
+- Product Codes [multilineText] (id: fldktxKNOGVjLNkG6)
+- Model [singleLineText] (id: fldSHxgjbQMpEam9N)
+- User Submitted [multipleRecordLinks] (id: fldVICPX9huWOfSq0) link: linkedTableId=tblGahduWXHJpBOya, inverse=fldubGNPFsVIWtorK, single=true
+- Name (from User Submitted) [multipleLookupValues] (id: fld5cfDfJQcGgKyqi) lookup: recordLinkFieldId=fldVICPX9huWOfSq0, fieldIdInLinkedTable=fldPMhvn8eGemwXHT, resultType=singleLineText
+- Flagged (from Clients) [multipleLookupValues] (id: fldFdImExBa8kat9d) lookup: recordLinkFieldId=fldM8pVmYgGBoOs9I, fieldIdInLinkedTable=fldQOCCrD3VMLNUkb, resultType=singleSelect
+- Assignee [singleCollaborator] (id: fldeL8Lv72p0ymNwK)
+- Expected Backorder Item 1 [formula] (id: fldjdccyVDCxvjEFZ) formula: IF(
+   AND(
+       {fld1F3zCvwxeJWTrI} > {fldcBSNUOfFbx4O6Q}, 
+       NOT(FIND("Software", {fldqLEFsE2SFRuTGk}))
+   ),
+   {fldqLEFsE2SFRuTGk} & " - Backordered: " & ({fld1F3zCvwxeJWTrI} - {fldcBSNUOfFbx4O6Q}) & " Units",
+   BLANK()
+)
+ resultType=singleLineText
+- Auto Backorder Item 1 [formula] (id: fld81oPFoxoJwNS29) formula: IF(
+   {fld1F3zCvwxeJWTrI}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldqLEFsE2SFRuTGk})), 
+         {fld1F3zCvwxeJWTrI} > {fldcBSNUOfFbx4O6Q}
+      ),
+      {fld1F3zCvwxeJWTrI} - {fldcBSNUOfFbx4O6Q},
+      0
+   ),
+   BLANK()
+)
+
+
+
+
+ resultType=number
+- Auto Partial Item 1 [formula] (id: fldJNVoGls5g10dlQ) formula: IF(
+  {fld1F3zCvwxeJWTrI},
+  {fld1F3zCvwxeJWTrI} - {fld81oPFoxoJwNS29},
+  BLANK()
+)
+
+
+ resultType=number
+- Auto Partial Item 2 [formula] (id: fldQRDuftf6l5JdXA) formula: IF(
+  {fldoMhZeh7j0immcM},
+  {fldoMhZeh7j0immcM} - {fldzD8nYxyu9Ixply},
+  BLANK()
+)
+
+
+
+ resultType=number
+- Auto Partial Item 3 [formula] (id: fldRqCXMpAQkwSWIo) formula: IF(
+  {fld80LoP4506Pc0rD},
+  {fld80LoP4506Pc0rD} - {fldLE4e6kbRQLZKhm},
+  BLANK()
+)
+
+
+
+ resultType=number
+- Auto Partial Item 4 [formula] (id: fldu1tdN2ruvY3yPF) formula: IF(
+  {flddnPgQ3LRXMQYnh},
+  {flddnPgQ3LRXMQYnh} - {fldOTOeRVxy2q1mnn},
+  BLANK()
+)
+
+
+
+ resultType=number
+- Auto Partial Item 5 [formula] (id: fldhJz0IJ5b0tz5lm) formula: IF(
+  {fld6oFgdoMCG9ywlX},
+  {fld6oFgdoMCG9ywlX} - {fldv4TqnJBjz70aGh},
+  BLANK()
+)
+
+
+ resultType=number
+- Auto Partial Item 6 [formula] (id: fldEfqwCCI9a48rp3) formula: IF(
+  {fld2ETkOS1I84Xrii},
+  {fld2ETkOS1I84Xrii} - {fldUv6KSG0uWdGqFq},
+  BLANK()
+)
+
+
+ resultType=number
+- Auto Partial Item 7 [formula] (id: fld49XvnzJBFaMEJs) formula: IF(
+  {fldQyrSfiXXXPDfJg},
+  {fldQyrSfiXXXPDfJg} - {fldG4TsatdudQoKZP},
+  BLANK()
+)
+
+
+
+ resultType=number
+- Auto Partial Item 8 [formula] (id: fldsxnKb7YB7hFSoO) formula: IF(
+  {fldB5o5hxzuaRSo9V},
+  {fldB5o5hxzuaRSo9V} - {fld58k9Wo3N43X0ub},
+  BLANK()
+)
+
+
+ resultType=number
+- Auto Partial Item 9 [formula] (id: fldAvuto3huH7jxgG) formula: IF(
+  {fldCQqpWdZb7K3I3Y},
+  {fldCQqpWdZb7K3I3Y} - {fldJ48FfFUsmUhn0l},
+  BLANK()
+)
+
+
+
+
+ resultType=number
+- Auto Partial Item 10 [formula] (id: fldgrSE15IKlo2CUz) formula: IF(
+  {fldRpcF4jhAtaSoAT},
+  {fldRpcF4jhAtaSoAT} - {fldeQCY2tELeLK5Do},
+  BLANK()
+)
+
+
+
+
+ resultType=number
+- Auto Backorder Item 2 [formula] (id: fldzD8nYxyu9Ixply) formula: IF(
+   {fldoMhZeh7j0immcM}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldHaTYYk80YsDWSh})), 
+         {fldoMhZeh7j0immcM} > {fld2eIXiJvwb1Zdtk}
+      ),
+      {fldoMhZeh7j0immcM} - {fld2eIXiJvwb1Zdtk},
+      0
+   ),
+   BLANK()
+)
+
+ resultType=number
+- Auto Backorder Item 3 [formula] (id: fldLE4e6kbRQLZKhm) formula: IF(
+   {fld80LoP4506Pc0rD}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldZosuMsZ4zbL8rH})), 
+         {fld80LoP4506Pc0rD} > {fldX2luzHGkNuU9oe}
+      ),
+      {fld80LoP4506Pc0rD} - {fldX2luzHGkNuU9oe},
+      0
+   ),
+   BLANK()
+)
+
+ resultType=number
+- Auto Backorder Item 4 [formula] (id: fldOTOeRVxy2q1mnn) formula: IF(
+   {flddnPgQ3LRXMQYnh}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldHsZbcyyDYiMAtX})), 
+         {flddnPgQ3LRXMQYnh} > {fld6l8ZqfXnHfagCe}
+      ),
+      {flddnPgQ3LRXMQYnh} - {fld6l8ZqfXnHfagCe},
+      0
+   ),
+   BLANK()
+)
+
+
+ resultType=number
+- Auto Backorder Item 5 [formula] (id: fldv4TqnJBjz70aGh) formula: IF(
+   {fld6oFgdoMCG9ywlX}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldxQvbNT8ZBh4dXG})), 
+         {fld6oFgdoMCG9ywlX} > {fldnccVh9S1Ap66Wz}
+      ),
+      {fld6oFgdoMCG9ywlX} - {fldnccVh9S1Ap66Wz},
+      0
+   ),
+   BLANK()
+)
+
+
+ resultType=number
+- Auto Backorder Item 6 [formula] (id: fldUv6KSG0uWdGqFq) formula: IF(
+   {fld2ETkOS1I84Xrii}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldyFCDcmByONlq5h})), 
+         {fld2ETkOS1I84Xrii} > {fldauAxlHqb3KIRSZ}
+      ),
+      {fld2ETkOS1I84Xrii} - {fldauAxlHqb3KIRSZ},
+      0
+   ),
+   BLANK()
+)
+
+ resultType=number
+- Auto Backorder Item 7 [formula] (id: fldG4TsatdudQoKZP) formula: IF(
+   {fldQyrSfiXXXPDfJg}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldAs0WeMv8FbPoDL})), 
+         {fldQyrSfiXXXPDfJg} > {fld8yE4BnjYx0NN4g}
+      ),
+      {fldQyrSfiXXXPDfJg} - {fld8yE4BnjYx0NN4g},
+      0
+   ),
+   BLANK()
+)
+ resultType=number
+- Auto Backorder Item 8 [formula] (id: fld58k9Wo3N43X0ub) formula: IF(
+   {fldB5o5hxzuaRSo9V}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fldiqkXXAytD8H6SO})), 
+         {fldB5o5hxzuaRSo9V} > {fldcCOtroYtxcQl8M}
+      ),
+      {fldB5o5hxzuaRSo9V} - {fldcCOtroYtxcQl8M},
+      0
+   ),
+   BLANK()
+)
+
+
+
+ resultType=number
+- Auto Backorder Item 9 [formula] (id: fldJ48FfFUsmUhn0l) formula: IF(
+   {fldCQqpWdZb7K3I3Y}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {fld9IZi13vrq8iXcX})), 
+         {fldCQqpWdZb7K3I3Y} > {fldVPPPjl6CQRGhPj}
+      ),
+      {fldCQqpWdZb7K3I3Y} - {fldVPPPjl6CQRGhPj},
+      0
+   ),
+   BLANK()
+)
+ resultType=number
+- Auto Backorder Item 10 [formula] (id: fldeQCY2tELeLK5Do) formula: IF(
+   {fldRpcF4jhAtaSoAT}, 
+   IF(
+      AND(
+         NOT(FIND("Software", {flduQU2PoGySsiBxI})), 
+         {fldRpcF4jhAtaSoAT} > {fldvZnilxvnK4pvki}
+      ),
+      {fldRpcF4jhAtaSoAT} - {fldvZnilxvnK4pvki},
+      0
+   ),
+   BLANK()
+)
+ resultType=number
+- Expected Backorder Item 2 [formula] (id: fld9hkzzh4dyTKFYA) formula: IF(
+   AND(
+       {fldoMhZeh7j0immcM} > {fld2eIXiJvwb1Zdtk}, 
+       NOT(FIND("Software", {fldHaTYYk80YsDWSh}))
+   ),
+   {fldHaTYYk80YsDWSh} & " - Backordered: " & ({fldoMhZeh7j0immcM} - {fld2eIXiJvwb1Zdtk}) & " Units",
+   BLANK()
+)
+
+ resultType=singleLineText
+- Expected Backorder Item 3 [formula] (id: fldKjS5e27PrDqjNd) formula: IF(
+   AND(
+       {fld80LoP4506Pc0rD} > {fldX2luzHGkNuU9oe}, 
+       NOT(FIND("Software", {fldZosuMsZ4zbL8rH}))
+   ),
+   {fldZosuMsZ4zbL8rH} & " - Backordered: " & ({fld80LoP4506Pc0rD} - {fldX2luzHGkNuU9oe}) & " Units",
+   BLANK()
+)
+
+
+ resultType=singleLineText
+- Expected Backorder Item 4 [formula] (id: fldi3FSebva9Ph0jX) formula: IF(
+   AND(
+       {flddnPgQ3LRXMQYnh} > {fld6l8ZqfXnHfagCe}, 
+       NOT(FIND("Software", {fldHsZbcyyDYiMAtX}))
+   ),
+   {fldHsZbcyyDYiMAtX} & " - Backordered: " & ({flddnPgQ3LRXMQYnh} - {fld6l8ZqfXnHfagCe}) & " Units",
+   BLANK()
+)
+
+
+ resultType=singleLineText
+- Expected Backorder Item 5 [formula] (id: fldgKvvnS97nfpzIv) formula: IF(
+   AND(
+       {fld6oFgdoMCG9ywlX} > {fldnccVh9S1Ap66Wz}, 
+       NOT(FIND("Software", {fldxQvbNT8ZBh4dXG}))
+   ),
+   {fldxQvbNT8ZBh4dXG} & " - Backordered: " & ({fld6oFgdoMCG9ywlX} - {fldnccVh9S1Ap66Wz}) & " Units",
+   BLANK()
+)
+
+ resultType=singleLineText
+- Expected Backorder Item 6 [formula] (id: fldRnCPIpeEVYTyCu) formula: IF(
+   AND(
+       {fld2ETkOS1I84Xrii} > {fldauAxlHqb3KIRSZ}, 
+       NOT(FIND("Software", {fldyFCDcmByONlq5h}))
+   ),
+   {fldyFCDcmByONlq5h} & " - Backordered: " & ({fld2ETkOS1I84Xrii} - {fldauAxlHqb3KIRSZ}) & " Units",
+   BLANK()
+)
+
+
+ resultType=singleLineText
+- Expected Backorder Item 7 [formula] (id: fld4rgNhSuoWEHyMs) formula: IF(
+   AND(
+       {fldQyrSfiXXXPDfJg} > {fld8yE4BnjYx0NN4g}, 
+       NOT(FIND("Software", {fldAs0WeMv8FbPoDL}))
+   ),
+   {fldAs0WeMv8FbPoDL} & " - Backordered: " & ({fldQyrSfiXXXPDfJg} - {fld8yE4BnjYx0NN4g}) & " Units",
+   BLANK()
+)
+
+ resultType=singleLineText
+- Expected Backorder Item 8 [formula] (id: fldh3BZO7y2ikziDQ) formula: IF(
+   AND(
+       {fldB5o5hxzuaRSo9V} > {fldcCOtroYtxcQl8M}, 
+       NOT(FIND("Software", {fldiqkXXAytD8H6SO}))
+   ),
+   {fldiqkXXAytD8H6SO} & " - Backordered: " & ({fldB5o5hxzuaRSo9V} - {fldcCOtroYtxcQl8M}) & " Units",
+   BLANK()
+)
+ resultType=singleLineText
+- Expected Backorder Item 9 [formula] (id: fldU6JwjIF95tAZIi) formula: IF(
+   AND(
+       {fldCQqpWdZb7K3I3Y} > {fldVPPPjl6CQRGhPj}, 
+       NOT(FIND("Software", {fld9IZi13vrq8iXcX}))
+   ),
+   {fld9IZi13vrq8iXcX} & " - Backordered: " & ({fldCQqpWdZb7K3I3Y} - {fldVPPPjl6CQRGhPj}) & " Units",
+   BLANK()
+)
+
+ resultType=singleLineText
+- Expected Backorder Item 10 [formula] (id: fldjammfWXXgR2wtn) formula: IF(
+   AND(
+       {fldRpcF4jhAtaSoAT} > {fldvZnilxvnK4pvki}, 
+       NOT(FIND("Software", {flduQU2PoGySsiBxI}))
+   ),
+   {flduQU2PoGySsiBxI} & " - Backordered: " & ({fldRpcF4jhAtaSoAT} - {fldvZnilxvnK4pvki}) & " Units",
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item [formula] (id: fld2ytv0Fyd9qmGJi) formula: IF(
+   AND({fld1F3zCvwxeJWTrI} > {fldcBSNUOfFbx4O6Q}, 
+       NOT(FIND("Software", {fldqLEFsE2SFRuTGk}))), 
+   {fldqLEFsE2SFRuTGk}, 
+   BLANK()
+)
+
+ resultType=singleLineText
+- Error Item2 [formula] (id: fldxtmPAHkkquAYDS) formula: IF(
+   AND({fldoMhZeh7j0immcM} > {fld2eIXiJvwb1Zdtk}, 
+       NOT(FIND("Software", {fldHaTYYk80YsDWSh}))), 
+   {fldHaTYYk80YsDWSh}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item3 [formula] (id: fldVtkSddBB8o1Q1n) formula: IF(
+   AND({fld80LoP4506Pc0rD} > {fldX2luzHGkNuU9oe}, 
+       NOT(FIND("Software", {fldZosuMsZ4zbL8rH}))), 
+   {fldZosuMsZ4zbL8rH}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item4 [formula] (id: fldwgLcIwYXOoF0cw) formula: IF(
+   AND({flddnPgQ3LRXMQYnh} > {fld6l8ZqfXnHfagCe}, 
+       NOT(FIND("Software", {fldHsZbcyyDYiMAtX}))), 
+   {fldHsZbcyyDYiMAtX}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item5 [formula] (id: fldnV6t783sk4yr3s) formula: IF(
+   AND({fld6oFgdoMCG9ywlX} > {fldnccVh9S1Ap66Wz}, 
+       NOT(FIND("Software", {fldxQvbNT8ZBh4dXG}))), 
+   {fldxQvbNT8ZBh4dXG}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item6 [formula] (id: fldkA5axuclkT6XQ6) formula: IF(
+   AND({fld2ETkOS1I84Xrii} > {fldauAxlHqb3KIRSZ}, 
+       NOT(FIND("Software", {fldyFCDcmByONlq5h}))), 
+   {fldyFCDcmByONlq5h}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item7 [formula] (id: fldS8N8UngyRDF51t) formula: IF(
+   AND({fldQyrSfiXXXPDfJg} > {fld8yE4BnjYx0NN4g}, 
+       NOT(FIND("Software", {fldAs0WeMv8FbPoDL}))), 
+   {fldAs0WeMv8FbPoDL}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item8 [formula] (id: fldLw9K4m6MEk5HKB) formula: IF(
+   AND({fldB5o5hxzuaRSo9V} > {fldcCOtroYtxcQl8M}, 
+       NOT(FIND("Software", {fldiqkXXAytD8H6SO}))), 
+   {fldiqkXXAytD8H6SO}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item9 [formula] (id: fldtaw0YObWBA1uby) formula: IF(
+   AND({fldCQqpWdZb7K3I3Y} > {fldVPPPjl6CQRGhPj}, 
+       NOT(FIND("Software", {fld9IZi13vrq8iXcX}))), 
+   {fld9IZi13vrq8iXcX}, 
+   BLANK()
+)
+ resultType=singleLineText
+- Error Item10 [formula] (id: fldNhot3HyEnhkvOz) formula: IF(
+   AND({fldRpcF4jhAtaSoAT} > {fldvZnilxvnK4pvki}, 
+       NOT(FIND("Software", {flduQU2PoGySsiBxI}))), 
+   {flduQU2PoGySsiBxI}, 
+   BLANK()
+)
+ resultType=singleLineText
+- On Hand Rollup (from Product Table) (from Item) [multipleLookupValues] (id: fldcBSNUOfFbx4O6Q) lookup: recordLinkFieldId=fldqLEFsE2SFRuTGk, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- On Hand Rollup (from Product Table) (from Item2) [multipleLookupValues] (id: fld2eIXiJvwb1Zdtk) lookup: recordLinkFieldId=fldHaTYYk80YsDWSh, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item2) [multipleLookupValues] (id: fldTX6P1ffhHQoQeV) lookup: recordLinkFieldId=fldHaTYYk80YsDWSh, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item3) [multipleLookupValues] (id: fldX2luzHGkNuU9oe) lookup: recordLinkFieldId=fldZosuMsZ4zbL8rH, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item3) [multipleLookupValues] (id: fldLeygsq18jPKtfO) lookup: recordLinkFieldId=fldZosuMsZ4zbL8rH, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item4) [multipleLookupValues] (id: fld6l8ZqfXnHfagCe) lookup: recordLinkFieldId=fldHsZbcyyDYiMAtX, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item4) [multipleLookupValues] (id: fldVhCo4ryMvmLtqH) lookup: recordLinkFieldId=fldHsZbcyyDYiMAtX, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item5) [multipleLookupValues] (id: fldnccVh9S1Ap66Wz) lookup: recordLinkFieldId=fldxQvbNT8ZBh4dXG, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item5) [multipleLookupValues] (id: fldIVCd8csnEq1hnQ) lookup: recordLinkFieldId=fldxQvbNT8ZBh4dXG, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item6) [multipleLookupValues] (id: fldauAxlHqb3KIRSZ) lookup: recordLinkFieldId=fldyFCDcmByONlq5h, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item6) [multipleLookupValues] (id: fldDMeq4P8fN0tG2W) lookup: recordLinkFieldId=fldyFCDcmByONlq5h, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item7) [multipleLookupValues] (id: fld8yE4BnjYx0NN4g) lookup: recordLinkFieldId=fldAs0WeMv8FbPoDL, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item7) [multipleLookupValues] (id: fldN25IFzPLEX3CX4) lookup: recordLinkFieldId=fldAs0WeMv8FbPoDL, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item8) [multipleLookupValues] (id: fldcCOtroYtxcQl8M) lookup: recordLinkFieldId=fldiqkXXAytD8H6SO, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item8) [multipleLookupValues] (id: fldexNgfUZtt1RSsS) lookup: recordLinkFieldId=fldiqkXXAytD8H6SO, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item9) [multipleLookupValues] (id: fldVPPPjl6CQRGhPj) lookup: recordLinkFieldId=fld9IZi13vrq8iXcX, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item9) [multipleLookupValues] (id: fldjEzLFqKqzRKC3J) lookup: recordLinkFieldId=fld9IZi13vrq8iXcX, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- On Hand Rollup (from Product Table) (from Item10) [multipleLookupValues] (id: fldvZnilxvnK4pvki) lookup: recordLinkFieldId=flduQU2PoGySsiBxI, fieldIdInLinkedTable=fldremjIk9mRgzEha, resultType=number
+- Price (from Product Table) (from Item10) [multipleLookupValues] (id: fldzv0oTho7Bj21vZ) lookup: recordLinkFieldId=flduQU2PoGySsiBxI, fieldIdInLinkedTable=fldr0RoTYKdZE73Iy, resultType=currency
+- Analytics [multipleRecordLinks] (id: fldwRUslMQfG9KzbS) link: linkedTableId=tblL3LcHiIxi8sylR, inverse=fldvfWaqQozjjY0at, single=false
+- Analytics 2 [singleLineText] (id: fldm5i97NkCBPByEa)
+- Dependencies [multipleRecordLinks] (id: fld3c9fqlO4CUwq1G) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=, single=false
+Views:
+- Grid view [grid] (id: viwtIXIdC0ipf2DME)
+- Grid view copy [grid] (id: viw1ClDTzq32sVvDq)
+
+----------------------------------------
+
+Table: Product Table (id: tblnY37NgFzTKKgyn)
+Primary field: flddegQEMKXjh1mAf (id: flddegQEMKXjh1mAf)
+Fields:
+- Product SKU [singleLineText] (id: flddegQEMKXjh1mAf)
+- API Inventory [multipleRecordLinks] (id: fld3CP08omHg8xCrN) link: linkedTableId=tblIOaD8txV2l7ETv, inverse=fldyNa5yulwsgefRW, single=false
+- Product Name [multipleRecordLinks] (id: fldKK8U1ueTq5VJ29) link: linkedTableId=tbl9I4fBRx5lbhnoZ, inverse=fldvX1p3YrM5Cge79, single=false
+- Product Code (from Product Name) [multipleLookupValues] (id: fldWAn3QJ5zf6HfSX) lookup: recordLinkFieldId=fldKK8U1ueTq5VJ29, fieldIdInLinkedTable=fld6ZAf6tXJ8SxusD, resultType=singleLineText
+- index (from API Inventory) [multipleLookupValues] (id: fldV9VfQfvN5DGAKh) lookup: recordLinkFieldId=fld3CP08omHg8xCrN, fieldIdInLinkedTable=fldDshR6c2iOqbOGY, resultType=multilineText
+- Product Code [singleLineText] (id: fldt7Ug0AVf3IKnsV)
+- name (from API Inventory) [multipleLookupValues] (id: fldGbWLofoHUr0KWb) lookup: recordLinkFieldId=fld3CP08omHg8xCrN, fieldIdInLinkedTable=fldw6SiosrGAKXeGd, resultType=singleLineText
+- quantity (from API Inventory) [multipleLookupValues] (id: fldaWZUVp0G6aBD1v) lookup: recordLinkFieldId=fld3CP08omHg8xCrN, fieldIdInLinkedTable=fldeFwE2MkEGZyCPJ, resultType=number
+- Price [currency] (id: fldUY2v0QUiRU6omn)
+- 2025 Price [currency] (id: fldODVb2qtmsrITLY)
+- Inventory [multipleRecordLinks] (id: fldJpkgfpKpD1wl3h) link: linkedTableId=tbl8ngBPM3By7SZp7, inverse=flduCdLhTXiiyRQ8h, single=false
+- Calculation [formula] (id: fldbzg6hHftjHeLZz) formula: ROUNDUP(
+  SUM({fldUY2v0QUiRU6omn} * 1.07),
+  0) resultType=number
+- Shipping Rate [currency] (id: fldxDOgoemdabUv1L)
+- Purchase Orders [singleLineText] (id: fldkUSFM8kHzt0Ck1)
+Views:
+- Grid view [grid] (id: viwJ5ZJG4SlLl9unR)
+
+----------------------------------------
+
+Table: Product Options (id: tbl9I4fBRx5lbhnoZ)
+Primary field: fldrsCC9wLpAiJaZL (id: fldrsCC9wLpAiJaZL)
+Fields:
+- Name [singleLineText] (id: fldrsCC9wLpAiJaZL)
+- Product Table [multipleRecordLinks] (id: fldvX1p3YrM5Cge79) link: linkedTableId=tblnY37NgFzTKKgyn, inverse=fldKK8U1ueTq5VJ29, single=false
+- Product Code Index [multipleLookupValues] (id: fldnYv4NmJJB41t4R) lookup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldV9VfQfvN5DGAKh, resultType=multilineText
+- Name - Product Code [formula] (id: fldQv80dYoMU3tQEj) formula: {fldrsCC9wLpAiJaZL} & " - " & {fld6ZAf6tXJ8SxusD} & " - " & {fldvX1p3YrM5Cge79} resultType=singleLineText
+- Product Code (from Product Table) [multipleLookupValues] (id: fldneXWlhCvAs2tZt) lookup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldt7Ug0AVf3IKnsV, resultType=singleLineText
+- Product Code [formula] (id: fld6ZAf6tXJ8SxusD) formula: {fldneXWlhCvAs2tZt} resultType=singleLineText
+- Price (from Product Table) [multipleLookupValues] (id: fldr0RoTYKdZE73Iy) lookup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldUY2v0QUiRU6omn, resultType=currency
+- Price [formula] (id: fldUgZxOcBMkHKEGE) formula: {fldr0RoTYKdZE73Iy} resultType=currency
+- On Hand (from Product Table) [multipleLookupValues] (id: fldiJwtvgNBJresX3) lookup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldaWZUVp0G6aBD1v, resultType=number
+- On Hand Rollup (from Product Table) [rollup] (id: fldremjIk9mRgzEha) rollup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldaWZUVp0G6aBD1v, resultType=number
+- Stock [formula] (id: flduYPvFd5uRQYFRV) formula: {fldremjIk9mRgzEha} resultType=number
+- Status [formula] (id: fldAEa1tWL5OBtfWN) formula: IF({fldremjIk9mRgzEha} > 0, "In Stock", "Out of Stock")
+ resultType=singleLineText
+- Discontinued [singleSelect] (id: fldDWjCAGYn5FTTR3) choices: Yes, No
+- On Hand Rollup (from Product Table) 2 [rollup] (id: fldeojGb44lKD7qSZ) rollup: recordLinkFieldId=fldvX1p3YrM5Cge79, fieldIdInLinkedTable=fldaWZUVp0G6aBD1v, resultType=number
+- Purchase Orders [multipleRecordLinks] (id: fldNGsNOIS2XBC35z) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldqLEFsE2SFRuTGk, single=false
+- Purchase Orders Item2 [multipleRecordLinks] (id: fldqt9sU59sa3PWt8) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldHaTYYk80YsDWSh, single=false
+- Purchase Orders Item3 [multipleRecordLinks] (id: fldzI8e52Y0KloQwQ) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldZosuMsZ4zbL8rH, single=false
+- Purchase Orders copy [multipleRecordLinks] (id: fldqcx2Sub7mZOW9i) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldHsZbcyyDYiMAtX, single=false
+- Purchase Orders copy copy [multipleRecordLinks] (id: fldQZnmp44Kdy1ZGa) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldxQvbNT8ZBh4dXG, single=false
+- Purchase Orders copy copy copy [multipleRecordLinks] (id: fld1U50Gi14ML5LHD) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldyFCDcmByONlq5h, single=false
+- Purchase Orders copy copy copy copy [multipleRecordLinks] (id: fldWicbFiMTfgErSt) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldAs0WeMv8FbPoDL, single=false
+- Purchase Orders copy copy copy copy copy [multipleRecordLinks] (id: fldCV5aa2dluUyJpL) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldiqkXXAytD8H6SO, single=false
+- Purchase Orders copy copy copy copy copy copy [multipleRecordLinks] (id: flduGeroom7bQS0Nu) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fld9IZi13vrq8iXcX, single=false
+- Purchase Orders copy copy copy copy copy copy copy [multipleRecordLinks] (id: fldxgxZp4Xj42ir2M) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=flduQU2PoGySsiBxI, single=false
+- Inventory [singleLineText] (id: fldxDA3tasmOphhjz)
+Views:
+- Grid view [grid] (id: viwVzkftgrSnuAxAM)
+
+----------------------------------------
+
+Table: Contact Us (id: tblMLdes1n9jUe9rS)
+Primary field: fldJyq1yOTjsTgH2O (id: fldJyq1yOTjsTgH2O)
+Fields:
+- Name [singleLineText] (id: fldJyq1yOTjsTgH2O)
+- Created By [createdBy] (id: fldcs1uGMfgXTZuQu)
+- Time Created [createdTime] (id: fldpmCPChTzwLEyIk) resultType=dateTime
+- Email [email] (id: fldt48cRoSPnNVvyj)
+- Phone [phoneNumber] (id: fldbCqnYXT1TNx7Gt)
+- Company [singleLineText] (id: fldbYkiZD2ofl3Q0o)
+- Message [multilineText] (id: fldTGEJqOUok2golu)
+- Status [singleSelect] (id: fldkOyibEyXDk0CAq) choices: Todo, In progress, Done
+Views:
+- Grid view [grid] (id: viwe1kh2iNQ8CxOSd)
+
+----------------------------------------
+
+Table: Analytics (id: tblL3LcHiIxi8sylR)
+Primary field: fldrlpe9Kp5Rbqw2u (id: fldrlpe9Kp5Rbqw2u)
+Fields:
+- Name [singleLineText] (id: fldrlpe9Kp5Rbqw2u)
+- Purchase Orders [multipleRecordLinks] (id: fldvfWaqQozjjY0at) link: linkedTableId=tblcCpM7WcMmtjRGc, inverse=fldwRUslMQfG9KzbS, single=false
+- Date (from Notes) [multipleLookupValues] (id: fldZ74qm1eaNiWsdu) lookup: recordLinkFieldId=fldvfWaqQozjjY0at, fieldIdInLinkedTable=fldgxAC8ZuYHO3K0z, resultType=date
+- Total Order Price (from Notes) [multipleLookupValues] (id: fldiEi23DN86QSDaz) lookup: recordLinkFieldId=fldvfWaqQozjjY0at, fieldIdInLinkedTable=fld5UsL59NP8O3Z7x, resultType=currency
+- Assignee [singleCollaborator] (id: fldZgROh4MHnCAuX5)
+- Status [singleSelect] (id: fldNsmplzFnCCFsUp) choices: Todo, In progress, Done
+Views:
+- Grid view [grid] (id: viwLFvyo1hK9kqlfQ)
+
+----------------------------------------
+
+Table: Inventory (id: tbl8ngBPM3By7SZp7)
+Primary field: fldq7OYnrhVNekM0T (id: fldq7OYnrhVNekM0T)
+Fields:
+- Name [singleLineText] (id: fldq7OYnrhVNekM0T)
+- Product Table [multipleRecordLinks] (id: flduCdLhTXiiyRQ8h) link: linkedTableId=tblnY37NgFzTKKgyn, inverse=fldJpkgfpKpD1wl3h, single=false
+- Price (from Product Table) [multipleLookupValues] (id: fldqF3K7TgJcAIFJG) lookup: recordLinkFieldId=flduCdLhTXiiyRQ8h, fieldIdInLinkedTable=fldUY2v0QUiRU6omn, resultType=currency
+- On Hand (from Product Table) [multipleLookupValues] (id: fldhoIPJbj7WnP4Yb) lookup: recordLinkFieldId=flduCdLhTXiiyRQ8h, fieldIdInLinkedTable=fldaWZUVp0G6aBD1v, resultType=number
+- On Hand Rollup (from Product Table) [rollup] (id: fldqTyFWfFS4cagii) rollup: recordLinkFieldId=flduCdLhTXiiyRQ8h, fieldIdInLinkedTable=fldaWZUVp0G6aBD1v, resultType=singleLineText
+- Status [formula] (id: fldaqxun06iiUFhdZ) formula: IF({fldqTyFWfFS4cagii} > 0, "In Stock", "Out of Stock") resultType=singleLineText
+- Lead Time [formula] (id: fldacK5JYXGOHMcE7) formula: IF(
+  {fldaqxun06iiUFhdZ} = "In Stock",
+  "None",
+  IF(
+    {fldaqxun06iiUFhdZ} = "Out of Stock",
+    "4-6 Weeks",
+    ""
+  )
+) resultType=singleLineText
+- index (from API Inventory) (from Product Table) [multipleLookupValues] (id: fldFNaOkb6JhxRgMx) lookup: recordLinkFieldId=flduCdLhTXiiyRQ8h, fieldIdInLinkedTable=fldV9VfQfvN5DGAKh, resultType=multilineText
+- Inventory [multipleRecordLinks] (id: fldST4cWu1fFLJjvY) link: linkedTableId=tbl8ngBPM3By7SZp7, inverse=, single=false
+- Status (from Inventory) [multipleLookupValues] (id: fld9VpKvUypNAtGfS) lookup: recordLinkFieldId=fldST4cWu1fFLJjvY, fieldIdInLinkedTable=fldaqxun06iiUFhdZ, resultType=singleLineText
+Views:
+- Grid view [grid] (id: viwUewBHbXoAqb9BU)
+
+----------------------------------------
+
+Table: Industrial Scales (id: tbl9SbeTji9rBhFiw)
+Primary field: fld9jVHRmeRF7rmj0 (id: fld9jVHRmeRF7rmj0)
+Fields:
+- Product Codes [singleLineText] (id: fld9jVHRmeRF7rmj0)
+- Product Name [singleLineText] (id: fldpkWP5czKpr61p1)
+- MSRP [currency] (id: fldc3jmqlwOoij0Hx)
+- Dealer Price [currency] (id: fldBcMpU68LhCF9ho)
+- 2025 MSRP 7% [formula] (id: fldrYQcGaOIBBkDN3) formula: ROUNDUP({fldc3jmqlwOoij0Hx}*1.07, 0) resultType=number
+- 2025 Dealer Price 7% [formula] (id: fldimzLqgvF6xYiFL) formula: ROUNDUP({fldBcMpU68LhCF9ho}*1.07, 0) resultType=number
+Views:
+- Grid view [grid] (id: viw3vo9YJcyldFEQy)
+
+----------------------------------------
+
+Table: API Inventory (id: tblIOaD8txV2l7ETv)
+Primary field: fldw6SiosrGAKXeGd (id: fldw6SiosrGAKXeGd)
+Fields:
+- name [singleLineText] (id: fldw6SiosrGAKXeGd)
+- fullName [multilineText] (id: fldfMv1lMnW0eyn03)
+- index [multilineText] (id: fldDshR6c2iOqbOGY)
+- quantity [number] (id: fldkBfGlfLMvzRhCl)
+- quantityWithoutOrders [number] (id: fldeFwE2MkEGZyCPJ)
+- quantityForOrders [number] (id: fldZDrQNfaTfASszu)
+- Product Table [multipleRecordLinks] (id: fldyNa5yulwsgefRW) link: linkedTableId=tblnY37NgFzTKKgyn, inverse=fld3CP08omHg8xCrN, single=false
+Views:
+- Grid view [grid] (id: viwRvnvZbahWiJS7y)
+
+----------------------------------------
+
+Table: Knowledge Base (id: tblIgPpkQ0EGA613a)
+Primary field: fldnLNunKOuxbz2cS (id: fldnLNunKOuxbz2cS)
+Fields:
+- Title [singleLineText] (id: fldnLNunKOuxbz2cS)
+- Article [richText] (id: fldQBoQvtz5v58uqB)
+- Embed Article [richText] (id: fldKuHnm2UkSWr9ZT)
+- Questions [multipleSelects] (id: fldPlwiJG0U8EdzSy) choices: What is the MYA 5Y Series designed for?, What are the key features of MYA 5Y balances?, Can MYA 5Y balances be used in hazardous or explosive environments?, What warranty conditions apply to MYA 5Y balances?, How do I properly unpack and install MYA 5Y microbalances?, What are the environmental conditions required for optimal performance?, How do I connect MYA 5Y balances to the power supply?, What is the required temperature stabilization time before use?, How do I power on/off the MYA 5Y balance correctly?, How do I use the automatic draft-proof weighing chamber?, What are the different working modes available on the MYA 5Y?, How do the proximity sensors and automatic doors work?, What voice commands can be used to operate the balance?, How do I perform internal and external adjustments on the balance?, What is the automatic adjustment feature and how does it work?, Can I adjust the balance settings for specific environmental conditions?, How can I print a report after adjusting the balance?, How should I clean and maintain the MYA 5Y balance?, What precautions should I take when using the ionizer-equipped models?, How do I disassemble and clean the anti-draft chamber and weighing pan?, What should I avoid when cleaning the balance?, What types of devices can be connected to MYA 5Y balances?, How do I set up the balance for use with printers, PCs, and other peripherals?, How do I connect the MYA 5Y balance to a Wi-Fi network?, How can I export weighing data from the MYA 5Y balance?, What types of reports can be generated by the balance?, How do I ensure data compliance with 21 CFR Part 11?, How do I print reports directly from the balance?, How can I manage and archive data using the balance’s database features?, What should I do if my MYA 5Y balance displays an error message?, How do I perform a hard reset on the balance?, Why is the balance displaying Lo mass?, What should I do if the balance isn’t stabilizing during weighing?, Why isn’t the automatic leveling system working?, What is a moisture analyzer and what is it used for?
+- Cover Image [multipleAttachments] (id: fldIdMB2TjxCHNF0t)
+- Balance Correlation [multipleSelects] (id: fldedLtFiVs0jV7zU) choices: Moisture Analyzer, Analytical Balance, Ultra Microbalance, Precision Balance, Microbalance, 5Y, R, X7, X2, UYA, AS, MA, XA, MYA, PM, PS, PMV
+- Gamma ID [singleLineText] (id: fldpG2UoUlqBC0tco)
+- Embed Form [formula] (id: fldM342KalSjp3UaU) formula: "<iframe src='https://gamma.app/embed/" & {fldpG2UoUlqBC0tco} & "' style='width: 100vw; height: calc(100vh - 90px); border: none; display: block; margin: 0 auto; padding: 0; position: fixed; top: 90px; left: 0; right: 0; overflow: hidden;' allow='fullscreen' title='Frequently Asked Questions (FAQ) for MYA 5Y Microbalances'></iframe>"
+ resultType=singleLineText
+Views:
+- Grid view [grid] (id: viwCmbloDUdkqBeqq)
+
+----------------------------------------
+
+Table: Mass Standards Price List (id: tblscLepU6bukQynZ)
+Primary field: fldeX2yfIBOU59bbM (id: fldeX2yfIBOU59bbM)
+Fields:
+- Product Code [singleLineText] (id: fldeX2yfIBOU59bbM)
+- Product Name [singleLineText] (id: fldqLOGcLLC4IlMtW)
+- MSRP [currency] (id: fldNNTtPwUf5dzqoo)
+- Dealer Price [currency] (id: fldjvY0LoUHZjF3g5)
+- 2025 MSRP 7% [formula] (id: fldqjdEGo5qukAZqA) formula: ROUNDUP({fldNNTtPwUf5dzqoo}*1.07,0) resultType=number
+- 2025 Dealer Price 7% [formula] (id: flddcePjImQO50c97) formula: ROUNDUP({fldjvY0LoUHZjF3g5}*1.07,0) resultType=number
+Views:
+- Grid view [grid] (id: viwYYwLCO5jf4jlMY)
+
+----------------------------------------
+
+Table: Shopify Inquiries (id: tblPuITLFsQGJuctz)
+Primary field: fldEA58VqX4rQmQb9 (id: fldEA58VqX4rQmQb9)
+Fields:
+- Name [singleLineText] (id: fldEA58VqX4rQmQb9)
+- Phone Number [phoneNumber] (id: fld3e4pPCnLhLejmG)
+- Email [email] (id: fldadRS3ICKAxwYbq)
+- Company [singleLineText] (id: fldJyoJd4NfcELL7p)
+- Product of Inquiry [singleLineText] (id: fldgyTzZgyGJXq2uJ)
+- Notes [multilineText] (id: fldGsOyKxsr6LKAfH)
+Views:
+- Grid view [grid] (id: viwthlcqW6mhwNYM0)
+
+----------------------------------------
+
+Table: NTEP (id: tbli97ne11mqKBeiz)
+Primary field: fldO8xmhojrdO2tqR (id: fldO8xmhojrdO2tqR)
+Fields:
+- SKU [singleLineText] (id: fldO8xmhojrdO2tqR)
+- Name [singleLineText] (id: fldUZzxqiccDxerTU)
+- Product Code [singleLineText] (id: fldbVGpR9CcBi3yWZ)
+- Capacity [singleLineText] (id: fldQilim63txTIdyC)
+- e (g) [singleLineText] (id: fldFHmSOCDJTeXnQd)
+- d (g) [singleLineText] (id: fldTOBdDfTWBODj8K)
+- nmax [singleLineText] (id: fld8j1kv8ghoTudNJ)
+- Pan Size (mm) Max. Diameter [singleLineText] (id: fld4HW6CTnqa8IFLt)
+- Class [singleLineText] (id: fld6I0gvm75fLdT70)
+Views:
+- Grid view [grid] (id: viwIuEN2zxY9BzFJw)
+
+----------------------------------------
+
+Table: News & Notifications (id: tblcB0ne41eYOMEoL)
+Primary field: fld0scECawGbIdegC (id: fld0scECawGbIdegC)
+Fields:
+- Notification Title [singleLineText] (id: fld0scECawGbIdegC)
+- Message [richText] (id: fldCv1F7Fdxc4zN7d)
+- Date [date] (id: fldUVvKi8HuFVqCKl)
+- Attachments [multipleAttachments] (id: fldJaLyeBjdqK4XSM)
+- Clients [multipleRecordLinks] (id: flduEx8zBBWuFnKaj) link: linkedTableId=tblgb089XAV7s8Etu, inverse=fld6iLqfpeiTSl160, single=false
+- Location (from Clients) [multipleLookupValues] (id: fldpRrITNV4fJ7eGi) lookup: recordLinkFieldId=flduEx8zBBWuFnKaj, fieldIdInLinkedTable=fld5zXIJdibVZpCuI, resultType=singleSelect
+- Client Name (from Clients) [multipleLookupValues] (id: fldzEFDTwc0KxbgY3) lookup: recordLinkFieldId=flduEx8zBBWuFnKaj, fieldIdInLinkedTable=flduQzenoNT93BVqN, resultType=singleLineText
+Views:
+- Grid view [grid] (id: viw0vdR3gVTzuW6CV)
+
+----------------------------------------
+
+Table: Embed Notifications (id: tblA6lHhONHe5jBjI)
+Primary field: fldoXxYFUi9rZKbbz (id: fldoXxYFUi9rZKbbz)
+Fields:
+- Title [singleLineText] (id: fldoXxYFUi9rZKbbz)
+- Message [richText] (id: fld00mZapZ0sl6K2a)
+- Snippet [singleLineText] (id: fldVpNm4svHDgtOUy)
+- CreatedTime [dateTime] (id: fldiqQ4lStXVcXzFi)
+- Read [checkbox] (id: fld7F6Shl5GG1BUNJ)
+- MediaType [singleSelect] (id: fld5xQT1AW731zp89) choices: none, image, video
+- MediaURL [url] (id: fldTB0jtFWYNSCQHW)
+- Category [singleSelect] (id: fldyt81as3tSbg60D) choices: Update, Alert, Announcement, Reminder
+- Importance [singleSelect] (id: fld0t6UCNW0veOQg2) choices: High, Medium, Low
+- FileName [singleLineText] (id: fldW0CkFHVXm0vmKA)
+- FileURL [url] (id: fldiJQYml1nnhDh2x)
+- RecipientEmail [email] (id: fldJvm4wDUB89eA55)
+Views:
+- Grid view [grid] (id: viwo0yb60HmPLt3xS)
+
+----------------------------------------
+
+Table: Bot Contact (id: tblnRJrqUzwrwVVQh)
+Primary field: fld1IAIDUn6L83ac1 (id: fld1IAIDUn6L83ac1)
+Fields:
+- Name [singleLineText] (id: fld1IAIDUn6L83ac1)
+- Summary [multilineText] (id: fldFnnnK9YJd0QsxK)
+- Email [email] (id: fldErSYE8AH7cnJ3U)
+- Status [singleSelect] (id: fldJB88AQ1N4dM8az) choices: Todo, In progress, Done, Open
+- Attachments [multipleAttachments] (id: fld7UCuWYebEKBsN6)
+Views:
+- Grid view [grid] (id: viwD0BEP8UbAr4OJW)
+
+----------------------------------------
+

@@ -1,0 +1,6 @@
+PO Assistant Chat Log (my chat1)
+Purpose: Personal, append-only summaries to avoid duplicating full chat content.
+Format: [ISO-8601 UTC] role=user|assistant - brief summary
+
+[2025-08-28T00:00:00Z] assistant - Initialized PO assistant scaffold; added FastAPI endpoints and Airtable-backed reconciliation.
+
