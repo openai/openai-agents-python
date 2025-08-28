@@ -33,6 +33,15 @@ from .guardrail import (
     output_guardrail,
 )
 from .handoffs import Handoff, HandoffInputData, HandoffInputFilter, handoff
+from .tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolInputGuardrailData,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailData,
+    tool_input_guardrail,
+    tool_output_guardrail,
+)
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -204,6 +213,13 @@ __all__ = [
     "GuardrailFunctionOutput",
     "input_guardrail",
     "output_guardrail",
+    "ToolInputGuardrail",
+    "ToolOutputGuardrail",
+    "ToolGuardrailFunctionOutput",
+    "ToolInputGuardrailData",
+    "ToolOutputGuardrailData",
+    "tool_input_guardrail",
+    "tool_output_guardrail",
     "handoff",
     "Handoff",
     "HandoffInputData",
