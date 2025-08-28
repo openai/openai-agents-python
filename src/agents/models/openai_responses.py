@@ -337,7 +337,7 @@ class Converter:
             }
         elif tool_choice == "web_search":
             return {
-                "type": "web_search",
+                "type": "web_search",  # type: ignore [typeddict-item]
             }
         elif tool_choice == "web_search_preview":
             return {
