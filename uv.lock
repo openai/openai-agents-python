@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.11'",
@@ -1816,7 +1816,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.2.9"
+version = "0.2.10"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
