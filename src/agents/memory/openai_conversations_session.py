@@ -1,4 +1,4 @@
-from typing import Optional
+from __future__ import annotations
 
 from openai import AsyncOpenAI
 
@@ -8,7 +8,7 @@ from ..items import TResponseInputItem
 from .session import SessionABC
 
 
-async def start_openai_conversations_session(openai_client: Optional[AsyncOpenAI] = None) -> str:
+async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
     _maybe_openai_client = openai_client
     if openai_client is None:
         _maybe_openai_client = get_default_openai_client() or AsyncOpenAI()
@@ -26,8 +26,8 @@ class OpenAIConversationsSession(SessionABC):
     def __init__(
         self,
         *,
-        session_id: Optional[str] = None,
-        openai_client: Optional[AsyncOpenAI] = None,
+        session_id: str | None = None,
+        openai_client: AsyncOpenAI | None = None,
     ):
         # this implementation allows to set this value later
         self.session_id = session_id or _EMPTY_SESSION_ID
@@ -41,7 +41,7 @@ class OpenAIConversationsSession(SessionABC):
         if self.session_id == _EMPTY_SESSION_ID:
             self.session_id = await start_openai_conversations_session(self.openai_client)
 
-    async def get_items(self, limit: Optional[int] = None) -> list[TResponseInputItem]:
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         await self._ensure_session_id()
 
         all_items = []
@@ -73,7 +73,7 @@ class OpenAIConversationsSession(SessionABC):
             items=items,
         )
 
-    async def pop_item(self) -> Optional[TResponseInputItem]:
+    async def pop_item(self) -> TResponseInputItem | None:
         await self._ensure_session_id()
         items = await self.get_items(limit=1)
         if not items:
