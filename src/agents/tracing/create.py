@@ -33,6 +33,36 @@ def trace(
     disabled: bool = False,
 ) -> Trace:
     """
+    Start a trace for the given workflow.
+
+    Args:
+        workflow_name (str): Name of the workflow. Must be a string.
+        trace_id (str | None): Optional trace ID.
+        group_id (str | None): Optional group ID.
+        metadata (dict | None): Optional metadata dictionary.
+        disabled (bool): If True, tracing is disabled.
+
+    Returns:
+        Trace: A Trace object for managing the workflow trace.
+    """
+
+    # --------------------------
+    # Input validation
+    # --------------------------
+    if not isinstance(workflow_name, str):
+        raise TypeError(
+            f"workflow_name must be str, got {type(workflow_name).__name__}"
+        )
+
+    if trace_id is not None and not isinstance(trace_id, str):
+        raise TypeError(f"trace_id must be str or None, got {type(trace_id).__name__}")
+
+    if group_id is not None and not isinstance(group_id, str):
+        raise TypeError(f"group_id must be str or None, got {type(group_id).__name__}")
+
+    if metadata is not None and not isinstance(metadata, dict):
+        raise TypeError(f"metadata must be dict or None, got {type(metadata).__name__}")
+    """
     Create a new trace. The trace will not be started automatically; you should either use
     it as a context manager (`with trace(...):`) or call `trace.start()` + `trace.finish()`
     manually.
