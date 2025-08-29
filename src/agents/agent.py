@@ -458,3 +458,14 @@ class Agent(AgentBase, Generic[TContext]):
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
         return await PromptUtil.to_model_input(self.prompt, run_context, self)
+    
+    def run(self, *args, **kwargs):
+        """
+        Alias for Runner.run_sync.
+
+        Example:
+            agent.run("Hello")  # Same as Runner.run_sync(agent, "Hello")
+        """
+        from .run import Runner
+        return Runner.run_sync(self, *args, **kwargs)
+
