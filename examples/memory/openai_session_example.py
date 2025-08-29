@@ -7,7 +7,7 @@ across multiple agent runs without manually handling .to_input_list().
 
 import asyncio
 
-from agents import Agent, OpenAISession, Runner
+from agents import Agent, OpenAIConversationsSession, Runner
 
 
 async def main():
@@ -18,7 +18,7 @@ async def main():
     )
 
     # Create a session instance that will persist across runs
-    session = OpenAISession()
+    session = OpenAIConversationsSession()
 
     print("=== Session Example ===")
     print("The agent will remember previous messages automatically.\n")

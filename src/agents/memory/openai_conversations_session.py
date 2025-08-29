@@ -8,7 +8,7 @@ from ..items import TResponseInputItem
 from .session import SessionABC
 
 
-async def start_openai_session(openai_client: Optional[AsyncOpenAI] = None) -> str:
+async def start_openai_conversations_session(openai_client: Optional[AsyncOpenAI] = None) -> str:
     _openai_client = openai_client
     if openai_client is None:
         _openai_client = get_default_openai_client() or AsyncOpenAI()
@@ -17,9 +17,10 @@ async def start_openai_session(openai_client: Optional[AsyncOpenAI] = None) -> s
     return response.id
 
 
-class OpenAISession(SessionABC):
+class OpenAIConversationsSession(SessionABC):
     def __init__(
         self,
+        *,
         session_id: Optional[str] = None,
         openai_client: Optional[AsyncOpenAI] = None,
     ):
@@ -31,7 +32,7 @@ class OpenAISession(SessionABC):
 
     async def _ensure_session_id(self) -> None:
         if self.session_id is None:
-            self.session_id = await start_openai_session(self.openai_client)
+            self.session_id = await start_openai_conversations_session(self.openai_client)
 
     async def get_items(self, limit: Optional[int] = None) -> list[TResponseInputItem]:
         await self._ensure_session_id()
