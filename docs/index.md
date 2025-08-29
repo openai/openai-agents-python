@@ -29,7 +29,7 @@ Here are the main features of the SDK:
 ## Installation
 
 ```bash
-pip install openai-agents
+pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
 ## Hello world example
