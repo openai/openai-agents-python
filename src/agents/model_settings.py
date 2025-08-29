@@ -120,7 +120,10 @@ class ModelSettings:
     """Whether to include usage chunk.
     Only available for Chat Completions API."""
 
-    response_include: list[ResponseIncludable] | None = None
+    # TODO: revisit ResponseIncludable | str if ResponseIncludable covers more cases
+    # We've added str to support missing ones like
+    # "web_search_call.action.sources" etc.
+    response_include: list[ResponseIncludable | str] | None = None
     """Additional output data to include in the model response.
     [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
 

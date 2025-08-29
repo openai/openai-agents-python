@@ -15,7 +15,6 @@ from openai.types.responses import (
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
-    WebSearchToolParam,
     response_create_params,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -76,7 +75,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
@@ -88,7 +88,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=False,
                     prompt=prompt,
                 )
@@ -151,7 +152,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
@@ -166,7 +168,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=True,
                     prompt=prompt,
                 )
@@ -204,6 +207,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[True],
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
@@ -218,6 +222,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[False],
         prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
@@ -230,7 +235,8 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         stream: Literal[True] | Literal[False] = False,
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
@@ -333,6 +339,7 @@ class OpenAIResponsesModel(Model):
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
                 f"Previous response id: {previous_response_id}\n"
+                f"Conversation id: {conversation_id}\n"
             )
 
         extra_args = dict(model_settings.extra_args or {})
@@ -346,6 +353,7 @@ class OpenAIResponsesModel(Model):
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
+            conversation=self._non_null_or_not_given(conversation_id),
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
@@ -403,6 +411,11 @@ class Converter:
         elif tool_choice == "file_search":
             return {
                 "type": "file_search",
+            }
+        elif tool_choice == "web_search":
+            return {
+                # TODO: revist the type: ignore comment when ToolChoice is updated in the future
+                "type": "web_search",  # type: ignore [typeddict-item]
             }
         elif tool_choice == "web_search_preview":
             return {
@@ -484,12 +497,13 @@ class Converter:
             }
             includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
-            ws: WebSearchToolParam = {
-                "type": "web_search_preview",
-                "user_location": tool.user_location,
+            # TODO: revist the type: ignore comment when ToolParam is updated in the future
+            converted_tool = {
+                "type": "web_search",
+                "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
+                "user_location": tool.user_location,  # type: ignore [typeddict-item]
                 "search_context_size": tool.search_context_size,
             }
-            converted_tool = ws
             includes = None
         elif isinstance(tool, FileSearchTool):
             converted_tool = {
