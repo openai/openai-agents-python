@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from typing import Any, Literal, cast, overload
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
@@ -329,7 +330,7 @@ class LitellmModel(Model):
             extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
             api_key=self.api_key,
             base_url=self.base_url,
-            **extra_kwargs,
+            **deepcopy(extra_kwargs),
         )
 
         if isinstance(ret, litellm.types.utils.ModelResponse):
