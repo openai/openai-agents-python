@@ -506,11 +506,13 @@ def guardrail_function(
 
 @pytest.mark.asyncio
 async def test_guardrail_error():
-    agent = Agent(
-        name="test", input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)]
-    )
     model = FakeModel()
     model.set_next_output([get_text_message("some_message")])
+    agent = Agent(
+        name="test",
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")

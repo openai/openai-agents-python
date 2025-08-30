@@ -260,3 +260,64 @@ async def test_output_guardrail_decorators():
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_4"
     assert guardrail.get_name() == "Custom name"
+
+
+@input_guardrail(block_downstream_calls=False)
+def non_blocking_input_guardrail(
+    context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(
+        output_info="non_blocking",
+        tripwire_triggered=False,
+    )
+
+
+@input_guardrail(block_downstream_calls=True)
+def blocking_input_guardrail(
+    context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    return GuardrailFunctionOutput(
+        output_info="blocking",
+        tripwire_triggered=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_block_downstream_calls_parameter():
+    """Test that the block_downstream_calls parameter is properly set."""
+    # Test decorator with block_downstream_calls=False
+    guardrail = non_blocking_input_guardrail
+    assert guardrail.block_downstream_calls is False
+
+    # Test decorator with block_downstream_calls=True (explicit)
+    guardrail = blocking_input_guardrail
+    assert guardrail.block_downstream_calls is True
+
+    # Test default behavior (should be True)
+    @input_guardrail
+    def default_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info="default", tripwire_triggered=False)
+
+    assert default_guardrail.block_downstream_calls is True
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_manual_creation_with_block_downstream_calls():
+    """Test creating InputGuardrail manually with block_downstream_calls parameter."""
+
+    def test_func(context, agent, input):
+        return GuardrailFunctionOutput(output_info="test", tripwire_triggered=False)
+
+    # Test explicit True
+    guardrail = InputGuardrail(guardrail_function=test_func, block_downstream_calls=True)
+    assert guardrail.block_downstream_calls is True
+
+    # Test explicit False
+    guardrail = InputGuardrail(guardrail_function=test_func, block_downstream_calls=False)
+    assert guardrail.block_downstream_calls is False
+
+    # Test default (should be True)
+    guardrail = InputGuardrail(guardrail_function=test_func)
+    assert guardrail.block_downstream_calls is True
