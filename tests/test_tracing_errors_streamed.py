@@ -543,10 +543,7 @@ async def test_input_guardrail_error():
                         "type": "agent",
                         "error": {
                             "message": "Guardrail tripwire triggered",
-                            "data": {
-                                "guardrail": "input_guardrail_function",
-                                "type": "input_guardrail",
-                            },
+                            "data": {"guardrail": "input_guardrail_function"},
                         },
                         "data": {"name": "test", "handoffs": [], "tools": [], "output_type": "str"},
                         "children": [
