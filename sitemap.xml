@@ -1,0 +1,1501 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+    <url>
+        <loc>None./</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="None"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/"/>
+    </url>
+    <url>
+        <loc>Noneagents/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneagents/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/agents/"/>
+    </url>
+    <url>
+        <loc>Noneconfig/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneconfig/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/config/"/>
+    </url>
+    <url>
+        <loc>Nonecontext/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonecontext/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/context/"/>
+    </url>
+    <url>
+        <loc>Noneexamples/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneexamples/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/examples/"/>
+    </url>
+    <url>
+        <loc>Noneguardrails/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneguardrails/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/guardrails/"/>
+    </url>
+    <url>
+        <loc>Nonehandoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonehandoffs/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/handoffs/"/>
+    </url>
+    <url>
+        <loc>Nonemcp/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/mcp/"/>
+    </url>
+    <url>
+        <loc>Nonemulti_agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemulti_agent/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/multi_agent/"/>
+    </url>
+    <url>
+        <loc>Nonequickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonequickstart/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/quickstart/"/>
+    </url>
+    <url>
+        <loc>Nonerelease/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerelease/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/release/"/>
+    </url>
+    <url>
+        <loc>Nonerepl/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerepl/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/repl/"/>
+    </url>
+    <url>
+        <loc>Noneresults/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneresults/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/results/"/>
+    </url>
+    <url>
+        <loc>Nonerunning_agents/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerunning_agents/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/running_agents/"/>
+    </url>
+    <url>
+        <loc>Nonesessions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonesessions/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/sessions/"/>
+    </url>
+    <url>
+        <loc>Nonestreaming/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonestreaming/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/streaming/"/>
+    </url>
+    <url>
+        <loc>Nonetools/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonetools/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/tools/"/>
+    </url>
+    <url>
+        <loc>Nonetracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonetracing/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/tracing/"/>
+    </url>
+    <url>
+        <loc>Noneusage/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneusage/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/usage/"/>
+    </url>
+    <url>
+        <loc>Nonevisualization/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevisualization/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/visualization/"/>
+    </url>
+    <url>
+        <loc>Nonemodels/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemodels/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/models/"/>
+    </url>
+    <url>
+        <loc>Nonemodels/litellm/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemodels/litellm/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/models/litellm/"/>
+    </url>
+    <url>
+        <loc>Nonerealtime/guide/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerealtime/guide/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/realtime/guide/"/>
+    </url>
+    <url>
+        <loc>Nonerealtime/quickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerealtime/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/realtime/quickstart/"/>
+    </url>
+    <url>
+        <loc>Noneref/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/"/>
+    </url>
+    <url>
+        <loc>Noneref/agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/agent/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/agent/"/>
+    </url>
+    <url>
+        <loc>Noneref/agent_output/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/agent_output/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/agent_output/"/>
+    </url>
+    <url>
+        <loc>Noneref/computer/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/computer/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/computer/"/>
+    </url>
+    <url>
+        <loc>Noneref/exceptions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/exceptions/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/exceptions/"/>
+    </url>
+    <url>
+        <loc>Noneref/function_schema/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/function_schema/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/function_schema/"/>
+    </url>
+    <url>
+        <loc>Noneref/guardrail/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/guardrail/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/guardrail/"/>
+    </url>
+    <url>
+        <loc>Noneref/handoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/handoffs/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/handoffs/"/>
+    </url>
+    <url>
+        <loc>Noneref/items/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/items/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/items/"/>
+    </url>
+    <url>
+        <loc>Noneref/lifecycle/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/lifecycle/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/lifecycle/"/>
+    </url>
+    <url>
+        <loc>Noneref/logger/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/logger/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/logger/"/>
+    </url>
+    <url>
+        <loc>Noneref/memory/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/memory/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/memory/"/>
+    </url>
+    <url>
+        <loc>Noneref/model_settings/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/model_settings/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/model_settings/"/>
+    </url>
+    <url>
+        <loc>Noneref/prompts/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/prompts/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/prompts/"/>
+    </url>
+    <url>
+        <loc>Noneref/repl/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/repl/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/repl/"/>
+    </url>
+    <url>
+        <loc>Noneref/result/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/result/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/result/"/>
+    </url>
+    <url>
+        <loc>Noneref/run/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/run/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/run/"/>
+    </url>
+    <url>
+        <loc>Noneref/run_context/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/run_context/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/run_context/"/>
+    </url>
+    <url>
+        <loc>Noneref/stream_events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/stream_events/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/stream_events/"/>
+    </url>
+    <url>
+        <loc>Noneref/strict_schema/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/strict_schema/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/strict_schema/"/>
+    </url>
+    <url>
+        <loc>Noneref/tool/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tool/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tool/"/>
+    </url>
+    <url>
+        <loc>Noneref/tool_context/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tool_context/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tool_context/"/>
+    </url>
+    <url>
+        <loc>Noneref/usage/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/usage/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/usage/"/>
+    </url>
+    <url>
+        <loc>Noneref/version/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/version/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/version/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/handoff_filters/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/handoff_filters/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/handoff_filters/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/handoff_prompt/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/handoff_prompt/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/handoff_prompt/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/litellm/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/litellm/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/litellm/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/visualization/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/visualization/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/visualization/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/memory/sqlalchemy_session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/memory/sqlalchemy_session/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/memory/sqlalchemy_session/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/models/litellm_model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/models/litellm_model/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/models/litellm_model/"/>
+    </url>
+    <url>
+        <loc>Noneref/extensions/models/litellm_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/models/litellm_provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/models/litellm_provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/mcp/server/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/mcp/server/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/mcp/server/"/>
+    </url>
+    <url>
+        <loc>Noneref/mcp/util/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/mcp/util/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/mcp/util/"/>
+    </url>
+    <url>
+        <loc>Noneref/memory/session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/memory/session/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/memory/session/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/chatcmpl_converter/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_converter/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_converter/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/chatcmpl_helpers/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_helpers/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_helpers/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/chatcmpl_stream_handler/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_stream_handler/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_stream_handler/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/fake_id/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/fake_id/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/fake_id/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/interface/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/interface/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/interface/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/multi_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/multi_provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/multi_provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/openai_chatcompletions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_chatcompletions/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_chatcompletions/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/openai_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/models/openai_responses/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_responses/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_responses/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/agent/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/agent/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/config/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/config/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/config/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/events/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/events/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/handoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/handoffs/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/handoffs/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/items/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/items/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/items/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/model_events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model_events/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model_events/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/model_inputs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model_inputs/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model_inputs/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/openai_realtime/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/openai_realtime/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/openai_realtime/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/runner/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/runner/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/runner/"/>
+    </url>
+    <url>
+        <loc>Noneref/realtime/session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/session/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/session/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/create/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/create/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/create/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/logger/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/logger/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/logger/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/processor_interface/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/processor_interface/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/processor_interface/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/processors/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/processors/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/processors/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/scope/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/scope/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/scope/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/setup/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/setup/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/setup/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/span_data/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/span_data/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/span_data/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/spans/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/spans/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/spans/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/traces/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/traces/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/traces/"/>
+    </url>
+    <url>
+        <loc>Noneref/tracing/util/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/util/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/util/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/events/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/events/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/exceptions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/exceptions/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/exceptions/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/imports/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/imports/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/imports/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/input/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/input/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/input/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/model/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/model/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/pipeline/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/pipeline/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/pipeline/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/pipeline_config/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/pipeline_config/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/pipeline_config/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/result/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/result/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/result/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/utils/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/utils/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/utils/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/workflow/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/workflow/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/workflow/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/models/openai_model_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_model_provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_model_provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/models/openai_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_provider/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_provider/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/models/openai_stt/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_stt/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_stt/"/>
+    </url>
+    <url>
+        <loc>Noneref/voice/models/openai_tts/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_tts/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_tts/"/>
+    </url>
+    <url>
+        <loc>Nonevoice/pipeline/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/pipeline/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/pipeline/"/>
+    </url>
+    <url>
+        <loc>Nonevoice/quickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/quickstart/"/>
+    </url>
+    <url>
+        <loc>Nonevoice/tracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/tracing/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/tracing/"/>
+    </url>
+    <url>
+        <loc>Noneja/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="None"/>
+    </url>
+    <url>
+        <loc>Noneja/agents/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/agents/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneagents/"/>
+    </url>
+    <url>
+        <loc>Noneja/config/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/config/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneconfig/"/>
+    </url>
+    <url>
+        <loc>Noneja/context/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/context/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonecontext/"/>
+    </url>
+    <url>
+        <loc>Noneja/examples/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/examples/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneexamples/"/>
+    </url>
+    <url>
+        <loc>Noneja/guardrails/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/guardrails/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneguardrails/"/>
+    </url>
+    <url>
+        <loc>Noneja/handoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/handoffs/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonehandoffs/"/>
+    </url>
+    <url>
+        <loc>Noneja/mcp/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemcp/"/>
+    </url>
+    <url>
+        <loc>Noneja/multi_agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/multi_agent/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemulti_agent/"/>
+    </url>
+    <url>
+        <loc>Noneja/quickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonequickstart/"/>
+    </url>
+    <url>
+        <loc>Noneja/release/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/release/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerelease/"/>
+    </url>
+    <url>
+        <loc>Noneja/repl/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/repl/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerepl/"/>
+    </url>
+    <url>
+        <loc>Noneja/results/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/results/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneresults/"/>
+    </url>
+    <url>
+        <loc>Noneja/running_agents/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/running_agents/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerunning_agents/"/>
+    </url>
+    <url>
+        <loc>Noneja/sessions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/sessions/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonesessions/"/>
+    </url>
+    <url>
+        <loc>Noneja/streaming/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/streaming/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonestreaming/"/>
+    </url>
+    <url>
+        <loc>Noneja/tools/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/tools/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonetools/"/>
+    </url>
+    <url>
+        <loc>Noneja/tracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/tracing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonetracing/"/>
+    </url>
+    <url>
+        <loc>Noneja/usage/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/usage/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneusage/"/>
+    </url>
+    <url>
+        <loc>Noneja/visualization/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/visualization/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevisualization/"/>
+    </url>
+    <url>
+        <loc>Noneja/models/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/models/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemodels/"/>
+    </url>
+    <url>
+        <loc>Noneja/models/litellm/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/models/litellm/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonemodels/litellm/"/>
+    </url>
+    <url>
+        <loc>Noneja/realtime/guide/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/realtime/guide/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerealtime/guide/"/>
+    </url>
+    <url>
+        <loc>Noneja/realtime/quickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/realtime/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonerealtime/quickstart/"/>
+    </url>
+    <url>
+        <loc>Noneja/voice/pipeline/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/pipeline/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/pipeline/"/>
+    </url>
+    <url>
+        <loc>Noneja/voice/quickstart/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/quickstart/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/quickstart/"/>
+    </url>
+    <url>
+        <loc>Noneja/voice/tracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/voice/tracing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Nonevoice/tracing/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/agent/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/agent/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/agent_output/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/agent_output/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/agent_output/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/computer/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/computer/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/computer/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/exceptions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/exceptions/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/exceptions/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/function_schema/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/function_schema/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/function_schema/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/guardrail/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/guardrail/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/guardrail/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/handoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/handoffs/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/handoffs/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/items/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/items/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/items/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/lifecycle/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/lifecycle/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/lifecycle/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/logger/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/logger/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/logger/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/memory/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/memory/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/memory/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/model_settings/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/model_settings/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/model_settings/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/prompts/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/prompts/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/prompts/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/repl/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/repl/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/repl/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/result/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/result/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/result/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/run/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/run/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/run/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/run_context/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/run_context/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/run_context/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/stream_events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/stream_events/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/stream_events/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/strict_schema/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/strict_schema/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/strict_schema/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tool/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tool/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tool/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tool_context/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tool_context/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tool_context/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/usage/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/usage/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/usage/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/version/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/version/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/version/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/handoff_filters/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/handoff_filters/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/handoff_filters/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/handoff_prompt/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/handoff_prompt/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/handoff_prompt/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/litellm/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/litellm/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/litellm/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/visualization/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/visualization/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/visualization/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/memory/sqlalchemy_session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/memory/sqlalchemy_session/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/memory/sqlalchemy_session/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/models/litellm_model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/models/litellm_model/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/models/litellm_model/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/extensions/models/litellm_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/extensions/models/litellm_provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/extensions/models/litellm_provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/mcp/server/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/mcp/server/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/mcp/server/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/mcp/util/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/mcp/util/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/mcp/util/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/memory/session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/memory/session/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/memory/session/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/chatcmpl_converter/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_converter/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_converter/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/chatcmpl_helpers/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_helpers/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_helpers/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/chatcmpl_stream_handler/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/chatcmpl_stream_handler/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/chatcmpl_stream_handler/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/fake_id/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/fake_id/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/fake_id/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/interface/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/interface/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/interface/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/multi_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/multi_provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/multi_provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/openai_chatcompletions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_chatcompletions/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_chatcompletions/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/openai_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/models/openai_responses/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/models/openai_responses/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/models/openai_responses/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/agent/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/agent/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/agent/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/config/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/config/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/config/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/events/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/events/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/handoffs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/handoffs/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/handoffs/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/items/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/items/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/items/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/model_events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model_events/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model_events/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/model_inputs/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/model_inputs/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/model_inputs/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/openai_realtime/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/openai_realtime/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/openai_realtime/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/runner/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/runner/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/runner/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/realtime/session/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/realtime/session/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/realtime/session/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/create/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/create/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/create/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/logger/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/logger/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/logger/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/processor_interface/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/processor_interface/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/processor_interface/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/processors/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/processors/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/processors/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/scope/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/scope/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/scope/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/setup/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/setup/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/setup/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/span_data/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/span_data/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/span_data/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/spans/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/spans/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/spans/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/traces/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/traces/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/traces/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/tracing/util/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/tracing/util/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/tracing/util/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/events/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/events/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/events/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/exceptions/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/exceptions/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/exceptions/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/imports/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/imports/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/imports/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/input/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/input/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/input/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/model/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/model/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/model/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/pipeline/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/pipeline/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/pipeline/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/pipeline_config/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/pipeline_config/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/pipeline_config/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/result/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/result/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/result/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/utils/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/utils/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/utils/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/workflow/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/workflow/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/workflow/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/models/openai_model_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_model_provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_model_provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/models/openai_provider/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_provider/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_provider/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/models/openai_stt/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_stt/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_stt/"/>
+    </url>
+    <url>
+        <loc>Noneja/ref/voice/models/openai_tts/</loc>
+        <lastmod>2025-08-30</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="ja" href="Noneja/ref/voice/models/openai_tts/"/>
+        <xhtml:link rel="alternate" hreflang="en" href="Noneref/voice/models/openai_tts/"/>
+    </url>
+</urlset>
