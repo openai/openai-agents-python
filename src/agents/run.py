@@ -8,7 +8,7 @@ from typing import Any, Callable, Generic, cast, get_args
 
 from openai.types.responses import (
     ResponseCompletedEvent,
-    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
@@ -1040,7 +1040,7 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(usage)
 
-            if isinstance(event, ResponseOutputItemAddedEvent):
+            if isinstance(event, ResponseOutputItemDoneEvent):
                 output_item = event.item
 
                 if isinstance(output_item, _TOOL_CALL_TYPES):
