@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 
-from openai.types.responses.tool import WebSearchToolFilters
+from openai.types.responses.web_search_tool import Filters
 from openai.types.shared.reasoning import Reasoning
 
 from agents import Agent, ModelSettings, Runner, WebSearchTool, trace
@@ -18,7 +18,7 @@ async def main():
         tools=[
             WebSearchTool(
                 # https://platform.openai.com/docs/guides/tools-web-search?api-mode=responses#domain-filtering
-                filters=WebSearchToolFilters(
+                filters=Filters(
                     allowed_domains=[
                         "openai.com",
                         "developer.openai.com",
