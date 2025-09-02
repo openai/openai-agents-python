@@ -17,7 +17,7 @@ lint:
 
 .PHONY: mypy
 mypy: 
-	uv run mypy .
+	uv run mypy . --exclude site
 
 .PHONY: tests
 tests: 
