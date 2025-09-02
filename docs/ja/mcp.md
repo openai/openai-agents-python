@@ -4,23 +4,23 @@ search:
 ---
 # Model context protocol (MCP)
 
-[Model context protocol](https://modelcontextprotocol.io/introduction)（別名 MCP）は、LLM にツールとコンテキストを提供する方法です。MCP のドキュメントより:
+The [Model context protocol](https://modelcontextprotocol.io/introduction) (aka MCP) is a way to provide tools and context to the LLM. From the MCP docs:
 
-> MCP は、アプリケーションが LLM にコンテキストを提供する方法を標準化するオープンなプロトコルです。MCP は AI アプリケーションのための USB-C ポートのようなものだと考えてください。USB-C がデバイスをさまざまな周辺機器やアクセサリーに接続する標準化された方法を提供するように、MCP は AI モデルを異なるデータソースやツールに接続する標準化された方法を提供します。
+> MCP is an open protocol that standardizes how applications provide context to LLMs. Think of MCP like a USB-C port for AI applications. Just as USB-C provides a standardized way to connect your devices to various peripherals and accessories, MCP provides a standardized way to connect AI models to different data sources and tools.
 
-Agents SDK は MCP をサポートしています。これにより、幅広い MCP サーバーを利用して、エージェントにツールやプロンプトを提供できます。
+Agents SDK は MCP をサポートしています。これにより、幅広い MCP サーバーを使用して、エージェント にツールやプロンプトを提供できます。
 
 ## MCP サーバー
 
-現在、MCP の仕様は使用するトランスポート機構に基づいて 3 種類のサーバーを定義しています:
+現在、MCP の仕様は、使用するトランスポート方式に基づいて 3 種類の サーバー を定義しています。
 
-1. **stdio** サーバーは、アプリケーションのサブプロセスとして実行されます。いわゆる「ローカル」で動作します。
-2. **HTTP over SSE** サーバーはリモートで動作します。URL を介して接続します。
-3. **Streamable HTTP** サーバーは、MCP 仕様で定義された Streamable HTTP トランスポートを使用してリモートで動作します。
+1. **stdio** サーバーはアプリケーションのサブプロセスとして実行されます。いわゆる「ローカル」で動作すると考えられます。
+2. **HTTP over SSE** サーバーはリモートで実行されます。URL 経由で接続します。
+3. **Streamable HTTP** サーバーは、MCP 仕様で定義された Streamable HTTP トランスポートを使用してリモートで実行されます。
 
-これらのサーバーには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio]、[`MCPServerSse`][agents.mcp.server.MCPServerSse]、[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] クラスを使用して接続できます。
+これらの サーバー に接続するには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio]、[`MCPServerSse`][agents.mcp.server.MCPServerSse]、[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] クラスを使用できます。
 
-たとえば、[公式の MCP filesystem サーバー](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem)は次のように使用します。
+たとえば、[official MCP filesystem server](https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem) は次のように使用します。
 
 ```python
 from agents.run_context import RunContextWrapper
@@ -41,7 +41,7 @@ async with MCPServerStdio(
 
 ## MCP サーバーの使用
 
-MCP サーバーはエージェントに追加できます。Agents SDK は、エージェントが実行されるたびに MCP サーバー上で `list_tools()` を呼び出します。これにより、LLM は MCP サーバーのツールを認識します。LLM が MCP サーバーのツールを呼び出すと、SDK はそのサーバーで `call_tool()` を呼び出します。
+MCP サーバーは エージェント に追加できます。Agents SDK は、エージェント の実行ごとに MCP サーバー上で `list_tools()` を呼び出します。これにより、LLM は MCP サーバーのツールを認識します。LLM が MCP サーバーのツールを呼び出すと、SDK はそのサーバーで `call_tool()` を呼び出します。
 
 ```python
 
@@ -54,11 +54,11 @@ agent=Agent(
 
 ## ツールのフィルタリング
 
-MCP サーバーでツールフィルターを構成することで、エージェントで使用可能なツールを絞り込めます。SDK は静的フィルタリングと動的フィルタリングの両方をサポートします。
+MCP サーバーでツールフィルターを設定することで、エージェント で利用可能なツールを制限できます。SDK は静的フィルタリングと動的フィルタリングの両方をサポートします。
 
 ### 静的ツールフィルタリング
 
-単純な許可/ブロック リストには、静的フィルタリングを使用できます:
+単純な許可/ブロック リストには、静的フィルタリングを使用できます。
 
 ```python
 from agents.mcp import create_static_tool_filter
@@ -87,15 +87,15 @@ server = MCPServerStdio(
 
 ```
 
-**`allowed_tool_names` と `blocked_tool_names` の両方が構成されている場合、処理順序は次のとおりです:**
-1. まず `allowed_tool_names`（allowlist）を適用 — 指定したツールのみを残す
-2. 次に `blocked_tool_names`（blocklist）を適用 — 残ったツールから指定したものを除外
+**`allowed_tool_names` と `blocked_tool_names` の両方が設定されている場合の処理順序は次のとおりです。**
+1. まず `allowed_tool_names`（許可リスト）を適用し、指定したツールのみを残します
+2. 次に `blocked_tool_names`（ブロックリスト）を適用し、残ったツールから指定したツールを除外します
 
-たとえば、`allowed_tool_names=["read_file", "write_file", "delete_file"]` と `blocked_tool_names=["delete_file"]` を構成した場合、利用可能なのは `read_file` と `write_file` のツールだけになります。
+たとえば、`allowed_tool_names=["read_file", "write_file", "delete_file"]` と `blocked_tool_names=["delete_file"]` を設定した場合、`read_file` と `write_file` のツールのみが利用可能になります。
 
 ### 動的ツールフィルタリング
 
-より複雑なフィルタリングロジックには、関数を使った動的フィルターを使用できます:
+より複雑なフィルタリングロジックには、関数を用いた動的フィルターを使用できます。
 
 ```python
 from agents.mcp import ToolFilterContext
@@ -134,21 +134,21 @@ server = MCPServerStdio(
 )
 ```
 
-`ToolFilterContext` では次にアクセスできます:
+`ToolFilterContext` では次の情報にアクセスできます。
 - `run_context`: 現在の実行コンテキスト
-- `agent`: ツールを要求しているエージェント
-- `server_name`: MCP サーバー名
+- `agent`: ツールを要求している エージェント
+- `server_name`: MCP サーバーの名前
 
 ## プロンプト
 
-MCP サーバーは、エージェントの instructions を動的に生成するために使用できるプロンプトも提供できます。これにより、パラメーターでカスタマイズ可能な再利用可能な instructions テンプレートを作成できます。
+MCP サーバーは、エージェント の指示を動的に生成するために使用できるプロンプトも提供できます。これにより、パラメーターでカスタマイズ可能な再利用可能な指示テンプレートを作成できます。
 
 ### プロンプトの使用
 
-プロンプトをサポートする MCP サーバーは、2 つの主要メソッドを提供します:
+プロンプトをサポートする MCP サーバーは、次の 2 つの主要なメソッドを提供します。
 
-- `list_prompts()`: サーバー上で利用可能なすべてのプロンプトを一覧表示
-- `get_prompt(name, arguments)`: 任意のパラメーター付きで特定のプロンプトを取得
+- `list_prompts()`: サーバー上で利用可能なすべてのプロンプトを一覧表示します
+- `get_prompt(name, arguments)`: 任意のパラメーター付きで特定のプロンプトを取得します
 
 ```python
 # List available prompts
@@ -173,19 +173,19 @@ agent = Agent(
 
 ## キャッシュ
 
-エージェントが実行されるたびに、MCP サーバーで `list_tools()` が呼び出されます。特にサーバーがリモート サーバーの場合、これはレイテンシの要因になり得ます。ツール一覧を自動的にキャッシュするには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio]、[`MCPServerSse`][agents.mcp.server.MCPServerSse]、[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] に `cache_tools_list=True` を渡します。ツール一覧が変更されないことが確実な場合にのみ実施してください。
+エージェント が実行されるたびに、MCP サーバーで `list_tools()` が呼び出されます。特に サーバー がリモートの場合はレイテンシが発生し得ます。ツール一覧を自動的にキャッシュするには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio]、[`MCPServerSse`][agents.mcp.server.MCPServerSse]、[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] に `cache_tools_list=True` を渡します。ツール一覧が変更されないと確信できる場合にのみ使用してください。
 
-キャッシュを無効化したい場合は、サーバーで `invalidate_tools_cache()` を呼び出せます。
+キャッシュを無効化したい場合は、サーバーで `invalidate_tools_cache()` を呼び出します。
 
 ## エンドツーエンドの code examples
 
-動作する完全な code examples は [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) をご覧ください。
+[examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) で、完全に動作する code examples を参照してください。
 
 ## トレーシング
 
-[トレーシング](./tracing.md) は次の MCP の操作を自動的に捕捉します:
+[Tracing](./tracing.md) は、以下を含む MCP の操作を自動的に取得します。
 
-1. ツール一覧のための MCP サーバーへの呼び出し
+1. ツール一覧の取得に対する MCP サーバーへの呼び出し
 2. 関数呼び出しに関する MCP 関連情報
 
 ![MCP Tracing Screenshot](../assets/images/mcp-tracing.jpg)
