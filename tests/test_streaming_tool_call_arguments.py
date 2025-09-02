@@ -7,7 +7,7 @@ were emitted with empty arguments during streaming (Issue #1629).
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, Optional, Union, cast
 
 import pytest
 from openai.types.responses import (
@@ -48,33 +48,33 @@ class StreamingFakeModel(Model):
 
     async def get_response(
         self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        system_instructions: Optional[str],
+        input: Union[str, list[TResponseInputItem]],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchemaBase | None,
+        output_schema: Optional[AgentOutputSchemaBase],
         handoffs: list[Handoff],
         tracing: ModelTracing,
         *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt: Any | None,
+        previous_response_id: Optional[str],
+        conversation_id: Optional[str],
+        prompt: Optional[Any],
     ):
         raise NotImplementedError("Use stream_response instead")
 
     async def stream_response(
         self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
+        system_instructions: Optional[str],
+        input: Union[str, list[TResponseInputItem]],
         model_settings: ModelSettings,
         tools: list[Tool],
-        output_schema: AgentOutputSchemaBase | None,
+        output_schema: Optional[AgentOutputSchemaBase],
         handoffs: list[Handoff],
         tracing: ModelTracing,
         *,
-        previous_response_id: str | None = None,
-        conversation_id: str | None = None,
-        prompt: Any | None = None,
+        previous_response_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        prompt: Optional[Any] = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream events that simulate real OpenAI streaming behavior for tool calls."""
         self.last_turn_args = {
