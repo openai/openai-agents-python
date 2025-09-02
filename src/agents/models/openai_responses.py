@@ -433,7 +433,7 @@ class Converter:
             converted_tool = {
                 "type": "web_search",
                 "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
-                "user_location": tool.user_location,  # type: ignore [typeddict-item]
+                "user_location": tool.user_location,
                 "search_context_size": tool.search_context_size,
             }
             includes = None
