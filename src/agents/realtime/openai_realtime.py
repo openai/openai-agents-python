@@ -188,9 +188,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             self._tracing_config = "auto"
 
-        if not api_key:
-            raise UserError("API key is required but was not provided.")
-
         url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
 
         headers: dict[str, str] = {}
@@ -199,6 +196,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             headers.update(options["headers"])
         else:
             # OpenAI's Realtime API
+            if not api_key:
+                raise UserError("API key is required but was not provided.")
+
             headers.update(
                 {
                     "Authorization": f"Bearer {api_key}",
