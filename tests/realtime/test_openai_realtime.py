@@ -84,8 +84,45 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
 
                 # Verify internal state
                 assert model._websocket == mock_websocket
-                assert model._websocket_task is not None
-                assert model.model == "gpt-4o-realtime-preview"
+        assert model._websocket_task is not None
+        assert model.model == "gpt-4o-realtime-preview"
+
+    @pytest.mark.asyncio
+    async def test_connect_with_custom_headers_overrides_defaults(self, model, mock_websocket):
+        """If custom headers are provided, use them verbatim without adding defaults."""
+        # Even when custom headers are provided, the implementation still requires api_key.
+        config = {
+            "api_key": "unused-because-headers-override",
+            "headers": {"api-key": "azure-key", "x-custom": "1"},
+            "url": "wss://custom.example.com/realtime?model=custom",
+            # Use a valid realtime model name for session.update to validate.
+            "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                # Verify WebSocket connection used the provided URL
+                called_url = mock_connect.call_args[0][0]
+                assert called_url == "wss://custom.example.com/realtime?model=custom"
+
+                # Verify headers are exactly as provided and no defaults were injected
+                headers = mock_connect.call_args.kwargs["additional_headers"]
+                assert headers == {"api-key": "azure-key", "x-custom": "1"}
+                assert "Authorization" not in headers
+                assert "OpenAI-Beta" not in headers
 
     @pytest.mark.asyncio
     async def test_connect_with_callable_api_key(self, model, mock_websocket):

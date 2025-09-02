@@ -118,6 +118,12 @@ class RealtimeModelConfig(TypedDict):
     the OpenAI Realtime model will use the default OpenAI WebSocket URL.
     """
 
+    headers: NotRequired[dict[str, str]]
+    """The headers to use when connecting. If unset, the model will use a sane default.
+    Note that, when you set this, authorization header won't be set under the hood.
+    e.g., {"api-key": "your api key here"} for Azure OpenAI Realtime WebSocket connections.
+    """
+
     initial_model_settings: NotRequired[RealtimeSessionModelSettings]
     """The initial model settings to use when connecting."""
 
