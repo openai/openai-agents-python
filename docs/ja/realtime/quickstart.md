@@ -4,10 +4,10 @@ search:
 ---
 # クイックスタート
 
-リアルタイム エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声対話を可能にします。本ガイドでは、最初のリアルタイム音声エージェントの作成手順を説明します。
+Realtime エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声対話を可能にします。本ガイドでは、最初のリアルタイム音声エージェントの作成方法を説明します。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装改善に伴い、破壊的な変更が入る可能性があります。
+Realtime エージェントはベータ版です。実装の改善に伴い、重大な変更が入る可能性があります。
 
 ## 前提条件
 
@@ -23,7 +23,7 @@ Realtime エージェントはベータ版です。実装改善に伴い、破�
 pip install openai-agents
 ```
 
-## 最初のリアルタイム エージェントの作成
+## 最初のリアルタイムエージェントの作成
 
 ### 1. 必要なコンポーネントのインポート
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. リアルタイム エージェントの作成
+### 2. リアルタイムエージェントの作成
 
 ```python
 agent = RealtimeAgent(
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. Runner のセットアップ
+### 3. ランナーのセットアップ
 
 ```python
 runner = RealtimeRunner(
@@ -140,8 +140,8 @@ if __name__ == "__main__":
 ### モデル設定
 
 -   `model_name`: 利用可能なリアルタイムモデルから選択 (例: `gpt-4o-realtime-preview`)
--   `voice`: 音声を選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: テキストや音声を有効化 (`["text", "audio"]`)
+-   `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
+-   `modalities`: テキストおよび/または音声を有効化 (`["text", "audio"]`)
 
 ### 音声設定
 
@@ -151,15 +151,15 @@ if __name__ == "__main__":
 
 ### ターン検出
 
--   `type`: 検出方式 (`server_vad`, `semantic_vad`)
--   `threshold`: 音声活動のしきい値 (0.0–1.0)
+-   `type`: 検出方法 (`server_vad`, `semantic_vad`)
+-   `threshold`: 音声活動のしきい値 (0.0-1.0)
 -   `silence_duration_ms`: ターン終了を検出する無音時間
 -   `prefix_padding_ms`: 発話前の音声パディング
 
 ## 次のステップ
 
--   [リアルタイム エージェントの詳細](guide.md)
--   動作するコードは [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダを参照
+-   [リアルタイムエージェントの詳細](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダ内の動作する sample code を参照
 -   エージェントにツールを追加
 -   エージェント間のハンドオフを実装
 -   安全性のためのガードレールを設定
