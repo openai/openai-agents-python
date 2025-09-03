@@ -137,6 +137,27 @@ You must return **only** the translated markdown. Do not include any commentary,
   - Link URLs inside `[label](URL)` – translate the label, never the URL.
 
 #########################
+##  HARD CONSTRAINTS   ##
+#########################
+- Never insert spaces immediately inside emphasis markers. Use `**bold**`, not `** bold **`.
+- Preserve the number of emphasis markers from the source: if the source uses `**` or `__`, keep the same pair count.
+- Ensure one space after heading markers: `##Heading` -> `## Heading`.
+- Ensure one space after list markers: `-Item` -> `- Item`, `*Item` -> `* Item` (does not apply to `**`).
+- Trim spaces inside link/image labels: `[ Label ](url)` -> `[Label](url)`.
+
+###########################
+##  GOOD / BAD EXAMPLES  ##
+###########################
+- Good: This is **bold** text.
+- Bad:  This is ** bold ** text.
+- Good: ## Heading
+- Bad:  ##Heading
+- Good: - Item
+- Bad:  -Item
+- Good: [Label](https://example.com)
+- Bad:  [ Label ](https://example.com)
+
+#########################
 ##  LANGUAGE‑SPECIFIC  ##
 #########################
 *(applies only when {target_language} = Japanese)*  
@@ -159,6 +180,7 @@ Translate these terms exactly as provided (no extra spaces):
 ##  EXTRA GUIDELINES   ##
 #########################
 {specific_instructions}
+- When translating Markdown tables, preserve the exact table structure, including all delimiters (|), header separators (---), and row/column counts. Only translate the cell contents. Do not add, remove, or reorder columns or rows.
 
 #########################
 ##  IF UNSURE          ##
@@ -173,7 +195,11 @@ Follow the following workflow to translate the given markdown text data:
 
 1. Read the input markdown text given by the user.
 2. Translate the markdown file into {target_language}, carefully following the requirements above.
-3. Self-review your translation to ensure high quality, focusing on naturalness, accuracy, and consistency while avoiding unnecessary changes or spacing.
+3. Perform a self-review to check for the following common issues:
+   - Naturalness, accuracy, and consistency throughout the text.
+   - Spacing inside markdown syntax such as `*` or `_`; `**bold**` is correct whereas `** bold **` is not.
+   - Unwanted spaces inside link or image labels, such as `[ Label ](url)`.
+   - Headings or list markers missing a space after their marker.
 4. If improvements are necessary, refine the content without changing the original meaning.
 5. Continue improving the translation until you are fully satisfied with the result.
 6. Once the final output is ready, return **only** the translated markdown text. No extra commentary.
@@ -208,7 +234,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
             code_block_chunks.append(line)
             if in_code_block is True:
                 code_blocks.append("\n".join(code_block_chunks))
-                current_chunk.append(f"CODE_BLOCK_{(len(code_blocks) - 1):02}")
+                current_chunk.append(f"CODE_BLOCK_{(len(code_blocks) - 1):03}")
                 code_block_chunks.clear()
             in_code_block = not in_code_block
             continue
@@ -250,7 +276,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
 
     translated_text = "\n".join(translated_content)
     for idx, code_block in enumerate(code_blocks):
-        translated_text = translated_text.replace(f"CODE_BLOCK_{idx:02}", code_block)
+        translated_text = translated_text.replace(f"CODE_BLOCK_{idx:03}", code_block)
 
     # FIXME: enable mkdocs search plugin to seamlessly work with i18n plugin
     translated_text = SEARCH_EXCLUSION + translated_text
