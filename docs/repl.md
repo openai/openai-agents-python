@@ -20,10 +20,10 @@ if __name__ == "__main__":
 To end this chat session, simply type `quit` or `exit` (and press Enter) or use the `Ctrl-D` keyboard shortcut.
 
 
-## Few-shot initialization with preload_history
+## Few-shot initialization with `preload_history`
 
-The run_demo_loop function also accepts an optional preload_history parameter. This allows you to initialize the session with example user/assistant turns, providing context before interactive input begins.  
-
+The `run_demo_loop` function accepts an optional `preload_history` parameter, which lets you seed the session with predefined user/assistant exchanges.  
+This enables few-shot prompting by giving the agent example interactions that establish context and behavior before the interactive session begins.
 
 ```python
 import asyncio
@@ -40,6 +40,7 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 
-```  
+```
 
-When you run this example, the chat session starts with the provided conversation history, and the agent can continue the dialogue as if those exchanges had already occurred.
+When you run this example, the session begins with the provided history.
+The agent continues the conversation naturally, as if those exchanges had already taken place.
