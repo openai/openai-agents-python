@@ -8,10 +8,17 @@ import numpy as np
 import sounddevice as sd
 
 from agents import function_tool
-from agents.realtime import RealtimeAgent, RealtimeRunner, RealtimeSession, RealtimeSessionEvent
+from agents.realtime import (
+    RealtimeAgent,
+    RealtimePlaybackTracker,
+    RealtimeRunner,
+    RealtimeSession,
+    RealtimeSessionEvent,
+)
+from agents.realtime.model import RealtimeModelConfig
 
 # Audio configuration
-CHUNK_LENGTH_S = 0.05  # 50ms
+CHUNK_LENGTH_S = 0.04  # 40ms aligns with realtime defaults
 SAMPLE_RATE = 24000
 FORMAT = np.int16
 CHANNELS = 1
@@ -49,11 +56,16 @@ class NoUIDemo:
         self.audio_player: sd.OutputStream | None = None
         self.recording = False
 
+        # Playback tracker lets the model know our real playback progress
+        self.playback_tracker = RealtimePlaybackTracker()
+
         # Audio output state for callback system
-        self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=10)  # Buffer more chunks
+        # Store tuples: (samples_np, item_id, content_index)
+        self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=100)
         self.interrupt_event = threading.Event()
-        self.current_audio_chunk: np.ndarray[Any, np.dtype[Any]] | None = None
+        self.current_audio_chunk: tuple[np.ndarray[Any, np.dtype[Any]], str, int] | None = None
         self.chunk_position = 0
+        self.bytes_per_sample = np.dtype(FORMAT).itemsize
 
     def _output_callback(self, outdata, frames: int, time, status) -> None:
         """Callback for audio output - handles continuous audio stream from server."""
@@ -92,20 +104,29 @@ class NoUIDemo:
 
             # Copy data from current chunk to output buffer
             remaining_output = len(outdata) - samples_filled
-            remaining_chunk = len(self.current_audio_chunk) - self.chunk_position
+            samples, item_id, content_index = self.current_audio_chunk
+            remaining_chunk = len(samples) - self.chunk_position
             samples_to_copy = min(remaining_output, remaining_chunk)
 
             if samples_to_copy > 0:
-                chunk_data = self.current_audio_chunk[
-                    self.chunk_position : self.chunk_position + samples_to_copy
-                ]
+                chunk_data = samples[self.chunk_position : self.chunk_position + samples_to_copy]
                 # More efficient: direct assignment for mono audio instead of reshape
                 outdata[samples_filled : samples_filled + samples_to_copy, 0] = chunk_data
                 samples_filled += samples_to_copy
                 self.chunk_position += samples_to_copy
 
+                # Inform playback tracker about played bytes
+                try:
+                    self.playback_tracker.on_play_bytes(
+                        item_id=item_id,
+                        item_content_index=content_index,
+                        bytes=chunk_data.tobytes(),
+                    )
+                except Exception:
+                    pass
+
                 # If we've used up the entire chunk, reset for next iteration
-                if self.chunk_position >= len(self.current_audio_chunk):
+                if self.chunk_position >= len(samples):
                     self.current_audio_chunk = None
                     self.chunk_position = 0
 
@@ -125,7 +146,15 @@ class NoUIDemo:
 
         try:
             runner = RealtimeRunner(agent)
-            async with await runner.run() as session:
+            # Attach playback tracker and disable server-side response interruption,
+            # which can truncate assistant audio when mic picks up speaker output.
+            model_config: RealtimeModelConfig = {
+                "playback_tracker": self.playback_tracker,
+                "initial_model_settings": {
+                    "turn_detection": {"type": "semantic_vad", "interrupt_response": False},
+                },
+            }
+            async with await runner.run(model_config=model_config) as session:
                 self.session = session
                 print("Connected. Starting audio recording...")
 
@@ -170,6 +199,14 @@ class NoUIDemo:
         read_size = int(SAMPLE_RATE * CHUNK_LENGTH_S)
 
         try:
+            # Simple energy-based barge-in: if user speaks while audio is playing, interrupt.
+            def rms_energy(samples: np.ndarray[Any, np.dtype[Any]]) -> float:
+                if samples.size == 0:
+                    return 0.0
+                # Normalize int16 to [-1, 1]
+                x = samples.astype(np.float32) / 32768.0
+                return float(np.sqrt(np.mean(x * x)))
+
             while self.recording:
                 # Check if there's enough data to read
                 if self.audio_stream.read_available < read_size:
@@ -182,8 +219,12 @@ class NoUIDemo:
                 # Convert numpy array to bytes
                 audio_bytes = data.tobytes()
 
-                # Send audio to session
-                await self.session.send_audio(audio_bytes)
+                # Half-duplex gating: do not send mic while assistant audio is playing
+                assistant_playing = (
+                    self.current_audio_chunk is not None or not self.output_queue.empty()
+                )
+                if not assistant_playing:
+                    await self.session.send_audio(audio_bytes)
 
                 # Yield control back to event loop
                 await asyncio.sleep(0)
@@ -212,17 +253,19 @@ class NoUIDemo:
             elif event.type == "audio_end":
                 print("Audio ended")
             elif event.type == "audio":
-                # Enqueue audio for callback-based playback
+                # Enqueue audio for callback-based playback with metadata
                 np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
                 try:
-                    self.output_queue.put_nowait(np_audio)
+                    self.output_queue.put_nowait((np_audio, event.item_id, event.content_index))
                 except queue.Full:
                     # Queue is full - only drop if we have significant backlog
                     # This prevents aggressive dropping that could cause choppiness
                     if self.output_queue.qsize() > 8:  # Keep some buffer
                         try:
                             self.output_queue.get_nowait()
-                            self.output_queue.put_nowait(np_audio)
+                            self.output_queue.put_nowait(
+                                (np_audio, event.item_id, event.content_index)
+                            )
                         except queue.Empty:
                             pass
                     # If queue isn't too full, just skip this chunk to avoid blocking

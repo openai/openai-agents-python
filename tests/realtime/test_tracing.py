@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from openai.types.realtime.realtime_tracing_config import TracingConfiguration
 
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.model import RealtimeModel
@@ -102,8 +103,7 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with tracing config
-                    from openai.types.beta.realtime.session_update_event import (
-                        SessionTracingTracingConfiguration,
+                    from openai.types.realtime.session_update_event import (
                         SessionUpdateEvent,
                     )
 
@@ -111,7 +111,7 @@ class TestRealtimeTracingIntegration:
                     call_args = mock_send_raw_message.call_args[0][0]
                     assert isinstance(call_args, SessionUpdateEvent)
                     assert call_args.type == "session.update"
-                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
+                    assert isinstance(call_args.session.tracing, TracingConfiguration)
                     assert call_args.session.tracing.workflow_name == "test_workflow"
                     assert call_args.session.tracing.group_id == "group_123"
 
@@ -143,7 +143,7 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with "auto"
-                    from openai.types.beta.realtime.session_update_event import SessionUpdateEvent
+                    from openai.types.realtime.session_update_event import SessionUpdateEvent
 
                     mock_send_raw_message.assert_called_once()
                     call_args = mock_send_raw_message.call_args[0][0]
@@ -206,8 +206,7 @@ class TestRealtimeTracingIntegration:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with complete tracing config including metadata
-                    from openai.types.beta.realtime.session_update_event import (
-                        SessionTracingTracingConfiguration,
+                    from openai.types.realtime.session_update_event import (
                         SessionUpdateEvent,
                     )
 
@@ -215,7 +214,7 @@ class TestRealtimeTracingIntegration:
                     call_args = mock_send_raw_message.call_args[0][0]
                     assert isinstance(call_args, SessionUpdateEvent)
                     assert call_args.type == "session.update"
-                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
+                    assert isinstance(call_args.session.tracing, TracingConfiguration)
                     assert call_args.session.tracing.workflow_name == "complex_workflow"
                     assert call_args.session.tracing.metadata == complex_metadata
 

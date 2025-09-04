@@ -6,53 +6,76 @@ import inspect
 import json
 import os
 from datetime import datetime
-from typing import Annotated, Any, Callable, Literal, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union, cast
 
 import pydantic
 import websockets
-from openai.types.beta.realtime.conversation_item import (
+from openai.types.realtime.conversation_item import (
     ConversationItem,
     ConversationItem as OpenAIConversationItem,
 )
-from openai.types.beta.realtime.conversation_item_content import (
-    ConversationItemContent as OpenAIConversationItemContent,
-)
-from openai.types.beta.realtime.conversation_item_create_event import (
+from openai.types.realtime.conversation_item_create_event import (
     ConversationItemCreateEvent as OpenAIConversationItemCreateEvent,
 )
-from openai.types.beta.realtime.conversation_item_retrieve_event import (
+from openai.types.realtime.conversation_item_retrieve_event import (
     ConversationItemRetrieveEvent as OpenAIConversationItemRetrieveEvent,
 )
-from openai.types.beta.realtime.conversation_item_truncate_event import (
+from openai.types.realtime.conversation_item_truncate_event import (
     ConversationItemTruncateEvent as OpenAIConversationItemTruncateEvent,
 )
-from openai.types.beta.realtime.input_audio_buffer_append_event import (
+from openai.types.realtime.input_audio_buffer_append_event import (
     InputAudioBufferAppendEvent as OpenAIInputAudioBufferAppendEvent,
 )
-from openai.types.beta.realtime.input_audio_buffer_commit_event import (
+from openai.types.realtime.input_audio_buffer_commit_event import (
     InputAudioBufferCommitEvent as OpenAIInputAudioBufferCommitEvent,
 )
-from openai.types.beta.realtime.realtime_client_event import (
+from openai.types.realtime.realtime_audio_config import (
+    Input as OpenAIRealtimeAudioInput,
+    Output as OpenAIRealtimeAudioOutput,
+    RealtimeAudioConfig as OpenAIRealtimeAudioConfig,
+)
+from openai.types.realtime.realtime_client_event import (
     RealtimeClientEvent as OpenAIRealtimeClientEvent,
 )
-from openai.types.beta.realtime.realtime_server_event import (
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    RealtimeConversationItemAssistantMessage,
+)
+from openai.types.realtime.realtime_conversation_item_function_call_output import (
+    RealtimeConversationItemFunctionCallOutput,
+)
+from openai.types.realtime.realtime_conversation_item_system_message import (
+    RealtimeConversationItemSystemMessage,
+)
+from openai.types.realtime.realtime_conversation_item_user_message import (
+    Content,
+    RealtimeConversationItemUserMessage,
+)
+from openai.types.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
-from openai.types.beta.realtime.response_audio_delta_event import ResponseAudioDeltaEvent
-from openai.types.beta.realtime.response_cancel_event import (
+from openai.types.realtime.realtime_session import (
+    RealtimeSession as OpenAISessionObject,
+)
+from openai.types.realtime.realtime_session_create_request import (
+    RealtimeSessionCreateRequest as OpenAISessionCreateRequest,
+)
+from openai.types.realtime.realtime_tools_config_union import (
+    Function as OpenAISessionFunction,
+)
+from openai.types.realtime.realtime_tracing_config import (
+    TracingConfiguration as OpenAITracingConfiguration,
+)
+from openai.types.realtime.response_audio_delta_event import ResponseAudioDeltaEvent
+from openai.types.realtime.response_cancel_event import (
     ResponseCancelEvent as OpenAIResponseCancelEvent,
 )
-from openai.types.beta.realtime.response_create_event import (
+from openai.types.realtime.response_create_event import (
     ResponseCreateEvent as OpenAIResponseCreateEvent,
 )
-from openai.types.beta.realtime.session_update_event import (
-    Session as OpenAISessionObject,
-    SessionTool as OpenAISessionTool,
-    SessionTracing as OpenAISessionTracing,
-    SessionTracingTracingConfiguration as OpenAISessionTracingConfiguration,
+from openai.types.realtime.session_update_event import (
     SessionUpdateEvent as OpenAISessionUpdateEvent,
 )
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import Field, TypeAdapter
 from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
 
@@ -129,19 +152,8 @@ async def get_api_key(key: str | Callable[[], MaybeAwaitable[str]] | None) -> st
     return os.getenv("OPENAI_API_KEY")
 
 
-class _InputAudioBufferTimeoutTriggeredEvent(BaseModel):
-    type: Literal["input_audio_buffer.timeout_triggered"]
-    event_id: str
-    audio_start_ms: int
-    audio_end_ms: int
-    item_id: str
-
-
 AllRealtimeServerEvents = Annotated[
-    Union[
-        OpenAIRealtimeServerEvent,
-        _InputAudioBufferTimeoutTriggeredEvent,
-    ],
+    Union[OpenAIRealtimeServerEvent,],
     Field(discriminator="type"),
 ]
 
@@ -159,7 +171,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
     def __init__(self) -> None:
-        self.model = "gpt-4o-realtime-preview"  # Default model
+        self.model = "gpt-realtime"  # Default model
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
         self._listeners: list[RealtimeModelListener] = []
@@ -222,7 +234,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             converted_tracing_config = _ConversionHelper.convert_tracing_config(tracing_config)
             await self._send_raw_message(
                 OpenAISessionUpdateEvent(
-                    session=OpenAISessionObject(tracing=converted_tracing_config),
+                    session=OpenAISessionCreateRequest(
+                        model=self.model,
+                        type="realtime",
+                        tracing=converted_tracing_config,
+                    ),
                     type="session.update",
                 )
             )
@@ -302,10 +318,54 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             raise ValueError(f"Unknown event type: {type(event)}")
 
     async def _send_raw_message(self, event: OpenAIRealtimeClientEvent) -> None:
-        """Send a raw message to the model."""
+        """Send a raw message to the model.
+
+        For GA Realtime, omit `session.type` from `session.update` events to avoid
+        server-side validation errors (param='session.type').
+        """
         assert self._websocket is not None, "Not connected"
 
-        await self._websocket.send(event.model_dump_json(exclude_none=True, exclude_unset=True))
+        if isinstance(event, OpenAISessionUpdateEvent):
+            # Build dict so we can normalize GA field names
+            as_dict = event.model_dump(
+                exclude={"session": {"type"}},
+                exclude_none=True,
+                exclude_unset=True,
+            )
+            session = as_dict.get("session", {})
+            # Flatten `session.audio.{input,output}` to GA-style top-level fields
+            audio_cfg = session.pop("audio", None)
+            if isinstance(audio_cfg, dict):
+                input_cfg = audio_cfg.get("input") or {}
+                output_cfg = audio_cfg.get("output") or {}
+                if "format" in input_cfg and input_cfg["format"] is not None:
+                    session["input_audio_format"] = input_cfg["format"]
+                if "transcription" in input_cfg and input_cfg["transcription"] is not None:
+                    session["input_audio_transcription"] = input_cfg["transcription"]
+                if "turn_detection" in input_cfg and input_cfg["turn_detection"] is not None:
+                    session["turn_detection"] = input_cfg["turn_detection"]
+                if "format" in output_cfg and output_cfg["format"] is not None:
+                    session["output_audio_format"] = output_cfg["format"]
+                if "voice" in output_cfg and output_cfg["voice"] is not None:
+                    session["voice"] = output_cfg["voice"]
+                if "speed" in output_cfg and output_cfg["speed"] is not None:
+                    session["speed"] = output_cfg["speed"]
+                as_dict["session"] = session
+
+            # GA field name normalization
+            if "output_modalities" in session and session.get("output_modalities") is not None:
+                session["modalities"] = session.pop("output_modalities")
+            # Map create-request name to GA session field name
+            if "max_output_tokens" in session and session.get("max_output_tokens") is not None:
+                session["max_response_output_tokens"] = session.pop("max_output_tokens")
+            # Drop unknown client_secret if present
+            session.pop("client_secret", None)
+            as_dict["session"] = session
+            payload = json.dumps(as_dict)
+        else:
+            payload = event.model_dump_json(exclude_none=True, exclude_unset=True)
+
+        await self._websocket.send(payload)
 
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
         converted = _ConversionHelper.convert_user_input_to_item_create(event)
@@ -495,6 +555,108 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
+        # Fast-path GA compatibility: some GA events (e.g., response.done) may include
+        # assistant message content parts with type "audio", which older SDK schemas
+        # don't accept during validation. We don't need to parse response.done further
+        # for our pipeline, so handle it early and skip strict validation.
+        if isinstance(event, dict) and event.get("type") == "response.done":
+            self._ongoing_response = False
+            await self._emit_event(RealtimeModelTurnEndedEvent())
+            return
+        # Similarly, response.output_item.added/done with an assistant message that contains
+        # an `audio` content part can fail validation in older OpenAI schemas. Convert it
+        # directly into our RealtimeMessageItem and emit, then return.
+        if isinstance(event, dict) and event.get("type") in (
+            "response.output_item.added",
+            "response.output_item.done",
+        ):
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "message":
+                raw_content = item.get("content") or []
+                converted_content: list[dict[str, Any]] = []
+                for part in raw_content:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = part.get("type")
+                    if part_type == "audio":
+                        converted_content.append(
+                            {
+                                "type": "audio",
+                                "audio": part.get("audio"),
+                                "transcript": part.get("transcript"),
+                            }
+                        )
+                    elif part_type == "text":
+                        converted_content.append({"type": "text", "text": part.get("text")})
+                status = item.get("status")
+                if status not in ("in_progress", "completed", "incomplete"):
+                    is_done = event.get("type") == "response.output_item.done"
+                    status = "completed" if is_done else "in_progress"
+                message_item: RealtimeMessageItem = TypeAdapter(
+                    RealtimeMessageItem
+                ).validate_python(
+                    {
+                        "item_id": item.get("id", ""),
+                        "type": "message",
+                        "role": item.get("role", "assistant"),
+                        "content": converted_content,
+                        "status": status,
+                    }
+                )
+                await self._emit_event(RealtimeModelItemUpdatedEvent(item=message_item))
+                return
+        # GA transcript events: response.audio_transcript.delta/done
+        if isinstance(event, dict) and event.get("type") in (
+            "response.audio_transcript.delta",
+            "response.audio_transcript.done",
+        ):
+            transcript = event.get("delta") or event.get("transcript") or ""
+            item_id = event.get("item_id", "")
+            response_id = event.get("response_id", "")
+            if transcript:
+                await self._emit_event(
+                    RealtimeModelTranscriptDeltaEvent(
+                        item_id=item_id,
+                        delta=transcript,
+                        response_id=response_id,
+                    )
+                )
+            return
+        # GA audio events: response.audio.delta/done (alias of response.output_audio.*)
+        if isinstance(event, dict) and event.get("type") in (
+            "response.audio.delta",
+            "response.audio.done",
+        ):
+            evt_type = event.get("type")
+            if evt_type == "response.audio.delta":
+                b64 = event.get("delta") or event.get("audio")
+                if isinstance(b64, str) and b64:
+                    item_id = event.get("item_id", "")
+                    content_index = event.get("content_index", 0)
+                    response_id = event.get("response_id", "")
+                    try:
+                        audio_bytes = base64.b64decode(b64)
+                    except Exception:
+                        logger.debug(f"Failed to decode audio delta: {b64}", exc_info=True)
+                        audio_bytes = b""
+
+                    self._audio_state_tracker.on_audio_delta(item_id, content_index, audio_bytes)
+                    await self._emit_event(
+                        RealtimeModelAudioEvent(
+                            data=audio_bytes,
+                            response_id=response_id,
+                            item_id=item_id,
+                            content_index=content_index,
+                        )
+                    )
+            else:  # response.audio.done
+                item_id = event.get("item_id", "")
+                content_index = event.get("content_index", 0)
+                await self._emit_event(
+                    RealtimeModelAudioDoneEvent(item_id=item_id, content_index=content_index)
+                )
+            return
+
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
@@ -518,9 +680,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
             return
 
-        if parsed.type == "response.audio.delta":
+        if parsed.type == "response.output_audio.delta":
             await self._handle_audio_delta(parsed)
-        elif parsed.type == "response.audio.done":
+        elif parsed.type == "response.output_audio.done":
             await self._emit_event(
                 RealtimeModelAudioDoneEvent(
                     item_id=parsed.item_id,
@@ -528,7 +690,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
         elif parsed.type == "input_audio_buffer.speech_started":
-            await self._send_interrupt(RealtimeModelSendInterrupt())
+            # Do not auto‑interrupt on VAD speech start.
+            # GA can be configured to cancel responses server‑side via
+            # turn_detection.interrupt_response; double‑sending interrupts can
+            # prematurely truncate assistant audio. If client‑side barge‑in is
+            # desired, handle it at the application layer and call
+            # RealtimeModelSendInterrupt explicitly.
+            pass
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
@@ -537,9 +705,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._emit_event(RealtimeModelTurnEndedEvent())
         elif parsed.type == "session.created":
             await self._send_tracing_config(self._tracing_config)
-            self._update_created_session(parsed.session)  # type: ignore
+            self._update_created_session(parsed.session)
         elif parsed.type == "session.updated":
-            self._update_created_session(parsed.session)  # type: ignore
+            self._update_created_session(parsed.session)
         elif parsed.type == "error":
             await self._emit_event(RealtimeModelErrorEvent(error=parsed.error))
         elif parsed.type == "conversation.item.deleted":
@@ -570,7 +738,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                         item_id=parsed.item_id, transcript=parsed.transcript
                     )
                 )
-        elif parsed.type == "response.audio_transcript.delta":
+        elif parsed.type == "response.output_audio_transcript.delta":
             await self._emit_event(
                 RealtimeModelTranscriptDeltaEvent(
                     item_id=parsed.item_id, delta=parsed.delta, response_id=parsed.response_id
@@ -578,7 +746,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
         elif (
             parsed.type == "conversation.item.input_audio_transcription.delta"
-            or parsed.type == "response.text.delta"
+            or parsed.type == "response.output_text.delta"
             or parsed.type == "response.function_call_arguments.delta"
         ):
             # No support for partials yet
@@ -612,51 +780,90 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     def _get_session_config(
         self, model_settings: RealtimeSessionModelSettings
-    ) -> OpenAISessionObject:
+    ) -> OpenAISessionCreateRequest:
         """Get the session config."""
-        return OpenAISessionObject(
-            instructions=model_settings.get("instructions", None),
-            model=(
-                model_settings.get("model_name", self.model)  # type: ignore
-                or DEFAULT_MODEL_SETTINGS.get("model_name")
-            ),
-            voice=model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice")),
-            speed=model_settings.get("speed", None),
-            modalities=model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities")),
-            input_audio_format=model_settings.get(
-                "input_audio_format",
-                DEFAULT_MODEL_SETTINGS.get("input_audio_format"),  # type: ignore
-            ),
-            output_audio_format=model_settings.get(
-                "output_audio_format",
-                DEFAULT_MODEL_SETTINGS.get("output_audio_format"),  # type: ignore
-            ),
-            input_audio_transcription=model_settings.get(
-                "input_audio_transcription",
-                DEFAULT_MODEL_SETTINGS.get("input_audio_transcription"),  # type: ignore
-            ),
-            turn_detection=model_settings.get(
-                "turn_detection",
-                DEFAULT_MODEL_SETTINGS.get("turn_detection"),  # type: ignore
-            ),
-            tool_choice=model_settings.get(
-                "tool_choice",
-                DEFAULT_MODEL_SETTINGS.get("tool_choice"),  # type: ignore
-            ),
-            tools=self._tools_to_session_tools(
-                tools=model_settings.get("tools", []), handoffs=model_settings.get("handoffs", [])
+        model_name = (model_settings.get("model_name") or self.model) or "gpt-realtime"
+
+        voice = model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice"))
+        speed = model_settings.get("speed")
+        modalities = model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities"))
+
+        input_audio_format = model_settings.get(
+            "input_audio_format",
+            DEFAULT_MODEL_SETTINGS.get("input_audio_format"),
+        )
+        input_audio_transcription = model_settings.get(
+            "input_audio_transcription",
+            DEFAULT_MODEL_SETTINGS.get("input_audio_transcription"),
+        )
+        turn_detection = model_settings.get(
+            "turn_detection",
+            DEFAULT_MODEL_SETTINGS.get("turn_detection"),
+        )
+        output_audio_format = model_settings.get(
+            "output_audio_format",
+            DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
+        )
+
+        input_audio_config = None
+        if any(
+            value is not None
+            for value in [input_audio_format, input_audio_transcription, turn_detection]
+        ):
+            input_audio_config = OpenAIRealtimeAudioInput(
+                format=cast(
+                    Optional[Literal["pcm16", "g711_ulaw", "g711_alaw"]],
+                    input_audio_format,
+                ),
+                transcription=cast(Any, input_audio_transcription),
+                turn_detection=cast(Any, turn_detection),
+            )
+
+        output_audio_config = None
+        if any(value is not None for value in [output_audio_format, speed, voice]):
+            output_audio_config = OpenAIRealtimeAudioOutput(
+                format=cast(
+                    Optional[Literal["pcm16", "g711_ulaw", "g711_alaw"]],
+                    output_audio_format,
+                ),
+                speed=speed,
+                voice=voice,
+            )
+
+        audio_config = None
+        if input_audio_config or output_audio_config:
+            audio_config = OpenAIRealtimeAudioConfig(
+                input=input_audio_config,
+                output=output_audio_config,
+            )
+
+        # Construct full session object. `type` will be excluded at serialization time for updates.
+        return OpenAISessionCreateRequest(
+            model=model_name,
+            type="realtime",
+            instructions=model_settings.get("instructions"),
+            output_modalities=modalities,
+            audio=audio_config,
+            max_output_tokens=cast(Any, model_settings.get("max_output_tokens")),
+            tool_choice=cast(Any, model_settings.get("tool_choice")),
+            tools=cast(
+                Any,
+                self._tools_to_session_tools(
+                    tools=model_settings.get("tools", []),
+                    handoffs=model_settings.get("handoffs", []),
+                ),
             ),
         )
 
     def _tools_to_session_tools(
         self, tools: list[Tool], handoffs: list[Handoff]
-    ) -> list[OpenAISessionTool]:
-        converted_tools: list[OpenAISessionTool] = []
+    ) -> list[OpenAISessionFunction]:
+        converted_tools: list[OpenAISessionFunction] = []
         for tool in tools:
             if not isinstance(tool, FunctionTool):
                 raise UserError(f"Tool {tool.name} is unsupported. Must be a function tool.")
             converted_tools.append(
-                OpenAISessionTool(
+                OpenAISessionFunction(
                     name=tool.name,
                     description=tool.description,
                     parameters=tool.params_json_schema,
@@ -666,7 +873,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         for handoff in handoffs:
             converted_tools.append(
-                OpenAISessionTool(
+                OpenAISessionFunction(
                     name=handoff.tool_name,
                     description=handoff.tool_description,
                     parameters=handoff.input_json_schema,
@@ -682,6 +889,15 @@ class _ConversionHelper:
     def conversation_item_to_realtime_message_item(
         cls, item: ConversationItem, previous_item_id: str | None
     ) -> RealtimeMessageItem:
+        if not isinstance(
+            item,
+            (
+                RealtimeConversationItemUserMessage,
+                RealtimeConversationItemAssistantMessage,
+                RealtimeConversationItemSystemMessage,
+            ),
+        ):
+            raise ValueError("Unsupported conversation item type for message conversion.")
         return TypeAdapter(RealtimeMessageItem).validate_python(
             {
                 "item_id": item.id or "",
@@ -710,12 +926,12 @@ class _ConversionHelper:
     @classmethod
     def convert_tracing_config(
         cls, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
-    ) -> OpenAISessionTracing | None:
+    ) -> OpenAITracingConfiguration | Literal["auto"] | None:
         if tracing_config is None:
             return None
         elif tracing_config == "auto":
             return "auto"
-        return OpenAISessionTracingConfiguration(
+        return OpenAITracingConfiguration(
             group_id=tracing_config.get("group_id"),
             metadata=tracing_config.get("metadata"),
             workflow_name=tracing_config.get("workflow_name"),
@@ -728,11 +944,11 @@ class _ConversionHelper:
         user_input = event.user_input
 
         if isinstance(user_input, dict):
-            return OpenAIConversationItem(
+            return RealtimeConversationItemUserMessage(
                 type="message",
                 role="user",
                 content=[
-                    OpenAIConversationItemContent(
+                    Content(
                         type="input_text",
                         text=item.get("text"),
                     )
@@ -740,10 +956,10 @@ class _ConversionHelper:
                 ],
             )
         else:
-            return OpenAIConversationItem(
+            return RealtimeConversationItemUserMessage(
                 type="message",
                 role="user",
-                content=[OpenAIConversationItemContent(type="input_text", text=user_input)],
+                content=[Content(type="input_text", text=user_input)],
             )
 
     @classmethod
@@ -769,7 +985,7 @@ class _ConversionHelper:
     def convert_tool_output(cls, event: RealtimeModelSendToolOutput) -> OpenAIRealtimeClientEvent:
         return OpenAIConversationItemCreateEvent(
             type="conversation.item.create",
-            item=OpenAIConversationItem(
+            item=RealtimeConversationItemFunctionCallOutput(
                 type="function_call_output",
                 output=event.output,
                 call_id=event.tool_call.call_id,
