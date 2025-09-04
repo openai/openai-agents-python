@@ -9,7 +9,9 @@ used as a drop-in replacement for :class:`agents.memory.session.SQLiteSession`.
 from __future__ import annotations
 
 from .sqlalchemy_session import SQLAlchemySession  # noqa: F401
+from .structured_sqlite_session import StructuredSQLiteSession  # noqa: F401
 
 __all__: list[str] = [
     "SQLAlchemySession",
+    "StructuredSQLiteSession",
 ]
