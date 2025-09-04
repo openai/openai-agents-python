@@ -13,8 +13,14 @@ from ...items import TResponseInputItem
 from ...memory import SQLiteSession
 
 
-class StructuredSQLiteSession(SQLiteSession):
-    """SQLite session with simple structured metadata and soft deletion."""
+class AdvancedSQLiteSession(SQLiteSession):
+    """Enhanced SQLite session with turn tracking, soft deletion, and usage analytics.
+
+    Features:
+    - Turn-based conversation management with soft delete/reactivate
+    - Detailed usage tracking per turn with token breakdowns
+    - Message structure metadata and tool usage statistics
+    """
 
     ACTIVE = 1  # Message is active and visible in conversation
     INACTIVE = 0  # Message is soft-deleted (hidden but preserved)

@@ -1,5 +1,5 @@
 """
-Advanced example demonstrating conversation branching with StructuredSQLiteSession.
+Advanced example demonstrating conversation branching with AdvancedSQLiteSession.
 
 This example shows how to use soft deletion for conversation editing/branching,
 allowing you to "undo" parts of a conversation and continue from any point.
@@ -8,7 +8,7 @@ allowing you to "undo" parts of a conversation and continue from any point.
 import asyncio
 
 from agents import Agent, Runner, function_tool
-from agents.extensions.memory import StructuredSQLiteSession
+from agents.extensions.memory import AdvancedSQLiteSession
 
 
 @function_tool
@@ -26,10 +26,10 @@ async def main():
         tools=[get_weather],
     )
 
-    # Create a structured session instance
-    session = StructuredSQLiteSession("conversation_advanced")
+    # Create a advanced session instance
+    session = AdvancedSQLiteSession("conversation_advanced")
 
-    print("=== Advanced Structured Session: Conversation Branching ===")
+    print("=== Advanced Session: Conversation Branching ===")
     print("This example demonstrates conversation editing and branching.\n")
 
     # Build initial conversation

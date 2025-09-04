@@ -1,14 +1,14 @@
 """
-Basic example demonstrating structured session memory functionality.
+Basic example demonstrating advanced session memory functionality.
 
-This example shows how to use StructuredSQLiteSession for conversation tracking
+This example shows how to use AdvancedSQLiteSession for conversation tracking
 with usage statistics and turn-based organization.
 """
 
 import asyncio
 
 from agents import Agent, Runner, function_tool
-from agents.extensions.memory import StructuredSQLiteSession
+from agents.extensions.memory import AdvancedSQLiteSession
 
 
 @function_tool
@@ -26,10 +26,10 @@ async def main():
         tools=[get_weather],
     )
 
-    # Create a structured session instance
-    session = StructuredSQLiteSession("conversation_basic")
+    # Create a advanced session instance
+    session = AdvancedSQLiteSession("conversation_basic")
 
-    print("=== Basic Structured Session Example ===")
+    print("=== Basic Advanced Session Example ===")
     print("The agent will remember previous messages with structured tracking.\n")
 
     # First turn

@@ -1,4 +1,4 @@
-"""Tests for StructuredSQLiteSession functionality."""
+"""Tests for AdvancedSQLiteSession functionality."""
 
 import tempfile
 from pathlib import Path
@@ -10,7 +10,7 @@ pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents import Agent, Runner, TResponseInputItem, function_tool
-from agents.extensions.memory import StructuredSQLiteSession
+from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.usage import Usage
@@ -77,12 +77,12 @@ def create_mock_run_result(
     )
 
 
-async def test_structured_session_basic_functionality(agent: Agent):
-    """Test basic StructuredSQLiteSession functionality."""
+async def test_advanced_session_basic_functionality(agent: Agent):
+    """Test basic AdvancedSQLiteSession functionality."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        db_path = Path(temp_dir) / "test_structured.db"
-        session_id = "structured_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        db_path = Path(temp_dir) / "test_advanced.db"
+        session_id = "advanced_test"
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Test basic session operations work
         items: list[TResponseInputItem] = [
@@ -105,7 +105,7 @@ async def test_message_structure_tracking(agent: Agent):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_structure.db"
         session_id = "structure_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Add various types of messages
         items: list[TResponseInputItem] = [
@@ -140,7 +140,7 @@ async def test_tool_usage_tracking(agent: Agent):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_tools.db"
         session_id = "tools_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Add items with tool calls
         items: list[TResponseInputItem] = [
@@ -169,7 +169,7 @@ async def test_soft_deletion_functionality(agent: Agent):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_deletion.db"
         session_id = "deletion_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Add multiple turns
         turn_1_items: list[TResponseInputItem] = [
@@ -224,7 +224,7 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_usage.db"
         session_id = "usage_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Simulate adding items for turn 1 to increment turn counter
         await session.add_items([{"role": "user", "content": "First turn"}])
@@ -285,9 +285,9 @@ async def test_runner_integration_with_usage_tracking(agent: Agent):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_integration.db"
         session_id = "integration_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
-        async def store_session_usage(result: Any, session: StructuredSQLiteSession):
+        async def store_session_usage(result: Any, session: AdvancedSQLiteSession):
             """Helper function to store usage after runner completes."""
             try:
                 await session.store_run_usage(result)
@@ -335,7 +335,7 @@ async def test_sequence_ordering():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_sequence.db"
         session_id = "sequence_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Add multiple items quickly to test sequence ordering
         items: list[TResponseInputItem] = [
@@ -362,7 +362,7 @@ async def test_conversation_structure_with_multiple_turns():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_multi_turn.db"
         session_id = "multi_turn_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Turn 1
         turn_1: list[TResponseInputItem] = [
@@ -415,7 +415,7 @@ async def test_empty_session_operations():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_empty.db"
         session_id = "empty_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Test getting items from empty session
         items = await session.get_items()
@@ -445,7 +445,7 @@ async def test_json_serialization_edge_cases(usage_data: Usage):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_json.db"
         session_id = "json_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Test with normal usage data (need to add user message first to create turn)
         await session.add_items([{"role": "user", "content": "First test"}])
@@ -488,8 +488,8 @@ async def test_session_isolation():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_isolation.db"
 
-        session1 = StructuredSQLiteSession("session_1", db_path)
-        session2 = StructuredSQLiteSession("session_2", db_path)
+        session1 = AdvancedSQLiteSession("session_1", db_path)
+        session2 = AdvancedSQLiteSession("session_2", db_path)
 
         # Add data to session 1
         await session1.add_items([{"role": "user", "content": "Session 1 message"}])
@@ -522,7 +522,7 @@ async def test_error_handling_in_usage_tracking(usage_data: Usage):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_errors.db"
         session_id = "error_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Test normal operation
         run_result = create_mock_run_result(usage_data)
@@ -540,7 +540,7 @@ async def test_tool_name_extraction():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_tool_names.db"
         session_id = "tool_names_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Add items with different ways of specifying tool names
         items: list[TResponseInputItem] = [
@@ -569,7 +569,7 @@ async def test_tool_execution_integration(agent: Agent):
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_tool_integration.db"
         session_id = "tool_integration_test"
-        session = StructuredSQLiteSession(session_id, db_path)
+        session = AdvancedSQLiteSession(session_id, db_path)
 
         # Set up the fake model to trigger a tool call
         fake_model = cast(FakeModel, agent.model)
