@@ -84,6 +84,9 @@ def get_all_nodes(
                 f"shape=box, style=filled, style=rounded, "
                 f"fillcolor=lightyellow, width=1.5, height=0.8];"
             )
+            if handoff.agent and handoff.agent.name not in visited:  
+                parts.append(get_all_nodes(handoff.agent, agent, visited))
+            
         if isinstance(handoff, Agent):
             if handoff.name not in visited:
                 parts.append(
@@ -134,6 +137,8 @@ def get_all_edges(
         if isinstance(handoff, Handoff):
             parts.append(f"""
             "{agent.name}" -> "{handoff.agent_name}";""")
+            if handoff.agent:  
+                parts.append(get_all_edges(handoff.agent, agent, visited)) 
         if isinstance(handoff, Agent):
             parts.append(f"""
             "{agent.name}" -> "{handoff.name}";""")
