@@ -2,9 +2,11 @@
 
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import pytest
+
+pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents import Agent, Runner, TResponseInputItem, function_tool
@@ -44,7 +46,9 @@ def usage_data() -> Usage:
     )
 
 
-def create_mock_run_result(usage: Usage | None = None, agent: Agent | None = None) -> RunResult:
+def create_mock_run_result(
+    usage: Optional[Usage] = None, agent: Optional[Agent] = None
+) -> RunResult:
     """Helper function to create a mock RunResult for testing."""
     if agent is None:
         agent = Agent(name="test", model=FakeModel())
