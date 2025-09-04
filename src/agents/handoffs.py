@@ -118,7 +118,8 @@ class Handoff(Generic[TContext, TAgent]):
     """Whether the input JSON schema is in strict mode. We **strongly** recommend setting this to
     True, as it increases the likelihood of correct JSON input.
     """
-
+    agent: TAgent | None = None  
+    """Reference to the actual agent object for visualization purposes."""
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = (
         True
     )
@@ -280,5 +281,6 @@ def handoff(
         on_invoke_handoff=_invoke_handoff,
         input_filter=input_filter,
         agent_name=agent.name,
+        agent = agent,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
     )
