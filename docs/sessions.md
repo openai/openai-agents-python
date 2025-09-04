@@ -122,6 +122,27 @@ print(f"Agent: {result.final_output}")
 result = await Runner.run(agent, "Hello")
 ```
 
+### OpenAI Conversations API memory
+
+Use the [OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api) to persist
+conversation state without managing your own database. This is helpful when you already rely on OpenAI-hosted infrastructure
+for storing conversation history.
+
+```python
+from agents import OpenAIConversationsSession
+
+session = OpenAIConversationsSession()
+
+# Optionally resume a previous conversation by passing a conversation ID
+# session = OpenAIConversationsSession(conversation_id="conv_123")
+
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=session,
+)
+```
+
 ### SQLite memory
 
 ```python
@@ -282,6 +303,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
+-   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
 
 ### Session management
@@ -378,4 +400,5 @@ For detailed API documentation, see:
 
 -   [`Session`][agents.memory.Session] - Protocol interface
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
+-   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation

@@ -188,15 +188,23 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             self._tracing_config = "auto"
 
-        if not api_key:
-            raise UserError("API key is required but was not provided.")
-
         url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        headers: dict[str, str] = {}
+        if options.get("headers") is not None:
+            # For customizing request headers
+            headers.update(options["headers"])
+        else:
+            # OpenAI's Realtime API
+            if not api_key:
+                raise UserError("API key is required but was not provided.")
+
+            headers.update(
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "OpenAI-Beta": "realtime=v1",
+                }
+            )
         self._websocket = await websockets.connect(
             url,
             user_agent_header=_USER_AGENT,
@@ -490,9 +498,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
-            parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(
-                event
-            )
+            parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(event)
         except pydantic.ValidationError as e:
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
             await self._emit_event(
@@ -583,11 +589,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         ):
             await self._handle_output_item(parsed.item)
         elif parsed.type == "input_audio_buffer.timeout_triggered":
-            await self._emit_event(RealtimeModelInputAudioTimeoutTriggeredEvent(
-                item_id=parsed.item_id,
-                audio_start_ms=parsed.audio_start_ms,
-                audio_end_ms=parsed.audio_end_ms,
-            ))
+            await self._emit_event(
+                RealtimeModelInputAudioTimeoutTriggeredEvent(
+                    item_id=parsed.item_id,
+                    audio_start_ms=parsed.audio_start_ms,
+                    audio_end_ms=parsed.audio_end_ms,
+                )
+            )
 
     def _update_created_session(self, session: OpenAISessionObject) -> None:
         self._created_session = session

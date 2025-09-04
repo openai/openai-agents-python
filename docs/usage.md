@@ -30,21 +30,23 @@ Usage is aggregated across all model calls during the run (including tool calls 
 
 ## Accessing usage with sessions
 
-When you use a `Session` (e.g., `SQLiteSession`), usage continues to accumulate across turns within the same run. Each call to `Runner.run(...)` returns the run’s cumulative usage at that point.
+When you use a `Session` (e.g., `SQLiteSession`), each call to `Runner.run(...)` returns usage for that specific run. Sessions maintain conversation history for context, but each run's usage is independent.
 
 ```python
 session = SQLiteSession("my_conversation")
 
 first = await Runner.run(agent, "Hi!", session=session)
-print(first.context_wrapper.usage.total_tokens)
+print(first.context_wrapper.usage.total_tokens)  # Usage for first run
 
 second = await Runner.run(agent, "Can you elaborate?", session=session)
-print(second.context_wrapper.usage.total_tokens)  # includes both turns
+print(second.context_wrapper.usage.total_tokens)  # Usage for second run
 ```
+
+Note that while sessions preserve conversation context between runs, the usage metrics returned by each `Runner.run()` call represent only that particular execution. In sessions, previous messages may be re-fed as input to each run, which affects the input token count in consequent turns.
 
 ## Using usage in hooks
 
-If you’re using `RunHooks`, the `context` object passed to each hook contains `usage`. This lets you log usage at key lifecycle moments.
+If you're using `RunHooks`, the `context` object passed to each hook contains `usage`. This lets you log usage at key lifecycle moments.
 
 ```python
 class MyHooks(RunHooks):
@@ -52,3 +54,11 @@ class MyHooks(RunHooks):
         u = context.usage
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
+
+## API Reference
+
+For detailed API documentation, see:
+
+-   [`Usage`][agents.usage.Usage] - Usage tracking data structure
+-   [`RunContextWrapper`][agents.run.RunContextWrapper] - Access usage from run context
+-   [`RunHooks`][agents.run.RunHooks] - Hook into usage tracking lifecycle

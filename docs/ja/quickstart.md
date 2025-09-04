@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これは 1 回だけ行います。
+これは 1 回だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-お持ちでない場合は、[これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+お持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初の エージェント の作成
 
-エージェント は、instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェント は instructions、名前、および任意の設定（例: `model_config`）で定義します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフ の定義
 
-各 エージェント で、タスクを進める方法を判断するために選択できる、送信側の ハンドオフ オプションの在庫を定義できます。
+各 エージェント で、タスクを前進させる方法を決める際に選択できる、送信側の ハンドオフ オプションの在庫（一覧）を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -93,9 +93,9 @@ async def main():
     print(result.final_output)
 ```
 
-## ガードレール の追加
+## ガードレールの追加
 
-入力または出力に対して実行するカスタム ガードレール を定義できます。
+入力または出力に対して実行するカスタム ガードレールを定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## すべてをまとめる
+## すべてを組み合わせる
 
-すべてをまとめて、ハンドオフ と入力 ガードレール を使用してワークフロー全体を実行しましょう。
+すべてを組み合わせ、ハンドオフ と入力 ガードレール を使用してワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## トレースの表示
 
-エージェント の実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの トレース ビューアー](https://platform.openai.com/traces) に移動して、エージェント 実行のトレースを表示してください。
+エージェント 実行中に何が起きたかを確認するには、[OpenAI Dashboard の Trace viewer](https://platform.openai.com/traces) に移動し、エージェント 実行のトレースを表示します。
 
 ## 次のステップ
 
-より複雑なエージェント フローの構築方法を学びましょう。
+より複雑な エージェント フローの構築方法を学びましょう:
 
--   [エージェント](agents.md) の設定方法について学ぶ。
--   [エージェントの実行](running_agents.md) について学ぶ。
--   [tools](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学ぶ。
+- エージェント の設定方法について学ぶ: [エージェント](agents.md)。
+- [エージェント の実行](running_agents.md)について学ぶ。
+- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md)について学ぶ。

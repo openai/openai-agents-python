@@ -12,8 +12,8 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
-from openai.types.responses.tool import WebSearchToolFilters
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
+from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import ValidationError
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
