@@ -15,7 +15,7 @@ Realtime agents allow for conversational flows, processing audio and text inputs
 
 The realtime system consists of several key components:
 
--   **RealtimeAgent**: An agent, configured wiht instructions, tools and handoffs.
+-   **RealtimeAgent**: An agent, configured with instructions, tools and handoffs.
 -   **RealtimeRunner**: Manages configuration. You can call `runner.run()` to get a session.
 -   **RealtimeSession**: A single interaction session. You typically create one each time a user starts a conversation, and keep it alive until the conversation is done.
 -   **RealtimeModel**: The underlying model interface (typically OpenAI's WebSocket implementation)
@@ -129,6 +129,24 @@ For complete event details, see [`RealtimeSessionEvent`][agents.realtime.events.
 ## Guardrails
 
 Only output guardrails are supported for realtime agents. These guardrails are debounced and run periodically (not on every word) to avoid performance issues during real-time generation. The default debounce length is 100 characters, but this is configurable.
+
+Guardrails can be attached directly to a `RealtimeAgent` or provided via the session's `run_config`. Guardrails from both sources run together.
+
+```python
+from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
+
+def sensitive_data_check(context, agent, output):
+    return GuardrailFunctionOutput(
+        tripwire_triggered="password" in output,
+        output_info=None,
+    )
+
+agent = RealtimeAgent(
+    name="Assistant",
+    instructions="...",
+    output_guardrails=[OutputGuardrail(guardrail_function=sensitive_data_check)],
+)
+```
 
 When a guardrail is triggered, it generates a `guardrail_tripped` event and can interrupt the agent's current response. The debounce behavior helps balance safety with real-time performance requirements. Unlike text agents, realtime agents do **not** raise an Exception when guardrails are tripped.
 

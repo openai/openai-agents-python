@@ -10,6 +10,7 @@ from typing_extensions import assert_never
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
+from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..tool import FunctionTool
 from ..tool_context import ToolContext
@@ -27,13 +28,14 @@ from .events import (
     RealtimeHandoffEvent,
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
+    RealtimeInputAudioTimeoutTriggered,
     RealtimeRawModelEvent,
     RealtimeSessionEvent,
     RealtimeToolEnd,
     RealtimeToolStart,
 )
 from .handoffs import realtime_handoff
-from .items import InputAudio, InputText, RealtimeItem
+from .items import AssistantAudio, InputAudio, InputText, RealtimeItem
 from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
     RealtimeModelEvent,
@@ -98,7 +100,7 @@ class RealtimeSession(RealtimeModelListener):
         self._stored_exception: Exception | None = None
 
         # Guardrails state tracking
-        self._interrupted_by_guardrail = False
+        self._interrupted_response_ids: set[str] = set()
         self._item_transcripts: dict[str, str] = {}  # item_id -> accumulated transcript
         self._item_guardrail_run_counts: dict[str, int] = {}  # item_id -> run count
         self._debounce_text_length = self._run_config.get("guardrails_settings", {}).get(
@@ -180,6 +182,19 @@ class RealtimeSession(RealtimeModelListener):
         """Interrupt the model."""
         await self._model.send_event(RealtimeModelSendInterrupt())
 
+    async def update_agent(self, agent: RealtimeAgent) -> None:
+        """Update the active agent for this session and apply its settings to the model."""
+        self._current_agent = agent
+
+        updated_settings = await self._get_updated_model_settings_from_agent(
+            starting_settings=None,
+            agent=self._current_agent,
+        )
+
+        await self._model.send_event(
+            RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+        )
+
     async def on_event(self, event: RealtimeModelEvent) -> None:
         await self._put_event(RealtimeRawModelEvent(data=event, info=self._event_info))
 
@@ -213,6 +228,12 @@ class RealtimeSession(RealtimeModelListener):
             await self._put_event(
                 RealtimeHistoryUpdated(info=self._event_info, history=self._history)
             )
+        elif event.type == "input_audio_timeout_triggered":
+            await self._put_event(
+                RealtimeInputAudioTimeoutTriggered(
+                    info=self._event_info,
+                )
+            )
         elif event.type == "transcript_delta":
             # Accumulate transcript text for guardrail debouncing per item_id
             item_id = event.item_id
@@ -229,10 +250,62 @@ class RealtimeSession(RealtimeModelListener):
 
             if current_length >= next_run_threshold:
                 self._item_guardrail_run_counts[item_id] += 1
-                self._enqueue_guardrail_task(self._item_transcripts[item_id])
+                # Pass response_id so we can ensure only a single interrupt per response
+                self._enqueue_guardrail_task(self._item_transcripts[item_id], event.response_id)
         elif event.type == "item_updated":
             is_new = not any(item.item_id == event.item.item_id for item in self._history)
-            self._history = self._get_new_history(self._history, event.item)
+
+            # Preserve previously known transcripts when updating existing items.
+            # This prevents transcripts from disappearing when an item is later
+            # retrieved without transcript fields populated.
+            incoming_item = event.item
+            existing_item = next(
+                (i for i in self._history if i.item_id == incoming_item.item_id), None
+            )
+
+            if (
+                existing_item is not None
+                and existing_item.type == "message"
+                and incoming_item.type == "message"
+            ):
+                try:
+                    # Merge transcripts for matching content indices
+                    existing_content = existing_item.content
+                    new_content = []
+                    for idx, entry in enumerate(incoming_item.content):
+                        # Only attempt to preserve for audio-like content
+                        if entry.type in ("audio", "input_audio"):
+                            # Use tuple form for Python 3.9 compatibility
+                            assert isinstance(entry, (InputAudio, AssistantAudio))
+                            # Determine if transcript is missing/empty on the incoming entry
+                            entry_transcript = entry.transcript
+                            if not entry_transcript:
+                                preserved: str | None = None
+                                # First prefer any transcript from the existing history item
+                                if idx < len(existing_content):
+                                    this_content = existing_content[idx]
+                                    if isinstance(this_content, AssistantAudio) or isinstance(
+                                        this_content, InputAudio
+                                    ):
+                                        preserved = this_content.transcript
+
+                                # If still missing and this is an assistant item, fall back to
+                                # accumulated transcript deltas tracked during the turn.
+                                if not preserved and incoming_item.role == "assistant":
+                                    preserved = self._item_transcripts.get(incoming_item.item_id)
+
+                                if preserved:
+                                    entry = entry.model_copy(update={"transcript": preserved})
+
+                        new_content.append(entry)
+
+                    if new_content:
+                        incoming_item = incoming_item.model_copy(update={"content": new_content})
+                except Exception:
+                    logger.error("Error merging transcripts", exc_info=True)
+                    pass
+
+            self._history = self._get_new_history(self._history, incoming_item)
             if is_new:
                 new_item = next(
                     item for item in self._history if item.item_id == event.item.item_id
@@ -261,7 +334,6 @@ class RealtimeSession(RealtimeModelListener):
             # Clear guardrail state for next turn
             self._item_transcripts.clear()
             self._item_guardrail_run_counts.clear()
-            self._interrupted_by_guardrail = False
 
             await self._put_event(
                 RealtimeAgentEndEvent(
@@ -361,18 +433,19 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
 
-            # Send tool output to complete the handoff
+            # First, send the session update so the model receives the new instructions
+            await self._model.send_event(
+                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
+            )
+
+            # Then send tool output to complete the handoff (this triggers a new response)
+            transfer_message = handoff.get_transfer_message(result)
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
                     tool_call=event,
-                    output=f"Handed off to {self._current_agent.name}",
+                    output=transfer_message,
                     start_response=True,
                 )
-            )
-
-            # Send session update to model
-            await self._model.send_event(
-                RealtimeModelSendSessionUpdate(session_settings=updated_settings)
             )
         else:
             raise ModelBehaviorError(f"Tool {event.name} not found")
@@ -428,10 +501,21 @@ class RealtimeSession(RealtimeModelListener):
         # Otherwise, add it to the end
         return old_history + [event]
 
-    async def _run_output_guardrails(self, text: str) -> bool:
+    async def _run_output_guardrails(self, text: str, response_id: str) -> bool:
         """Run output guardrails on the given text. Returns True if any guardrail was triggered."""
-        output_guardrails = self._run_config.get("output_guardrails", [])
-        if not output_guardrails or self._interrupted_by_guardrail:
+        combined_guardrails = self._current_agent.output_guardrails + self._run_config.get(
+            "output_guardrails", []
+        )
+        seen_ids: set[int] = set()
+        output_guardrails = []
+        for guardrail in combined_guardrails:
+            guardrail_id = id(guardrail)
+            if guardrail_id not in seen_ids:
+                output_guardrails.append(guardrail)
+                seen_ids.add(guardrail_id)
+
+        # If we've already interrupted this response, skip
+        if not output_guardrails or response_id in self._interrupted_response_ids:
             return False
 
         triggered_results = []
@@ -451,8 +535,12 @@ class RealtimeSession(RealtimeModelListener):
                 continue
 
         if triggered_results:
-            # Mark as interrupted to prevent multiple interrupts
-            self._interrupted_by_guardrail = True
+            # Double-check: bail if already interrupted for this response
+            if response_id in self._interrupted_response_ids:
+                return False
+
+            # Mark as interrupted immediately (before any awaits) to minimize race window
+            self._interrupted_response_ids.add(response_id)
 
             # Emit guardrail tripped event
             await self._put_event(
@@ -478,10 +566,10 @@ class RealtimeSession(RealtimeModelListener):
 
         return False
 
-    def _enqueue_guardrail_task(self, text: str) -> None:
+    def _enqueue_guardrail_task(self, text: str, response_id: str) -> None:
         # Runs the guardrails in a separate task to avoid blocking the main loop
 
-        task = asyncio.create_task(self._run_output_guardrails(text))
+        task = asyncio.create_task(self._run_output_guardrails(text, response_id))
         self._guardrail_tasks.add(task)
 
         # Add callback to remove completed tasks and handle exceptions

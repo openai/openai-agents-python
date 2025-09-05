@@ -91,7 +91,10 @@ class ModelSettings:
     """
 
     truncation: Literal["auto", "disabled"] | None = None
-    """The truncation strategy to use when calling the model."""
+    """The truncation strategy to use when calling the model.
+    See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
+    for more details.
+    """
 
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
@@ -101,20 +104,32 @@ class ModelSettings:
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
+    """
+
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
-    Defaults to True if not provided."""
+    For Responses API: automatically enabled when not specified.
+    For Chat Completions API: disabled when not specified."""
 
     include_usage: bool | None = None
     """Whether to include usage chunk.
-    Defaults to True if not provided."""
+    Only available for Chat Completions API."""
 
-    response_include: list[ResponseIncludable] | None = None
+    # TODO: revisit ResponseIncludable | str if ResponseIncludable covers more cases
+    # We've added str to support missing ones like
+    # "web_search_call.action.sources" etc.
+    response_include: list[ResponseIncludable | str] | None = None
     """Additional output data to include in the model response.
     [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
+
+    top_logprobs: int | None = None
+    """Number of top tokens to return logprobs for. Setting this will
+    automatically include ``"message.output_text.logprobs"`` in the response."""
 
     extra_query: Query | None = None
     """Additional query fields to provide with the request.

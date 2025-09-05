@@ -68,6 +68,7 @@ plugins:
                 - context.md
                 - guardrails.md
                 - multi_agent.md
+                - usage.md
                 - Models:
                     - models/index.md
                     - models/litellm.md
@@ -143,6 +144,7 @@ plugins:
                     - ref/extensions/handoff_filters.md
                     - ref/extensions/handoff_prompt.md
                     - ref/extensions/litellm.md
+                    - ref/extensions/memory/sqlalchemy_session.md
 
         - locale: ja
           name: 日本語
@@ -165,6 +167,7 @@ plugins:
                 - context.md
                 - guardrails.md
                 - multi_agent.md
+                - usage.md
                 - モデル:
                     - models/index.md
                     - models/litellm.md

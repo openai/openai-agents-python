@@ -5,6 +5,47 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 -   **Recommended**: the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel], which calls OpenAI APIs using the new [Responses API](https://platform.openai.com/docs/api-reference/responses).
 -   The [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel], which calls OpenAI APIs using the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
+## OpenAI models
+
+When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1), which offers a strong balance of predictability for agentic workflows and low latency.
+
+If you want to switch to other models like [`gpt-5`](https://platform.openai.com/docs/models/gpt-5), follow the steps in the next section.
+
+### Default OpenAI model
+
+If you want to consistently use a specific model for all agents that do not set a custom model, set the `OPENAI_DEFAULT_MODEL` environment variable before running your agents.
+
+```bash
+export OPENAI_DEFAULT_MODEL=gpt-5
+python3 my_awesome_agent.py
+```
+
+#### GPT-5 models
+
+When you use any of GPT-5's reasoning models ([`gpt-5`](https://platform.openai.com/docs/models/gpt-5), [`gpt-5-mini`](https://platform.openai.com/docs/models/gpt-5-mini), or [`gpt-5-nano`](https://platform.openai.com/docs/models/gpt-5-nano)) this way, the SDK applies sensible `ModelSettings` by default. Specifically, it sets both `reasoning.effort` and `verbosity` to `"low"`. If you want to build these settings yourself, call `agents.models.get_default_model_settings("gpt-5")`.
+
+For lower latency or specific requirements, you can choose a different model and settings. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
+
+```python
+from openai.types.shared import Reasoning
+from agents import Agent, ModelSettings
+
+my_agent = Agent(
+    name="My Agent",
+    instructions="You're a helpful agent.",
+    model_settings=ModelSettings(reasoning=Reasoning(effort="minimal"), verbosity="low")
+    # If OPENAI_DEFAULT_MODEL=gpt-5 is set, passing only model_settings works.
+    # It's also fine to pass a GPT-5 model name explicitly:
+    # model="gpt-5",
+)
+```
+
+Specifically for lower latency, using either [`gpt-5-mini`](https://platform.openai.com/docs/models/gpt-5-mini) or [`gpt-5-nano`](https://platform.openai.com/docs/models/gpt-5-nano) model with `reasoning.effort="minimal"` will often return responses faster than the default settings. However, some built-in tools (such as file search and image generation) in Responses API do not support `"minimal"` reasoning effort, which is why this Agents SDK defaults to `"low"`.
+
+#### Non-GPT-5 models
+
+If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
+
 ## Non-OpenAI models
 
 You can use most other non-OpenAI models via the [LiteLLM integration](./litellm.md). First, install the litellm dependency group:
@@ -53,14 +94,14 @@ import asyncio
 spanish_agent = Agent(
     name="Spanish agent",
     instructions="You only speak Spanish.",
-    model="o3-mini", # (1)!
+    model="gpt-5-mini", # (1)!
 )
 
 english_agent = Agent(
     name="English agent",
     instructions="You only speak English",
     model=OpenAIChatCompletionsModel( # (2)!
-        model="gpt-4o",
+        model="gpt-5-nano",
         openai_client=AsyncOpenAI()
     ),
 )
@@ -69,7 +110,7 @@ triage_agent = Agent(
     name="Triage agent",
     instructions="Handoff to the appropriate agent based on the language of the request.",
     handoffs=[spanish_agent, english_agent],
-    model="gpt-3.5-turbo",
+    model="gpt-5",
 )
 
 async def main():
@@ -88,7 +129,7 @@ from agents import Agent, ModelSettings
 english_agent = Agent(
     name="English agent",
     instructions="You only speak English",
-    model="gpt-4o",
+    model="gpt-4.1",
     model_settings=ModelSettings(temperature=0.1),
 )
 ```
@@ -101,7 +142,7 @@ from agents import Agent, ModelSettings
 english_agent = Agent(
     name="English agent",
     instructions="You only speak English",
-    model="gpt-4o",
+    model="gpt-4.1",
     model_settings=ModelSettings(
         temperature=0.1,
         extra_args={"service_tier": "flex", "user": "user_12345"},

@@ -194,23 +194,21 @@ class MCPUtil:
         else:
             logger.debug(f"MCP tool {tool.name} returned {result}")
 
-        # The MCP tool result is a list of content items, whereas OpenAI tool outputs are a single
-        # string. We'll try to convert.
-        if len(result.content) == 1:
-            tool_output = result.content[0].model_dump_json()
-            # Append structured content if it exists and we're using it.
-            if server.use_structured_content and result.structuredContent:
-                tool_output = f"{tool_output}\n{json.dumps(result.structuredContent)}"
-        elif len(result.content) > 1:
-            tool_results = [item.model_dump(mode="json") for item in result.content]
-            if server.use_structured_content and result.structuredContent:
-                tool_results.append(result.structuredContent)
-            tool_output = json.dumps(tool_results)
-        elif server.use_structured_content and result.structuredContent:
+        # If structured content is requested and available, use it exclusively
+        if server.use_structured_content and result.structuredContent:
             tool_output = json.dumps(result.structuredContent)
         else:
-            # Empty content is a valid result (e.g., "no results found")
-            tool_output = "[]"
+            # Fall back to regular text content processing
+            # The MCP tool result is a list of content items, whereas OpenAI tool
+            # outputs are a single string. We'll try to convert.
+            if len(result.content) == 1:
+                tool_output = result.content[0].model_dump_json()
+            elif len(result.content) > 1:
+                tool_results = [item.model_dump(mode="json") for item in result.content]
+                tool_output = json.dumps(tool_results)
+            else:
+                # Empty content is a valid result (e.g., "no results found")
+                tool_output = "[]"
 
         current_span = get_current_span()
         if current_span:

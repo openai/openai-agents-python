@@ -15,13 +15,17 @@ pip install "openai-agents[viz]"
 You can generate an agent visualization using the `draw_graph` function. This function creates a directed graph where:
 
 - **Agents** are represented as yellow boxes.
+- **MCP Servers** are represented as grey boxes.
 - **Tools** are represented as green ellipses.
 - **Handoffs** are directed edges from one agent to another.
 
 ### Example Usage
 
 ```python
+import os
+
 from agents import Agent, function_tool
+from agents.mcp.server import MCPServerStdio
 from agents.extensions.visualization import draw_graph
 
 @function_tool
@@ -38,11 +42,22 @@ english_agent = Agent(
     instructions="You only speak English",
 )
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+samples_dir = os.path.join(current_dir, "sample_files")
+mcp_server = MCPServerStdio(
+    name="Filesystem Server, via npx",
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", samples_dir],
+    },
+)
+
 triage_agent = Agent(
     name="Triage agent",
     instructions="Handoff to the appropriate agent based on the language of the request.",
     handoffs=[spanish_agent, english_agent],
     tools=[get_weather],
+    mcp_servers=[mcp_server],
 )
 
 draw_graph(triage_agent)
@@ -60,10 +75,16 @@ The generated graph includes:
 - A **start node** (`__start__`) indicating the entry point.
 - Agents represented as **rectangles** with yellow fill.
 - Tools represented as **ellipses** with green fill.
+- MCP Servers represented as **rectangles** with grey fill.
 - Directed edges indicating interactions:
   - **Solid arrows** for agent-to-agent handoffs.
   - **Dotted arrows** for tool invocations.
+  - **Dashed arrows** for MCP server invocations.
 - An **end node** (`__end__`) indicating where execution terminates.
+
+**Note:** MCP servers are rendered in recent versions of the
+`agents` package (verified in **v0.2.8**). If you don’t see MCP boxes
+in your visualization, upgrade to the latest release.
 
 ## Customizing the Graph
 

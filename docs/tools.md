@@ -311,6 +311,74 @@ json_tool = data_agent.as_tool(
 )
 ```
 
+### Conditional tool enabling
+
+You can conditionally enable or disable agent tools at runtime using the `is_enabled` parameter. This allows you to dynamically filter which tools are available to the LLM based on context, user preferences, or runtime conditions.
+
+```python
+import asyncio
+from agents import Agent, AgentBase, Runner, RunContextWrapper
+from pydantic import BaseModel
+
+class LanguageContext(BaseModel):
+    language_preference: str = "french_spanish"
+
+def french_enabled(ctx: RunContextWrapper[LanguageContext], agent: AgentBase) -> bool:
+    """Enable French for French+Spanish preference."""
+    return ctx.context.language_preference == "french_spanish"
+
+# Create specialized agents
+spanish_agent = Agent(
+    name="spanish_agent",
+    instructions="You respond in Spanish. Always reply to the user's question in Spanish.",
+)
+
+french_agent = Agent(
+    name="french_agent",
+    instructions="You respond in French. Always reply to the user's question in French.",
+)
+
+# Create orchestrator with conditional tools
+orchestrator = Agent(
+    name="orchestrator",
+    instructions=(
+        "You are a multilingual assistant. You use the tools given to you to respond to users. "
+        "You must call ALL available tools to provide responses in different languages. "
+        "You never respond in languages yourself, you always use the provided tools."
+    ),
+    tools=[
+        spanish_agent.as_tool(
+            tool_name="respond_spanish",
+            tool_description="Respond to the user's question in Spanish",
+            is_enabled=True,  # Always enabled
+        ),
+        french_agent.as_tool(
+            tool_name="respond_french",
+            tool_description="Respond to the user's question in French",
+            is_enabled=french_enabled,
+        ),
+    ],
+)
+
+async def main():
+    context = RunContextWrapper(LanguageContext(language_preference="french_spanish"))
+    result = await Runner.run(orchestrator, "How are you?", context=context.context)
+    print(result.final_output)
+
+asyncio.run(main())
+```
+
+The `is_enabled` parameter accepts:
+- **Boolean values**: `True` (always enabled) or `False` (always disabled)
+- **Callable functions**: Functions that take `(context, agent)` and return a boolean
+- **Async functions**: Async functions for complex conditional logic
+
+Disabled tools are completely hidden from the LLM at runtime, making this useful for:
+- Feature gating based on user permissions
+- Environment-specific tool availability (dev vs prod)
+- A/B testing different tool configurations
+- Dynamic tool filtering based on runtime state
+
 ## Handling errors in function tools
 
 When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
@@ -318,5 +386,26 @@ When you create a function tool via `@function_tool`, you can pass a `failure_er
 -   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
 -   If you pass your own error function, it runs that instead, and sends the response to the LLM.
 -   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+
+```python
+from agents import function_tool, RunContextWrapper
+from typing import Any
+
+def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
+
+@function_tool(failure_error_function=my_custom_error_function)
+def get_user_profile(user_id: str) -> str:
+    """Fetches a user profile from a mock API.
+     This function demonstrates a 'flaky' or failing API call.
+    """
+    if user_id == "user_123":
+        return "User profile for user_123 successfully retrieved."
+    else:
+        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
+
+```
 
 If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.

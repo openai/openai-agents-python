@@ -509,13 +509,29 @@ class RunImpl:
             # Regular function tool call
             else:
                 if output.name not in function_map:
-                    _error_tracing.attach_error_to_current_span(
-                        SpanError(
-                            message="Tool not found",
-                            data={"tool_name": output.name},
+                    if output_schema is not None and output.name == "json_tool_call":
+                        # LiteLLM could generate non-existent tool calls for structured outputs
+                        items.append(ToolCallItem(raw_item=output, agent=agent))
+                        functions.append(
+                            ToolRunFunction(
+                                tool_call=output,
+                                # this tool does not exist in function_map, so generate ad-hoc one,
+                                # which just parses the input if it's a string, and returns the
+                                # value otherwise
+                                function_tool=_build_litellm_json_tool_call(output),
+                            )
                         )
-                    )
-                    raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
+                        continue
+                    else:
+                        _error_tracing.attach_error_to_current_span(
+                            SpanError(
+                                message="Tool not found",
+                                data={"tool_name": output.name},
+                            )
+                        )
+                        error = f"Tool {output.name} not found in agent {agent.name}"
+                        raise ModelBehaviorError(error)
+
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 functions.append(
                     ToolRunFunction(
@@ -914,12 +930,12 @@ class RunImpl:
             return result
 
     @classmethod
-    def stream_step_result_to_queue(
+    def stream_step_items_to_queue(
         cls,
-        step_result: SingleStepResult,
+        new_step_items: list[RunItem],
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
-        for item in step_result.new_step_items:
+        for item in new_step_items:
             if isinstance(item, MessageOutputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
             elif isinstance(item, HandoffCallItem):
@@ -945,6 +961,14 @@ class RunImpl:
                 queue.put_nowait(event)
 
     @classmethod
+    def stream_step_result_to_queue(
+        cls,
+        step_result: SingleStepResult,
+        queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
+    ):
+        cls.stream_step_items_to_queue(step_result.new_step_items, queue)
+
+    @classmethod
     async def _check_for_final_output_from_tools(
         cls,
         *,
@@ -953,7 +977,10 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> ToolsToFinalOutputResult:
-        """Returns (i, final_output)."""
+        """Determine if tool results should produce a final output.
+        Returns:
+            ToolsToFinalOutputResult: Indicates whether final output is ready, and the output value.
+        """
         if not tool_results:
             return _NOT_FINAL_OUTPUT
 
@@ -1182,3 +1209,21 @@ class LocalShellAction:
                 # "id": "out" + call.tool_call.id,  # TODO remove this, it should be optional
             },
         )
+
+
+def _build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
+    async def on_invoke_tool(_ctx: ToolContext[Any], value: Any) -> Any:
+        if isinstance(value, str):
+            import json
+
+            return json.loads(value)
+        return value
+
+    return FunctionTool(
+        name=output.name,
+        description=output.name,
+        params_json_schema={},
+        on_invoke_tool=on_invoke_tool,
+        strict_json_schema=True,
+        is_enabled=True,
+    )

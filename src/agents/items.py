@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
 
@@ -66,7 +65,7 @@ class RunItemBase(Generic[T], abc.ABC):
     """The agent whose run caused this item to be generated."""
 
     raw_item: T
-    """The raw Responses item from the run. This will always be a either an output item (i.e.
+    """The raw Responses item from the run. This will always be either an output item (i.e.
     `openai.types.responses.ResponseOutputItem` or an input item
     (i.e. `openai.types.responses.ResponseInputItemParam`).
     """
@@ -243,6 +242,8 @@ class ItemHelpers:
         if not isinstance(message, ResponseOutputMessage):
             return ""
 
+        if not message.content:
+            return ""
         last_content = message.content[-1]
         if isinstance(last_content, ResponseOutputText):
             return last_content.text
@@ -255,6 +256,8 @@ class ItemHelpers:
     def extract_last_text(cls, message: TResponseOutputItem) -> str | None:
         """Extracts the last text content from a message, if any. Ignores refusals."""
         if isinstance(message, ResponseOutputMessage):
+            if not message.content:
+                return None
             last_content = message.content[-1]
             if isinstance(last_content, ResponseOutputText):
                 return last_content.text
@@ -273,7 +276,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return copy.deepcopy(input)
+        return input.copy()
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:

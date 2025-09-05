@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 from datetime import datetime
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal, Union
 
 import pydantic
 import websockets
@@ -52,7 +52,7 @@ from openai.types.beta.realtime.session_update_event import (
     SessionTracingTracingConfiguration as OpenAISessionTracingConfiguration,
     SessionUpdateEvent as OpenAISessionUpdateEvent,
 )
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
 
@@ -83,6 +83,7 @@ from .model_events import (
     RealtimeModelErrorEvent,
     RealtimeModelEvent,
     RealtimeModelExceptionEvent,
+    RealtimeModelInputAudioTimeoutTriggeredEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelItemDeletedEvent,
     RealtimeModelItemUpdatedEvent,
@@ -128,6 +129,32 @@ async def get_api_key(key: str | Callable[[], MaybeAwaitable[str]] | None) -> st
     return os.getenv("OPENAI_API_KEY")
 
 
+class _InputAudioBufferTimeoutTriggeredEvent(BaseModel):
+    type: Literal["input_audio_buffer.timeout_triggered"]
+    event_id: str
+    audio_start_ms: int
+    audio_end_ms: int
+    item_id: str
+
+
+AllRealtimeServerEvents = Annotated[
+    Union[
+        OpenAIRealtimeServerEvent,
+        _InputAudioBufferTimeoutTriggeredEvent,
+    ],
+    Field(discriminator="type"),
+]
+
+ServerEventTypeAdapter: TypeAdapter[AllRealtimeServerEvents] | None = None
+
+
+def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
+    global ServerEventTypeAdapter
+    if not ServerEventTypeAdapter:
+        ServerEventTypeAdapter = TypeAdapter(AllRealtimeServerEvents)
+    return ServerEventTypeAdapter
+
+
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
@@ -142,6 +169,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionObject | None = None
+        self._server_event_type_adapter = get_server_event_type_adapter()
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -150,7 +178,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         model_settings: RealtimeSessionModelSettings = options.get("initial_model_settings", {})
 
-        self._playback_tracker = options.get("playback_tracker", RealtimePlaybackTracker())
+        self._playback_tracker = options.get("playback_tracker", None)
 
         self.model = model_settings.get("model_name", self.model)
         api_key = await get_api_key(options.get("api_key"))
@@ -160,17 +188,28 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             self._tracing_config = "auto"
 
-        if not api_key:
-            raise UserError("API key is required but was not provided.")
-
         url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        headers: dict[str, str] = {}
+        if options.get("headers") is not None:
+            # For customizing request headers
+            headers.update(options["headers"])
+        else:
+            # OpenAI's Realtime API
+            if not api_key:
+                raise UserError("API key is required but was not provided.")
+
+            headers.update(
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "OpenAI-Beta": "realtime=v1",
+                }
+            )
         self._websocket = await websockets.connect(
-            url, user_agent_header=_USER_AGENT, additional_headers=headers
+            url,
+            user_agent_header=_USER_AGENT,
+            additional_headers=headers,
+            max_size=None,  # Allow any size of message
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
@@ -226,7 +265,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         except websockets.exceptions.ConnectionClosedOK:
             # Normal connection closure - no exception event needed
-            logger.info("WebSocket connection closed normally")
+            logger.debug("WebSocket connection closed normally")
         except websockets.exceptions.ConnectionClosed as e:
             await self._emit_event(
                 RealtimeModelExceptionEvent(
@@ -329,7 +368,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         current_item_content_index = playback_state.get("current_item_content_index")
         elapsed_ms = playback_state.get("elapsed_ms")
         if current_item_id is None or elapsed_ms is None:
-            logger.info(
+            logger.debug(
                 "Skipping interrupt. "
                 f"Item id: {current_item_id}, "
                 f"elapsed ms: {elapsed_ms}, "
@@ -351,6 +390,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 int(elapsed_ms),
             )
             await self._send_raw_message(converted)
+        else:
+            logger.debug(
+                "Didn't interrupt bc elapsed ms is < 0. "
+                f"Item id: {current_item_id}, "
+                f"elapsed ms: {elapsed_ms}, "
+                f"content index: {current_item_content_index}"
+            )
 
         automatic_response_cancellation_enabled = (
             self._created_session
@@ -452,9 +498,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
                 event["previous_item_id"] = ""  # TODO (rm) remove
-            parsed: OpenAIRealtimeServerEvent = TypeAdapter(
-                OpenAIRealtimeServerEvent
-            ).validate_python(event)
+            parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(event)
         except pydantic.ValidationError as e:
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
             await self._emit_event(
@@ -544,6 +588,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             or parsed.type == "response.output_item.done"
         ):
             await self._handle_output_item(parsed.item)
+        elif parsed.type == "input_audio_buffer.timeout_triggered":
+            await self._emit_event(
+                RealtimeModelInputAudioTimeoutTriggeredEvent(
+                    item_id=parsed.item_id,
+                    audio_start_ms=parsed.audio_start_ms,
+                    audio_end_ms=parsed.audio_end_ms,
+                )
+            )
 
     def _update_created_session(self, session: OpenAISessionObject) -> None:
         self._created_session = session

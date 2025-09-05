@@ -6,6 +6,9 @@ from agents import Agent, CodeInterpreterTool, Runner, trace
 async def main():
     agent = Agent(
         name="Code interpreter",
+        # Note that using gpt-5 model with streaming for this tool requires org verification
+        # Also, code interpreter tool does not support gpt-5's minimal reasoning effort
+        model="gpt-4.1",
         instructions="You love doing math.",
         tools=[
             CodeInterpreterTool(

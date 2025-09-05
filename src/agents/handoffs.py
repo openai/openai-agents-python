@@ -264,7 +264,7 @@ def handoff(
     async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
         from .agent import Agent
 
-        assert callable(is_enabled), "is_enabled must be non-null here"
+        assert callable(is_enabled), "is_enabled must be callable here"
         assert isinstance(agent_base, Agent), "Can't handoff to a non-Agent"
         result = is_enabled(ctx, agent_base)
 
