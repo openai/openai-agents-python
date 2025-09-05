@@ -13,7 +13,7 @@ DEFAULT_SAMPLE_RATE = 24000
 
 
 def _buffer_to_audio_file(
-    buffer: npt.NDArray[np.int16 | np.float32],
+    buffer: npt.NDArray[np.int16 | np.float32 | np.float64],
     frame_rate: int = DEFAULT_SAMPLE_RATE,
     sample_width: int = 2,
     channels: int = 1,

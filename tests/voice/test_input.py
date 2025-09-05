@@ -55,8 +55,7 @@ def test_buffer_to_audio_file_invalid_dtype():
     buffer = np.array([1.0, 2.0, 3.0], dtype=np.float64)
 
     with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
-        # Purposely ignore the type error
-        _buffer_to_audio_file(buffer)  # type: ignore
+        _buffer_to_audio_file(buffer=buffer)
 
 
 class TestAudioInput:

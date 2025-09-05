@@ -228,7 +228,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
 
-        invalid_event = {"type": "response.audio.delta"}  # Missing required fields
+        invalid_event = {"type": "response.output_audio.delta"}  # Missing required fields
 
         await model._handle_ws_event(invalid_event)
 
@@ -267,7 +267,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Valid audio delta event (minimal required fields for OpenAI spec)
         audio_event = {
-            "type": "response.audio.delta",
+            "type": "response.output_audio.delta",
             "event_id": "event_123",
             "response_id": "resp_123",
             "item_id": "item_456",
@@ -363,7 +363,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Send multiple audio deltas to test cumulative timing
         audio_deltas = [
             {
-                "type": "response.audio.delta",
+                "type": "response.output_audio.delta",
                 "event_id": "event_1",
                 "response_id": "resp_1",
                 "item_id": "item_1",
@@ -372,7 +372,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "delta": "dGVzdA==",  # 4 bytes -> "test"
             },
             {
-                "type": "response.audio.delta",
+                "type": "response.output_audio.delta",
                 "event_id": "event_2",
                 "response_id": "resp_1",
                 "item_id": "item_1",
