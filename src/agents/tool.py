@@ -142,7 +142,7 @@ class WebSearchTool:
 
     @property
     def name(self):
-        return "web_search_preview"
+        return "web_search"
 
 
 @dataclass
