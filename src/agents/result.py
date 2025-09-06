@@ -196,7 +196,11 @@ class RunResultStreaming(RunResultBase):
                 break
 
             try:
-                item = await self._event_queue.get()
+                # Avoid blocking forever if the background task errors before enqueuing.
+                item = await asyncio.wait_for(self._event_queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                # No item yet; re-check for stored exceptions and completion conditions.
+                continue
             except asyncio.CancelledError:
                 break
 

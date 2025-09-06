@@ -97,6 +97,13 @@ class InputGuardrail(Generic[TContext]):
     function's name.
     """
 
+    block_downstream_calls: bool = True
+    """Whether this guardrail should block downstream calls until it completes.
+    If any input guardrail has this set to True, the initial model call and any
+    subsequent tool execution will be delayed until all blocking guardrails finish.
+    Defaults to True for backwards compatibility and safety.
+    """
+
     def get_name(self) -> str:
         if self.name:
             return self.name
@@ -209,6 +216,7 @@ def input_guardrail(
 def input_guardrail(
     *,
     name: str | None = None,
+    block_downstream_calls: bool = True,
 ) -> Callable[
     [_InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co]],
     InputGuardrail[TContext_co],
@@ -221,6 +229,7 @@ def input_guardrail(
     | None = None,
     *,
     name: str | None = None,
+    block_downstream_calls: bool = True,
 ) -> (
     InputGuardrail[TContext_co]
     | Callable[
@@ -235,7 +244,7 @@ def input_guardrail(
         @input_guardrail
         def my_sync_guardrail(...): ...
 
-        @input_guardrail(name="guardrail_name")
+        @input_guardrail(name="guardrail_name", block_downstream_calls=False)
         async def my_async_guardrail(...): ...
     """
 
@@ -246,6 +255,7 @@ def input_guardrail(
             guardrail_function=f,
             # If not set, guardrail name uses the function’s name by default.
             name=name if name else f.__name__,
+            block_downstream_calls=block_downstream_calls,
         )
 
     if func is not None:
