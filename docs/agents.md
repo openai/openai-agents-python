@@ -280,6 +280,19 @@ agent = Agent(
 )
 ```
 
+## Advanced Reasoning
+
+Agents can be configured to perform advanced reasoning using the `reasoning` parameter in `ModelSettings`.
+
+Key configurable options:
+
+- `strategy`: The reasoning strategy, e.g., `"tree_of_thoughts"` or `"step_by_step"`.
+- `depth`: The number of reasoning steps the model should perform.
+
+!!! note
+    The maximum value for `depth` is currently **not documented**. Contributors should refer to model-specific limits, and start with low values (like 2–3) to avoid excessively long computations or errors.
+
+
 !!! note
 
     To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call. This behavior is configurable via [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]. The infinite loop is because tool results are sent to the LLM, which then generates another tool call because of `tool_choice`, ad infinitum.
