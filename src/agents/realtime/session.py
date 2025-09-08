@@ -95,6 +95,24 @@ class RealtimeSession(RealtimeModelListener):
         self._history: list[RealtimeItem] = []
         self._model_config = model_config or {}
         self._run_config = run_config or {}
+        initial_model_settings = (
+            cast(
+                RealtimeSessionModelSettings | None,
+                self._model_config.get("initial_model_settings"),
+            )
+            or {}
+        )
+        run_config_settings = (
+            cast(
+                RealtimeSessionModelSettings | None,
+                self._run_config.get("model_settings"),
+            )
+            or {}
+        )
+        self._base_model_settings: RealtimeSessionModelSettings = {
+            **run_config_settings,
+            **initial_model_settings,
+        }
         self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
         self._closed = False
         self._stored_exception: Exception | None = None
@@ -619,9 +637,11 @@ class RealtimeSession(RealtimeModelListener):
         starting_settings: RealtimeSessionModelSettings | None,
         agent: RealtimeAgent,
     ) -> RealtimeSessionModelSettings:
-        # Start with run config model settings as base
-        run_config_settings = self._run_config.get("model_settings", {})
-        updated_settings: RealtimeSessionModelSettings = run_config_settings.copy()
+        # Start with the merged base settings from run and model configuration.
+        updated_settings = cast(
+            RealtimeSessionModelSettings,
+            self._base_model_settings.copy(),
+        )
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
