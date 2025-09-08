@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 from collections.abc import Awaitable
@@ -224,6 +225,29 @@ def get_model_tracing_impl(
         return ModelTracing.ENABLED
     else:
         return ModelTracing.ENABLED_WITHOUT_DATA
+
+
+# Helpers for cancellable tool execution
+
+
+async def _await_cancellable(awaitable):
+    """Await an awaitable in its own task so CancelledError interrupts promptly."""
+    task = asyncio.create_task(awaitable)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        # propagate so run.py can handle terminal cancel
+        raise
+
+
+def _maybe_call_cancel_hook(tool_obj) -> None:
+    """Best-effort: call a cancel/terminate hook on the tool if present."""
+    for name in ("cancel", "terminate", "stop"):
+        cb = getattr(tool_obj, name, None)
+        if callable(cb):
+            with contextlib.suppress(Exception):
+                cb()
+            break
 
 
 class RunImpl:
@@ -572,15 +596,23 @@ class RunImpl:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    _, _, result = await asyncio.gather(
+                    # run start hooks first (don’t tie them to the cancellable task)
+                    await asyncio.gather(
                         hooks.on_tool_start(tool_context, agent, func_tool),
                         (
                             agent.hooks.on_tool_start(tool_context, agent, func_tool)
                             if agent.hooks
                             else _coro.noop_coroutine()
                         ),
-                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
                     )
+
+                    try:
+                        result = await _await_cancellable(
+                            func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+                        )
+                    except asyncio.CancelledError:
+                        _maybe_call_cancel_hook(func_tool)
+                        raise
 
                     await asyncio.gather(
                         hooks.on_tool_end(tool_context, agent, func_tool, result),
@@ -590,6 +622,7 @@ class RunImpl:
                             else _coro.noop_coroutine()
                         ),
                     )
+
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
@@ -660,7 +693,6 @@ class RunImpl:
         config: RunConfig,
     ) -> list[RunItem]:
         results: list[RunItem] = []
-        # Need to run these serially, because each action can affect the computer state
         for action in actions:
             acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
             if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
@@ -677,24 +709,28 @@ class RunImpl:
                     if ack:
                         acknowledged.append(
                             ComputerCallOutputAcknowledgedSafetyCheck(
-                                id=check.id,
-                                code=check.code,
-                                message=check.message,
+                                id=check.id, code=check.code, message=check.message
                             )
                         )
                     else:
                         raise UserError("Computer tool safety check was not acknowledged")
 
-            results.append(
-                await ComputerAction.execute(
-                    agent=agent,
-                    action=action,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=config,
-                    acknowledged_safety_checks=acknowledged,
+            try:
+                item = await _await_cancellable(
+                    ComputerAction.execute(
+                        agent=agent,
+                        action=action,
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        config=config,
+                        acknowledged_safety_checks=acknowledged,
+                    )
                 )
-            )
+            except asyncio.CancelledError:
+                _maybe_call_cancel_hook(action.computer_tool)
+                raise
+
+            results.append(item)
 
         return results
 
@@ -1068,16 +1104,23 @@ class ComputerAction:
             else cls._get_screenshot_sync(action.computer_tool.computer, action.tool_call)
         )
 
-        _, _, output = await asyncio.gather(
+        # start hooks first
+        await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
             (
                 agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
-            output_func,
         )
+        # run the action (screenshot/etc) in a cancellable task
+        try:
+            output = await _await_cancellable(output_func)
+        except asyncio.CancelledError:
+            _maybe_call_cancel_hook(action.computer_tool)
+            raise
 
+        # end hooks
         await asyncio.gather(
             hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
             (
@@ -1185,10 +1228,20 @@ class LocalShellAction:
             data=call.tool_call,
         )
         output = call.local_shell_tool.executor(request)
-        if inspect.isawaitable(output):
-            result = await output
-        else:
-            result = output
+        try:
+            if inspect.isawaitable(output):
+                result = await _await_cancellable(output)
+            else:
+                # If executor returns a sync result, just use it (can’t cancel mid-call)
+                result = output
+        except asyncio.CancelledError:
+            # Best-effort: if the executor or tool exposes a cancel/terminate, call it
+            _maybe_call_cancel_hook(call.local_shell_tool)
+            # If your executor returns a proc handle (common pattern), adddress it here if needed:
+            # with contextlib.suppress(Exception):
+            #     proc.terminate(); await asyncio.wait_for(proc.wait(), 1.0)
+            #     proc.kill()
+            raise
 
         await asyncio.gather(
             hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
@@ -1201,7 +1254,7 @@ class LocalShellAction:
 
         return ToolCallOutputItem(
             agent=agent,
-            output=output,
+            output=result,
             raw_item={
                 "type": "local_shell_call_output",
                 "id": call.tool_call.call_id,

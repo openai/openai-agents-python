@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -175,14 +176,29 @@ class OpenAIResponsesModel(Model):
 
                 final_response: Response | None = None
 
-                async for chunk in stream:
-                    if isinstance(chunk, ResponseCompletedEvent):
-                        final_response = chunk.response
-                    yield chunk
+                try:
+                    async for chunk in stream:  # ensure type checkers relax here
+                        if isinstance(chunk, ResponseCompletedEvent):
+                            final_response = chunk.response
+                        yield chunk
+                except asyncio.CancelledError:
+                    # Cooperative cancel: ensure the HTTP stream is closed, then propagate
+                    try:
+                        await stream.close()
+                    except Exception:
+                        pass
+                    raise
+                finally:
+                    # Always close the stream if the async iterator exits (normal or error)
+                    try:
+                        await stream.close()
+                    except Exception:
+                        pass
 
                 if final_response and tracing.include_data():
                     span_response.span_data.response = final_response
                     span_response.span_data.input = input
+
 
             except Exception as e:
                 span_response.set_error(
