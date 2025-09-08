@@ -18,6 +18,7 @@ from ..tool import Tool
 RealtimeModelName: TypeAlias = Union[
     Literal[
         "gpt-realtime",
+        "gpt-realtime-2025-08-28",
         "gpt-4o-realtime-preview",
         "gpt-4o-mini-realtime-preview",
         "gpt-4o-realtime-preview-2025-06-03",
