@@ -104,7 +104,12 @@ class HomeworkOutput(BaseModel):
 
 guardrail_agent = Agent(
     name="Guardrail check",
-    instructions="Check if the user is asking about homework.",
+    instructions=
+        """
+        - Determine if the user's input looks like a school-style homework question.
+        - Homework questions are typically about math, history, science, or similar academic subjects.
+        - If the input is educational or academic in nature, classify it as homework.
+        """,
     output_type=HomeworkOutput,
 )
 
@@ -113,7 +118,7 @@ async def homework_guardrail(ctx, agent, input_data):
     final_output = result.final_output_as(HomeworkOutput)
     return GuardrailFunctionOutput(
         output_info=final_output,
-        tripwire_triggered=not final_output.is_homework,
+        tripwire_triggered=final_output.is_homework,
     )
 ```
 
