@@ -38,6 +38,7 @@ from ..tool import (
 )
 from ..tracing import SpanError, response_span
 from ..usage import Usage
+from ..util._json import _to_dump_compatible
 from ..version import __version__
 from .interface import Model, ModelTracing
 
@@ -263,10 +264,20 @@ class OpenAIResponsesModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            input_json = json.dumps(
+                _to_dump_compatible(list_input),
+                indent=2,
+                ensure_ascii=False,
+            )
+            tools_json = json.dumps(
+                _to_dump_compatible(converted_tools.tools),
+                indent=2,
+                ensure_ascii=False,
+            )
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
+                f"{input_json}\n"
+                f"Tools:\n{tools_json}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"

@@ -48,6 +48,7 @@ from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
+from ...util._json import _to_dump_compatible
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
@@ -286,10 +287,20 @@ class LitellmModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            messages_json = json.dumps(
+                _to_dump_compatible(converted_messages),
+                indent=2,
+                ensure_ascii=False,
+            )
+            tools_json = json.dumps(
+                _to_dump_compatible(converted_tools),
+                indent=2,
+                ensure_ascii=False,
+            )
             logger.debug(
                 f"Calling Litellm model: {self.model}\n"
-                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
+                f"{messages_json}\n"
+                f"Tools:\n{tools_json}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
@@ -369,9 +380,9 @@ class LitellmConverter:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
 
-        tool_calls: list[
-            ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall
-        ] | None = (
+        tool_calls: (
+            list[ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall] | None
+        ) = (
             [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
             if message.tool_calls
             else None
