@@ -4,26 +4,26 @@ search:
 ---
 # クイックスタート
 
-リアルタイム エージェント は、OpenAI の Realtime API を使って AI エージェント との音声会話を可能にします。このガイドでは、最初の リアルタイム 音声 エージェント の作成手順を説明します。
+リアルタイム エージェントは、OpenAI の Realtime API を使用して AI エージェントとの音声対話を可能にします。本ガイドでは、最初のリアルタイム音声エージェントの作成手順を説明します。
 
-!!! warning "Beta feature"
-リアルタイム エージェント はベータ版です。実装の改善に伴い、破壊的な変更が発生する可能性があります。
+!!! warning "ベータ機能"
+Realtime agents はベータ版です。実装の改善に伴い破壊的変更が入る可能性があります。
 
 ## 前提条件
 
 -   Python 3.9 以上
 -   OpenAI API キー
--   OpenAI Agents SDK の基本的な知識
+-   OpenAI Agents SDK の基本的な理解
 
 ## インストール
 
-まだの場合は、OpenAI Agents SDK をインストールします:
+まだの場合は、OpenAI Agents SDK をインストールしてください:
 
 ```bash
 pip install openai-agents
 ```
 
-## 最初の リアルタイム エージェント の作成
+## 最初のリアルタイム エージェントの作成
 
 ### 1. 必要なコンポーネントのインポート
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. リアルタイム エージェント の作成
+### 2. リアルタイム エージェントの作成
 
 ```python
 agent = RealtimeAgent(
@@ -81,7 +81,7 @@ asyncio.run(main())
 
 ## 完全な例
 
-以下は動作する完全な例です:
+以下は動作する完全なコード例です:
 
 ```python
 import asyncio
@@ -139,34 +139,34 @@ if __name__ == "__main__":
 
 ### モデル設定
 
--   `model_name`: 利用可能な リアルタイム モデルから選択 (例: `gpt-4o-realtime-preview`)
--   `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: テキストや音声を有効化 (`["text", "audio"]`)
+-   `model_name`: 利用可能なリアルタイム モデルから選択します（例: `gpt-4o-realtime-preview`）
+-   `voice`: 音声を選択します（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+-   `modalities`: テキストや音声を有効化します（`["text", "audio"]`）
 
-### オーディオ設定
+### 音声設定
 
--   `input_audio_format`: 入力音声の形式 (`pcm16`, `g711_ulaw`, `g711_alaw`)
+-   `input_audio_format`: 入力音声の形式（`pcm16`、`g711_ulaw`、`g711_alaw`）
 -   `output_audio_format`: 出力音声の形式
 -   `input_audio_transcription`: 文字起こしの構成
 
-### ターン検出
+### 発話区切り検出
 
--   `type`: 検出方法 (`server_vad`, `semantic_vad`)
--   `threshold`: 音声活動のしきい値 (0.0–1.0)
--   `silence_duration_ms`: ターン終了を検出する無音時間
+-   `type`: 検出方式（`server_vad`、`semantic_vad`）
+-   `threshold`: 音声活動のしきい値（0.0–1.0）
+-   `silence_duration_ms`: 発話終了を検出する無音時間
 -   `prefix_padding_ms`: 発話前の音声パディング
 
 ## 次のステップ
 
--   [リアルタイム エージェント について詳しく学ぶ](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダにある動作する code examples を確認
--   エージェント にツールを追加
--   エージェント 間の ハンドオフ を実装
--   安全性のための ガードレール を設定
+-   [リアルタイム エージェントについて詳しく学ぶ](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダの動作するサンプルコードを確認してください
+-   エージェントに tools を追加
+-   エージェント間のハンドオフを実装
+-   安全性のためのガードレールを設定
 
 ## 認証
 
-OpenAI API キーが環境に設定されていることを確認してください:
+環境に OpenAI API キーが設定されていることを確認してください:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"

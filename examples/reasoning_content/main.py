@@ -47,6 +47,7 @@ async def stream_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         if event.type == "response.reasoning_summary_text.delta":
@@ -83,6 +84,7 @@ async def get_response_with_reasoning_content():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
 

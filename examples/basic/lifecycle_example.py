@@ -1,10 +1,11 @@
 import asyncio
 import random
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
 from agents import Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
+from agents.items import ModelResponse, TResponseInputItem
 
 
 class ExampleHooks(RunHooks):
@@ -19,6 +20,22 @@ class ExampleHooks(RunHooks):
         print(
             f"### {self.event_counter}: Agent {agent.name} started. Usage: {self._usage_to_str(context.usage)}"
         )
+
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper,
+        agent: Agent,
+        system_prompt: Optional[str],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        self.event_counter += 1
+        print(f"### {self.event_counter}: LLM started. Usage: {self._usage_to_str(context.usage)}")
+
+    async def on_llm_end(
+        self, context: RunContextWrapper, agent: Agent, response: ModelResponse
+    ) -> None:
+        self.event_counter += 1
+        print(f"### {self.event_counter}: LLM ended. Usage: {self._usage_to_str(context.usage)}")
 
     async def on_agent_end(self, context: RunContextWrapper, agent: Agent, output: Any) -> None:
         self.event_counter += 1
@@ -109,13 +126,21 @@ $ python examples/basic/lifecycle_example.py
 
 Enter a max number: 250
 ### 1: Agent Start Agent started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens
-### 2: Tool random_number started. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 3: Tool random_number ended with result 101. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total token
-### 4: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 5: Agent Multiply Agent started. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 6: Tool multiply_by_two started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 7: Tool multiply_by_two ended with result 202. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 8: Agent Multiply Agent ended with output number=202. Usage: 4 requests, 714 input tokens, 63 output tokens, 777 total tokens
+### 2: LLM started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens
+### 3: LLM ended. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 4: Tool random_number started. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 5: Tool random_number ended with result 69. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 6: LLM started. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 7: LLM ended. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 8: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 9: Agent Multiply Agent started. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 10: LLM started. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 11: LLM ended. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 12: Tool multiply_by_two started. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 13: Tool multiply_by_two ended with result 138. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 14: LLM started. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 15: LLM ended. Usage: 4 requests, 660 input tokens, 56 output tokens, 716 total tokens
+### 16: Agent Multiply Agent ended with output number=138. Usage: 4 requests, 660 input tokens, 56 output tokens, 716 total tokens
 Done!
 
 """

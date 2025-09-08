@@ -28,11 +28,17 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
     ResponseUsage,
 )
-from openai.types.responses.response_reasoning_item import Summary
+from openai.types.responses.response_reasoning_item import Content, Summary
 from openai.types.responses.response_reasoning_summary_part_added_event import (
     Part as AddedEventPart,
 )
 from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
+from openai.types.responses.response_reasoning_text_delta_event import (
+    ResponseReasoningTextDeltaEvent,
+)
+from openai.types.responses.response_reasoning_text_done_event import (
+    ResponseReasoningTextDoneEvent,
+)
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from ..items import TResponseStreamEvent
@@ -95,7 +101,7 @@ class ChatCmplStreamHandler:
 
             delta = chunk.choices[0].delta
 
-            # Handle reasoning content
+            # Handle reasoning content for reasoning summaries
             if hasattr(delta, "reasoning_content"):
                 reasoning_content = delta.reasoning_content
                 if reasoning_content and not state.reasoning_content_index_and_output:
@@ -138,10 +144,55 @@ class ChatCmplStreamHandler:
                     )
 
                     # Create a new summary with updated text
-                    current_summary = state.reasoning_content_index_and_output[1].summary[0]
-                    updated_text = current_summary.text + reasoning_content
-                    new_summary = Summary(text=updated_text, type="summary_text")
-                    state.reasoning_content_index_and_output[1].summary[0] = new_summary
+                    current_content = state.reasoning_content_index_and_output[1].summary[0]
+                    updated_text = current_content.text + reasoning_content
+                    new_content = Summary(text=updated_text, type="summary_text")
+                    state.reasoning_content_index_and_output[1].summary[0] = new_content
+
+            # Handle reasoning content from 3rd party platforms
+            if hasattr(delta, "reasoning"):
+                reasoning_text = delta.reasoning
+                if reasoning_text and not state.reasoning_content_index_and_output:
+                    state.reasoning_content_index_and_output = (
+                        0,
+                        ResponseReasoningItem(
+                            id=FAKE_RESPONSES_ID,
+                            summary=[],
+                            content=[Content(text="", type="reasoning_text")],
+                            type="reasoning",
+                        ),
+                    )
+                    yield ResponseOutputItemAddedEvent(
+                        item=ResponseReasoningItem(
+                            id=FAKE_RESPONSES_ID,
+                            summary=[],
+                            content=[Content(text="", type="reasoning_text")],
+                            type="reasoning",
+                        ),
+                        output_index=0,
+                        type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                if reasoning_text and state.reasoning_content_index_and_output:
+                    yield ResponseReasoningTextDeltaEvent(
+                        delta=reasoning_text,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        content_index=0,
+                        type="response.reasoning_text.delta",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                    # Create a new summary with updated text
+                    if state.reasoning_content_index_and_output[1].content is None:
+                        state.reasoning_content_index_and_output[1].content = [
+                            Content(text="", type="reasoning_text")
+                        ]
+                    current_text = state.reasoning_content_index_and_output[1].content[0]
+                    updated_text = current_text.text + reasoning_text
+                    new_text_content = Content(text=updated_text, type="reasoning_text")
+                    state.reasoning_content_index_and_output[1].content[0] = new_text_content
 
             # Handle regular content
             if delta.content is not None:
@@ -344,17 +395,30 @@ class ChatCmplStreamHandler:
                         )
 
         if state.reasoning_content_index_and_output:
-            yield ResponseReasoningSummaryPartDoneEvent(
-                item_id=FAKE_RESPONSES_ID,
-                output_index=0,
-                summary_index=0,
-                part=DoneEventPart(
-                    text=state.reasoning_content_index_and_output[1].summary[0].text,
-                    type="summary_text",
-                ),
-                type="response.reasoning_summary_part.done",
-                sequence_number=sequence_number.get_and_increment(),
-            )
+            if (
+                state.reasoning_content_index_and_output[1].summary
+                and len(state.reasoning_content_index_and_output[1].summary) > 0
+            ):
+                yield ResponseReasoningSummaryPartDoneEvent(
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=0,
+                    summary_index=0,
+                    part=DoneEventPart(
+                        text=state.reasoning_content_index_and_output[1].summary[0].text,
+                        type="summary_text",
+                    ),
+                    type="response.reasoning_summary_part.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+            elif state.reasoning_content_index_and_output[1].content is not None:
+                yield ResponseReasoningTextDoneEvent(
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=0,
+                    content_index=0,
+                    text=state.reasoning_content_index_and_output[1].content[0].text,
+                    type="response.reasoning_text.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
             yield ResponseOutputItemDoneEvent(
                 item=state.reasoning_content_index_and_output[1],
                 output_index=0,
