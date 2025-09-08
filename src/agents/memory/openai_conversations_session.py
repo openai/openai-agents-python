@@ -19,9 +19,6 @@ async def start_openai_conversations_session(openai_client: AsyncOpenAI | None =
     return response.id
 
 
-_EMPTY_SESSION_ID = ""
-
-
 class OpenAIConversationsSession(SessionABC):
     def __init__(
         self,
