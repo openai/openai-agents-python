@@ -58,9 +58,8 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     """
 
     prompt: Prompt | None = None
-    """A prompt object (or a function that returns a Prompt). Prompts allow you to dynamically
-    configure the instructions, tools and other config for an agent outside of your code. Only
-    usable with OpenAI models, using the Responses API.
+    """A prompt object. Prompts allow you to dynamically configure the instructions, tools
+    and other config for an agent outside of your code. Only usable with OpenAI models.
     """
 
     handoffs: list[RealtimeAgent[Any] | Handoff[TContext, RealtimeAgent[Any]]] = field(

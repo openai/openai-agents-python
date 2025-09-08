@@ -160,6 +160,4 @@ async def read_index():
 if __name__ == "__main__":
     import uvicorn
 
-    # log_level = "debug"
-    log_level = "info"
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level=log_level)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
