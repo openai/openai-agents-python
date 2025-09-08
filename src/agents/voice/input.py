@@ -77,12 +77,13 @@ class StreamedAudioInput:
     """
 
     def __init__(self):
-        self.queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32]] = asyncio.Queue()
+        self.queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None] = asyncio.Queue()
 
     async def add_audio(self, audio: npt.NDArray[np.int16 | np.float32] | None):
         """Adds more audio data to the stream.
 
         Args:
-            audio: The audio data to add. Must be a numpy array of int16 or float32 or None. If None passed, it indicates the end of the stream.
+            audio: The audio data to add. Must be a numpy array of int16 or float32 or None.
+              If None passed, it indicates the end of the stream.
         """
         await self.queue.put(audio)

@@ -88,7 +88,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._trace_include_sensitive_data = trace_include_sensitive_data
         self._trace_include_sensitive_audio_data = trace_include_sensitive_audio_data
 
-        self._input_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32]] = input.queue
+        self._input_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None] = input.queue
         self._output_queue: asyncio.Queue[str | ErrorSentinel | SessionCompleteSentinel] = (
             asyncio.Queue()
         )
@@ -245,7 +245,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         await self._output_queue.put(SessionCompleteSentinel())
 
     async def _stream_audio(
-        self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32]]
+        self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None]
     ) -> None:
         assert self._websocket is not None, "Websocket not initialized"
         self._start_turn()
