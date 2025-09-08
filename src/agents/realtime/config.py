@@ -8,6 +8,8 @@ from typing import (
 
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
+from agents.prompts import Prompt
+
 from ..guardrail import OutputGuardrail
 from ..handoffs import Handoff
 from ..model_settings import ToolChoice
@@ -91,6 +93,9 @@ class RealtimeSessionModelSettings(TypedDict):
 
     instructions: NotRequired[str]
     """System instructions for the model."""
+
+    prompt: NotRequired[Prompt]
+    """The prompt to use for the model."""
 
     modalities: NotRequired[list[Literal["text", "audio"]]]
     """The modalities the model should support."""

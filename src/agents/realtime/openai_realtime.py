@@ -75,11 +75,13 @@ from openai.types.realtime.response_create_event import (
 from openai.types.realtime.session_update_event import (
     SessionUpdateEvent as OpenAISessionUpdateEvent,
 )
+from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
 from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
+from agents.prompts import Prompt
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.tool import FunctionTool, Tool
 from agents.util._types import MaybeAwaitable
@@ -837,11 +839,22 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 output=output_audio_config,
             )
 
+        prompt: ResponsePrompt | None = None
+        if model_settings.get("prompt") is not None:
+            _passed_prompt: Prompt = model_settings["prompt"]
+            variables: dict[str, Any] | None = _passed_prompt.get("variables")
+            prompt = ResponsePrompt(
+                id=_passed_prompt["id"],
+                variables=variables,
+                version=_passed_prompt.get("version"),
+            )
+
         # Construct full session object. `type` will be excluded at serialization time for updates.
         return OpenAISessionCreateRequest(
             model=model_name,
             type="realtime",
             instructions=model_settings.get("instructions"),
+            prompt=prompt,
             output_modalities=modalities,
             audio=audio_config,
             max_output_tokens=cast(Any, model_settings.get("max_output_tokens")),
