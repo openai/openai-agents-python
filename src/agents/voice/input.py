@@ -83,6 +83,6 @@ class StreamedAudioInput:
         """Adds more audio data to the stream.
 
         Args:
-            audio: The audio data to add. Must be a numpy array of int16 or float32. If None, it indicates the end of the stream.
+            audio: The audio data to add. Must be a numpy array of int16 or float32 or None. If None passed, it indicates the end of the stream.
         """
         await self.queue.put(audio)
