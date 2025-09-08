@@ -51,6 +51,7 @@ handoff_obj = handoff(
     on_handoff=on_handoff,
     tool_name_override="custom_handoff_tool",
     tool_description_override="Custom description",
+    is_enabled="boolean_value",
 )
 ```
 
