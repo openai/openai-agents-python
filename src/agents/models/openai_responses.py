@@ -241,6 +241,7 @@ class OpenAIResponsesModel(Model):
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
+        list_input = _to_dump_compatible(list_input)
 
         parallel_tool_calls = (
             True
@@ -252,6 +253,7 @@ class OpenAIResponsesModel(Model):
 
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
+        converted_tools_payload = _to_dump_compatible(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
 
         include_set: set[str] = set(converted_tools.includes)
@@ -265,12 +267,12 @@ class OpenAIResponsesModel(Model):
             logger.debug("Calling LLM")
         else:
             input_json = json.dumps(
-                _to_dump_compatible(list_input),
+                list_input,
                 indent=2,
                 ensure_ascii=False,
             )
             tools_json = json.dumps(
-                _to_dump_compatible(converted_tools.tools),
+                converted_tools_payload,
                 indent=2,
                 ensure_ascii=False,
             )
@@ -301,7 +303,7 @@ class OpenAIResponsesModel(Model):
             model=self.model,
             input=list_input,
             include=include,
-            tools=converted_tools.tools,
+            tools=converted_tools_payload,
             prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),

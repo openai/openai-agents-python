@@ -266,6 +266,8 @@ class LitellmModel(Model):
                     "role": "system",
                 },
             )
+        converted_messages = _to_dump_compatible(converted_messages)
+
         if tracing.include_data():
             span.span_data.input = converted_messages
 
@@ -284,16 +286,18 @@ class LitellmModel(Model):
         for handoff in handoffs:
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
+        converted_tools = _to_dump_compatible(converted_tools)
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
             messages_json = json.dumps(
-                _to_dump_compatible(converted_messages),
+                converted_messages,
                 indent=2,
                 ensure_ascii=False,
             )
             tools_json = json.dumps(
-                _to_dump_compatible(converted_tools),
+                converted_tools,
                 indent=2,
                 ensure_ascii=False,
             )
