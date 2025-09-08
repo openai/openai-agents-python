@@ -627,9 +627,6 @@ class RealtimeSession(RealtimeModelListener):
     ) -> RealtimeSessionModelSettings:
         # Start with the merged base settings from run and model configuration.
         updated_settings = self._base_model_settings.copy()
-        # Apply starting settings (from model config) next
-        if starting_settings:
-            updated_settings.update(starting_settings)
 
         instructions, tools, handoffs = await asyncio.gather(
             agent.get_system_prompt(self._context_wrapper),
@@ -639,6 +636,10 @@ class RealtimeSession(RealtimeModelListener):
         updated_settings["instructions"] = instructions or ""
         updated_settings["tools"] = tools or []
         updated_settings["handoffs"] = handoffs or []
+
+        # Apply starting settings (from model config) next
+        if starting_settings:
+            updated_settings.update(starting_settings)
 
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:
