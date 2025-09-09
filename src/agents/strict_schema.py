@@ -107,6 +107,16 @@ def _ensure_strict_json_schema(
     if json_schema.get("default", NOT_GIVEN) is None:
         json_schema.pop("default")
 
+    # Remove all null values to comply with JSON Schema Draft 2020-12
+    # This prevents LLM providers from rejecting schemas with null values
+    keys_to_remove = []
+    for key, value in json_schema.items():
+        if value is None:
+            keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        json_schema.pop(key)
+
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
     #

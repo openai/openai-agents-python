@@ -124,3 +124,35 @@ def test_invalid_ref_format():
     schema = {"type": "object", "properties": {"a": {"$ref": "invalid", "description": "desc"}}}
     with pytest.raises(ValueError):
         ensure_strict_json_schema(schema)
+
+
+def test_null_values_removal():
+    """
+    Test that null values are removed from JSON schemas to comply with JSON Schema Draft 2020-12.
+    """
+    schema_with_nulls = {
+        "type": "object",
+        "properties": {
+            "param": {
+                "type": "boolean",
+                "default": True,
+                "enum": None,
+                "minimum": None,
+                "maximum": None,
+                "items": None,
+                "properties": None,
+            }
+        },
+    }
+
+    result = ensure_strict_json_schema(schema_with_nulls)
+
+    # The result should not contain any null values
+    param_schema = result["properties"]["param"]
+    assert param_schema["type"] == "boolean"
+    assert param_schema["default"] is True
+    assert "enum" not in param_schema
+    assert "minimum" not in param_schema
+    assert "maximum" not in param_schema
+    assert "items" not in param_schema
+    assert "properties" not in param_schema
