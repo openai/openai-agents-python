@@ -330,43 +330,40 @@ class RunImpl:
             ItemHelpers.extract_last_text(message_items[-1].raw_item) if message_items else None
         )
 
-        # There are two possibilities that lead to a final output:
-        # 1. Structured output schema => always leads to a final output
-        # 2. Plain text output schema => only leads to a final output if there are no tool calls
-        if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
-            final_output = output_schema.validate_json(potential_final_output_text)
-            return await cls.execute_final_output(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=final_output,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-            )
-        elif (
-            not output_schema or output_schema.is_plain_text()
-        ) and not processed_response.has_tools_or_approvals_to_run():
-            return await cls.execute_final_output(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=potential_final_output_text or "",
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-            )
-        else:
-            # If there's no final output, we can just run again
-            return SingleStepResult(
-                original_input=original_input,
-                model_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                next_step=NextStepRunAgain(),
-            )
+        # Generate final output only when there are no pending tool calls or approval requests.
+        if not processed_response.has_tools_or_approvals_to_run():
+            if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
+                final_output = output_schema.validate_json(potential_final_output_text)
+                return await cls.execute_final_output(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=final_output,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                )
+            elif not output_schema or output_schema.is_plain_text():
+                return await cls.execute_final_output(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=potential_final_output_text or "",
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                )
+
+        # If there's no final output, we can just run again
+        return SingleStepResult(
+            original_input=original_input,
+            model_response=new_response,
+            pre_step_items=pre_step_items,
+            new_step_items=new_step_items,
+            next_step=NextStepRunAgain(),
+        )
 
     @classmethod
     def maybe_reset_tool_choice(
