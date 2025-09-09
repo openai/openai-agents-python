@@ -1,13 +1,12 @@
 from .openai_conversations_session import OpenAIConversationsSession
 from .session import Session, SessionABC
 from .sqlite_session import SQLiteSession
-from .util import SessionInputHandler, SessionMixerCallable
+from .util import SessionInputCallback
 
 __all__ = [
     "Session",
     "SessionABC",
-    "SessionInputHandler",
-    "SessionMixerCallable",
+    "SessionInputCallback",
     "SQLiteSession",
     "OpenAIConversationsSession",
 ]

@@ -54,7 +54,7 @@ from .items import (
 )
 from .lifecycle import RunHooks
 from .logger import logger
-from .memory import Session, SessionInputHandler
+from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -179,11 +179,10 @@ class RunConfig:
     An optional dictionary of additional metadata to include with the trace.
     """
 
-    session_input_callback: SessionInputHandler = None
+    session_input_callback: SessionInputCallback | None = None
     """Defines how to handle session history when new input is provided.
-
     - `None` (default): The new input is appended to the session history.
-    - `SessionMixerCallable`: A custom function that receives the history and new input, and
+    - `SessionInputCallback`: A custom function that receives the history and new input, and
       returns the desired combined list of items.
     """
 
@@ -1491,7 +1490,7 @@ class AgentRunner:
         cls,
         input: str | list[TResponseInputItem],
         session: Session | None,
-        session_input_callback: SessionInputHandler,
+        session_input_callback: SessionInputCallback | None,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
@@ -1535,7 +1534,7 @@ class AgentRunner:
         """
         Save the conversation turn to session.
         It does not account for any filtering or modification performed by
-        `RunConfig.session_input_handling`.
+        `RunConfig.session_input_callback`.
         """
         if session is None:
             return
