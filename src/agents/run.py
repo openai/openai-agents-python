@@ -438,6 +438,9 @@ class AgentRunner:
             current_agent = starting_agent
             should_run_agent_start_hooks = True
 
+            # save the original input to the session if enabled
+            await self._save_result_to_session(session, original_input, [])
+
             try:
                 while True:
                     all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
@@ -537,9 +540,7 @@ class AgentRunner:
                             output_guardrail_results=output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-
-                        # Save the conversation to session if enabled
-                        await self._save_result_to_session(session, input, result)
+                        await self._save_result_to_session(session, [], turn_result.new_step_items)
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -548,7 +549,7 @@ class AgentRunner:
                         current_span = None
                         should_run_agent_start_hooks = True
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
+                        await self._save_result_to_session(session, [], turn_result.new_step_items)
                     else:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
@@ -784,6 +785,8 @@ class AgentRunner:
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
 
+            await AgentRunner._save_result_to_session(session, starting_input, [])
+
             while True:
                 if streamed_result.is_complete:
                     break
@@ -887,24 +890,15 @@ class AgentRunner:
                         streamed_result.is_complete = True
 
                         # Save the conversation to session if enabled
-                        # Create a temporary RunResult for session saving
-                        temp_result = RunResult(
-                            input=streamed_result.input,
-                            new_items=streamed_result.new_items,
-                            raw_responses=streamed_result.raw_responses,
-                            final_output=streamed_result.final_output,
-                            _last_agent=current_agent,
-                            input_guardrail_results=streamed_result.input_guardrail_results,
-                            output_guardrail_results=streamed_result.output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                        )
                         await AgentRunner._save_result_to_session(
-                            session, starting_input, temp_result
+                            session, [], turn_result.new_step_items
                         )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
+                        await AgentRunner._save_result_to_session(
+                            session, [], turn_result.new_step_items
+                        )
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1510,7 +1504,7 @@ class AgentRunner:
         cls,
         session: Session | None,
         original_input: str | list[TResponseInputItem],
-        result: RunResult,
+        new_items: list[RunItem],
     ) -> None:
         """Save the conversation turn to session."""
         if session is None:
@@ -1520,7 +1514,7 @@ class AgentRunner:
         input_list = ItemHelpers.input_to_new_input_list(original_input)
 
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in result.new_items]
+        new_items_as_input = [item.to_input_item() for item in new_items]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
