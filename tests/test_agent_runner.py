@@ -526,11 +526,13 @@ async def test_input_guardrail_tripwire_triggered_causes_exception():
             tripwire_triggered=True,
         )
 
-    agent = Agent(
-        name="test", input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)]
-    )
     model = FakeModel()
     model.set_next_output([get_text_message("user_message")])
+    agent = Agent(
+        name="test",
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
@@ -780,3 +782,213 @@ async def test_dynamic_tool_addition_run() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_blocking_input_guardrail_tripwire_prevents_model_call():
+    """Blocking input guardrails should prevent the initial model call if tripped."""
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_called")])
+    agent = Agent(
+        name="test",
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message")
+
+    # Ensure model was never invoked
+    assert model.last_turn_args == {}
+
+
+@pytest.mark.asyncio
+async def test_blocking_input_guardrail_delays_tool_execution():
+    """Test that blocking input guardrails delay tool execution until they complete."""
+    import asyncio
+
+    execution_order = []
+
+    # Create a slow blocking guardrail
+    async def slow_blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        execution_order.append("guardrail_start")
+        await asyncio.sleep(0.1)  # Simulate slow guardrail
+        execution_order.append("guardrail_end")
+        return GuardrailFunctionOutput(
+            output_info="blocking_completed",
+            tripwire_triggered=False,
+        )
+
+    # Create a tool that tracks when it's called
+    @function_tool
+    async def test_tool() -> str:
+        execution_order.append("tool_executed")
+        return "tool_result"
+
+    # Create agent with blocking guardrail and tool
+    blocking_guardrail = InputGuardrail(
+        guardrail_function=slow_blocking_guardrail, block_downstream_calls=True
+    )
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        input_guardrails=[blocking_guardrail],
+        tools=[test_tool],
+        model=model,
+    )
+
+    # Model output that calls the tool
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", "{}")], [get_text_message("completed")]]
+    )
+
+    result = await Runner.run(agent, input="test input")
+
+    # Verify execution order: guardrail must complete before tool is executed
+    assert execution_order == ["guardrail_start", "guardrail_end", "tool_executed"]
+    assert result.final_output == "completed"
+    assert len(result.input_guardrail_results) == 1
+    assert result.input_guardrail_results[0].output.output_info == "blocking_completed"
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_input_guardrail_allows_parallel_tool_execution():
+    """Test that non-blocking input guardrails allow tool execution in parallel."""
+    import asyncio
+
+    execution_order = []
+    tool_started = asyncio.Event()
+
+    # Create a slow non-blocking guardrail
+    async def slow_non_blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        execution_order.append("guardrail_start")
+        # Wait for tool to start before finishing
+        await tool_started.wait()
+        execution_order.append("guardrail_end")
+        return GuardrailFunctionOutput(
+            output_info="non_blocking_completed",
+            tripwire_triggered=False,
+        )
+
+    # Create a tool that signals when it starts
+    @function_tool
+    async def test_tool() -> str:
+        execution_order.append("tool_start")
+        tool_started.set()
+        await asyncio.sleep(0.05)  # Small delay
+        execution_order.append("tool_end")
+        return "tool_result"
+
+    # Create agent with non-blocking guardrail and tool
+    non_blocking_guardrail = InputGuardrail(
+        guardrail_function=slow_non_blocking_guardrail, block_downstream_calls=False
+    )
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        input_guardrails=[non_blocking_guardrail],
+        tools=[test_tool],
+        model=model,
+    )
+
+    # Model output that calls the tool
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", "{}")], [get_text_message("completed")]]
+    )
+
+    result = await Runner.run(agent, input="test input")
+
+    # Verify execution order: tool should start before guardrail finishes
+    assert execution_order == ["guardrail_start", "tool_start", "guardrail_end", "tool_end"]
+    assert result.final_output == "completed"
+    assert len(result.input_guardrail_results) == 1
+    assert result.input_guardrail_results[0].output.output_info == "non_blocking_completed"
+
+
+@pytest.mark.asyncio
+async def test_mixed_blocking_and_non_blocking_guardrails():
+    """Test behavior when both blocking and non-blocking guardrails are present."""
+    import asyncio
+
+    execution_order = []
+
+    # Create blocking and non-blocking guardrails
+    async def blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        execution_order.append("blocking_start")
+        await asyncio.sleep(0.1)
+        execution_order.append("blocking_end")
+        return GuardrailFunctionOutput(
+            output_info="blocking_done",
+            tripwire_triggered=False,
+        )
+
+    async def non_blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        execution_order.append("non_blocking_start")
+        await asyncio.sleep(0.15)  # Takes longer than blocking
+        execution_order.append("non_blocking_end")
+        return GuardrailFunctionOutput(
+            output_info="non_blocking_done",
+            tripwire_triggered=False,
+        )
+
+    @function_tool
+    async def test_tool() -> str:
+        execution_order.append("tool_executed")
+        return "tool_result"
+
+    # Create agent with both types of guardrails
+    blocking_gr = InputGuardrail(
+        guardrail_function=blocking_guardrail, block_downstream_calls=True
+    )
+    non_blocking_gr = InputGuardrail(
+        guardrail_function=non_blocking_guardrail, block_downstream_calls=False
+    )
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        input_guardrails=[blocking_gr, non_blocking_gr],
+        tools=[test_tool],
+        model=model,
+    )
+
+    model.add_multiple_turn_outputs(
+        [[get_function_tool_call("test_tool", "{}")], [get_text_message("completed")]]
+    )
+
+    result = await Runner.run(agent, input="test input")
+
+    # Expected execution order
+    # blocking guardrail run first because you need to wait for it to run
+    # subsequent runs
+    # then non-blocking guardrail runs
+    # then tool runs
+    # then non-blocking guardrail finishes
+    expected_execution_order = [
+        "blocking_start",
+        "blocking_end",
+        "non_blocking_start",
+        "tool_executed",
+        "non_blocking_end",
+    ]
+
+    # Check that the execution order is as expected
+    assert execution_order == expected_execution_order
+
+    assert result.final_output == "completed"
+    assert len(result.input_guardrail_results) == 2
