@@ -490,9 +490,6 @@ class RunImpl:
                 continue
 
             # At this point we know it's a function tool call
-            if not isinstance(output, ResponseFunctionToolCall):
-                continue
-
             tools_used.append(output.name)
 
             # Handoffs
