@@ -1606,6 +1606,47 @@ class TestModelSettingsPrecedence:
             assert model_settings["tool_choice"] == "required"
             assert model_settings["output_audio_format"] == "g711_ulaw"
 
+    @pytest.mark.asyncio
+    async def test_model_settings_preserve_initial_settings_on_updates(self):
+        """Initial model settings should persist when we recompute settings for updates."""
+
+        agent = RealtimeAgent(name="test_agent", instructions="test")
+        agent.handoffs = []
+        agent.get_system_prompt = AsyncMock(return_value="test_prompt")  # type: ignore
+        agent.get_all_tools = AsyncMock(return_value=[])  # type: ignore
+
+        mock_model = Mock(spec=RealtimeModel)
+
+        initial_settings: RealtimeSessionModelSettings = {
+            "voice": "initial_voice",
+            "output_audio_format": "pcm16",
+        }
+
+        session = RealtimeSession(
+            model=mock_model,
+            agent=agent,
+            context=None,
+            model_config={"initial_model_settings": initial_settings},
+            run_config={},
+        )
+
+        async def mock_get_handoffs(cls, agent, context_wrapper):
+            return []
+
+        with pytest.MonkeyPatch().context() as m:
+            m.setattr(
+                "agents.realtime.session.RealtimeSession._get_handoffs",
+                mock_get_handoffs,
+            )
+
+            model_settings = await session._get_updated_model_settings_from_agent(
+                starting_settings=None,
+                agent=agent,
+            )
+
+        assert model_settings["voice"] == "initial_voice"
+        assert model_settings["output_audio_format"] == "pcm16"
+
 
 class TestUpdateAgentFunctionality:
     """Tests for update agent functionality in RealtimeSession"""
