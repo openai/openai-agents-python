@@ -121,7 +121,14 @@ class TestStreamedAudioInput:
         # Verify the queue contents
         assert streamed_input.queue.qsize() == 2
         # Test non-blocking get
-        assert np.array_equal(streamed_input.queue.get_nowait(), audio1)
+        retrieved_audio1 = streamed_input.queue.get_nowait()
+        # Satisfy type checker
+        assert retrieved_audio1 is not None
+        assert np.array_equal(retrieved_audio1, audio1)
+
         # Test blocking get
-        assert np.array_equal(await streamed_input.queue.get(), audio2)
+        retrieved_audio2 = await streamed_input.queue.get()
+        # Satisfy type checker
+        assert retrieved_audio2 is not None
+        assert np.array_equal(retrieved_audio2, audio2)
         assert streamed_input.queue.empty()
