@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from typing_extensions import TypedDict
@@ -20,6 +23,7 @@ from agents import (
     RunConfig,
     RunContextWrapper,
     Runner,
+    SQLiteSession,
     UserError,
     handoff,
 )
@@ -192,11 +196,13 @@ async def test_structured_output():
             [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
-            # Third turn: tool call and structured output
+            # Third turn: tool call with preamble message
             [
+                get_text_message(json.dumps(Foo(bar="preamble"))),
                 get_function_tool_call("bar", json.dumps({"bar": "baz"})),
-                get_final_output_message(json.dumps(Foo(bar="baz"))),
             ],
+            # Fourth turn: structured output
+            [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
     )
 
@@ -209,10 +215,10 @@ async def test_structured_output():
     )
 
     assert result.final_output == Foo(bar="baz")
-    assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 10, (
+    assert len(result.raw_responses) == 4, "should have four model responses"
+    assert len(result.to_input_list()) == 11, (
         "should have input: 2 orig inputs, function call, function call result, message, handoff, "
-        "handoff output, tool call, tool call result, final output message"
+        "handoff output, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -780,3 +786,96 @@ async def test_dynamic_tool_addition_run() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_session_add_items_called_multiple_times_for_multi_turn_completion():
+    """Test that SQLiteSession.add_items is called multiple times
+    during a multi-turn agent completion.
+
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_agent_runner_session_multi_turn_calls.db"
+        session_id = "runner_session_multi_turn_calls"
+        session = SQLiteSession(session_id, db_path)
+
+        # Define a tool that will be called by the orchestrator agent
+        @function_tool
+        async def echo_tool(text: str) -> str:
+            return f"Echo: {text}"
+
+        # Orchestrator agent that calls the tool multiple times in one completion
+        orchestrator_agent = Agent(
+            name="orchestrator_agent",
+            instructions=(
+                "Call echo_tool twice with inputs of 'foo' and 'bar', then return a summary."
+            ),
+            tools=[echo_tool],
+        )
+
+        # Patch the model to simulate two tool calls and a final message
+        model = FakeModel()
+        orchestrator_agent.model = model
+        model.add_multiple_turn_outputs(
+            [
+                # First turn: tool call
+                [get_function_tool_call("echo_tool", json.dumps({"text": "foo"}), call_id="1")],
+                # Second turn: tool call
+                [get_function_tool_call("echo_tool", json.dumps({"text": "bar"}), call_id="2")],
+                # Third turn: final output
+                [get_final_output_message("Summary: Echoed foo and bar")],
+            ]
+        )
+
+        # Patch add_items to count calls
+        with patch.object(SQLiteSession, "add_items", wraps=session.add_items) as mock_add_items:
+            result = await Runner.run(orchestrator_agent, input="foo and bar", session=session)
+
+            expected_items = [
+                {"content": "foo and bar", "role": "user"},
+                {
+                    "arguments": '{"text": "foo"}',
+                    "call_id": "1",
+                    "name": "echo_tool",
+                    "type": "function_call",
+                    "id": "1",
+                },
+                {"call_id": "1", "output": "Echo: foo", "type": "function_call_output"},
+                {
+                    "arguments": '{"text": "bar"}',
+                    "call_id": "2",
+                    "name": "echo_tool",
+                    "type": "function_call",
+                    "id": "1",
+                },
+                {"call_id": "2", "output": "Echo: bar", "type": "function_call_output"},
+                {
+                    "id": "1",
+                    "content": [
+                        {
+                            "annotations": [],
+                            "text": "Summary: Echoed foo and bar",
+                            "type": "output_text",
+                        }
+                    ],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ]
+
+            expected_calls = [
+                # First call is the initial input
+                (([expected_items[0]],),),
+                # Second call is the first tool call and its result
+                (([expected_items[1], expected_items[2]],),),
+                # Third call is the second tool call and its result
+                (([expected_items[3], expected_items[4]],),),
+                # Fourth call is the final output
+                (([expected_items[5]],),),
+            ]
+            assert mock_add_items.call_args_list == expected_calls
+            assert result.final_output == "Summary: Echoed foo and bar"
+            assert (await session.get_items()) == expected_items
+
+        session.close()
