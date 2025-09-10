@@ -55,7 +55,7 @@ def test_assistant_message_conversion() -> None:
         id="123",
         type="message",
         role="assistant",
-        content=[AssistantMessageContent(type="text", text=None)],
+        content=[AssistantMessageContent(type="output_text", text=None)],
     )
 
     converted: RealtimeMessageItem = _ConversionHelper.conversation_item_to_realtime_message_item(

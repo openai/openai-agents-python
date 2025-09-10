@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 from datetime import datetime
-from typing import Annotated, Any, Callable, Literal, Optional, Union, cast
+from typing import Annotated, Any, Callable, Literal, Union, cast
 
 import pydantic
 import websockets
@@ -30,9 +30,9 @@ from openai.types.realtime.input_audio_buffer_commit_event import (
     InputAudioBufferCommitEvent as OpenAIInputAudioBufferCommitEvent,
 )
 from openai.types.realtime.realtime_audio_config import (
-    Input as OpenAIRealtimeAudioInput,
-    Output as OpenAIRealtimeAudioOutput,
     RealtimeAudioConfig as OpenAIRealtimeAudioConfig,
+    RealtimeAudioConfigInput as OpenAIRealtimeAudioInput,
+    RealtimeAudioConfigOutput as OpenAIRealtimeAudioOutput,
 )
 from openai.types.realtime.realtime_client_event import (
     RealtimeClientEvent as OpenAIRealtimeClientEvent,
@@ -50,17 +50,14 @@ from openai.types.realtime.realtime_conversation_item_user_message import (
     Content,
     RealtimeConversationItemUserMessage,
 )
+from openai.types.realtime.realtime_function_tool import (
+    RealtimeFunctionTool as OpenAISessionFunction,
+)
 from openai.types.realtime.realtime_server_event import (
     RealtimeServerEvent as OpenAIRealtimeServerEvent,
 )
-from openai.types.realtime.realtime_session import (
-    RealtimeSession as OpenAISessionObject,
-)
 from openai.types.realtime.realtime_session_create_request import (
     RealtimeSessionCreateRequest as OpenAISessionCreateRequest,
-)
-from openai.types.realtime.realtime_tools_config_union import (
-    Function as OpenAISessionFunction,
 )
 from openai.types.realtime.realtime_tracing_config import (
     TracingConfiguration as OpenAITracingConfiguration,
@@ -83,6 +80,7 @@ from websockets.asyncio.client import ClientConnection
 from agents.handoffs import Handoff
 from agents.prompts import Prompt
 from agents.realtime._default_tracker import ModelAudioTracker
+from agents.realtime.audio_formats import to_realtime_audio_format
 from agents.tool import FunctionTool, Tool
 from agents.util._types import MaybeAwaitable
 
@@ -132,13 +130,13 @@ _USER_AGENT = f"Agents/Python {__version__}"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
-    "modalities": ["text", "audio"],
+    "modalities": ["audio"],
     "input_audio_format": "pcm16",
     "output_audio_format": "pcm16",
     "input_audio_transcription": {
         "model": "gpt-4o-mini-transcribe",
     },
-    "turn_detection": {"type": "semantic_vad"},
+    "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
 }
 
 
@@ -182,7 +180,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._ongoing_response: bool = False
         self._tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None = None
         self._playback_tracker: RealtimePlaybackTracker | None = None
-        self._created_session: OpenAISessionObject | None = None
+        self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
 
     async def connect(self, options: RealtimeModelConfig) -> None:
@@ -213,12 +211,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             if not api_key:
                 raise UserError("API key is required but was not provided.")
 
-            headers.update(
-                {
-                    "Authorization": f"Bearer {api_key}",
-                    "OpenAI-Beta": "realtime=v1",
-                }
-            )
+            headers.update({"Authorization": f"Bearer {api_key}"})
         self._websocket = await websockets.connect(
             url,
             user_agent_header=_USER_AGENT,
@@ -320,53 +313,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             raise ValueError(f"Unknown event type: {type(event)}")
 
     async def _send_raw_message(self, event: OpenAIRealtimeClientEvent) -> None:
-        """Send a raw message to the model.
-
-        For GA Realtime, omit `session.type` from `session.update` events to avoid
-        server-side validation errors (param='session.type').
-        """
+        """Send a raw message to the model."""
         assert self._websocket is not None, "Not connected"
-
-        if isinstance(event, OpenAISessionUpdateEvent):
-            # Build dict so we can normalize GA field names
-            as_dict = event.model_dump(
-                exclude={"session": {"type"}},
-                exclude_none=True,
-                exclude_unset=True,
-            )
-            session = as_dict.get("session", {})
-            # Flatten `session.audio.{input,output}` to GA-style top-level fields
-            audio_cfg = session.pop("audio", None)
-            if isinstance(audio_cfg, dict):
-                input_cfg = audio_cfg.get("input") or {}
-                output_cfg = audio_cfg.get("output") or {}
-                if "format" in input_cfg and input_cfg["format"] is not None:
-                    session["input_audio_format"] = input_cfg["format"]
-                if "transcription" in input_cfg and input_cfg["transcription"] is not None:
-                    session["input_audio_transcription"] = input_cfg["transcription"]
-                if "turn_detection" in input_cfg and input_cfg["turn_detection"] is not None:
-                    session["turn_detection"] = input_cfg["turn_detection"]
-                if "format" in output_cfg and output_cfg["format"] is not None:
-                    session["output_audio_format"] = output_cfg["format"]
-                if "voice" in output_cfg and output_cfg["voice"] is not None:
-                    session["voice"] = output_cfg["voice"]
-                if "speed" in output_cfg and output_cfg["speed"] is not None:
-                    session["speed"] = output_cfg["speed"]
-                as_dict["session"] = session
-
-            # GA field name normalization
-            if "output_modalities" in session and session.get("output_modalities") is not None:
-                session["modalities"] = session.pop("output_modalities")
-            # Map create-request name to GA session field name
-            if "max_output_tokens" in session and session.get("max_output_tokens") is not None:
-                session["max_response_output_tokens"] = session.pop("max_output_tokens")
-            # Drop unknown client_secret if present
-            session.pop("client_secret", None)
-            as_dict["session"] = session
-            payload = json.dumps(as_dict)
-        else:
-            payload = event.model_dump_json(exclude_none=True, exclude_unset=True)
-
+        payload = event.model_dump_json(exclude_none=True, exclude_unset=True)
         await self._websocket.send(payload)
 
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
@@ -460,10 +409,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 f"content index: {current_item_content_index}"
             )
 
+        session = self._created_session
         automatic_response_cancellation_enabled = (
-            self._created_session
-            and self._created_session.turn_detection
-            and self._created_session.turn_detection.interrupt_response
+            session
+            and session.audio is not None
+            and session.audio.input is not None
+            and session.audio.input.turn_detection is not None
+            and session.audio.input.turn_detection.interrupt_response is True,
         )
         if not automatic_response_cancellation_enabled:
             await self._cancel_response()
@@ -557,17 +509,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
-        # Fast-path GA compatibility: some GA events (e.g., response.done) may include
-        # assistant message content parts with type "audio", which older SDK schemas
-        # don't accept during validation. We don't need to parse response.done further
-        # for our pipeline, so handle it early and skip strict validation.
-        if isinstance(event, dict) and event.get("type") == "response.done":
-            self._ongoing_response = False
-            await self._emit_event(RealtimeModelTurnEndedEvent())
-            return
-        # Similarly, response.output_item.added/done with an assistant message that contains
-        # an `audio` content part can fail validation in older OpenAI schemas. Convert it
-        # directly into our RealtimeMessageItem and emit, then return.
+        # To keep backward-compatibility with the public interface provided by this Agents SDK
         if isinstance(event, dict) and event.get("type") in (
             "response.output_item.added",
             "response.output_item.done",
@@ -579,8 +521,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 for part in raw_content:
                     if not isinstance(part, dict):
                         continue
-                    part_type = part.get("type")
-                    if part_type == "audio":
+                    if part.get("type") == "audio":
                         converted_content.append(
                             {
                                 "type": "audio",
@@ -588,15 +529,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                                 "transcript": part.get("transcript"),
                             }
                         )
-                    elif part_type == "text":
+                    elif part.get("type") == "text":
                         converted_content.append({"type": "text", "text": part.get("text")})
                 status = item.get("status")
                 if status not in ("in_progress", "completed", "incomplete"):
                     is_done = event.get("type") == "response.output_item.done"
                     status = "completed" if is_done else "in_progress"
-                message_item: RealtimeMessageItem = TypeAdapter(
-                    RealtimeMessageItem
-                ).validate_python(
+                type_adapter = TypeAdapter(RealtimeMessageItem)
+                message_item: RealtimeMessageItem = type_adapter.validate_python(
                     {
                         "item_id": item.get("id", ""),
                         "type": "message",
@@ -607,57 +547,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
                 await self._emit_event(RealtimeModelItemUpdatedEvent(item=message_item))
                 return
-        # GA transcript events: response.audio_transcript.delta/done
-        if isinstance(event, dict) and event.get("type") in (
-            "response.audio_transcript.delta",
-            "response.audio_transcript.done",
-        ):
-            transcript = event.get("delta") or event.get("transcript") or ""
-            item_id = event.get("item_id", "")
-            response_id = event.get("response_id", "")
-            if transcript:
-                await self._emit_event(
-                    RealtimeModelTranscriptDeltaEvent(
-                        item_id=item_id,
-                        delta=transcript,
-                        response_id=response_id,
-                    )
-                )
-            return
-        # GA audio events: response.audio.delta/done (alias of response.output_audio.*)
-        if isinstance(event, dict) and event.get("type") in (
-            "response.audio.delta",
-            "response.audio.done",
-        ):
-            evt_type = event.get("type")
-            if evt_type == "response.audio.delta":
-                b64 = event.get("delta") or event.get("audio")
-                if isinstance(b64, str) and b64:
-                    item_id = event.get("item_id", "")
-                    content_index = event.get("content_index", 0)
-                    response_id = event.get("response_id", "")
-                    try:
-                        audio_bytes = base64.b64decode(b64)
-                    except Exception:
-                        logger.debug(f"Failed to decode audio delta: {b64}", exc_info=True)
-                        audio_bytes = b""
-
-                    self._audio_state_tracker.on_audio_delta(item_id, content_index, audio_bytes)
-                    await self._emit_event(
-                        RealtimeModelAudioEvent(
-                            data=audio_bytes,
-                            response_id=response_id,
-                            item_id=item_id,
-                            content_index=content_index,
-                        )
-                    )
-            else:  # response.audio.done
-                item_id = event.get("item_id", "")
-                content_index = event.get("content_index", 0)
-                await self._emit_event(
-                    RealtimeModelAudioDoneEvent(item_id=item_id, content_index=content_index)
-                )
-            return
 
         try:
             if "previous_item_id" in event and event["previous_item_id"] is None:
@@ -665,40 +554,56 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             parsed: AllRealtimeServerEvents = self._server_event_type_adapter.validate_python(event)
         except pydantic.ValidationError as e:
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
-            await self._emit_event(
-                RealtimeModelErrorEvent(
-                    error=e,
-                )
-            )
+            await self._emit_event(RealtimeModelErrorEvent(error=e))
             return
         except Exception as e:
             event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
-            await self._emit_event(
-                RealtimeModelExceptionEvent(
-                    exception=e,
-                    context=f"Failed to validate server event: {event_type}",
-                )
+            event = RealtimeModelExceptionEvent(
+                exception=e,
+                context=f"Failed to validate server event: {event_type}",
             )
+            await self._emit_event(event)
             return
 
         if parsed.type == "response.output_audio.delta":
             await self._handle_audio_delta(parsed)
         elif parsed.type == "response.output_audio.done":
-            await self._emit_event(
-                RealtimeModelAudioDoneEvent(
-                    item_id=parsed.item_id,
-                    content_index=parsed.content_index,
-                )
+            event = RealtimeModelAudioDoneEvent(
+                item_id=parsed.item_id,
+                content_index=parsed.content_index,
             )
+            await self._emit_event(event)
         elif parsed.type == "input_audio_buffer.speech_started":
-            # Do not auto‑interrupt on VAD speech start.
-            # GA can be configured to cancel responses server‑side via
-            # turn_detection.interrupt_response; double‑sending interrupts can
-            # prematurely truncate assistant audio. If client‑side barge‑in is
-            # desired, handle it at the application layer and call
-            # RealtimeModelSendInterrupt explicitly.
-            pass
+            # On VAD speech start, immediately stop local playback so the user can
+            # barge‑in without overlapping assistant audio.
+            last_audio = self._audio_state_tracker.get_last_audio_item()
+            if last_audio is not None:
+                item_id, content_index = last_audio
+                await self._emit_event(
+                    RealtimeModelAudioInterruptedEvent(item_id=item_id, content_index=content_index)
+                )
+
+                # Reset trackers so subsequent playback state queries don't
+                # reference audio that has been interrupted client‑side.
+                self._audio_state_tracker.on_interrupted()
+                if self._playback_tracker:
+                    self._playback_tracker.on_interrupted()
+
+                # If server isn't configured to auto‑interrupt/cancel, cancel the
+                # response to prevent further audio.
+                session = self._created_session
+                automatic_response_cancellation_enabled = (
+                    session
+                    and session.audio is not None
+                    and session.audio.input is not None
+                    and session.audio.input.turn_detection is not None
+                    and session.audio.input.turn_detection.interrupt_response is True,
+                )
+                if not automatic_response_cancellation_enabled:
+                    await self._cancel_response()
+            # Avoid sending conversation.item.truncate here; when GA is set to
+            # interrupt on VAD start, the server will handle truncation.
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
@@ -715,7 +620,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         elif parsed.type == "conversation.item.deleted":
             await self._emit_event(RealtimeModelItemDeletedEvent(item_id=parsed.item_id))
         elif (
-            parsed.type == "conversation.item.created"
+            parsed.type == "conversation.item.added"
+            or parsed.type == "conversation.item.created"
             or parsed.type == "conversation.item.retrieved"
         ):
             previous_item_id = (
@@ -767,12 +673,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
 
-    def _update_created_session(self, session: OpenAISessionObject) -> None:
+    def _update_created_session(self, session: OpenAISessionCreateRequest) -> None:
         self._created_session = session
-        if session.output_audio_format:
-            self._audio_state_tracker.set_audio_format(session.output_audio_format)
+        if (
+            session.audio is not None
+            and session.audio.output is not None
+            and session.audio.output.format is not None
+        ):
+            audio_format = session.audio.output.format
+            self._audio_state_tracker.set_audio_format(audio_format)
             if self._playback_tracker:
-                self._playback_tracker.set_audio_format(session.output_audio_format)
+                self._playback_tracker.set_audio_format(audio_format)
 
     async def _update_session_config(self, model_settings: RealtimeSessionModelSettings) -> None:
         session_config = self._get_session_config(model_settings)
@@ -813,10 +724,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             for value in [input_audio_format, input_audio_transcription, turn_detection]
         ):
             input_audio_config = OpenAIRealtimeAudioInput(
-                format=cast(
-                    Optional[Literal["pcm16", "g711_ulaw", "g711_alaw"]],
-                    input_audio_format,
-                ),
+                format=to_realtime_audio_format(input_audio_format),
                 transcription=cast(Any, input_audio_transcription),
                 turn_detection=cast(Any, turn_detection),
             )
@@ -824,10 +732,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         output_audio_config = None
         if any(value is not None for value in [output_audio_format, speed, voice]):
             output_audio_config = OpenAIRealtimeAudioOutput(
-                format=cast(
-                    Optional[Literal["pcm16", "g711_ulaw", "g711_alaw"]],
-                    output_audio_format,
-                ),
+                format=to_realtime_audio_format(output_audio_format),
                 speed=speed,
                 voice=voice,
             )
@@ -911,15 +816,23 @@ class _ConversionHelper:
             ),
         ):
             raise ValueError("Unsupported conversation item type for message conversion.")
+        content: list[dict] = []
+        for each in item.content:
+            c = each.model_dump()
+            if each.type == "output_text":
+                # For backward-compatibility of assistant message items
+                c["type"] = "text"
+            elif each.type == "output_audio":
+                # For backward-compatibility of assistant message items
+                c["type"] = "audio"
+            content.append(c)
         return TypeAdapter(RealtimeMessageItem).validate_python(
             {
                 "item_id": item.id or "",
                 "previous_item_id": previous_item_id,
                 "type": item.type,
                 "role": item.role,
-                "content": (
-                    [content.model_dump() for content in item.content] if item.content else []
-                ),
+                "content": content,
                 "status": "in_progress",
             },
         )

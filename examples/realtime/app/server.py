@@ -101,7 +101,11 @@ class RealtimeWebSocketManager:
         elif event.type == "history_updated":
             base_event["history"] = [item.model_dump(mode="json") for item in event.history]
         elif event.type == "history_added":
-            pass
+            # Provide the added item so the UI can render incrementally.
+            try:
+                base_event["item"] = event.item.model_dump(mode="json")
+            except Exception:
+                base_event["item"] = None
         elif event.type == "guardrail_tripped":
             base_event["guardrail_results"] = [
                 {"name": result.guardrail.name} for result in event.guardrail_results

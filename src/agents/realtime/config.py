@@ -6,6 +6,9 @@ from typing import (
     Union,
 )
 
+from openai.types.realtime.realtime_audio_formats import (
+    RealtimeAudioFormats as OpenAIRealtimeAudioFormats,
+)
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from agents.prompts import Prompt
@@ -107,10 +110,10 @@ class RealtimeSessionModelSettings(TypedDict):
     speed: NotRequired[float]
     """The speed of the model's responses."""
 
-    input_audio_format: NotRequired[RealtimeAudioFormat]
+    input_audio_format: NotRequired[RealtimeAudioFormat | OpenAIRealtimeAudioFormats]
     """The format for input audio streams."""
 
-    output_audio_format: NotRequired[RealtimeAudioFormat]
+    output_audio_format: NotRequired[RealtimeAudioFormat | OpenAIRealtimeAudioFormats]
     """The format for output audio streams."""
 
     input_audio_transcription: NotRequired[RealtimeInputAudioTranscriptionConfig]

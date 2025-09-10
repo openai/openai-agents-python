@@ -35,7 +35,14 @@ from .events import (
     RealtimeToolStart,
 )
 from .handoffs import realtime_handoff
-from .items import AssistantAudio, InputAudio, InputText, RealtimeItem
+from .items import (
+    AssistantAudio,
+    AssistantMessageItem,
+    InputAudio,
+    InputText,
+    RealtimeItem,
+    UserMessageItem,
+)
 from .model import RealtimeModel, RealtimeModelConfig, RealtimeModelListener
 from .model_events import (
     RealtimeModelEvent,
@@ -248,6 +255,13 @@ class RealtimeSession(RealtimeModelListener):
                 self._item_guardrail_run_counts[item_id] = 0
 
             self._item_transcripts[item_id] += event.delta
+            self._history = self._get_new_history(
+                self._history,
+                AssistantMessageItem(
+                    item_id=item_id,
+                    content=[AssistantAudio(transcript=self._item_transcripts[item_id])],
+                ),
+            )
 
             # Check if we should run guardrails based on debounce threshold
             current_length = len(self._item_transcripts[item_id])
@@ -297,7 +311,7 @@ class RealtimeSession(RealtimeModelListener):
 
                                 # If still missing and this is an assistant item, fall back to
                                 # accumulated transcript deltas tracked during the turn.
-                                if not preserved and incoming_item.role == "assistant":
+                                if incoming_item.role == "assistant":
                                     preserved = self._item_transcripts.get(incoming_item.item_id)
 
                                 if preserved:
@@ -462,9 +476,9 @@ class RealtimeSession(RealtimeModelListener):
         old_history: list[RealtimeItem],
         event: RealtimeModelInputAudioTranscriptionCompletedEvent | RealtimeItem,
     ) -> list[RealtimeItem]:
-        # Merge transcript into placeholder input_audio message.
         if isinstance(event, RealtimeModelInputAudioTranscriptionCompletedEvent):
             new_history: list[RealtimeItem] = []
+            existing_item_found = False
             for item in old_history:
                 if item.item_id == event.item_id and item.type == "message" and item.role == "user":
                     content: list[InputText | InputAudio] = []
@@ -477,11 +491,18 @@ class RealtimeSession(RealtimeModelListener):
                     new_history.append(
                         item.model_copy(update={"content": content, "status": "completed"})
                     )
+                    existing_item_found = True
                 else:
                     new_history.append(item)
+
+            if existing_item_found is False:
+                new_history.append(
+                    UserMessageItem(
+                        item_id=event.item_id, content=[InputText(text=event.transcript)]
+                    )
+                )
             return new_history
 
-        # Otherwise it's just a new item
         # TODO (rm) Add support for audio storage config
 
         # If the item already exists, update it
@@ -490,8 +511,29 @@ class RealtimeSession(RealtimeModelListener):
         )
         if existing_index is not None:
             new_history = old_history.copy()
-            new_history[existing_index] = event
+            if event.type == "message" and event.content is not None and len(event.content) > 0:
+                new_content = []
+                existing_content = old_history[existing_index].content
+                for idx, c in enumerate(event.content):
+                    if idx >= len(existing_content):
+                        new_content.append(c)
+                        continue
+
+                    current_one = existing_content[idx]
+                    if c.type == "audio" or c.type == "input_audio":
+                        if c.transcript is None:
+                            new_content.append(current_one)
+                        else:
+                            new_content.append(c)
+                    elif c.type == "text" or c.type == "input_text":
+                        if current_one.text is not None and c.text is None:
+                            new_content.append(current_one)
+                        else:
+                            new_content.append(c)
+                event.content = new_content
+                new_history[existing_index] = event
             return new_history
+
         # Otherwise, insert it after the previous_item_id if that is set
         elif event.previous_item_id:
             # Insert the new item after the previous item

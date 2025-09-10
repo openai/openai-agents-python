@@ -77,7 +77,7 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
                 assert (
                     call_args[1]["additional_headers"]["Authorization"] == "Bearer test-api-key-123"
                 )
-                assert call_args[1]["additional_headers"]["OpenAI-Beta"] == "realtime=v1"
+                assert call_args[1]["additional_headers"].get("OpenAI-Beta") is None
 
                 # Verify task was created for message listening
                 mock_create_task.assert_called_once()

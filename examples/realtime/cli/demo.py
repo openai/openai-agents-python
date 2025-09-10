@@ -280,7 +280,7 @@ class NoUIDemo:
             elif event.type == "history_added":
                 pass  # Skip these frequent events
             elif event.type == "raw_model_event":
-                print(f"Raw model event: {_truncate_str(str(event.data), 50)}")
+                print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
             else:
                 print(f"Unknown event type: {event.type}")
         except Exception as e:

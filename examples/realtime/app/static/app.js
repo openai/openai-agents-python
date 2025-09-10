@@ -210,6 +210,12 @@ class RealtimeDemo {
             case 'history_updated':
                 this.updateMessagesFromHistory(event.history);
                 break;
+            case 'history_added':
+                // Append just the new item without clearing the thread.
+                if (event.item) {
+                    this.addMessageFromItem(event.item);
+                }
+                break;
         }
     }
     
@@ -235,13 +241,7 @@ class RealtimeDemo {
                         // Extract text from content array
                         item.content.forEach(contentPart => {
                             console.log('Content part:', contentPart);
-                            if (contentPart.type === 'text' && contentPart.text) {
-                                content += contentPart.text;
-                            } else if (contentPart.type === 'input_text' && contentPart.text) {
-                                content += contentPart.text;
-                            } else if (contentPart.type === 'input_audio' && contentPart.transcript) {
-                                content += contentPart.transcript;
-                            } else if (contentPart.type === 'audio' && contentPart.transcript) {
+                            if (contentPart && contentPart.transcript) {
                                 content += contentPart.transcript;
                             }
                         });
@@ -262,6 +262,35 @@ class RealtimeDemo {
         }
         
         this.scrollToBottom();
+    }
+
+    addMessageFromItem(item) {
+        try {
+            if (!item || item.type !== 'message') return;
+            const role = item.role;
+            let content = '';
+
+            if (Array.isArray(item.content)) {
+                for (const contentPart of item.content) {
+                    if (!contentPart || typeof contentPart !== 'object') continue;
+                    if (contentPart.type === 'text' && contentPart.text) {
+                        content += contentPart.text;
+                    } else if (contentPart.type === 'input_text' && contentPart.text) {
+                        content += contentPart.text;
+                    } else if (contentPart.type === 'input_audio' && contentPart.transcript) {
+                        content += contentPart.transcript;
+                    } else if (contentPart.type === 'audio' && contentPart.transcript) {
+                        content += contentPart.transcript;
+                    }
+                }
+            }
+
+            if (content && content.trim()) {
+                this.addMessage(role, content.trim());
+            }
+        } catch (e) {
+            console.error('Failed to add message from item:', e, item);
+        }
     }
     
     addMessage(type, content) {

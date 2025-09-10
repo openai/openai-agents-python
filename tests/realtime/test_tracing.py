@@ -96,7 +96,7 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:
@@ -136,7 +136,7 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:
@@ -160,7 +160,7 @@ class TestRealtimeTracingIntegration:
         session_created_event = {
             "type": "session.created",
             "event_id": "event_123",
-            "session": {"id": "session_456"},
+            "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
         }
 
         with patch.object(model, "send_event") as mock_send_event:
@@ -199,7 +199,7 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:

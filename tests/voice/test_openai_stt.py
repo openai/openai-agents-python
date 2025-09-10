@@ -112,7 +112,7 @@ async def test_session_connects_and_configures_successfully():
         assert "wss://api.openai.com/v1/realtime?intent=transcription" in args[0]
         headers = kwargs.get("additional_headers", {})
         assert headers.get("Authorization") == "Bearer FAKE_KEY"
-        assert headers.get("OpenAI-Beta") == "realtime=v1"
+        assert headers.get("OpenAI-Beta") is None
         assert headers.get("OpenAI-Log-Session") == "1"
 
         # Check that we sent a 'transcription_session.update' message
