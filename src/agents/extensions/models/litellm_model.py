@@ -52,10 +52,11 @@ from ...usage import Usage
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
     """
-    An internal subclass to carry reasoning_content without modifying the original model.
-    """
+    An internal subclass to carry reasoning_content and thinking_blocks without modifying the original model.
+    """  # noqa: E501
 
     reasoning_content: str
+    thinking_blocks: list[dict[str, Any]] | None = None
 
 
 class LitellmModel(Model):
@@ -386,6 +387,26 @@ class LitellmConverter:
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             reasoning_content = message.reasoning_content
 
+        # Extract full thinking blocks including signatures (for Anthropic)
+        thinking_blocks: list[dict[str, Any]] | None = None
+        if hasattr(message, "thinking_blocks") and message.thinking_blocks:
+            # Convert thinking blocks to dict format for compatibility
+            thinking_blocks = []
+            for block in message.thinking_blocks:
+                if isinstance(block, dict):
+                    thinking_blocks.append(cast(dict[str, Any], block))
+                else:
+                    # Convert object to dict by accessing its attributes
+                    block_dict: dict[str, Any] = {}
+                    if hasattr(block, '__dict__'):
+                        block_dict = dict(block.__dict__.items())
+                    elif hasattr(block, 'model_dump'):
+                        block_dict = block.model_dump()
+                    else:
+                        # Last resort: convert to string representation
+                        block_dict = {"thinking": str(block)}
+                    thinking_blocks.append(block_dict)
+
         return InternalChatCompletionMessage(
             content=message.content,
             refusal=refusal,
@@ -394,6 +415,7 @@ class LitellmConverter:
             audio=message.get("audio", None),  # litellm deletes audio if not present
             tool_calls=tool_calls,
             reasoning_content=reasoning_content,
+            thinking_blocks=thinking_blocks,
         )
 
     @classmethod
