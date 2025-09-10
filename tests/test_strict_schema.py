@@ -156,3 +156,20 @@ def test_null_values_removal():
     assert "maximum" not in param_schema
     assert "items" not in param_schema
     assert "properties" not in param_schema
+
+
+def test_additional_properties_none_handling():
+    """
+    Test that additionalProperties: None is properly converted to False to maintain strictness.
+    """
+    schema_with_none_additional_properties = {
+        "type": "object",
+        "properties": {"param": {"type": "string"}},
+        "additionalProperties": None,
+    }
+
+    result = ensure_strict_json_schema(schema_with_none_additional_properties)
+
+    # additionalProperties should be False, not removed
+    assert result["additionalProperties"] is False
+    assert "additionalProperties" in result
