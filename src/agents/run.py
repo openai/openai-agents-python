@@ -411,7 +411,8 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
-        # Prepare input with session if enabled
+        # Keep original user input separate from session-prepared input
+        original_user_input = input
         prepared_input = await self._prepare_input_with_session(input, session)
 
         tool_use_tracker = AgentToolUseTracker()
@@ -438,8 +439,8 @@ class AgentRunner:
             current_agent = starting_agent
             should_run_agent_start_hooks = True
 
-            # save the original input to the session if enabled
-            await self._save_result_to_session(session, original_input, [])
+            # save only the new user input to the session, not the combined history
+            await self._save_result_to_session(session, original_user_input, [])
 
             try:
                 while True:
