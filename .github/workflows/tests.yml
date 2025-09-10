@@ -84,5 +84,7 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: make sync
+      - name: Install Python 3.9 dependencies
+        run: UV_PROJECT_ENVIRONMENT=.venv_39 uv sync --all-extras --all-packages --group dev
       - name: Run tests
         run: make old_version_tests
