@@ -11,11 +11,9 @@ from openai.types.realtime.realtime_audio_formats import (
 
 from ..logger import logger
 
-type LegacyRealtimeAudioFormats = Literal["pcm16", "g711_ulaw", "g711_alaw"]
-
 
 def to_realtime_audio_format(
-    input_audio_format: LegacyRealtimeAudioFormats | RealtimeAudioFormats | None,
+    input_audio_format: str | RealtimeAudioFormats | None,
 ) -> RealtimeAudioFormats | None:
     format: RealtimeAudioFormats | None = None
     if input_audio_format is not None:
