@@ -178,12 +178,9 @@ def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
     return ServerEventTypeAdapter
 
 
-SessionPayload = (
-    OpenAISessionCreateRequest
-    | OpenAIRealtimeTranscriptionSessionCreateRequest
-    | Mapping[str, object]
-    | pydantic.BaseModel
-)
+# Note: Avoid a module-level union alias for Python 3.9 compatibility.
+# Using a union at runtime (e.g., A | B) in a type alias triggers evaluation
+# during import on 3.9. We instead inline the union in annotations below.
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -696,7 +693,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     def _update_created_session(
         self,
-        session: SessionPayload,
+        session: OpenAISessionCreateRequest
+        | OpenAIRealtimeTranscriptionSessionCreateRequest
+        | Mapping[str, object]
+        | pydantic.BaseModel,
     ) -> None:
         # Only store/playback-format information for realtime sessions (not transcription-only)
         normalized_session = self._normalize_session_payload(session)
@@ -714,7 +714,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     @staticmethod
     def _normalize_session_payload(
-        session: SessionPayload,
+        session: OpenAISessionCreateRequest
+        | OpenAIRealtimeTranscriptionSessionCreateRequest
+        | Mapping[str, object]
+        | pydantic.BaseModel,
     ) -> OpenAISessionCreateRequest | None:
         if isinstance(session, OpenAISessionCreateRequest):
             return session
