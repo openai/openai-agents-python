@@ -28,6 +28,7 @@ from .run_context import RunContextWrapper, TContext
 from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
 from .util import _transforms
 from .util._types import MaybeAwaitable
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
@@ -384,6 +385,8 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        # This is our new parameter for context binding
+        bound_context: BaseModel | None = None,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -402,6 +405,12 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
+            bound_context: An optional Pydantic `BaseModel` instance to be used as
+                the context for this specific agent-tool's execution. If provided,
+                this context will be passed to the `Runner.run` call, overriding
+                the parent agent's context. If `None`, the tool will inherit the
+                context from its calling agent, preserving the default behavior.
+
         """
 
         @function_tool(
@@ -415,7 +424,9 @@ class Agent(AgentBase, Generic[TContext]):
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
-                context=context.context,
+                # ✅ The key logic: Use our bound_context if it exists,
+                # otherwise fall back to the original behavior.
+                context=bound_context or context.context,
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
@@ -458,3 +469,4 @@ class Agent(AgentBase, Generic[TContext]):
     ) -> ResponsePromptParam | None:
         """Get the prompt for the agent."""
         return await PromptUtil.to_model_input(self.prompt, run_context, self)
+
