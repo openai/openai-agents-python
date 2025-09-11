@@ -418,7 +418,8 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
-        # Prepare input with session if enabled
+        # Keep original user input separate from session-prepared input
+        original_user_input = input
         prepared_input = await self._prepare_input_with_session(
             input, session, run_config.session_input_callback
         )
@@ -447,8 +448,8 @@ class AgentRunner:
             current_agent = starting_agent
             should_run_agent_start_hooks = True
 
-            # save the original input to the session if enabled
-            await self._save_result_to_session(session, original_input, [])
+            # save only the new user input to the session, not the combined history
+            await self._save_result_to_session(session, original_user_input, [])
 
             try:
                 while True:
@@ -1490,13 +1491,14 @@ class AgentRunner:
         if session is None:
             return input
 
-        # If the user doesn't explicitly specify a mode, raise an error
+        # If the user doesn't specify an input callback and pass a list as input
         if isinstance(input, list) and not session_input_callback:
             raise UserError(
-                "You must specify the `session_input_callback` in the `RunConfig`. "
-                "Otherwise, when using session memory, provide only a string input to append to "
-                "the conversation, or use session=None and provide a list to manually manage "
-                "conversation history."
+                "When using session memory, list inputs require a "
+                "`RunConfig.session_input_callback` to define how they should be merged "
+                "with the conversation history. If you don't want to use a callback, "
+                "provide your input as a string instead, or disable session memory "
+                "(session=None) and pass a list to manage the history manually."
             )
 
         # Get previous conversation history
