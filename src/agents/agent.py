@@ -403,6 +403,8 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
+            max_turns: The maximum number of turns the agent can take when running as a tool.
+                If not provided, the default value will be used.
         """
 
         @function_tool(
