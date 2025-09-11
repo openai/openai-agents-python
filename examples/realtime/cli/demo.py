@@ -22,6 +22,9 @@ CHUNK_LENGTH_S = 0.04  # 40ms aligns with realtime defaults
 SAMPLE_RATE = 24000
 FORMAT = np.int16
 CHANNELS = 1
+ENERGY_THRESHOLD = 0.015  # RMS threshold for barge‑in while assistant is speaking
+PREBUFFER_CHUNKS = 3      # initial jitter buffer (~120ms with 40ms chunks)
+FADE_OUT_MS = 12          # short fade to avoid clicks when interrupting
 
 # Set up logging for OpenAI agents SDK
 # logging.basicConfig(
@@ -61,29 +64,86 @@ class NoUIDemo:
 
         # Audio output state for callback system
         # Store tuples: (samples_np, item_id, content_index)
-        self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=100)
+        # Use an unbounded queue to avoid drops that sound like skipped words.
+        self.output_queue: queue.Queue[Any] = queue.Queue(maxsize=0)
         self.interrupt_event = threading.Event()
         self.current_audio_chunk: tuple[np.ndarray[Any, np.dtype[Any]], str, int] | None = None
         self.chunk_position = 0
         self.bytes_per_sample = np.dtype(FORMAT).itemsize
+
+        # Jitter buffer and fade-out state
+        self.prebuffering = True
+        self.prebuffer_target_chunks = PREBUFFER_CHUNKS
+        self.fading = False
+        self.fade_total_samples = 0
+        self.fade_done_samples = 0
+        self.fade_samples = int(SAMPLE_RATE * (FADE_OUT_MS / 1000.0))
 
     def _output_callback(self, outdata, frames: int, time, status) -> None:
         """Callback for audio output - handles continuous audio stream from server."""
         if status:
             print(f"Output callback status: {status}")
 
-        # Check if we should clear the queue due to interrupt
+        # Handle interruption with a short fade-out to prevent clicks.
         if self.interrupt_event.is_set():
-            # Clear the queue and current chunk state
-            while not self.output_queue.empty():
-                try:
-                    self.output_queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.current_audio_chunk = None
-            self.chunk_position = 0
-            self.interrupt_event.clear()
             outdata.fill(0)
+            if self.current_audio_chunk is None:
+                # Nothing to fade, just flush everything and reset.
+                while not self.output_queue.empty():
+                    try:
+                        self.output_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self.prebuffering = True
+                self.interrupt_event.clear()
+                return
+
+            # Prepare fade parameters
+            if not self.fading:
+                self.fading = True
+                self.fade_done_samples = 0
+                # Remaining samples in the current chunk
+                remaining_in_chunk = len(self.current_audio_chunk[0]) - self.chunk_position
+                self.fade_total_samples = min(self.fade_samples, max(0, remaining_in_chunk))
+
+            samples, item_id, content_index = self.current_audio_chunk
+            samples_filled = 0
+            while samples_filled < len(outdata) and self.fade_done_samples < self.fade_total_samples:
+                remaining_output = len(outdata) - samples_filled
+                remaining_fade = self.fade_total_samples - self.fade_done_samples
+                n = min(remaining_output, remaining_fade)
+
+                src = samples[self.chunk_position : self.chunk_position + n].astype(np.float32)
+                # Linear ramp from current level down to 0 across remaining fade samples
+                idx = np.arange(self.fade_done_samples, self.fade_done_samples + n, dtype=np.float32)
+                gain = 1.0 - (idx / float(self.fade_total_samples))
+                ramped = np.clip(src * gain, -32768.0, 32767.0).astype(np.int16)
+                outdata[samples_filled : samples_filled + n, 0] = ramped
+
+                # Optionally report played bytes (ramped) to playback tracker
+                try:
+                    self.playback_tracker.on_play_bytes(
+                        item_id=item_id, item_content_index=content_index, bytes=ramped.tobytes()
+                    )
+                except Exception:
+                    pass
+
+                samples_filled += n
+                self.chunk_position += n
+                self.fade_done_samples += n
+
+            # If fade completed, flush the remaining audio and reset state
+            if self.fade_done_samples >= self.fade_total_samples:
+                self.current_audio_chunk = None
+                self.chunk_position = 0
+                while not self.output_queue.empty():
+                    try:
+                        self.output_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                self.fading = False
+                self.prebuffering = True
+                self.interrupt_event.clear()
             return
 
         # Fill output buffer from queue and current chunk
@@ -94,6 +154,10 @@ class NoUIDemo:
             # If we don't have a current chunk, try to get one from queue
             if self.current_audio_chunk is None:
                 try:
+                    # Respect a small jitter buffer before starting playback
+                    if self.prebuffering and self.output_queue.qsize() < self.prebuffer_target_chunks:
+                        break
+                    self.prebuffering = False
                     self.current_audio_chunk = self.output_queue.get_nowait()
                     self.chunk_position = 0
                 except queue.Empty:
@@ -146,12 +210,15 @@ class NoUIDemo:
 
         try:
             runner = RealtimeRunner(agent)
-            # Attach playback tracker and disable server-side response interruption,
-            # which can truncate assistant audio when mic picks up speaker output.
+            # Attach playback tracker and enable server‑side interruptions + auto response.
             model_config: RealtimeModelConfig = {
                 "playback_tracker": self.playback_tracker,
                 "initial_model_settings": {
-                    "turn_detection": {"type": "semantic_vad", "interrupt_response": False},
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "interrupt_response": True,
+                        "create_response": True,
+                    },
                 },
             }
             async with await runner.run(model_config=model_config) as session:
@@ -219,11 +286,18 @@ class NoUIDemo:
                 # Convert numpy array to bytes
                 audio_bytes = data.tobytes()
 
-                # Half-duplex gating: do not send mic while assistant audio is playing
+                # Smart barge‑in: if assistant audio is playing, send only if mic has speech.
                 assistant_playing = (
                     self.current_audio_chunk is not None or not self.output_queue.empty()
                 )
-                if not assistant_playing:
+                if assistant_playing:
+                    # Compute RMS energy to detect speech while assistant is talking
+                    samples = data.reshape(-1)
+                    if rms_energy(samples) >= ENERGY_THRESHOLD:
+                        # Locally flush queued assistant audio for snappier interruption.
+                        self.interrupt_event.set()
+                        await self.session.send_audio(audio_bytes)
+                else:
                     await self.session.send_audio(audio_bytes)
 
                 # Yield control back to event loop
@@ -255,23 +329,12 @@ class NoUIDemo:
             elif event.type == "audio":
                 # Enqueue audio for callback-based playback with metadata
                 np_audio = np.frombuffer(event.audio.data, dtype=np.int16)
-                try:
-                    self.output_queue.put_nowait((np_audio, event.item_id, event.content_index))
-                except queue.Full:
-                    # Queue is full - only drop if we have significant backlog
-                    # This prevents aggressive dropping that could cause choppiness
-                    if self.output_queue.qsize() > 8:  # Keep some buffer
-                        try:
-                            self.output_queue.get_nowait()
-                            self.output_queue.put_nowait(
-                                (np_audio, event.item_id, event.content_index)
-                            )
-                        except queue.Empty:
-                            pass
-                    # If queue isn't too full, just skip this chunk to avoid blocking
+                # Non-blocking put; queue is unbounded, so drops won’t occur.
+                self.output_queue.put_nowait((np_audio, event.item_id, event.content_index))
             elif event.type == "audio_interrupted":
                 print("Audio interrupted")
-                # Signal the output callback to clear its queue and state
+                # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
+                self.prebuffering = True
                 self.interrupt_event.set()
             elif event.type == "error":
                 print(f"Error: {event.error}")

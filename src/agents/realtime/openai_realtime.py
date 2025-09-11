@@ -30,6 +30,11 @@ from openai.types.realtime.input_audio_buffer_append_event import (
 from openai.types.realtime.input_audio_buffer_commit_event import (
     InputAudioBufferCommitEvent as OpenAIInputAudioBufferCommitEvent,
 )
+from openai.types.realtime.realtime_audio_formats import (
+    AudioPCM,
+    AudioPCMA,
+    AudioPCMU,
+)
 from openai.types.realtime.realtime_client_event import (
     RealtimeClientEvent as OpenAIRealtimeClientEvent,
 )
@@ -124,6 +129,12 @@ from .model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
+
+# Avoid direct imports of non-exported names by referencing via module
+OpenAIRealtimeAudioConfig = _rt_audio_config.RealtimeAudioConfig
+OpenAIRealtimeAudioInput = _rt_audio_config.RealtimeAudioConfigInput  # type: ignore[attr-defined]
+OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: ignore[attr-defined]
+
 
 _USER_AGENT = f"Agents/Python {__version__}"
 
@@ -508,7 +519,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _handle_ws_event(self, event: dict[str, Any]):
         await self._emit_event(RealtimeModelRawServerEvent(data=event))
-        # To keep backward-compatibility with the public interface provided by this Agents SDK
+        # The public interface definedo on this Agents SDK side (e.g., RealtimeMessageItem)
+        # must be the same even after the GA migration, so this part does the conversion
         if isinstance(event, dict) and event.get("type") in (
             "response.output_item.added",
             "response.output_item.done",
@@ -685,13 +697,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 and session.audio.output is not None
                 and session.audio.output.format is not None
             ):
-                # Convert OpenAI audio format objects to our internal string format
-                from openai.types.realtime.realtime_audio_formats import (
-                    AudioPCM,
-                    AudioPCMA,
-                    AudioPCMU,
-                )
-
                 fmt = session.audio.output.format
                 if isinstance(fmt, AudioPCM):
                     normalized = "pcm16"
@@ -739,11 +744,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "output_audio_format",
             DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
         )
-
-        # Avoid direct imports of non-exported names by referencing via module
-        OpenAIRealtimeAudioConfig = _rt_audio_config.RealtimeAudioConfig
-        OpenAIRealtimeAudioInput = _rt_audio_config.RealtimeAudioConfigInput  # type: ignore[attr-defined]
-        OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: ignore[attr-defined]
 
         input_audio_config = None
         if any(
