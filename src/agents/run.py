@@ -230,7 +230,7 @@ class Runner:
         input: str | list[TResponseInputItem],
         *,
         context: TContext | None = None,
-        max_turns: int = DEFAULT_MAX_TURNS,
+        max_turns: int | None = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
@@ -271,6 +271,8 @@ class Runner:
             agent. Agents may perform handoffs, so we don't know the specific type of the output.
         """
         runner = DEFAULT_AGENT_RUNNER
+        if max_turns is None:
+            max_turns = DEFAULT_MAX_TURNS
         return await runner.run(
             starting_agent,
             input,

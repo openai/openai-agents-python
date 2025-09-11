@@ -384,6 +384,7 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        max_turns: int | None = None,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -416,6 +417,7 @@ class Agent(AgentBase, Generic[TContext]):
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                max_turns=max_turns
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
