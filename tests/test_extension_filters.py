@@ -5,6 +5,7 @@ from agents.extensions.handoff_filters import remove_all_tools
 from agents.items import (
     HandoffOutputItem,
     MessageOutputItem,
+    ReasoningItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
@@ -74,6 +75,12 @@ def _get_handoff_output_run_item(content: str) -> HandoffOutputItem:
         },
         source_agent=fake_agent(),
         target_agent=fake_agent(),
+    )
+
+
+def _get_reasoning_output_run_item() -> ReasoningItem:
+    return ReasoningItem(
+        agent=fake_agent(), raw_item={"id": "rid", "summary": [], "type": "reasoning"}
     )
 
 
@@ -165,10 +172,12 @@ def test_removes_tools_from_new_items_and_history():
             _get_message_input_item("Hello2"),
         ),
         pre_handoff_items=(
+            _get_reasoning_output_run_item(),
             _get_message_output_run_item("123"),
             _get_tool_output_run_item("456"),
         ),
         new_items=(
+            _get_reasoning_output_run_item(),
             _get_message_output_run_item("Hello"),
             _get_tool_output_run_item("World"),
         ),
@@ -187,11 +196,13 @@ def test_removes_handoffs_from_history():
             _get_handoff_input_item("World"),
         ),
         pre_handoff_items=(
+            _get_reasoning_output_run_item(),
             _get_message_output_run_item("Hello"),
             _get_tool_output_run_item("World"),
             _get_handoff_output_run_item("World"),
         ),
         new_items=(
+            _get_reasoning_output_run_item(),
             _get_message_output_run_item("Hello"),
             _get_tool_output_run_item("World"),
             _get_handoff_output_run_item("World"),
