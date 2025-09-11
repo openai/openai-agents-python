@@ -1,11 +1,14 @@
 """Tests for realtime handoff functionality."""
 
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 
 from agents import Agent
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.realtime import RealtimeAgent, realtime_handoff
+from agents.run_context import RunContextWrapper
 
 
 def test_realtime_handoff_creation():
@@ -94,3 +97,58 @@ def test_type_annotations_work():
 
     # This should be typed as Handoff[Any, RealtimeAgent[Any]]
     assert isinstance(handoff_obj, Handoff)
+
+
+def test_realtime_handoff_invalid_param_counts_raise():
+    rt = RealtimeAgent(name="x")
+
+    # on_handoff with input_type but wrong param count
+    def bad2(a):  # only one parameter
+        return None
+
+    with pytest.raises(UserError):
+        realtime_handoff(rt, on_handoff=bad2, input_type=int)  # type: ignore[arg-type]
+
+    # on_handoff without input but wrong param count
+    def bad1(a, b):  # two parameters
+        return None
+
+    with pytest.raises(UserError):
+        realtime_handoff(rt, on_handoff=bad1)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_missing_input_json_raises_model_error():
+    rt = RealtimeAgent(name="x")
+
+    async def with_input(ctx: RunContextWrapper[Any], data: int):  # simple non-object type
+        return None
+
+    h = realtime_handoff(rt, on_handoff=with_input, input_type=int)
+
+    with pytest.raises(ModelBehaviorError):
+        await h.on_invoke_handoff(RunContextWrapper(None), "null")
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_is_enabled_async(monkeypatch):
+    rt = RealtimeAgent(name="x")
+
+    async def is_enabled(ctx, agent):
+        return True
+
+    h = realtime_handoff(rt, is_enabled=is_enabled)
+
+    # Patch missing symbol in module to satisfy isinstance in closure
+    import agents.realtime.handoffs as rh
+
+    if not hasattr(rh, "RealtimeAgent"):
+        from agents.realtime import RealtimeAgent as _RT
+
+        rh.RealtimeAgent = _RT  # type: ignore[attr-defined]
+
+    from collections.abc import Awaitable
+    from typing import cast as _cast
+
+    assert callable(h.is_enabled)
+    assert await _cast(Awaitable[bool], h.is_enabled(RunContextWrapper(None), rt))

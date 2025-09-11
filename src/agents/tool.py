@@ -13,6 +13,7 @@ from openai.types.responses.response_computer_tool_call import (
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
+from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
 from pydantic import ValidationError
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
@@ -133,12 +134,15 @@ class WebSearchTool:
     user_location: UserLocation | None = None
     """Optional location for the search. Lets you customize results to be relevant to a location."""
 
+    filters: WebSearchToolFilters | None = None
+    """A filter to apply based on file attributes."""
+
     search_context_size: Literal["low", "medium", "high"] = "medium"
     """The amount of context to use for the search."""
 
     @property
     def name(self):
-        return "web_search_preview"
+        return "web_search"
 
 
 @dataclass
@@ -264,7 +268,11 @@ LocalShellExecutor = Callable[[LocalShellCommandRequest], MaybeAwaitable[str]]
 
 @dataclass
 class LocalShellTool:
-    """A tool that allows the LLM to execute commands on a shell."""
+    """A tool that allows the LLM to execute commands on a shell.
+
+    For more details, see:
+    https://platform.openai.com/docs/guides/tools-local-shell
+    """
 
     executor: LocalShellExecutor
     """A function that executes a command on a shell."""

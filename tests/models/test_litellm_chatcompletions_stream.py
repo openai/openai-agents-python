@@ -90,6 +90,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -183,6 +184,7 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -273,6 +275,7 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -389,6 +392,7 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)

@@ -6,6 +6,8 @@ from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast
 
+from agents.prompts import Prompt
+
 from ..agent import AgentBase
 from ..guardrail import OutputGuardrail
 from ..handoffs import Handoff
@@ -53,6 +55,11 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     Can either be a string, or a function that dynamically generates instructions for the agent. If
     you provide a function, it will be called with the context and the agent instance. It must
     return a string.
+    """
+
+    prompt: Prompt | None = None
+    """A prompt object. Prompts allow you to dynamically configure the instructions, tools
+    and other config for an agent outside of your code. Only usable with OpenAI models.
     """
 
     handoffs: list[RealtimeAgent[Any] | Handoff[TContext, RealtimeAgent[Any]]] = field(

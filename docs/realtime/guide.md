@@ -15,7 +15,7 @@ Realtime agents allow for conversational flows, processing audio and text inputs
 
 The realtime system consists of several key components:
 
--   **RealtimeAgent**: An agent, configured wiht instructions, tools and handoffs.
+-   **RealtimeAgent**: An agent, configured with instructions, tools and handoffs.
 -   **RealtimeRunner**: Manages configuration. You can call `runner.run()` to get a session.
 -   **RealtimeSession**: A single interaction session. You typically create one each time a user starts a conversation, and keep it alive until the conversation is done.
 -   **RealtimeModel**: The underlying model interface (typically OpenAI's WebSocket implementation)
@@ -48,7 +48,7 @@ Key differences from regular agents:
 
 ### Model settings
 
-The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-4o-realtime-preview`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
+The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-realtime`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
 
 ### Audio configuration
 

@@ -24,6 +24,7 @@ class PromptCaptureFakeModel(FakeModel):
         tracing,
         *,
         previous_response_id,
+        conversation_id,
         prompt,
     ):
         # Record the prompt that the agent resolved and passed in.
@@ -37,6 +38,7 @@ class PromptCaptureFakeModel(FakeModel):
             handoffs,
             tracing,
             previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
             prompt=prompt,
         )
 

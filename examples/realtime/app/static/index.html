@@ -204,6 +204,7 @@
             background: #f8f9fa;
             display: flex;
             gap: 0.5rem;
+            align-items: center;
         }
         
         .mute-btn {
@@ -265,6 +266,9 @@
             </div>
             <div class="controls">
                 <button id="muteBtn" class="mute-btn unmuted" disabled>🎤 Mic On</button>
+                <input id="imagePrompt" type="text" placeholder="Optional prompt for image" style="flex: 1; padding: 0.5rem; border: 1px solid #e1e5e9; border-radius: 6px;" />
+                <input id="imageInput" type="file" accept="image/*" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;" />
+                <button id="imageBtn" type="button" class="mute-btn unmuted" style="background:#6f42c1; user-select:none;">🖼️ Send Image</button>
                 <span id="status" class="status disconnected">Disconnected</span>
             </div>
         </div>

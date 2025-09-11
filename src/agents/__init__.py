@@ -46,7 +46,7 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import AgentHooks, RunHooks
-from .memory import Session, SQLiteSession
+from .memory import OpenAIConversationsSession, Session, SessionABC, SQLiteSession
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
@@ -221,7 +221,9 @@ __all__ = [
     "RunHooks",
     "AgentHooks",
     "Session",
+    "SessionABC",
     "SQLiteSession",
+    "OpenAIConversationsSession",
     "RunContextWrapper",
     "TContext",
     "RunErrorDetails",

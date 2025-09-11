@@ -5,6 +5,7 @@ from agents import Agent, function_tool, handoff
 def greet(name: str) -> str:
     return f"Hello, {name}!"
 
+
 def test_agent_clone_shallow_copy():
     """Test that clone creates shallow copy with tools.copy() workaround"""
     target_agent = Agent(name="Target")
@@ -16,9 +17,7 @@ def test_agent_clone_shallow_copy():
     )
 
     cloned = original.clone(
-        name="Cloned",
-        tools=original.tools.copy(),
-        handoffs=original.handoffs.copy()
+        name="Cloned", tools=original.tools.copy(), handoffs=original.handoffs.copy()
     )
 
     # Basic assertions

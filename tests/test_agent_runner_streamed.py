@@ -207,11 +207,13 @@ async def test_structured_output():
             [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
-            # Third turn: tool call and structured output
+            # Third turn: tool call with preamble message
             [
+                get_text_message(json.dumps(Foo(bar="preamble"))),
                 get_function_tool_call("bar", json.dumps({"bar": "baz"})),
-                get_final_output_message(json.dumps(Foo(bar="baz"))),
             ],
+            # Fourth turn: structured output
+            [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
     )
 
@@ -226,10 +228,10 @@ async def test_structured_output():
         pass
 
     assert result.final_output == Foo(bar="baz")
-    assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 10, (
+    assert len(result.raw_responses) == 4, "should have four model responses"
+    assert len(result.to_input_list()) == 11, (
         "should have input: 2 orig inputs, function call, function call result, message, handoff, "
-        "handoff output, tool call, tool call result, final output"
+        "handoff output, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -624,11 +626,10 @@ async def test_streaming_events():
             [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
-            # Third turn: tool call and structured output
-            [
-                get_function_tool_call("bar", json.dumps({"bar": "baz"})),
-                get_final_output_message(json.dumps(Foo(bar="baz"))),
-            ],
+            # Third turn: tool call
+            [get_function_tool_call("bar", json.dumps({"bar": "baz"}))],
+            # Fourth turn: structured output
+            [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
     )
 
@@ -652,7 +653,7 @@ async def test_streaming_events():
             agent_data.append(event)
 
     assert result.final_output == Foo(bar="baz")
-    assert len(result.raw_responses) == 3, "should have three model responses"
+    assert len(result.raw_responses) == 4, "should have four model responses"
     assert len(result.to_input_list()) == 10, (
         "should have input: 2 orig inputs, function call, function call result, message, handoff, "
         "handoff output, tool call, tool call result, final output"

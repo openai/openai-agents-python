@@ -6,17 +6,18 @@ the Runner API, which is the most common way users interact with the Agents libr
 
 To run this example, you need to:
 1. Set your OPENAI_API_KEY environment variable
-2. Use a model that supports reasoning content (e.g., deepseek-reasoner)
+2. Use a model that supports reasoning content (e.g., gpt-5)
 """
 
 import asyncio
 import os
-from typing import Any
 
-from agents import Agent, Runner, trace
+from openai.types.shared.reasoning import Reasoning
+
+from agents import Agent, ModelSettings, Runner, trace
 from agents.items import ReasoningItem
 
-MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "deepseek-reasoner"
+MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "gpt-5"
 
 
 async def main():
@@ -27,6 +28,7 @@ async def main():
         name="Reasoning Agent",
         instructions="You are a helpful assistant that explains your reasoning step by step.",
         model=MODEL_NAME,
+        model_settings=ModelSettings(reasoning=Reasoning(effort="medium", summary="detailed")),
     )
 
     # Example 1: Non-streaming response
@@ -35,53 +37,34 @@ async def main():
         result = await Runner.run(
             agent, "What is the square root of 841? Please explain your reasoning."
         )
-
         # Extract reasoning content from the result items
         reasoning_content = None
-        # RunResult has 'response' attribute which has 'output' attribute
-        for item in result.response.output:  # type: ignore
-            if isinstance(item, ReasoningItem):
-                reasoning_content = item.summary[0].text  # type: ignore
+        for item in result.new_items:
+            if isinstance(item, ReasoningItem) and len(item.raw_item.summary) > 0:
+                reasoning_content = item.raw_item.summary[0].text
                 break
 
-        print("\nReasoning Content:")
+        print("\n### Reasoning Content:")
         print(reasoning_content or "No reasoning content provided")
-
-        print("\nFinal Output:")
+        print("\n### Final Output:")
         print(result.final_output)
 
     # Example 2: Streaming response
     with trace("Reasoning Content - Streaming"):
         print("\n=== Example 2: Streaming response ===")
-        print("\nStreaming response:")
-
-        # Buffers to collect reasoning and regular content
-        reasoning_buffer = ""
-        content_buffer = ""
-
-        # RunResultStreaming is async iterable
         stream = Runner.run_streamed(agent, "What is 15 x 27? Please explain your reasoning.")
+        output_text_already_started = False
+        async for event in stream.stream_events():
+            if event.type == "raw_response_event":
+                if event.data.type == "response.reasoning_summary_text.delta":
+                    print(f"\033[33m{event.data.delta}\033[0m", end="", flush=True)
+                elif event.data.type == "response.output_text.delta":
+                    if not output_text_already_started:
+                        print("\n")
+                        output_text_already_started = True
+                    print(f"\033[32m{event.data.delta}\033[0m", end="", flush=True)
 
-        async for event in stream:  # type: ignore
-            if isinstance(event, ReasoningItem):
-                # This is reasoning content
-                reasoning_item: Any = event
-                reasoning_buffer += reasoning_item.summary[0].text
-                print(
-                    f"\033[33m{reasoning_item.summary[0].text}\033[0m", end="", flush=True
-                )  # Yellow for reasoning
-            elif hasattr(event, "text"):
-                # This is regular content
-                content_buffer += event.text
-                print(
-                    f"\033[32m{event.text}\033[0m", end="", flush=True
-                )  # Green for regular content
-
-        print("\n\nCollected Reasoning Content:")
-        print(reasoning_buffer)
-
-        print("\nCollected Final Answer:")
-        print(content_buffer)
+        print("\n")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,10 @@ async def main(verbose: bool, stream: bool):
                 print(f"Got event of type {event.item.__class__.__name__}")
         print(f"Done streaming; final result: {result.final_output}")
     else:
-        res = await Runner.run(agent, "Which language is this repo written in?")
+        res = await Runner.run(
+            agent,
+            "Which language is this repo written in? Your MCP server should know what the repo is.",
+        )
         print(res.final_output)
         # The repository is primarily written in multiple languages, including Rust and TypeScript...
 

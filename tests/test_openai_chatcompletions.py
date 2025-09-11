@@ -77,6 +77,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Should have produced exactly one output message with one text part
@@ -129,6 +130,7 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert len(resp.output) == 1
@@ -182,6 +184,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Expect a message item followed by a function tool call item.
@@ -224,6 +227,7 @@ async def test_get_response_with_no_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert resp.output == []

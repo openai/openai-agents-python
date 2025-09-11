@@ -70,8 +70,8 @@ class BackendSpanExporter(TracingExporter):
                 client.
         """
         # Clear the cached property if it exists
-        if 'api_key' in self.__dict__:
-            del self.__dict__['api_key']
+        if "api_key" in self.__dict__:
+            del self.__dict__["api_key"]
 
         # Update the private attribute
         self._api_key = api_key

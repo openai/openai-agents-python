@@ -17,6 +17,11 @@ from .items import ItemHelpers
 from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
+from .models.default_models import (
+    get_default_model_settings,
+    gpt_5_reasoning_settings_required,
+    is_gpt_5_default,
+)
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
@@ -168,10 +173,10 @@ class Agent(AgentBase, Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `openai_provider.DEFAULT_MODEL` (currently "gpt-4o").
+    `agents.models.get_default_model()` (currently "gpt-4.1").
     """
 
-    model_settings: ModelSettings = field(default_factory=ModelSettings)
+    model_settings: ModelSettings = field(default_factory=get_default_model_settings)
     """Configures model-specific tuning parameters (e.g. temperature, top_p).
     """
 
@@ -285,6 +290,26 @@ class Agent(AgentBase, Generic[TContext]):
                 f"Agent model_settings must be a ModelSettings instance, "
                 f"got {type(self.model_settings).__name__}"
             )
+
+        if (
+            # The user sets a non-default model
+            self.model is not None
+            and (
+                # The default model is gpt-5
+                is_gpt_5_default() is True
+                # However, the specified model is not a gpt-5 model
+                and (
+                    isinstance(self.model, str) is False
+                    or gpt_5_reasoning_settings_required(self.model) is False  # type: ignore
+                )
+                # The model settings are not customized for the specified model
+                and self.model_settings == get_default_model_settings()
+            )
+        ):
+            # In this scenario, we should use a generic model settings
+            # because non-gpt-5 models are not compatible with the default gpt-5 model settings.
+            # This is a best-effort attempt to make the agent work with non-gpt-5 models.
+            self.model_settings = ModelSettings()
 
         if not isinstance(self.input_guardrails, list):
             raise TypeError(

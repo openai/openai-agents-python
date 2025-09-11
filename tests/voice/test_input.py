@@ -55,8 +55,7 @@ def test_buffer_to_audio_file_invalid_dtype():
     buffer = np.array([1.0, 2.0, 3.0], dtype=np.float64)
 
     with pytest.raises(UserError, match="Buffer must be a numpy array of int16 or float32"):
-        # Purposely ignore the type error
-        _buffer_to_audio_file(buffer)  # type: ignore
+        _buffer_to_audio_file(buffer=buffer)
 
 
 class TestAudioInput:
@@ -121,7 +120,14 @@ class TestStreamedAudioInput:
         # Verify the queue contents
         assert streamed_input.queue.qsize() == 2
         # Test non-blocking get
-        assert np.array_equal(streamed_input.queue.get_nowait(), audio1)
+        retrieved_audio1 = streamed_input.queue.get_nowait()
+        # Satisfy type checker
+        assert retrieved_audio1 is not None
+        assert np.array_equal(retrieved_audio1, audio1)
+
         # Test blocking get
-        assert np.array_equal(await streamed_input.queue.get(), audio2)
+        retrieved_audio2 = await streamed_input.queue.get()
+        # Satisfy type checker
+        assert retrieved_audio2 is not None
+        assert np.array_equal(retrieved_audio2, audio2)
         assert streamed_input.queue.empty()

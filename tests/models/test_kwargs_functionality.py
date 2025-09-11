@@ -47,6 +47,7 @@ async def test_litellm_kwargs_forwarded(monkeypatch):
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
     )
 
     # Verify that all kwargs were passed through

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Iterable
+from typing import Any, Literal
 
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
@@ -29,3 +30,20 @@ def validate_json(json_str: str, type_adapter: TypeAdapter[T], partial: bool) ->
         raise ModelBehaviorError(
             f"Invalid JSON when parsing {json_str} for {type_adapter}; {e}"
         ) from e
+
+
+def _to_dump_compatible(obj: Any) -> Any:
+    return _to_dump_compatible_internal(obj)
+
+
+def _to_dump_compatible_internal(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: _to_dump_compatible_internal(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_to_dump_compatible_internal(x) for x in obj]
+
+    if isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, bytearray)):
+        return [_to_dump_compatible_internal(x) for x in obj]
+
+    return obj
