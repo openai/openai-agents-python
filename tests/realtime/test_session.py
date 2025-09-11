@@ -127,9 +127,7 @@ async def test_transcription_completed_adds_new_user_item():
     agent = RealtimeAgent(name="agent")
     session = RealtimeSession(model, agent, None)
 
-    event = RealtimeModelInputAudioTranscriptionCompletedEvent(
-        item_id="item1", transcript="hello"
-    )
+    event = RealtimeModelInputAudioTranscriptionCompletedEvent(item_id="item1", transcript="hello")
     await session.on_event(event)
 
     # Should have appended a new user item

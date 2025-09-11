@@ -461,7 +461,6 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio is not None and cfg.audio.output is not None
         assert cfg.audio.output.voice == "verse"
 
-
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
         """Test successful handling of error events."""

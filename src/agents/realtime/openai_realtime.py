@@ -5,6 +5,7 @@ import base64
 import inspect
 import json
 import os
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union, cast
 
@@ -175,6 +176,14 @@ def get_server_event_type_adapter() -> TypeAdapter[AllRealtimeServerEvents]:
     if not ServerEventTypeAdapter:
         ServerEventTypeAdapter = TypeAdapter(AllRealtimeServerEvents)
     return ServerEventTypeAdapter
+
+
+SessionPayload = (
+    OpenAISessionCreateRequest
+    | OpenAIRealtimeTranscriptionSessionCreateRequest
+    | Mapping[str, object]
+    | pydantic.BaseModel
+)
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -687,30 +696,99 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     def _update_created_session(
         self,
-        session: OpenAISessionCreateRequest | OpenAIRealtimeTranscriptionSessionCreateRequest,
+        session: SessionPayload,
     ) -> None:
         # Only store/playback-format information for realtime sessions (not transcription-only)
-        if isinstance(session, OpenAISessionCreateRequest):
-            self._created_session = session
-            if (
-                session.audio is not None
-                and session.audio.output is not None
-                and session.audio.output.format is not None
-            ):
-                fmt = session.audio.output.format
-                if isinstance(fmt, AudioPCM):
-                    normalized = "pcm16"
-                elif isinstance(fmt, AudioPCMU):
-                    normalized = "g711_ulaw"
-                elif isinstance(fmt, AudioPCMA):
-                    normalized = "g711_alaw"
-                else:
-                    # Fallback for unknown/str-like values
-                    normalized = cast("str", getattr(fmt, "type", str(fmt)))
+        normalized_session = self._normalize_session_payload(session)
+        if not normalized_session:
+            return
 
-                self._audio_state_tracker.set_audio_format(normalized)
-                if self._playback_tracker:
-                    self._playback_tracker.set_audio_format(normalized)
+        self._created_session = normalized_session
+        normalized_format = self._extract_audio_format(normalized_session)
+        if normalized_format is None:
+            return
+
+        self._audio_state_tracker.set_audio_format(normalized_format)
+        if self._playback_tracker:
+            self._playback_tracker.set_audio_format(normalized_format)
+
+    @staticmethod
+    def _normalize_session_payload(
+        session: SessionPayload,
+    ) -> OpenAISessionCreateRequest | None:
+        if isinstance(session, OpenAISessionCreateRequest):
+            return session
+
+        if isinstance(session, OpenAIRealtimeTranscriptionSessionCreateRequest):
+            return None
+
+        session_payload: Mapping[str, object]
+        if isinstance(session, pydantic.BaseModel):
+            session_payload = cast(Mapping[str, object], session.model_dump())
+        elif isinstance(session, Mapping):
+            session_payload = session
+        else:
+            return None
+
+        if OpenAIRealtimeWebSocketModel._is_transcription_session(session_payload):
+            return None
+
+        try:
+            return OpenAISessionCreateRequest.model_validate(session_payload)
+        except pydantic.ValidationError:
+            return None
+
+    @staticmethod
+    def _is_transcription_session(payload: Mapping[str, object]) -> bool:
+        try:
+            OpenAIRealtimeTranscriptionSessionCreateRequest.model_validate(payload)
+        except pydantic.ValidationError:
+            return False
+        else:
+            return True
+
+    @staticmethod
+    def _extract_audio_format(session: OpenAISessionCreateRequest) -> str | None:
+        audio = session.audio
+        if not audio or not audio.output or not audio.output.format:
+            return None
+
+        return OpenAIRealtimeWebSocketModel._normalize_audio_format(audio.output.format)
+
+    @staticmethod
+    def _normalize_audio_format(fmt: object) -> str:
+        if isinstance(fmt, AudioPCM):
+            return "pcm16"
+        if isinstance(fmt, AudioPCMU):
+            return "g711_ulaw"
+        if isinstance(fmt, AudioPCMA):
+            return "g711_alaw"
+
+        fmt_type = OpenAIRealtimeWebSocketModel._read_format_type(fmt)
+        if isinstance(fmt_type, str) and fmt_type:
+            return fmt_type
+
+        return str(fmt)
+
+    @staticmethod
+    def _read_format_type(fmt: object) -> str | None:
+        if isinstance(fmt, str):
+            return fmt
+
+        if isinstance(fmt, Mapping):
+            type_value = fmt.get("type")
+            return type_value if isinstance(type_value, str) else None
+
+        if isinstance(fmt, pydantic.BaseModel):
+            type_value = fmt.model_dump().get("type")
+            return type_value if isinstance(type_value, str) else None
+
+        try:
+            type_value = fmt.type  # type: ignore[attr-defined]
+        except AttributeError:
+            return None
+
+        return type_value if isinstance(type_value, str) else None
 
     async def _update_session_config(self, model_settings: RealtimeSessionModelSettings) -> None:
         session_config = self._get_session_config(model_settings)
