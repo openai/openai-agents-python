@@ -185,6 +185,11 @@ If the MCP server implements the HTTP with SSE transport, instantiate
 [`MCPServerSse`][agents.mcp.server.MCPServerSse]. Apart from the transport, the API is identical to the Streamable HTTP server.
 
 ```python
+
+from agents import Agent, Runner
+from agents.model_settings import ModelSettings
+from mcp import MCPServerSse
+
 workspace_id = "demo-workspace"
 
 async with MCPServerSse(
@@ -212,6 +217,8 @@ proofs of concept or when the server only exposes a command line entry point.
 
 ```python
 from pathlib import Path
+from agents import Agent, Runner
+from agents.mcp import MCPServerStdio
 
 current_dir = Path(__file__).parent
 samples_dir = current_dir / "sample_files"
@@ -298,6 +305,9 @@ methods:
 - `get_prompt(name, arguments)` fetches a concrete prompt, optionally with parameters.
 
 ```python
+
+from agents import Agent
+
 prompt_result = await server.get_prompt(
     "generate_code_review_instructions",
     {"focus": "security vulnerabilities", "language": "python"},
