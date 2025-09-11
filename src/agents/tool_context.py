@@ -33,10 +33,15 @@ class ToolContext(RunContextWrapper[TContext]):
     ) -> "ToolContext":
         """
         Create a ToolContext from a RunContextWrapper.
+
+        This method preserves the generic type information of the context object,
+        ensuring that ctx.context maintains its proper type in tool validation functions.
         """
-        # Grab the names of the RunContextWrapper's init=True fields
-        base_values: dict[str, Any] = {
-            f.name: getattr(context, f.name) for f in fields(RunContextWrapper) if f.init
-        }
+        # Directly pass the context and usage to preserve generic type information
         tool_name = tool_call.name if tool_call is not None else _assert_must_pass_tool_name()
-        return cls(tool_name=tool_name, tool_call_id=tool_call_id, **base_values)
+        return cls(
+            context=context.context,
+            usage=context.usage,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+        )
