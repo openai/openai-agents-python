@@ -62,8 +62,8 @@ from agents.tool_context import ToolContext
 class _DummyModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__()
-        self.events = []
-        self.listeners = []
+        self.events: list[Any] = []
+        self.listeners: list[Any] = []
 
     async def connect(self, options=None):  # pragma: no cover - not used here
         pass

@@ -127,7 +127,7 @@ async def test_realtime_handoff_missing_input_json_raises_model_error():
     h = realtime_handoff(rt, on_handoff=with_input, input_type=int)
 
     with pytest.raises(ModelBehaviorError):
-        await h.on_invoke_handoff(RunContextWrapper(None), None)
+        await h.on_invoke_handoff(RunContextWrapper(None), "null")
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,10 @@ async def test_realtime_handoff_is_enabled_async(monkeypatch):
     if not hasattr(rh, "RealtimeAgent"):
         from agents.realtime import RealtimeAgent as _RT
 
-        setattr(rh, "RealtimeAgent", _RT)
+        rh.RealtimeAgent = _RT  # type: ignore[attr-defined]
+
+    from collections.abc import Awaitable
+    from typing import cast as _cast
 
     assert callable(h.is_enabled)
-    assert await h.is_enabled(RunContextWrapper(None), rt)
+    assert await _cast(Awaitable[bool], h.is_enabled(RunContextWrapper(None), rt))

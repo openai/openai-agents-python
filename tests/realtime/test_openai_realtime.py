@@ -1,16 +1,17 @@
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import websockets
 
+from agents import Agent
 from agents.exceptions import UserError
+from agents.handoffs import handoff
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
     RealtimeModelToolCallEvent,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
 from agents.realtime.model_inputs import (
     RealtimeModelSendAudio,
     RealtimeModelSendInterrupt,
@@ -18,9 +19,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.items import RealtimeMessageItem
-from agents.handoffs import handoff
-from agents import Agent
+from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -428,19 +427,21 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 8
 
     def test_add_remove_listener_and_tools_conversion(self, model):
-        l = AsyncMock()
-        model.add_listener(l)
-        model.add_listener(l)
+        listener = AsyncMock()
+        model.add_listener(listener)
+        model.add_listener(listener)
         assert len(model._listeners) == 1
-        model.remove_listener(l)
+        model.remove_listener(listener)
         assert len(model._listeners) == 0
 
         # tools conversion rejects non function tools and includes handoffs
         with pytest.raises(UserError):
+            from agents.tool import Tool
+
             class X:
                 name = "x"
 
-            model._tools_to_session_tools([X()], [])  # type: ignore[arg-type]
+            model._tools_to_session_tools(cast(list[Tool], [X()]), [])
 
         h = handoff(Agent(name="a"))
         out = model._tools_to_session_tools([], [h])

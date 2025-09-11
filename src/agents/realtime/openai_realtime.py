@@ -915,13 +915,21 @@ class _ConversionHelper:
                                 Literal["auto", "low", "high"] | None,
                                 d if isinstance(d, str) and d in ("auto", "low", "high") else None,
                             )
-                            content.append(
-                                Content(
-                                    type="input_image",
-                                    image_url=iu,
-                                    detail=detail_val,
+                            if detail_val is None:
+                                content.append(
+                                    Content(
+                                        type="input_image",
+                                        image_url=iu,
+                                    )
                                 )
-                            )
+                            else:
+                                content.append(
+                                    Content(
+                                        type="input_image",
+                                        image_url=iu,
+                                        detail=detail_val,
+                                    )
+                                )
                     # ignore unknown types for forward-compat
                 except Exception:
                     # best-effort; skip malformed parts
