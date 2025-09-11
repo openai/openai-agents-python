@@ -10,6 +10,7 @@ from typing import Annotated, Any, Callable, Literal, Union, cast
 
 import pydantic
 import websockets
+from openai.types.realtime import realtime_audio_config as _rt_audio_config
 from openai.types.realtime.conversation_item import (
     ConversationItem,
     ConversationItem as OpenAIConversationItem,
@@ -28,11 +29,6 @@ from openai.types.realtime.input_audio_buffer_append_event import (
 )
 from openai.types.realtime.input_audio_buffer_commit_event import (
     InputAudioBufferCommitEvent as OpenAIInputAudioBufferCommitEvent,
-)
-from openai.types.realtime.realtime_audio_config import (
-    RealtimeAudioConfig as OpenAIRealtimeAudioConfig,
-    RealtimeAudioConfigInput as OpenAIRealtimeAudioInput,
-    RealtimeAudioConfigOutput as OpenAIRealtimeAudioOutput,
 )
 from openai.types.realtime.realtime_client_event import (
     RealtimeClientEvent as OpenAIRealtimeClientEvent,
@@ -61,6 +57,9 @@ from openai.types.realtime.realtime_session_create_request import (
 )
 from openai.types.realtime.realtime_tracing_config import (
     TracingConfiguration as OpenAITracingConfiguration,
+)
+from openai.types.realtime.realtime_transcription_session_create_request import (
+    RealtimeTranscriptionSessionCreateRequest as OpenAIRealtimeTranscriptionSessionCreateRequest,
 )
 from openai.types.realtime.response_audio_delta_event import ResponseAudioDeltaEvent
 from openai.types.realtime.response_cancel_event import (
@@ -535,7 +534,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if status not in ("in_progress", "completed", "incomplete"):
                     is_done = event.get("type") == "response.output_item.done"
                     status = "completed" if is_done else "in_progress"
-                type_adapter = TypeAdapter(RealtimeMessageItem)
+                # Explicitly type the adapter for mypy
+                type_adapter: TypeAdapter[RealtimeMessageItem] = TypeAdapter(RealtimeMessageItem)
                 message_item: RealtimeMessageItem = type_adapter.validate_python(
                     {
                         "item_id": item.get("id", ""),
@@ -559,21 +559,21 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         except Exception as e:
             event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
             logger.error(f"Failed to validate server event: {event}", exc_info=True)
-            event = RealtimeModelExceptionEvent(
+            exception_event = RealtimeModelExceptionEvent(
                 exception=e,
                 context=f"Failed to validate server event: {event_type}",
             )
-            await self._emit_event(event)
+            await self._emit_event(exception_event)
             return
 
         if parsed.type == "response.output_audio.delta":
             await self._handle_audio_delta(parsed)
         elif parsed.type == "response.output_audio.done":
-            event = RealtimeModelAudioDoneEvent(
+            audio_done_event = RealtimeModelAudioDoneEvent(
                 item_id=parsed.item_id,
                 content_index=parsed.content_index,
             )
-            await self._emit_event(event)
+            await self._emit_event(audio_done_event)
         elif parsed.type == "input_audio_buffer.speech_started":
             # On VAD speech start, immediately stop local playback so the user can
             # barge‑in without overlapping assistant audio.
@@ -673,17 +673,39 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
             )
 
-    def _update_created_session(self, session: OpenAISessionCreateRequest) -> None:
-        self._created_session = session
-        if (
-            session.audio is not None
-            and session.audio.output is not None
-            and session.audio.output.format is not None
-        ):
-            audio_format = session.audio.output.format
-            self._audio_state_tracker.set_audio_format(audio_format)
-            if self._playback_tracker:
-                self._playback_tracker.set_audio_format(audio_format)
+    def _update_created_session(
+        self,
+        session: OpenAISessionCreateRequest | OpenAIRealtimeTranscriptionSessionCreateRequest,
+    ) -> None:
+        # Only store/playback-format information for realtime sessions (not transcription-only)
+        if isinstance(session, OpenAISessionCreateRequest):
+            self._created_session = session
+            if (
+                session.audio is not None
+                and session.audio.output is not None
+                and session.audio.output.format is not None
+            ):
+                # Convert OpenAI audio format objects to our internal string format
+                from openai.types.realtime.realtime_audio_formats import (
+                    AudioPCM,
+                    AudioPCMA,
+                    AudioPCMU,
+                )
+
+                fmt = session.audio.output.format
+                if isinstance(fmt, AudioPCM):
+                    normalized = "pcm16"
+                elif isinstance(fmt, AudioPCMU):
+                    normalized = "g711_ulaw"
+                elif isinstance(fmt, AudioPCMA):
+                    normalized = "g711_alaw"
+                else:
+                    # Fallback for unknown/str-like values
+                    normalized = cast("str", getattr(fmt, "type", str(fmt)))
+
+                self._audio_state_tracker.set_audio_format(normalized)
+                if self._playback_tracker:
+                    self._playback_tracker.set_audio_format(normalized)
 
     async def _update_session_config(self, model_settings: RealtimeSessionModelSettings) -> None:
         session_config = self._get_session_config(model_settings)
@@ -717,6 +739,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "output_audio_format",
             DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
         )
+
+        # Avoid direct imports of non-exported names by referencing via module
+        OpenAIRealtimeAudioConfig = _rt_audio_config.RealtimeAudioConfig
+        OpenAIRealtimeAudioInput = _rt_audio_config.RealtimeAudioConfigInput  # type: ignore[attr-defined]
+        OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: ignore[attr-defined]
 
         input_audio_config = None
         if any(
@@ -816,7 +843,7 @@ class _ConversionHelper:
             ),
         ):
             raise ValueError("Unsupported conversation item type for message conversion.")
-        content: list[dict] = []
+        content: list[dict[str, Any]] = []
         for each in item.content:
             c = each.model_dump()
             if each.type == "output_text":

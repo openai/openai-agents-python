@@ -399,6 +399,7 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
 
         session.close()
 
+
 @pytest.mark.asyncio
 async def test_sqlite_session_unicode_content():
     """Test that session correctly stores and retrieves unicode/non-ASCII content."""
@@ -437,9 +438,7 @@ async def test_sqlite_session_special_characters_and_sql_injection():
         items: list[TResponseInputItem] = [
             {"role": "user", "content": "O'Reilly"},
             {"role": "assistant", "content": "DROP TABLE sessions;"},
-            {"role": "user", "content": (
-                '"SELECT * FROM users WHERE name = \"admin\";"'
-            )},
+            {"role": "user", "content": ('"SELECT * FROM users WHERE name = "admin";"')},
             {"role": "assistant", "content": "Robert'); DROP TABLE students;--"},
             {"role": "user", "content": "Normal message"},
         ]
@@ -450,10 +449,11 @@ async def test_sqlite_session_special_characters_and_sql_injection():
         assert len(retrieved) == len(items)
         assert retrieved[0].get("content") == "O'Reilly"
         assert retrieved[1].get("content") == "DROP TABLE sessions;"
-        assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = \"admin\";"'
+        assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = "admin";"'
         assert retrieved[3].get("content") == "Robert'); DROP TABLE students;--"
         assert retrieved[4].get("content") == "Normal message"
         session.close()
+
 
 @pytest.mark.asyncio
 async def test_sqlite_session_concurrent_access():
@@ -461,6 +461,7 @@ async def test_sqlite_session_concurrent_access():
     Test concurrent access to the same session to verify data integrity.
     """
     import concurrent.futures
+
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_concurrent.db"
         session_id = "concurrent_test"
@@ -477,6 +478,7 @@ async def test_sqlite_session_concurrent_access():
             asyncio.set_event_loop(loop)
             loop.run_until_complete(session.add_items([item]))
             loop.close()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             executor.map(add_item, items)
 

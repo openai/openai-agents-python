@@ -369,9 +369,9 @@ class LitellmConverter:
         if message.role != "assistant":
             raise ModelBehaviorError(f"Unsupported role: {message.role}")
 
-        tool_calls: list[
-            ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall
-        ] | None = (
+        tool_calls: (
+            list[ChatCompletionMessageFunctionToolCall | ChatCompletionMessageCustomToolCall] | None
+        ) = (
             [LitellmConverter.convert_tool_call_to_openai(tool) for tool in message.tool_calls]
             if message.tool_calls
             else None

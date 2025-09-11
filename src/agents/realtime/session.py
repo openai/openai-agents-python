@@ -38,6 +38,7 @@ from .handoffs import realtime_handoff
 from .items import (
     AssistantAudio,
     AssistantMessageItem,
+    AssistantText,
     InputAudio,
     InputText,
     RealtimeItem,
@@ -512,26 +513,86 @@ class RealtimeSession(RealtimeModelListener):
         if existing_index is not None:
             new_history = old_history.copy()
             if event.type == "message" and event.content is not None and len(event.content) > 0:
-                new_content = []
-                existing_content = old_history[existing_index].content
-                for idx, c in enumerate(event.content):
-                    if idx >= len(existing_content):
-                        new_content.append(c)
-                        continue
-
-                    current_one = existing_content[idx]
-                    if c.type == "audio" or c.type == "input_audio":
-                        if c.transcript is None:
-                            new_content.append(current_one)
-                        else:
-                            new_content.append(c)
-                    elif c.type == "text" or c.type == "input_text":
-                        if current_one.text is not None and c.text is None:
-                            new_content.append(current_one)
-                        else:
-                            new_content.append(c)
-                event.content = new_content
-                new_history[existing_index] = event
+                existing_item = old_history[existing_index]
+                if existing_item.type == "message":
+                    # Merge content preserving existing transcript/text when incoming entry is empty
+                    if event.role == "assistant" and existing_item.role == "assistant":
+                        assistant_existing_content = existing_item.content
+                        assistant_incoming = event.content
+                        assistant_new_content: list[AssistantText | AssistantAudio] = []
+                        for idx, ac in enumerate(assistant_incoming):
+                            if idx >= len(assistant_existing_content):
+                                assistant_new_content.append(ac)
+                                continue
+                            assistant_current = assistant_existing_content[idx]
+                            if ac.type == "audio":
+                                if ac.transcript is None:
+                                    assistant_new_content.append(assistant_current)
+                                else:
+                                    assistant_new_content.append(ac)
+                            else:  # text
+                                cur_text = (
+                                    assistant_current.text
+                                    if isinstance(assistant_current, AssistantText)
+                                    else None
+                                )
+                                if cur_text is not None and ac.text is None:
+                                    assistant_new_content.append(assistant_current)
+                                else:
+                                    assistant_new_content.append(ac)
+                        updated_assistant = event.model_copy(
+                            update={"content": assistant_new_content}
+                        )
+                        new_history[existing_index] = updated_assistant
+                    elif event.role == "user" and existing_item.role == "user":
+                        user_existing_content = existing_item.content
+                        user_incoming = event.content
+                        user_new_content: list[InputText | InputAudio] = []
+                        for idx, uc in enumerate(user_incoming):
+                            if idx >= len(user_existing_content):
+                                user_new_content.append(uc)
+                                continue
+                            user_current = user_existing_content[idx]
+                            if uc.type == "input_audio":
+                                if uc.transcript is None:
+                                    user_new_content.append(user_current)
+                                else:
+                                    user_new_content.append(uc)
+                            else:  # input_text
+                                cur_text = (
+                                    user_current.text
+                                    if isinstance(user_current, InputText)
+                                    else None
+                                )
+                                if cur_text is not None and uc.text is None:
+                                    user_new_content.append(user_current)
+                                else:
+                                    user_new_content.append(uc)
+                        updated_user = event.model_copy(update={"content": user_new_content})
+                        new_history[existing_index] = updated_user
+                    elif event.role == "system" and existing_item.role == "system":
+                        system_existing_content = existing_item.content
+                        system_incoming = event.content
+                        # Prefer existing non-empty text when incoming is empty
+                        system_new_content: list[InputText] = []
+                        for idx, sc in enumerate(system_incoming):
+                            if idx >= len(system_existing_content):
+                                system_new_content.append(sc)
+                                continue
+                            system_current = system_existing_content[idx]
+                            cur_text = system_current.text
+                            if cur_text is not None and sc.text is None:
+                                system_new_content.append(system_current)
+                            else:
+                                system_new_content.append(sc)
+                        updated_system = event.model_copy(update={"content": system_new_content})
+                        new_history[existing_index] = updated_system
+                    else:
+                        # Role changed or mismatched; just replace
+                        new_history[existing_index] = event
+                else:
+                    # If the existing item is not a message, just replace it.
+                    new_history[existing_index] = event
             return new_history
 
         # Otherwise, insert it after the previous_item_id if that is set

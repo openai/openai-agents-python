@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from openai.types.realtime.realtime_audio_formats import (
     AudioPCM,
     AudioPCMA,
