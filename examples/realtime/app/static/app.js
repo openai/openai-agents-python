@@ -14,6 +14,8 @@ class RealtimeDemo {
         this.isPlayingAudio = false;
         this.playbackAudioContext = null;
         this.currentAudioSource = null;
+        this.currentAudioGain = null; // per-chunk gain for smooth fades
+        this.playbackFadeSec = 0.02; // ~20ms fade to reduce clicks
         this.messageNodes = new Map(); // item_id -> DOM node
         this.seenItemIds = new Set(); // item_id set for append-only syncing
 
@@ -224,7 +226,7 @@ class RealtimeDemo {
                 }
             });
 
-            this.audioContext = new AudioContext({ sampleRate: 24000 });
+            this.audioContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
             const source = this.audioContext.createMediaStreamSource(this.stream);
 
             // Create a script processor to capture audio data
@@ -564,7 +566,12 @@ class RealtimeDemo {
 
         // Initialize audio context if needed
         if (!this.playbackAudioContext) {
-            this.playbackAudioContext = new AudioContext({ sampleRate: 24000 });
+            this.playbackAudioContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
+        }
+
+        // Ensure context is running (autoplay policies can suspend it)
+        if (this.playbackAudioContext.state === 'suspended') {
+            try { await this.playbackAudioContext.resume(); } catch {}
         }
 
         while (this.audioQueue.length > 0) {
@@ -605,13 +612,30 @@ class RealtimeDemo {
 
                 const source = this.playbackAudioContext.createBufferSource();
                 source.buffer = audioBuffer;
-                source.connect(this.playbackAudioContext.destination);
 
-                // Store reference to current source
+                // Per-chunk gain with short fade-in/out to avoid clicks
+                const gainNode = this.playbackAudioContext.createGain();
+                const now = this.playbackAudioContext.currentTime;
+                const fade = Math.min(this.playbackFadeSec, Math.max(0.005, audioBuffer.duration / 8));
+                try {
+                    gainNode.gain.cancelScheduledValues(now);
+                    gainNode.gain.setValueAtTime(0.0, now);
+                    gainNode.gain.linearRampToValueAtTime(1.0, now + fade);
+                    const endTime = now + audioBuffer.duration;
+                    gainNode.gain.setValueAtTime(1.0, Math.max(now + fade, endTime - fade));
+                    gainNode.gain.linearRampToValueAtTime(0.0001, endTime);
+                } catch {}
+
+                source.connect(gainNode);
+                gainNode.connect(this.playbackAudioContext.destination);
+
+                // Store references to allow smooth stop on interruption
                 this.currentAudioSource = source;
+                this.currentAudioGain = gainNode;
 
                 source.onended = () => {
                     this.currentAudioSource = null;
+                    this.currentAudioGain = null;
                     resolve();
                 };
                 source.start();
@@ -626,11 +650,26 @@ class RealtimeDemo {
     stopAudioPlayback() {
         console.log('Stopping audio playback due to interruption');
 
-        // Stop current audio source if playing
-        if (this.currentAudioSource) {
+        // Smoothly ramp down before stopping to avoid clicks
+        if (this.currentAudioSource && this.playbackAudioContext) {
             try {
-                this.currentAudioSource.stop();
-                this.currentAudioSource = null;
+                const now = this.playbackAudioContext.currentTime;
+                const fade = Math.max(0.01, this.playbackFadeSec);
+                if (this.currentAudioGain) {
+                    try {
+                        this.currentAudioGain.gain.cancelScheduledValues(now);
+                        // Capture current value to ramp from it
+                        const current = this.currentAudioGain.gain.value ?? 1.0;
+                        this.currentAudioGain.gain.setValueAtTime(current, now);
+                        this.currentAudioGain.gain.linearRampToValueAtTime(0.0001, now + fade);
+                    } catch {}
+                }
+                // Stop after the fade completes
+                setTimeout(() => {
+                    try { this.currentAudioSource && this.currentAudioSource.stop(); } catch {}
+                    this.currentAudioSource = null;
+                    this.currentAudioGain = null;
+                }, Math.ceil(fade * 1000));
             } catch (error) {
                 console.error('Error stopping audio source:', error);
             }
