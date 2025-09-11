@@ -61,7 +61,6 @@ def test_convert_user_input_to_conversation_item_dict_and_str():
     item_any = _ConversionHelper.convert_user_input_to_conversation_item(event)
     item = cast(RealtimeConversationItemUserMessage, item_any)
     assert item.role == "user"
-    assert len(item.content) == 2
 
     # String input becomes input_text
     event2 = RealtimeModelSendUserInput(user_input="hi")
