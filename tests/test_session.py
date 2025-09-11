@@ -394,8 +394,8 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
             await run_agent_async(runner_method, agent, list_input, session=session)
 
         # Verify the error message explains the issue
-        assert "You must specify the `session_input_callback` in" in str(exc_info.value)
-        assert "manually manage conversation history" in str(exc_info.value)
+        assert "list inputs require a `RunConfig.session_input_callback" in str(exc_info.value)
+        assert "to manage the history manually" in str(exc_info.value)
 
         session.close()
 
