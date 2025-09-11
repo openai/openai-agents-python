@@ -187,6 +187,14 @@ class RealtimeUserInputText(TypedDict):
     """The text content from the user."""
 
 
+class RealtimeUserInputImage(TypedDict, total=False):
+    """An image input from the user (Realtime)."""
+
+    type: Literal["input_image"]
+    image_url: str
+    detail: NotRequired[Literal["auto", "low", "high"] | str]
+
+
 class RealtimeUserInputMessage(TypedDict):
     """A message input from the user."""
 
@@ -196,8 +204,8 @@ class RealtimeUserInputMessage(TypedDict):
     role: Literal["user"]
     """The role identifier for user messages."""
 
-    content: list[RealtimeUserInputText]
-    """List of text content items in the message."""
+    content: list[RealtimeUserInputText | RealtimeUserInputImage]
+    """List of content items (text and image) in the message."""
 
 
 RealtimeUserInput: TypeAlias = Union[str, RealtimeUserInputMessage]

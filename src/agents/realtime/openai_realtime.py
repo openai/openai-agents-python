@@ -897,16 +897,39 @@ class _ConversionHelper:
         user_input = event.user_input
 
         if isinstance(user_input, dict):
+            content: list[Content] = []
+            for item in user_input.get("content", []):
+                try:
+                    if not isinstance(item, dict):
+                        continue
+                    t = item.get("type")
+                    if t == "input_text":
+                        _txt = item.get("text")
+                        text_val = _txt if isinstance(_txt, str) else None
+                        content.append(Content(type="input_text", text=text_val))
+                    elif t == "input_image":
+                        iu = item.get("image_url")
+                        if isinstance(iu, str) and iu:
+                            d = item.get("detail")
+                            detail_val = cast(
+                                Literal["auto", "low", "high"] | None,
+                                d if isinstance(d, str) and d in ("auto", "low", "high") else None,
+                            )
+                            content.append(
+                                Content(
+                                    type="input_image",
+                                    image_url=iu,
+                                    detail=detail_val,
+                                )
+                            )
+                    # ignore unknown types for forward-compat
+                except Exception:
+                    # best-effort; skip malformed parts
+                    continue
             return RealtimeConversationItemUserMessage(
                 type="message",
                 role="user",
-                content=[
-                    Content(
-                        type="input_text",
-                        text=item.get("text"),
-                    )
-                    for item in user_input.get("content", [])
-                ],
+                content=content,
             )
         else:
             return RealtimeConversationItemUserMessage(

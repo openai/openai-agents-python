@@ -40,6 +40,7 @@ from .items import (
     AssistantMessageItem,
     AssistantText,
     InputAudio,
+    InputImage,
     InputText,
     RealtimeItem,
     UserMessageItem,
@@ -238,10 +239,17 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         elif event.type == "input_audio_transcription_completed":
+            prev_len = len(self._history)
             self._history = RealtimeSession._get_new_history(self._history, event)
-            await self._put_event(
-                RealtimeHistoryUpdated(info=self._event_info, history=self._history)
-            )
+            # If a new user item was appended (no existing item),
+            # emit history_added for incremental UIs.
+            if len(self._history) > prev_len and len(self._history) > 0:
+                new_item = self._history[-1]
+                await self._put_event(RealtimeHistoryAdded(info=self._event_info, item=new_item))
+            else:
+                await self._put_event(
+                    RealtimeHistoryUpdated(info=self._event_info, history=self._history)
+                )
         elif event.type == "input_audio_timeout_triggered":
             await self._put_event(
                 RealtimeInputAudioTimeoutTriggered(
@@ -547,28 +555,61 @@ class RealtimeSession(RealtimeModelListener):
                     elif event.role == "user" and existing_item.role == "user":
                         user_existing_content = existing_item.content
                         user_incoming = event.content
-                        user_new_content: list[InputText | InputAudio] = []
-                        for idx, uc in enumerate(user_incoming):
-                            if idx >= len(user_existing_content):
-                                user_new_content.append(uc)
-                                continue
-                            user_current = user_existing_content[idx]
+
+                        # Start from incoming content (prefer latest fields)
+                        user_new_content: list[InputText | InputAudio | InputImage] = list(
+                            user_incoming
+                        )
+
+                        # Merge by type with special handling for images and transcripts
+                        def _image_url_str(val: object) -> str | None:
+                            if isinstance(val, InputImage):
+                                return val.image_url or None
+                            return None
+
+                        # 1) Preserve any existing images that are missing from the incoming payload
+                        incoming_image_urls: set[str] = set()
+                        for part in user_incoming:
+                            if isinstance(part, InputImage):
+                                u = _image_url_str(part)
+                                if u:
+                                    incoming_image_urls.add(u)
+
+                        missing_images: list[InputImage] = []
+                        for part in user_existing_content:
+                            if isinstance(part, InputImage):
+                                u = _image_url_str(part)
+                                if u and u not in incoming_image_urls:
+                                    missing_images.append(part)
+
+                        # Insert missing images at the beginning to keep them visible and stable
+                        if missing_images:
+                            user_new_content = missing_images + user_new_content
+
+                        # 2) For text/audio entries, preserve existing when incoming entry is empty
+                        merged: list[InputText | InputAudio | InputImage] = []
+                        for idx, uc in enumerate(user_new_content):
                             if uc.type == "input_audio":
-                                if uc.transcript is None:
-                                    user_new_content.append(user_current)
-                                else:
-                                    user_new_content.append(uc)
-                            else:  # input_text
-                                cur_text = (
-                                    user_current.text
-                                    if isinstance(user_current, InputText)
-                                    else None
-                                )
-                                if cur_text is not None and uc.text is None:
-                                    user_new_content.append(user_current)
-                                else:
-                                    user_new_content.append(uc)
-                        updated_user = event.model_copy(update={"content": user_new_content})
+                                # Attempt to preserve transcript if empty
+                                transcript = getattr(uc, "transcript", None)
+                                if transcript is None and idx < len(user_existing_content):
+                                    prev = user_existing_content[idx]
+                                    if isinstance(prev, InputAudio) and prev.transcript is not None:
+                                        uc = uc.model_copy(update={"transcript": prev.transcript})
+                                merged.append(uc)
+                            elif uc.type == "input_text":
+                                text = getattr(uc, "text", None)
+                                if (text is None or text == "") and idx < len(
+                                    user_existing_content
+                                ):
+                                    prev = user_existing_content[idx]
+                                    if isinstance(prev, InputText) and prev.text:
+                                        uc = uc.model_copy(update={"text": prev.text})
+                                merged.append(uc)
+                            else:
+                                merged.append(uc)
+
+                        updated_user = event.model_copy(update={"content": merged})
                         new_history[existing_index] = updated_user
                     elif event.role == "system" and existing_item.role == "system":
                         system_existing_content = existing_item.content

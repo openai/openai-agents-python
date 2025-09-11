@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
+from agents.realtime.config import RealtimeUserInputMessage
+from agents.realtime.model_inputs import RealtimeModelSendRawMessage
 
 # Import TwilioHandler class - handle both module and package use cases
 if TYPE_CHECKING:
@@ -63,6 +65,34 @@ class RealtimeWebSocketManager:
     async def send_audio(self, session_id: str, audio_bytes: bytes):
         if session_id in self.active_sessions:
             await self.active_sessions[session_id].send_audio(audio_bytes)
+
+    async def send_client_event(self, session_id: str, event: dict[str, Any]):
+        """Send a raw client event to the underlying realtime model."""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        await session.model.send_event(
+            RealtimeModelSendRawMessage(
+                message={
+                    "type": event["type"],
+                    "other_data": {k: v for k, v in event.items() if k != "type"},
+                }
+            )
+        )
+
+    async def send_user_message(self, session_id: str, message: RealtimeUserInputMessage):
+        """Send a structured user message via the higher-level API (supports input_image)."""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        await session.send_message(message)  # delegates to RealtimeModelSendUserInput path
+
+    async def interrupt(self, session_id: str) -> None:
+        """Interrupt current model playback/response for a session."""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        await session.interrupt()
 
     async def _process_events(self, session_id: str):
         try:
@@ -138,6 +168,7 @@ app = FastAPI(lifespan=lifespan)
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await manager.connect(websocket, session_id)
+    image_buffers: dict[str, dict[str, Any]] = {}
     try:
         while True:
             data = await websocket.receive_text()
@@ -148,6 +179,124 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 int16_data = message["data"]
                 audio_bytes = struct.pack(f"{len(int16_data)}h", *int16_data)
                 await manager.send_audio(session_id, audio_bytes)
+            elif message["type"] == "image":
+                logger.info("Received image message from client (session %s).", session_id)
+                # Build a conversation.item.create with input_image (and optional input_text)
+                data_url = message.get("data_url")
+                prompt_text = message.get("text") or "Please describe this image."
+                if data_url:
+                    logger.info(
+                        "Forwarding image (structured message) to Realtime API (len=%d).",
+                        len(data_url),
+                    )
+                    user_msg: RealtimeUserInputMessage = {
+                        "type": "message",
+                        "role": "user",
+                        "content": (
+                            [
+                                {"type": "input_image", "image_url": data_url, "detail": "high"},
+                                {"type": "input_text", "text": prompt_text},
+                            ]
+                            if prompt_text
+                            else [
+                                {"type": "input_image", "image_url": data_url, "detail": "high"}
+                            ]
+                        ),
+                    }
+                    await manager.send_user_message(session_id, user_msg)
+                    # Acknowledge to client UI
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "client_info",
+                                "info": "image_enqueued",
+                                "size": len(data_url),
+                            }
+                        )
+                    )
+                else:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "error": "No data_url for image message.",
+                            }
+                        )
+                    )
+            elif message["type"] == "commit_audio":
+                # Force close the current input audio turn
+                await manager.send_client_event(session_id, {"type": "input_audio_buffer.commit"})
+            elif message["type"] == "image_start":
+                img_id = str(message.get("id"))
+                image_buffers[img_id] = {
+                    "text": message.get("text") or "Please describe this image.",
+                    "chunks": [],
+                }
+                await websocket.send_text(
+                    json.dumps({"type": "client_info", "info": "image_start_ack", "id": img_id})
+                )
+            elif message["type"] == "image_chunk":
+                img_id = str(message.get("id"))
+                chunk = message.get("chunk", "")
+                if img_id in image_buffers:
+                    image_buffers[img_id]["chunks"].append(chunk)
+                    if len(image_buffers[img_id]["chunks"]) % 10 == 0:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "client_info",
+                                    "info": "image_chunk_ack",
+                                    "id": img_id,
+                                    "count": len(image_buffers[img_id]["chunks"]),
+                                }
+                            )
+                        )
+            elif message["type"] == "image_end":
+                img_id = str(message.get("id"))
+                buf = image_buffers.pop(img_id, None)
+                if buf is None:
+                    await websocket.send_text(
+                        json.dumps({"type": "error", "error": "Unknown image id for image_end."})
+                    )
+                else:
+                    data_url = "".join(buf["chunks"]) if buf["chunks"] else None
+                    prompt_text = buf["text"]
+                    if data_url:
+                        logger.info(
+                            "Forwarding chunked image (structured message) to Realtime API (len=%d).",
+                            len(data_url),
+                        )
+                        user_msg2: RealtimeUserInputMessage = {
+                            "type": "message",
+                            "role": "user",
+                            "content": (
+                                [
+                                    {"type": "input_image", "image_url": data_url, "detail": "high"},
+                                    {"type": "input_text", "text": prompt_text},
+                                ]
+                                if prompt_text
+                                else [
+                                    {"type": "input_image", "image_url": data_url, "detail": "high"}
+                                ]
+                            ),
+                        }
+                        await manager.send_user_message(session_id, user_msg2)
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "client_info",
+                                    "info": "image_enqueued",
+                                    "id": img_id,
+                                    "size": len(data_url),
+                                }
+                            )
+                        )
+                    else:
+                        await websocket.send_text(
+                            json.dumps({"type": "error", "error": "Empty image."})
+                        )
+            elif message["type"] == "interrupt":
+                await manager.interrupt(session_id)
 
     except WebSocketDisconnect:
         await manager.disconnect(session_id)
@@ -164,4 +313,10 @@ async def read_index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        # Increased WebSocket frame size to comfortably handle image data URLs.
+        ws_max_size=16 * 1024 * 1024,
+    )
