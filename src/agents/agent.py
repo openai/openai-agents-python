@@ -414,10 +414,7 @@ class Agent(AgentBase, Generic[TContext]):
             from .run import Runner
 
             output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
-                max_turns=max_turns
+                starting_agent=self, input=input, context=context.context, max_turns=max_turns
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)

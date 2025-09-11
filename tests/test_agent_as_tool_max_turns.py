@@ -66,17 +66,20 @@ async def test_agent_as_tool_forwards_max_turns():
         tools=[wrapped_tool],
     )
 
-    # Outer model asks to call the tool once; exceeding happens inside the tool call when inner runs.
+    # Outer model asks to call the tool once;
+    # exceeding happens inside the tool call when inner runs.
     outer_model.add_multiple_turn_outputs(
         [
             [get_function_tool_call("inner_tool")],
         ]
     )
 
-    # Since tool default error handling returns a string on error, the run should not raise here.
+    # Since tool default error handling returns a string on error,
+    # the run should not raise here.
     result = await Runner.run(orchestrator, input="start")
 
-    # The tool call error should be surfaced as a message back to the model; ensure we have some output.
-    # We don't assert exact message text to avoid brittleness; just ensure the run completed with items.
+    # The tool call error should be surfaced as a message back to the model;
+    # ensure we have some output.
+    # We don't assert exact message text to avoid brittleness;
+    # just ensure the run completed with items.
     assert len(result.new_items) >= 1
-
