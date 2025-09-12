@@ -13,7 +13,7 @@ from agents import Agent, HostedMCPTool, Runner
 async def main(verbose: bool, stream: bool):
     # 1. Visit https://developers.google.com/oauthplayground/
     # 2. Input https://www.googleapis.com/auth/calendar.events as the required scope
-    # 3. Grab the acccess token starting with "ya29."
+    # 3. Grab the access token starting with "ya29."
     authorization = os.environ["GOOGLE_CALENDAR_AUTHORIZATION"]
     agent = Agent(
         name="Assistant",

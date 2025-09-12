@@ -3,15 +3,14 @@ from __future__ import annotations
 import base64
 from unittest.mock import Mock
 
-from openai.types.beta.realtime.conversation_item import ConversationItem
-from openai.types.beta.realtime.conversation_item_create_event import ConversationItemCreateEvent
-from openai.types.beta.realtime.conversation_item_truncate_event import (
-    ConversationItemTruncateEvent,
+import pytest
+from openai.types.realtime.conversation_item_create_event import ConversationItemCreateEvent
+from openai.types.realtime.conversation_item_truncate_event import ConversationItemTruncateEvent
+from openai.types.realtime.input_audio_buffer_append_event import InputAudioBufferAppendEvent
+from openai.types.realtime.realtime_conversation_item_function_call_output import (
+    RealtimeConversationItemFunctionCallOutput,
 )
-from openai.types.beta.realtime.input_audio_buffer_append_event import InputAudioBufferAppendEvent
-from openai.types.beta.realtime.session_update_event import (
-    SessionTracingTracingConfiguration,
-)
+from pydantic import ValidationError
 
 from agents.realtime.config import RealtimeModelTracingConfig
 from agents.realtime.model_inputs import (
@@ -34,6 +33,8 @@ class TestConversionHelperTryConvertRawMessage:
                 "type": "session.update",
                 "other_data": {
                     "session": {
+                        "model": "gpt-realtime",
+                        "type": "realtime",
                         "modalities": ["text", "audio"],
                         "voice": "ash",
                     }
@@ -125,7 +126,8 @@ class TestConversionHelperTracingConfig:
 
         result = _ConversionHelper.convert_tracing_config(tracing_config)
 
-        assert isinstance(result, SessionTracingTracingConfiguration)
+        assert result is not None
+        assert result != "auto"
         assert result.group_id == "test-group"
         assert result.metadata == {"env": "test"}
         assert result.workflow_name == "test-workflow"
@@ -138,7 +140,8 @@ class TestConversionHelperTracingConfig:
 
         result = _ConversionHelper.convert_tracing_config(tracing_config)
 
-        assert isinstance(result, SessionTracingTracingConfiguration)
+        assert result is not None
+        assert result != "auto"
         assert result.group_id == "test-group"
         assert result.metadata is None
         assert result.workflow_name is None
@@ -149,7 +152,8 @@ class TestConversionHelperTracingConfig:
 
         result = _ConversionHelper.convert_tracing_config(tracing_config)
 
-        assert isinstance(result, SessionTracingTracingConfiguration)
+        assert result is not None
+        assert result != "auto"
         assert result.group_id is None
         assert result.metadata is None
         assert result.workflow_name is None
@@ -164,7 +168,6 @@ class TestConversionHelperUserInput:
 
         result = _ConversionHelper.convert_user_input_to_conversation_item(event)
 
-        assert isinstance(result, ConversationItem)
         assert result.type == "message"
         assert result.role == "user"
         assert result.content is not None
@@ -186,7 +189,6 @@ class TestConversionHelperUserInput:
 
         result = _ConversionHelper.convert_user_input_to_conversation_item(event)
 
-        assert isinstance(result, ConversationItem)
         assert result.type == "message"
         assert result.role == "user"
         assert result.content is not None
@@ -207,7 +209,6 @@ class TestConversionHelperUserInput:
 
         result = _ConversionHelper.convert_user_input_to_conversation_item(event)
 
-        assert isinstance(result, ConversationItem)
         assert result.type == "message"
         assert result.role == "user"
         assert result.content is not None
@@ -221,7 +222,6 @@ class TestConversionHelperUserInput:
 
         assert isinstance(result, ConversationItemCreateEvent)
         assert result.type == "conversation.item.create"
-        assert isinstance(result.item, ConversationItem)
         assert result.item.type == "message"
         assert result.item.role == "user"
 
@@ -287,10 +287,11 @@ class TestConversionHelperToolOutput:
 
         assert isinstance(result, ConversationItemCreateEvent)
         assert result.type == "conversation.item.create"
-        assert isinstance(result.item, ConversationItem)
         assert result.item.type == "function_call_output"
-        assert result.item.output == "Function executed successfully"
-        assert result.item.call_id == "call_123"
+        assert isinstance(result.item, RealtimeConversationItemFunctionCallOutput)
+        tool_output_item = result.item
+        assert tool_output_item.output == "Function executed successfully"
+        assert tool_output_item.call_id == "call_123"
 
     def test_convert_tool_output_no_call_id(self):
         """Test converting tool output with None call_id."""
@@ -303,11 +304,11 @@ class TestConversionHelperToolOutput:
             start_response=False,
         )
 
-        result = _ConversionHelper.convert_tool_output(event)
-
-        assert isinstance(result, ConversationItemCreateEvent)
-        assert result.type == "conversation.item.create"
-        assert result.item.call_id is None
+        with pytest.raises(
+            ValidationError,
+            match="1 validation error for RealtimeConversationItemFunctionCallOutput",
+        ):
+            _ConversionHelper.convert_tool_output(event)
 
     def test_convert_tool_output_empty_output(self):
         """Test converting tool output with empty output."""
@@ -323,6 +324,8 @@ class TestConversionHelperToolOutput:
         result = _ConversionHelper.convert_tool_output(event)
 
         assert isinstance(result, ConversationItemCreateEvent)
+        assert result.type == "conversation.item.create"
+        assert isinstance(result.item, RealtimeConversationItemFunctionCallOutput)
         assert result.item.output == ""
         assert result.item.call_id == "call_456"
 

@@ -112,7 +112,7 @@ async def test_session_connects_and_configures_successfully():
         assert "wss://api.openai.com/v1/realtime?intent=transcription" in args[0]
         headers = kwargs.get("additional_headers", {})
         assert headers.get("Authorization") == "Bearer FAKE_KEY"
-        assert headers.get("OpenAI-Beta") == "realtime=v1"
+        assert headers.get("OpenAI-Beta") is None
         assert headers.get("OpenAI-Log-Session") == "1"
 
         # Check that we sent a 'transcription_session.update' message
@@ -184,22 +184,35 @@ async def test_stream_audio_sends_correct_json():
 
 
 @pytest.mark.asyncio
-async def test_transcription_event_puts_output_in_queue():
+@pytest.mark.parametrize(
+    "created,updated,completed",
+    [
+        (
+            {"type": "transcription_session.created"},
+            {"type": "transcription_session.updated"},
+            {"type": "input_audio_transcription_completed", "transcript": "Hello world!"},
+        ),
+        (
+            {"type": "session.created"},
+            {"type": "session.updated"},
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Hello world!",
+            },
+        ),
+    ],
+)
+async def test_transcription_event_puts_output_in_queue(created, updated, completed):
     """
-    Test that a 'input_audio_transcription_completed' event
+    Test that a 'input_audio_transcription_completed' event and
+    'conversation.item.input_audio_transcription.completed'
     yields a transcript from transcribe_turns().
     """
     mock_ws = create_mock_websocket(
         [
-            json.dumps({"type": "transcription_session.created"}),
-            json.dumps({"type": "transcription_session.updated"}),
-            # Once configured, we mock a completed transcription event:
-            json.dumps(
-                {
-                    "type": "input_audio_transcription_completed",
-                    "transcript": "Hello world!",
-                }
-            ),
+            json.dumps(created),
+            json.dumps(updated),
+            json.dumps(completed),
         ]
     )
 
