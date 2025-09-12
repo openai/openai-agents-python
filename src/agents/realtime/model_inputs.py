@@ -24,12 +24,26 @@ class RealtimeModelInputTextContent(TypedDict):
     text: str
 
 
+class RealtimeModelInputImageContent(TypedDict, total=False):
+    """An image to be sent to the model.
+
+    The Realtime API expects `image_url` to be a string data/remote URL.
+    """
+
+    type: Literal["input_image"]
+    image_url: str
+    """String URL (data:... or https:...)."""
+
+    detail: NotRequired[str]
+    """Optional detail hint such as 'high', 'low', or 'auto'."""
+
+
 class RealtimeModelUserInputMessage(TypedDict):
     """A message to be sent to the model."""
 
     type: Literal["message"]
     role: Literal["user"]
-    content: list[RealtimeModelInputTextContent]
+    content: list[RealtimeModelInputTextContent | RealtimeModelInputImageContent]
 
 
 RealtimeModelUserInput: TypeAlias = Union[str, RealtimeModelUserInputMessage]

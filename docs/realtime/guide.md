@@ -48,7 +48,7 @@ Key differences from regular agents:
 
 ### Model settings
 
-The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-4o-realtime-preview`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
+The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-realtime`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
 
 ### Audio configuration
 

@@ -13,6 +13,10 @@ on:
       - 'docs/**'
       - mkdocs.yml
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   update-docs:
     if: "!contains(github.event.head_commit.message, 'Update all translated document pages')"

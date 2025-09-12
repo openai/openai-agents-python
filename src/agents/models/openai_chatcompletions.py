@@ -23,6 +23,7 @@ from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
+from ..util._json import _to_dump_compatible
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -237,6 +238,8 @@ class OpenAIChatCompletionsModel(Model):
                     "role": "system",
                 },
             )
+        converted_messages = _to_dump_compatible(converted_messages)
+
         if tracing.include_data():
             span.span_data.input = converted_messages
 
@@ -255,12 +258,24 @@ class OpenAIChatCompletionsModel(Model):
         for handoff in handoffs:
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
+        converted_tools = _to_dump_compatible(converted_tools)
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            messages_json = json.dumps(
+                converted_messages,
+                indent=2,
+                ensure_ascii=False,
+            )
+            tools_json = json.dumps(
+                converted_tools,
+                indent=2,
+                ensure_ascii=False,
+            )
             logger.debug(
-                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
+                f"{messages_json}\n"
+                f"Tools:\n{tools_json}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
