@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -517,6 +518,35 @@ async def test_input_guardrail_tripwire_triggered_causes_exception_streamed():
         model=FakeModel(),
     )
 
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_slow_input_guardrail_still_raises_exception_streamed():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        # Simulate a slow guardrail that completes after model streaming ends.
+        await asyncio.sleep(0.05)
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    # Ensure the model finishes streaming quickly.
+    model.set_next_output([get_text_message("ok")])
+
+    agent = Agent(
+        name="test",
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
+
+    # Even though the guardrail is slower than the model stream, the exception should still raise.
     with pytest.raises(InputGuardrailTripwireTriggered):
         result = Runner.run_streamed(agent, input="user_message")
         async for _ in result.stream_events():

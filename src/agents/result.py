@@ -201,7 +201,11 @@ class RunResultStreaming(RunResultBase):
                 break
 
             if isinstance(item, QueueCompleteSentinel):
+                # Await input guardrails if they are still running, so late exceptions are captured.
+                await self._await_task_safely(self._input_guardrails_task)
+
                 self._event_queue.task_done()
+
                 # Check for errors, in case the queue was completed due to an exception
                 self._check_errors()
                 break
@@ -274,3 +278,19 @@ class RunResultStreaming(RunResultBase):
 
     def __str__(self) -> str:
         return pretty_print_run_result_streaming(self)
+
+    async def _await_task_safely(self, task: asyncio.Task[Any] | None) -> None:
+        """Await a task if present, ignoring cancellation and storing exceptions elsewhere.
+
+        This ensures we do not lose late guardrail exceptions while not surfacing
+        CancelledError to callers of stream_events.
+        """
+        if task and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Task was cancelled (e.g., due to result.cancel()). Nothing to do here.
+                pass
+            except Exception:
+                # The exception will be surfaced via _check_errors() if needed.
+                pass

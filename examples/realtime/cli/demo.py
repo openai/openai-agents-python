@@ -23,8 +23,8 @@ SAMPLE_RATE = 24000
 FORMAT = np.int16
 CHANNELS = 1
 ENERGY_THRESHOLD = 0.015  # RMS threshold for barge‑in while assistant is speaking
-PREBUFFER_CHUNKS = 3      # initial jitter buffer (~120ms with 40ms chunks)
-FADE_OUT_MS = 12          # short fade to avoid clicks when interrupting
+PREBUFFER_CHUNKS = 3  # initial jitter buffer (~120ms with 40ms chunks)
+FADE_OUT_MS = 12  # short fade to avoid clicks when interrupting
 
 # Set up logging for OpenAI agents SDK
 # logging.basicConfig(
@@ -108,14 +108,18 @@ class NoUIDemo:
 
             samples, item_id, content_index = self.current_audio_chunk
             samples_filled = 0
-            while samples_filled < len(outdata) and self.fade_done_samples < self.fade_total_samples:
+            while (
+                samples_filled < len(outdata) and self.fade_done_samples < self.fade_total_samples
+            ):
                 remaining_output = len(outdata) - samples_filled
                 remaining_fade = self.fade_total_samples - self.fade_done_samples
                 n = min(remaining_output, remaining_fade)
 
                 src = samples[self.chunk_position : self.chunk_position + n].astype(np.float32)
                 # Linear ramp from current level down to 0 across remaining fade samples
-                idx = np.arange(self.fade_done_samples, self.fade_done_samples + n, dtype=np.float32)
+                idx = np.arange(
+                    self.fade_done_samples, self.fade_done_samples + n, dtype=np.float32
+                )
                 gain = 1.0 - (idx / float(self.fade_total_samples))
                 ramped = np.clip(src * gain, -32768.0, 32767.0).astype(np.int16)
                 outdata[samples_filled : samples_filled + n, 0] = ramped
@@ -155,7 +159,10 @@ class NoUIDemo:
             if self.current_audio_chunk is None:
                 try:
                     # Respect a small jitter buffer before starting playback
-                    if self.prebuffering and self.output_queue.qsize() < self.prebuffer_target_chunks:
+                    if (
+                        self.prebuffering
+                        and self.output_queue.qsize() < self.prebuffer_target_chunks
+                    ):
                         break
                     self.prebuffering = False
                     self.current_audio_chunk = self.output_queue.get_nowait()
@@ -347,7 +354,7 @@ class NoUIDemo:
             else:
                 print(f"Unknown event type: {event.type}")
         except Exception as e:
-            print(f"Error processing event: {_truncate_str(str(e), 50)}")
+            print(f"Error processing event: {_truncate_str(str(e), 200)}")
 
 
 if __name__ == "__main__":
