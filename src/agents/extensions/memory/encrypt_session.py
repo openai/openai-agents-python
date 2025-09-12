@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Literal, TypedDict, TypeGuard, cast
+from typing import Any, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from typing_extensions import Literal, TypedDict, TypeGuard
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
@@ -130,6 +131,9 @@ class EncryptedSession(SessionABC):
         self.cipher = _derive_session_fernet_key(master, session_id)
         self._kid = "hkdf-v1"
         self._ver = 1
+
+    def __getattr__(self, name):
+        return getattr(self.underlying_session, name)
 
     def _wrap(self, item: TResponseInputItem) -> EncryptedEnvelope:
         if isinstance(item, dict):

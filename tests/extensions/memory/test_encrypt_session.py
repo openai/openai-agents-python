@@ -292,3 +292,42 @@ async def test_encrypted_session_unicode_content(
     assert retrieved[2].get("content") == "Numbers and symbols: 123!@#"
 
     underlying_session.close()
+
+
+class CustomSession(SQLiteSession):
+    """Mock custom session with additional methods for testing delegation."""
+
+    def get_stats(self) -> dict[str, int]:
+        """Custom method that should be accessible through delegation."""
+        return {"custom_method_calls": 42, "test_value": 123}
+
+    async def custom_async_method(self) -> str:
+        """Custom async method for testing delegation."""
+        return "custom_async_result"
+
+
+async def test_encrypted_session_delegation():
+    """Test that custom methods on underlying session are accessible through delegation."""
+    temp_dir = tempfile.mkdtemp()
+    db_path = Path(temp_dir) / "test_delegation.db"
+    underlying_session = CustomSession("test_session", db_path)
+
+    encryption_key = str(Fernet.generate_key().decode("utf-8"))
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying_session,
+        encryption_key=encryption_key,
+    )
+
+    stats = session.get_stats()
+    assert stats == {"custom_method_calls": 42, "test_value": 123}
+
+    result = await session.custom_async_method()
+    assert result == "custom_async_result"
+
+    await session.add_items([{"role": "user", "content": "Test delegation"}])
+    items = await session.get_items()
+    assert len(items) == 1
+    assert items[0].get("content") == "Test delegation"
+
+    underlying_session.close()
