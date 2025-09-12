@@ -305,7 +305,6 @@ methods:
 - `get_prompt(name, arguments)` fetches a concrete prompt, optionally with parameters.
 
 ```python
-
 from agents import Agent
 
 prompt_result = await server.get_prompt(
