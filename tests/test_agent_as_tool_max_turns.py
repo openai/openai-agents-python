@@ -5,6 +5,7 @@ import json
 import pytest
 
 from agents import Agent, MaxTurnsExceeded, Runner
+from agents.items import TResponseOutputItem
 from agents.run import DEFAULT_MAX_TURNS
 
 from .fake_model import FakeModel
@@ -22,7 +23,7 @@ async def test_runner_run_max_turns_none_defaults_to_constant():
 
     # Prepare 11 turns (DEFAULT_MAX_TURNS is 10) to ensure exceeding default.
     func_output = json.dumps({"a": "b"})
-    turns: list[list[object]] = []
+    turns: list[list[TResponseOutputItem] | Exception] = []
     for i in range(1, DEFAULT_MAX_TURNS + 1):
         turns.append([get_text_message(str(i)), get_function_tool_call("tool", func_output)])
     model.add_multiple_turn_outputs(turns)
@@ -44,12 +45,11 @@ async def test_agent_as_tool_forwards_max_turns():
 
     # Make inner agent require more than 1 turn.
     func_output = json.dumps({"x": 1})
-    inner_model.add_multiple_turn_outputs(
-        [
-            [get_text_message("t1"), get_function_tool_call("some_function", func_output)],
-            [get_text_message("t2"), get_function_tool_call("some_function", func_output)],
-        ]
-    )
+    inner_turns: list[list[TResponseOutputItem] | Exception] = [
+        [get_text_message("t1"), get_function_tool_call("some_function", func_output)],
+        [get_text_message("t2"), get_function_tool_call("some_function", func_output)],
+    ]
+    inner_model.add_multiple_turn_outputs(inner_turns)
 
     # Wrap inner agent as a tool with max_turns=1.
     wrapped_tool = inner_agent.as_tool(
@@ -68,11 +68,10 @@ async def test_agent_as_tool_forwards_max_turns():
 
     # Outer model asks to call the tool once;
     # exceeding happens inside the tool call when inner runs.
-    outer_model.add_multiple_turn_outputs(
-        [
-            [get_function_tool_call("inner_tool")],
-        ]
-    )
+    outer_turns: list[list[TResponseOutputItem] | Exception] = [
+        [get_function_tool_call("inner_tool")],
+    ]
+    outer_model.add_multiple_turn_outputs(outer_turns)
 
     # Since tool default error handling returns a string on error,
     # the run should not raise here.
