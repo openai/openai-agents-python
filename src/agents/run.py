@@ -1127,14 +1127,11 @@ class AgentRunner:
 
         # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
         items_to_filter = [
-            item for item in items_to_filter
-            if not isinstance(item, HandoffCallItem)
+            item for item in items_to_filter if not isinstance(item, HandoffCallItem)
         ]
 
         # Create filtered result and send to queue
-        filtered_result = _dc.replace(
-            single_step_result, new_step_items=items_to_filter
-        )
+        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
@@ -1235,8 +1232,7 @@ class AgentRunner:
         # Send handoff items immediately for streaming, but avoid duplicates
         if event_queue is not None and processed_response.new_items:
             handoff_items = [
-                item for item in processed_response.new_items
-                if isinstance(item, HandoffCallItem)
+                item for item in processed_response.new_items if isinstance(item, HandoffCallItem)
             ]
             if handoff_items:
                 RunImpl.stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)

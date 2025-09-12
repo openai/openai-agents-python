@@ -413,9 +413,9 @@ class LitellmConverter:
                 else:
                     # Convert object to dict by accessing its attributes
                     block_dict: dict[str, Any] = {}
-                    if hasattr(block, '__dict__'):
+                    if hasattr(block, "__dict__"):
                         block_dict = dict(block.__dict__.items())
-                    elif hasattr(block, 'model_dump'):
+                    elif hasattr(block, "model_dump"):
                         block_dict = block.model_dump()
                     else:
                         # Last resort: convert to string representation
