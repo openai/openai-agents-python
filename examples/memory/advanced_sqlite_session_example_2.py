@@ -27,7 +27,7 @@ async def main():
     )
 
     # Create a advanced session instance
-    session = AdvancedSQLiteSession(session_id="conversation_advanced")
+    session = AdvancedSQLiteSession(session_id="conversation_advanced", create_tables=True)
 
     print("=== Advanced Session: Conversation Branching ===")
     print("This example demonstrates conversation editing and branching.\n")

@@ -78,7 +78,7 @@ def create_mock_run_result(
 async def test_advanced_session_basic_functionality(agent: Agent):
     """Test basic AdvancedSQLiteSession functionality."""
     session_id = "advanced_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Test basic session operations work
     items: list[TResponseInputItem] = [
@@ -99,7 +99,7 @@ async def test_advanced_session_basic_functionality(agent: Agent):
 async def test_message_structure_tracking(agent: Agent):
     """Test that message structure is properly tracked."""
     session_id = "structure_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Add various types of messages
     items: list[TResponseInputItem] = [
@@ -132,7 +132,7 @@ async def test_message_structure_tracking(agent: Agent):
 async def test_tool_usage_tracking(agent: Agent):
     """Test tool usage tracking functionality."""
     session_id = "tools_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Add items with tool calls
     items: list[TResponseInputItem] = [
@@ -159,7 +159,7 @@ async def test_tool_usage_tracking(agent: Agent):
 async def test_soft_deletion_functionality(agent: Agent):
     """Test soft deletion and reactivation functionality."""
     session_id = "deletion_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Add multiple turns
     turn_1_items: list[TResponseInputItem] = [
@@ -212,7 +212,7 @@ async def test_soft_deletion_functionality(agent: Agent):
 async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
     """Test usage data storage and retrieval."""
     session_id = "usage_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Simulate adding items for turn 1 to increment turn counter
     await session.add_items([{"role": "user", "content": "First turn"}])
@@ -271,7 +271,7 @@ async def test_usage_tracking_storage(agent: Agent, usage_data: Usage):
 async def test_runner_integration_with_usage_tracking(agent: Agent):
     """Test integration with Runner and automatic usage tracking pattern."""
     session_id = "integration_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     async def store_session_usage(result: Any, session: AdvancedSQLiteSession):
         """Helper function to store usage after runner completes."""
@@ -319,7 +319,7 @@ async def test_runner_integration_with_usage_tracking(agent: Agent):
 async def test_sequence_ordering():
     """Test that sequence ordering works correctly even with same timestamps."""
     session_id = "sequence_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Add multiple items quickly to test sequence ordering
     items: list[TResponseInputItem] = [
@@ -344,7 +344,7 @@ async def test_sequence_ordering():
 async def test_conversation_structure_with_multiple_turns():
     """Test conversation structure tracking with multiple user turns."""
     session_id = "multi_turn_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Turn 1
     turn_1: list[TResponseInputItem] = [
@@ -395,7 +395,7 @@ async def test_conversation_structure_with_multiple_turns():
 async def test_empty_session_operations():
     """Test operations on empty sessions."""
     session_id = "empty_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Test getting items from empty session
     items = await session.get_items()
@@ -423,7 +423,7 @@ async def test_empty_session_operations():
 async def test_json_serialization_edge_cases(usage_data: Usage):
     """Test edge cases in JSON serialization of usage data."""
     session_id = "json_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Test with normal usage data (need to add user message first to create turn)
     await session.add_items([{"role": "user", "content": "First test"}])
@@ -463,8 +463,8 @@ async def test_json_serialization_edge_cases(usage_data: Usage):
 
 async def test_session_isolation():
     """Test that different session IDs maintain separate data."""
-    session1 = AdvancedSQLiteSession(session_id="session_1")
-    session2 = AdvancedSQLiteSession(session_id="session_2")
+    session1 = AdvancedSQLiteSession(session_id="session_1", create_tables=True)
+    session2 = AdvancedSQLiteSession(session_id="session_2", create_tables=True)
 
     # Add data to session 1
     await session1.add_items([{"role": "user", "content": "Session 1 message"}])
@@ -495,7 +495,7 @@ async def test_session_isolation():
 async def test_error_handling_in_usage_tracking(usage_data: Usage):
     """Test that usage tracking errors don't break the main flow."""
     session_id = "error_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Test normal operation
     run_result = create_mock_run_result(usage_data)
@@ -511,7 +511,7 @@ async def test_error_handling_in_usage_tracking(usage_data: Usage):
 async def test_tool_name_extraction():
     """Test that tool names are correctly extracted from different item types."""
     session_id = "tool_names_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Add items with different ways of specifying tool names
     items: list[TResponseInputItem] = [
@@ -538,7 +538,7 @@ async def test_tool_name_extraction():
 async def test_tool_execution_integration(agent: Agent):
     """Test integration with actual tool execution."""
     session_id = "tool_integration_test"
-    session = AdvancedSQLiteSession(session_id=session_id)
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Set up the fake model to trigger a tool call
     fake_model = cast(FakeModel, agent.model)
