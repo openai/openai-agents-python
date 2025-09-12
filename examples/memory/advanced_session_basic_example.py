@@ -27,7 +27,7 @@ async def main():
     )
 
     # Create a advanced session instance
-    session = AdvancedSQLiteSession("conversation_basic")
+    session = AdvancedSQLiteSession(session_id="conversation_basic")
 
     print("=== Basic Advanced Session Example ===")
     print("The agent will remember previous messages with structured tracking.\n")
