@@ -1,8 +1,10 @@
-from typing import cast
-from unittest.mock import AsyncMock, Mock, PropertyMock
+import asyncio
+from typing import Any, cast
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import pytest
 
+from agents.exceptions import UserError
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
@@ -46,10 +48,200 @@ from agents.realtime.model_events import (
     RealtimeModelTurnEndedEvent,
     RealtimeModelTurnStartedEvent,
 )
-from agents.realtime.model_inputs import RealtimeModelSendSessionUpdate
+from agents.realtime.model_inputs import (
+    RealtimeModelSendAudio,
+    RealtimeModelSendInterrupt,
+    RealtimeModelSendSessionUpdate,
+    RealtimeModelSendUserInput,
+)
 from agents.realtime.session import RealtimeSession
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
+
+
+class _DummyModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[Any] = []
+        self.listeners: list[Any] = []
+
+    async def connect(self, options=None):  # pragma: no cover - not used here
+        pass
+
+    async def close(self):  # pragma: no cover - not used here
+        pass
+
+    async def send_event(self, event):
+        self.events.append(event)
+
+    def add_listener(self, listener):
+        self.listeners.append(listener)
+
+    def remove_listener(self, listener):
+        if listener in self.listeners:
+            self.listeners.remove(listener)
+
+
+@pytest.mark.asyncio
+async def test_property_and_send_helpers_and_enter_alias():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    # property
+    assert session.model is model
+
+    # enter alias calls __aenter__
+    async with await session.enter():
+        # send helpers
+        await session.send_message("hi")
+        await session.send_audio(b"abc", commit=True)
+        await session.interrupt()
+
+        # verify sent events
+        assert any(isinstance(e, RealtimeModelSendUserInput) for e in model.events)
+        assert any(isinstance(e, RealtimeModelSendAudio) and e.commit for e in model.events)
+        assert any(isinstance(e, RealtimeModelSendInterrupt) for e in model.events)
+
+
+@pytest.mark.asyncio
+async def test_aiter_cancel_breaks_loop_gracefully():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    async def consume():
+        async for _ in session:
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.01)
+    consumer.cancel()
+    # The iterator swallows CancelledError internally and exits cleanly
+    await consumer
+
+
+@pytest.mark.asyncio
+async def test_transcription_completed_adds_new_user_item():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    event = RealtimeModelInputAudioTranscriptionCompletedEvent(item_id="item1", transcript="hello")
+    await session.on_event(event)
+
+    # Should have appended a new user item
+    assert len(session._history) == 1
+    assert session._history[0].type == "message"
+    assert session._history[0].role == "user"
+
+
+class _FakeAudio:
+    # Looks like an audio part but is not an InputAudio/AssistantAudio instance
+    type = "audio"
+    transcript = None
+
+
+@pytest.mark.asyncio
+async def test_item_updated_merge_exception_path_logs_error(monkeypatch):
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    # existing assistant message with transcript to preserve
+    existing = AssistantMessageItem(
+        item_id="a1", role="assistant", content=[AssistantAudio(audio=None, transcript="t")]
+    )
+    session._history = [existing]
+
+    # incoming message with a deliberately bogus content entry to trigger assertion path
+    incoming = AssistantMessageItem(
+        item_id="a1", role="assistant", content=[AssistantAudio(audio=None, transcript=None)]
+    )
+    incoming.content[0] = cast(Any, _FakeAudio())
+
+    with patch("agents.realtime.session.logger") as mock_logger:
+        await session.on_event(RealtimeModelItemUpdatedEvent(item=incoming))
+        # error branch should be hit
+        assert mock_logger.error.called
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_handoff_invalid_result_raises():
+    model = _DummyModel()
+    target = RealtimeAgent(name="target")
+
+    bad_handoff = Handoff(
+        tool_name="switch",
+        tool_description="",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=123),  # invalid return
+        input_filter=None,
+        agent_name=target.name,
+        is_enabled=True,
+    )
+
+    agent = RealtimeAgent(name="agent", handoffs=[bad_handoff])
+    session = RealtimeSession(model, agent, None)
+
+    with pytest.raises(UserError):
+        await session._handle_tool_call(
+            RealtimeModelToolCallEvent(name="switch", call_id="c1", arguments="{}")
+        )
+
+
+@pytest.mark.asyncio
+async def test_on_guardrail_task_done_emits_error_event():
+    model = _DummyModel()
+    agent = RealtimeAgent(name="agent")
+    session = RealtimeSession(model, agent, None)
+
+    async def failing_task():
+        raise ValueError("task failed")
+
+    task = asyncio.create_task(failing_task())
+    # Wait for it to finish so exception() is available
+    try:
+        await task
+    except Exception:  # noqa: S110
+        pass
+
+    session._on_guardrail_task_done(task)
+
+    # Allow event task to enqueue
+    await asyncio.sleep(0.01)
+
+    # Should have a RealtimeError queued
+    err = await session._event_queue.get()
+    assert isinstance(err, RealtimeError)
+
+
+@pytest.mark.asyncio
+async def test_get_handoffs_async_is_enabled(monkeypatch):
+    # Agent includes both a direct Handoff and a RealtimeAgent (auto-converted)
+    target = RealtimeAgent(name="target")
+    other = RealtimeAgent(name="other")
+
+    async def is_enabled(ctx, agent):
+        return True
+
+    # direct handoff with async is_enabled
+    direct = Handoff(
+        tool_name="to_target",
+        tool_description="",
+        input_json_schema={},
+        on_invoke_handoff=AsyncMock(return_value=target),
+        input_filter=None,
+        agent_name=target.name,
+        is_enabled=is_enabled,
+    )
+
+    a = RealtimeAgent(name="a", handoffs=[direct, other])
+    session = RealtimeSession(_DummyModel(), a, None)
+
+    enabled = await RealtimeSession._get_handoffs(a, session._context_wrapper)
+    # Both should be enabled
+    assert len(enabled) == 2
 
 
 class MockRealtimeModel(RealtimeModel):

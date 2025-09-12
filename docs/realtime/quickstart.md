@@ -44,9 +44,13 @@ runner = RealtimeRunner(
     starting_agent=agent,
     config={
         "model_settings": {
-            "model_name": "gpt-4o-realtime-preview",
-            "voice": "alloy",
-            "modalities": ["text", "audio"],
+            "model_name": "gpt-realtime",
+            "voice": "ash",
+            "modalities": ["audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
+            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
         }
     }
 )
@@ -55,24 +59,50 @@ runner = RealtimeRunner(
 ### 4. Start a session
 
 ```python
-async def main():
-    # Start the realtime session
-    session = await runner.run()
+# Start the session
+session = await runner.run()
 
-    async with session:
-        # Send a text message to start the conversation
-        await session.send_message("Hello! How are you today?")
+async with session:
+    print("Session started! The agent will stream audio responses in real-time.")
+    # Process events
+    async for event in session:
+        try:
+            if event.type == "agent_start":
+                print(f"Agent started: {event.agent.name}")
+            elif event.type == "agent_end":
+                print(f"Agent ended: {event.agent.name}")
+            elif event.type == "handoff":
+                print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
+            elif event.type == "tool_start":
+                print(f"Tool started: {event.tool.name}")
+            elif event.type == "tool_end":
+                print(f"Tool ended: {event.tool.name}; output: {event.output}")
+            elif event.type == "audio_end":
+                print("Audio ended")
+            elif event.type == "audio":
+                # Enqueue audio for callback-based playback with metadata
+                # Non-blocking put; queue is unbounded, so drops won’t occur.
+                pass
+            elif event.type == "audio_interrupted":
+                print("Audio interrupted")
+                # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
+            elif event.type == "error":
+                print(f"Error: {event.error}")
+            elif event.type == "history_updated":
+                pass  # Skip these frequent events
+            elif event.type == "history_added":
+                pass  # Skip these frequent events
+            elif event.type == "raw_model_event":
+                print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
+            else:
+                print(f"Unknown event type: {event.type}")
+        except Exception as e:
+            print(f"Error processing event: {_truncate_str(str(e), 200)}")
 
-        # The agent will stream back audio in real-time (not shown in this example)
-        # Listen for events from the session
-        async for event in session:
-            if event.type == "response.audio_transcript.done":
-                print(f"Assistant: {event.transcript}")
-            elif event.type == "conversation.item.input_audio_transcription.completed":
-                print(f"User: {event.transcript}")
-
-# Run the session
-asyncio.run(main())
+def _truncate_str(s: str, max_length: int) -> str:
+    if len(s) > max_length:
+        return s[:max_length] + "..."
+    return s
 ```
 
 ## Complete example
@@ -89,45 +119,68 @@ async def main():
         name="Assistant",
         instructions="You are a helpful voice assistant. Keep responses brief and conversational.",
     )
-
     # Set up the runner with configuration
     runner = RealtimeRunner(
         starting_agent=agent,
         config={
             "model_settings": {
-                "model_name": "gpt-4o-realtime-preview",
-                "voice": "alloy",
-                "modalities": ["text", "audio"],
-                "input_audio_transcription": {
-                    "model": "whisper-1"
-                },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 200
-                }
+                "model_name": "gpt-realtime",
+                "voice": "ash",
+                "modalities": ["audio"],
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
+                "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
             }
-        }
+        },
     )
-
     # Start the session
     session = await runner.run()
 
     async with session:
         print("Session started! The agent will stream audio responses in real-time.")
-
         # Process events
         async for event in session:
-            if event.type == "response.audio_transcript.done":
-                print(f"Assistant: {event.transcript}")
-            elif event.type == "conversation.item.input_audio_transcription.completed":
-                print(f"User: {event.transcript}")
-            elif event.type == "error":
-                print(f"Error: {event.error}")
-                break
+            try:
+                if event.type == "agent_start":
+                    print(f"Agent started: {event.agent.name}")
+                elif event.type == "agent_end":
+                    print(f"Agent ended: {event.agent.name}")
+                elif event.type == "handoff":
+                    print(f"Handoff from {event.from_agent.name} to {event.to_agent.name}")
+                elif event.type == "tool_start":
+                    print(f"Tool started: {event.tool.name}")
+                elif event.type == "tool_end":
+                    print(f"Tool ended: {event.tool.name}; output: {event.output}")
+                elif event.type == "audio_end":
+                    print("Audio ended")
+                elif event.type == "audio":
+                    # Enqueue audio for callback-based playback with metadata
+                    # Non-blocking put; queue is unbounded, so drops won’t occur.
+                    pass
+                elif event.type == "audio_interrupted":
+                    print("Audio interrupted")
+                    # Begin graceful fade + flush in the audio callback and rebuild jitter buffer.
+                elif event.type == "error":
+                    print(f"Error: {event.error}")
+                elif event.type == "history_updated":
+                    pass  # Skip these frequent events
+                elif event.type == "history_added":
+                    pass  # Skip these frequent events
+                elif event.type == "raw_model_event":
+                    print(f"Raw model event: {_truncate_str(str(event.data), 200)}")
+                else:
+                    print(f"Unknown event type: {event.type}")
+            except Exception as e:
+                print(f"Error processing event: {_truncate_str(str(e), 200)}")
+
+def _truncate_str(s: str, max_length: int) -> str:
+    if len(s) > max_length:
+        return s[:max_length] + "..."
+    return s
 
 if __name__ == "__main__":
+    # Run the session
     asyncio.run(main())
 ```
 
@@ -135,9 +188,9 @@ if __name__ == "__main__":
 
 ### Model settings
 
--   `model_name`: Choose from available realtime models (e.g., `gpt-4o-realtime-preview`)
+-   `model_name`: Choose from available realtime models (e.g., `gpt-realtime`)
 -   `voice`: Select voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: Enable text and/or audio (`["text", "audio"]`)
+-   `modalities`: Enable text or audio (`["text"]` or `["audio"]`)
 
 ### Audio settings
 
