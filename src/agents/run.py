@@ -45,6 +45,7 @@ from .guardrail import (
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import (
+    HandoffCallItem,
     ItemHelpers,
     ModelResponse,
     RunItem,
@@ -54,13 +55,18 @@ from .items import (
 )
 from .lifecycle import RunHooks
 from .logger import logger
-from .memory import Session
+from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
-from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
+from .stream_events import (
+    AgentUpdatedStreamEvent,
+    RawResponsesStreamEvent,
+    RunItemStreamEvent,
+    StreamEvent,
+)
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -177,6 +183,13 @@ class RunConfig:
     trace_metadata: dict[str, Any] | None = None
     """
     An optional dictionary of additional metadata to include with the trace.
+    """
+
+    session_input_callback: SessionInputCallback | None = None
+    """Defines how to handle session history when new input is provided.
+    - `None` (default): The new input is appended to the session history.
+    - `SessionInputCallback`: A custom function that receives the history and new input, and
+      returns the desired combined list of items.
     """
 
     call_model_input_filter: CallModelInputFilter | None = None
@@ -413,7 +426,9 @@ class AgentRunner:
 
         # Keep original user input separate from session-prepared input
         original_user_input = input
-        prepared_input = await self._prepare_input_with_session(input, session)
+        prepared_input = await self._prepare_input_with_session(
+            input, session, run_config.session_input_callback
+        )
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -781,7 +796,9 @@ class AgentRunner:
 
         try:
             # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(starting_input, session)
+            prepared_input = await AgentRunner._prepare_input_with_session(
+                starting_input, session, run_config.session_input_callback
+            )
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
@@ -1084,14 +1101,19 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            event_queue=streamed_result._event_queue,
         )
 
-        if emitted_tool_call_ids:
-            import dataclasses as _dc
+        import dataclasses as _dc
 
-            filtered_items = [
+        # Filter out items that have already been sent to avoid duplicates
+        items_to_filter = single_step_result.new_step_items
+
+        if emitted_tool_call_ids:
+            # Filter out tool call items that were already emitted during streaming
+            items_to_filter = [
                 item
-                for item in single_step_result.new_step_items
+                for item in items_to_filter
                 if not (
                     isinstance(item, ToolCallItem)
                     and (
@@ -1103,15 +1125,17 @@ class AgentRunner:
                 )
             ]
 
-            single_step_result_filtered = _dc.replace(
-                single_step_result, new_step_items=filtered_items
-            )
+        # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
+        items_to_filter = [
+            item for item in items_to_filter
+            if not isinstance(item, HandoffCallItem)
+        ]
 
-            RunImpl.stream_step_result_to_queue(
-                single_step_result_filtered, streamed_result._event_queue
-            )
-        else:
-            RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        # Create filtered result and send to queue
+        filtered_result = _dc.replace(
+            single_step_result, new_step_items=items_to_filter
+        )
+        RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
     @classmethod
@@ -1196,6 +1220,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -1206,6 +1231,15 @@ class AgentRunner:
         )
 
         tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+
+        # Send handoff items immediately for streaming, but avoid duplicates
+        if event_queue is not None and processed_response.new_items:
+            handoff_items = [
+                item for item in processed_response.new_items
+                if isinstance(item, HandoffCallItem)
+            ]
+            if handoff_items:
+                RunImpl.stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)
 
         return await RunImpl.execute_tools_and_side_effects(
             agent=agent,
@@ -1474,19 +1508,20 @@ class AgentRunner:
         cls,
         input: str | list[TResponseInputItem],
         session: Session | None,
+        session_input_callback: SessionInputCallback | None,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
             return input
 
-        # Validate that we don't have both a session and a list input, as this creates
-        # ambiguity about whether the list should append to or replace existing session history
-        if isinstance(input, list):
+        # If the user doesn't specify an input callback and pass a list as input
+        if isinstance(input, list) and not session_input_callback:
             raise UserError(
-                "Cannot provide both a session and a list of input items. "
-                "When using session memory, provide only a string input to append to the "
-                "conversation, or use session=None and provide a list to manually manage "
-                "conversation history."
+                "When using session memory, list inputs require a "
+                "`RunConfig.session_input_callback` to define how they should be merged "
+                "with the conversation history. If you don't want to use a callback, "
+                "provide your input as a string instead, or disable session memory "
+                "(session=None) and pass a list to manage the history manually."
             )
 
         # Get previous conversation history
@@ -1495,10 +1530,18 @@ class AgentRunner:
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
-        # Combine history with new input
-        combined_input = history + new_input_list
-
-        return combined_input
+        if session_input_callback is None:
+            return history + new_input_list
+        elif callable(session_input_callback):
+            res = session_input_callback(history, new_input_list)
+            if inspect.isawaitable(res):
+                return await res
+            return res
+        else:
+            raise UserError(
+                f"Invalid `session_input_callback` value: {session_input_callback}. "
+                "Choose between `None` or a custom callable function."
+            )
 
     @classmethod
     async def _save_result_to_session(
@@ -1507,7 +1550,11 @@ class AgentRunner:
         original_input: str | list[TResponseInputItem],
         new_items: list[RunItem],
     ) -> None:
-        """Save the conversation turn to session."""
+        """
+        Save the conversation turn to session.
+        It does not account for any filtering or modification performed by
+        `RunConfig.session_input_callback`.
+        """
         if session is None:
             return
 

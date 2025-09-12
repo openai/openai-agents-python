@@ -95,13 +95,23 @@ class Converter:
 
         # Handle reasoning content if available
         if hasattr(message, "reasoning_content") and message.reasoning_content:
-            items.append(
-                ResponseReasoningItem(
-                    id=FAKE_RESPONSES_ID,
-                    summary=[Summary(text=message.reasoning_content, type="summary_text")],
-                    type="reasoning",
-                )
+            reasoning_item = ResponseReasoningItem(
+                id=FAKE_RESPONSES_ID,
+                summary=[Summary(text=message.reasoning_content, type="summary_text")],
+                type="reasoning",
             )
+
+            # Store full thinking blocks for Anthropic compatibility
+            if hasattr(message, "thinking_blocks") and message.thinking_blocks:
+                # Store thinking blocks in the reasoning item's content
+                # Convert thinking blocks to Content objects
+                from openai.types.responses.response_reasoning_item import Content
+                reasoning_item.content = [
+                    Content(text=str(block.get("thinking", "")), type="reasoning_text")
+                    for block in message.thinking_blocks
+                ]
+
+            items.append(reasoning_item)
 
         message_item = ResponseOutputMessage(
             id=FAKE_RESPONSES_ID,

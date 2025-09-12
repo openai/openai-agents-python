@@ -278,7 +278,6 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 "wss://api.openai.com/v1/realtime?intent=transcription",
                 additional_headers={
                     "Authorization": f"Bearer {self._client.api_key}",
-                    "OpenAI-Beta": "realtime=v1",
                     "OpenAI-Log-Session": "1",
                 },
             ) as ws:
