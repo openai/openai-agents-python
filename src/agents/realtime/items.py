@@ -34,6 +34,22 @@ class InputAudio(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class InputImage(BaseModel):
+    """Image input content for realtime messages."""
+
+    type: Literal["input_image"] = "input_image"
+    """The type identifier for image input."""
+
+    image_url: str | None = None
+    """Data/remote URL string (data:... or https:...)."""
+
+    detail: str | None = None
+    """Optional detail hint (e.g., 'auto', 'high', 'low')."""
+
+    # Allow extra data (e.g., `detail`)
+    model_config = ConfigDict(extra="allow")
+
+
 class AssistantText(BaseModel):
     """Text content from the assistant in realtime responses."""
 
@@ -100,7 +116,7 @@ class UserMessageItem(BaseModel):
     role: Literal["user"] = "user"
     """The role identifier for user messages."""
 
-    content: list[Annotated[InputText | InputAudio, Field(discriminator="type")]]
+    content: list[Annotated[InputText | InputAudio | InputImage, Field(discriminator="type")]]
     """List of content items, can be text or audio."""
 
     # Allow extra data

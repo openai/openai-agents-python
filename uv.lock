@@ -1797,7 +1797,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "1.104.1"
+version = "1.107.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1809,14 +1809,14 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/47/55/7e0242a7db611ad4a091a98ca458834b010639e94e84faca95741ded4050/openai-1.104.1.tar.gz", hash = "sha256:8b234ada6f720fa82859fb7dcecf853f8ddf3892c3038c81a9cc08bcb4cd8d86", size = 557053, upload-time = "2025-09-02T19:59:37.818Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f3/e0/a62daa7ff769df969cc1b782852cace79615039630b297005356f5fb46fb/openai-1.107.1.tar.gz", hash = "sha256:7c51b6b8adadfcf5cada08a613423575258b180af5ad4bc2954b36ebc0d3ad48", size = 563671, upload-time = "2025-09-10T15:04:40.288Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/de/af0eefab4400d2c888cea4f9b929bd5208d98aa7619c38b93554b0699d60/openai-1.104.1-py3-none-any.whl", hash = "sha256:153f2e9c60d4c8bb90f2f3ef03b6433b3c186ee9497c088d323028f777760af4", size = 928094, upload-time = "2025-09-02T19:59:36.155Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/12/32c19999a58eec4a695e8ce334442b6135df949f0bb61b2ceaa4fa60d3a9/openai-1.107.1-py3-none-any.whl", hash = "sha256:168f9885b1b70d13ada0868a0d0adfd538c16a02f7fd9fe063851a2c9a025e72", size = 945177, upload-time = "2025-09-10T15:04:37.782Z" },
 ]
 
 [[package]]
 name = "openai-agents"
-version = "0.2.11"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
@@ -1882,7 +1882,7 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.67.4.post1,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.11.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "openai", specifier = ">=1.104.1,<2" },
+    { name = "openai", specifier = ">=1.107.1,<2" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },

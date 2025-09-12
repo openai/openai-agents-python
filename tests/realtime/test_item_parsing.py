@@ -1,5 +1,15 @@
-from openai.types.beta.realtime.conversation_item import ConversationItem
-from openai.types.beta.realtime.conversation_item_content import ConversationItemContent
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    Content as AssistantMessageContent,
+    RealtimeConversationItemAssistantMessage,
+)
+from openai.types.realtime.realtime_conversation_item_system_message import (
+    Content as SystemMessageContent,
+    RealtimeConversationItemSystemMessage,
+)
+from openai.types.realtime.realtime_conversation_item_user_message import (
+    Content as UserMessageContent,
+    RealtimeConversationItemUserMessage,
+)
 
 from agents.realtime.items import (
     AssistantMessageItem,
@@ -11,14 +21,12 @@ from agents.realtime.openai_realtime import _ConversionHelper
 
 
 def test_user_message_conversion() -> None:
-    item = ConversationItem(
+    item = RealtimeConversationItemUserMessage(
         id="123",
         type="message",
         role="user",
         content=[
-            ConversationItemContent(
-                id=None, audio=None, text=None, transcript=None, type="input_text"
-            )
+            UserMessageContent(type="input_text", text=None),
         ],
     )
 
@@ -28,14 +36,12 @@ def test_user_message_conversion() -> None:
 
     assert isinstance(converted, UserMessageItem)
 
-    item = ConversationItem(
+    item = RealtimeConversationItemUserMessage(
         id="123",
         type="message",
         role="user",
         content=[
-            ConversationItemContent(
-                id=None, audio=None, text=None, transcript=None, type="input_audio"
-            )
+            UserMessageContent(type="input_audio", audio=None),
         ],
     )
 
@@ -45,13 +51,11 @@ def test_user_message_conversion() -> None:
 
 
 def test_assistant_message_conversion() -> None:
-    item = ConversationItem(
+    item = RealtimeConversationItemAssistantMessage(
         id="123",
         type="message",
         role="assistant",
-        content=[
-            ConversationItemContent(id=None, audio=None, text=None, transcript=None, type="text")
-        ],
+        content=[AssistantMessageContent(type="output_text", text=None)],
     )
 
     converted: RealtimeMessageItem = _ConversionHelper.conversation_item_to_realtime_message_item(
@@ -62,15 +66,11 @@ def test_assistant_message_conversion() -> None:
 
 
 def test_system_message_conversion() -> None:
-    item = ConversationItem(
+    item = RealtimeConversationItemSystemMessage(
         id="123",
         type="message",
         role="system",
-        content=[
-            ConversationItemContent(
-                id=None, audio=None, text=None, transcript=None, type="input_text"
-            )
-        ],
+        content=[SystemMessageContent(type="input_text", text=None)],
     )
 
     converted: RealtimeMessageItem = _ConversionHelper.conversation_item_to_realtime_message_item(
