@@ -25,7 +25,7 @@ class AdvancedSQLiteSession(SQLiteSession):
     ACTIVE = 1  # Message is active and visible in conversation
     INACTIVE = 0  # Message is soft-deleted (hidden but preserved)
 
-    def __init__(self, session_id: str, db_path: str | Path = ":memory:", **kwargs):
+    def __init__(self, *, session_id: str, db_path: str | Path = ":memory:", **kwargs):
         super().__init__(session_id, db_path, **kwargs)
         self._current_user_turn = 0
         self._init_structure_tables()
