@@ -1,6 +1,11 @@
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from openai.types.realtime.realtime_session_create_request import (
+    RealtimeSessionCreateRequest,
+)
+from openai.types.realtime.realtime_tracing_config import TracingConfiguration
 
 from agents.realtime.agent import RealtimeAgent
 from agents.realtime.model import RealtimeModel
@@ -95,15 +100,14 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with tracing config
-                    from openai.types.beta.realtime.session_update_event import (
-                        SessionTracingTracingConfiguration,
+                    from openai.types.realtime.session_update_event import (
                         SessionUpdateEvent,
                     )
 
@@ -111,9 +115,10 @@ class TestRealtimeTracingIntegration:
                     call_args = mock_send_raw_message.call_args[0][0]
                     assert isinstance(call_args, SessionUpdateEvent)
                     assert call_args.type == "session.update"
-                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
-                    assert call_args.session.tracing.workflow_name == "test_workflow"
-                    assert call_args.session.tracing.group_id == "group_123"
+                    session_req = cast(RealtimeSessionCreateRequest, call_args.session)
+                    assert isinstance(session_req.tracing, TracingConfiguration)
+                    assert session_req.tracing.workflow_name == "test_workflow"
+                    assert session_req.tracing.group_id == "group_123"
 
     @pytest.mark.asyncio
     async def test_send_tracing_config_auto_mode(self, model, mock_websocket):
@@ -136,20 +141,21 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with "auto"
-                    from openai.types.beta.realtime.session_update_event import SessionUpdateEvent
+                    from openai.types.realtime.session_update_event import SessionUpdateEvent
 
                     mock_send_raw_message.assert_called_once()
                     call_args = mock_send_raw_message.call_args[0][0]
                     assert isinstance(call_args, SessionUpdateEvent)
                     assert call_args.type == "session.update"
-                    assert call_args.session.tracing == "auto"
+                    session_req = cast(RealtimeSessionCreateRequest, call_args.session)
+                    assert session_req.tracing == "auto"
 
     @pytest.mark.asyncio
     async def test_tracing_config_none_skips_session_update(self, model, mock_websocket):
@@ -160,7 +166,7 @@ class TestRealtimeTracingIntegration:
         session_created_event = {
             "type": "session.created",
             "event_id": "event_123",
-            "session": {"id": "session_456"},
+            "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
         }
 
         with patch.object(model, "send_event") as mock_send_event:
@@ -199,15 +205,14 @@ class TestRealtimeTracingIntegration:
                 session_created_event = {
                     "type": "session.created",
                     "event_id": "event_123",
-                    "session": {"id": "session_456"},
+                    "session": {"id": "session_456", "type": "realtime", "model": "gpt-realtime"},
                 }
 
                 with patch.object(model, "_send_raw_message") as mock_send_raw_message:
                     await model._handle_ws_event(session_created_event)
 
                     # Should send session.update with complete tracing config including metadata
-                    from openai.types.beta.realtime.session_update_event import (
-                        SessionTracingTracingConfiguration,
+                    from openai.types.realtime.session_update_event import (
                         SessionUpdateEvent,
                     )
 
@@ -215,9 +220,10 @@ class TestRealtimeTracingIntegration:
                     call_args = mock_send_raw_message.call_args[0][0]
                     assert isinstance(call_args, SessionUpdateEvent)
                     assert call_args.type == "session.update"
-                    assert isinstance(call_args.session.tracing, SessionTracingTracingConfiguration)
-                    assert call_args.session.tracing.workflow_name == "complex_workflow"
-                    assert call_args.session.tracing.metadata == complex_metadata
+                    session_req = cast(RealtimeSessionCreateRequest, call_args.session)
+                    assert isinstance(session_req.tracing, TracingConfiguration)
+                    assert session_req.tracing.workflow_name == "complex_workflow"
+                    assert session_req.tracing.metadata == complex_metadata
 
     @pytest.mark.asyncio
     async def test_tracing_disabled_prevents_tracing(self, mock_websocket):
