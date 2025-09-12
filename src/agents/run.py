@@ -45,6 +45,7 @@ from .guardrail import (
 )
 from .handoffs import Handoff, HandoffInputFilter, handoff
 from .items import (
+    HandoffCallItem,
     ItemHelpers,
     ModelResponse,
     RunItem,
@@ -60,7 +61,12 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
-from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent, StreamEvent
+from .stream_events import (
+    AgentUpdatedStreamEvent,
+    RawResponsesStreamEvent,
+    RunItemStreamEvent,
+    StreamEvent,
+)
 from .tool import Tool
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -1098,12 +1104,16 @@ class AgentRunner:
             event_queue=streamed_result._event_queue,
         )
 
-        if emitted_tool_call_ids:
-            import dataclasses as _dc
+        import dataclasses as _dc
 
-            filtered_items = [
+        # Filter out items that have already been sent to avoid duplicates
+        items_to_filter = single_step_result.new_step_items
+
+        if emitted_tool_call_ids:
+            # Filter out tool call items that were already emitted during streaming
+            items_to_filter = [
                 item
-                for item in single_step_result.new_step_items
+                for item in items_to_filter
                 if not (
                     isinstance(item, ToolCallItem)
                     and (
@@ -1115,15 +1125,17 @@ class AgentRunner:
                 )
             ]
 
-            single_step_result_filtered = _dc.replace(
-                single_step_result, new_step_items=filtered_items
-            )
+        # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
+        items_to_filter = [
+            item for item in items_to_filter
+            if not isinstance(item, HandoffCallItem)
+        ]
 
-            RunImpl.stream_step_result_to_queue(
-                single_step_result_filtered, streamed_result._event_queue
-            )
-        else:
-            RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        # Create filtered result and send to queue
+        filtered_result = _dc.replace(
+            single_step_result, new_step_items=items_to_filter
+        )
+        RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
     @classmethod
@@ -1220,8 +1232,14 @@ class AgentRunner:
 
         tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
 
+        # Send handoff items immediately for streaming, but avoid duplicates
         if event_queue is not None and processed_response.new_items:
-            RunImpl.stream_step_items_to_queue(processed_response.new_items, event_queue)
+            handoff_items = [
+                item for item in processed_response.new_items
+                if isinstance(item, HandoffCallItem)
+            ]
+            if handoff_items:
+                RunImpl.stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)
 
         return await RunImpl.execute_tools_and_side_effects(
             agent=agent,

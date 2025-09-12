@@ -3,12 +3,13 @@ import time
 
 import pytest
 
-from agents import Agent, Runner, function_tool, HandoffCallItem, HandoffOutputItem
-from agents.handoffs import handoff
+from agents import Agent, HandoffCallItem, Runner, function_tool
 from agents.extensions.handoff_filters import remove_all_tools
+from agents.handoffs import handoff
 
 from .fake_model import FakeModel
-from .test_responses import get_function_tool_call, get_text_message, get_handoff_tool_call
+from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
+
 
 @function_tool
 async def foo() -> str:
@@ -54,6 +55,7 @@ async def test_stream_events_main():
     assert tool_call_end_time > 0, "tool_call_output_item was not observed"
     assert tool_call_start_time < tool_call_end_time, "Tool call ended before or equals it started?"
 
+
 @pytest.mark.asyncio
 async def test_stream_events_main_with_handoff():
     @function_tool
@@ -93,24 +95,15 @@ async def test_stream_events_main_with_handoff():
         input="Start",
     )
 
-    tool_call_start_time = -1
-    tool_call_end_time = -1
     handoff_requested_seen = False
-    handoff_occured_seen = False
     agent_switched_to_english = False
 
     async for event in result.stream_events():
         if event.type == "run_item_stream_event":
             if isinstance(event.item, HandoffCallItem):
                 handoff_requested_seen = True
-            elif isinstance(event.item, HandoffOutputItem):
-                handoff_occured_seen = True
-            elif event.item.type == "tool_call_item":
-                tool_call_start_time = time.time_ns()
-            elif event.item.type == "tool_call_output_item":
-                tool_call_end_time = time.time_ns()
         elif event.type == "agent_updated_stream_event":
-            if hasattr(event, 'new_agent') and event.new_agent.name == "EnglishAgent":
+            if hasattr(event, "new_agent") and event.new_agent.name == "EnglishAgent":
                 agent_switched_to_english = True
 
     assert handoff_requested_seen, "handoff_requested event not observed"
