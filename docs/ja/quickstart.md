@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 仮想環境の有効化
 
-新しいターミナル セッションを開始するたびに実行してください。
+新しいターミナル セッションを開始するたびに実行します。
 
 ```bash
 source .venv/bin/activate
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-お持ちでない場合は、OpenAI API キーを作成するために[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従ってください。
+まだお持ちでない場合は、[これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは instructions、名前、任意の config（例えば `model_config`）で定義します。
+エージェントは instructions、名前、任意のコンフィグ（例: `model_config`）で定義します。
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## いくつかのエージェントを追加
+## いくつかのエージェントの追加
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` はハンドオフのルーティングを判断するための追加コンテキストを提供します。
+追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントで、タスクを前進させるために選択できる送信側ハンドオフの選択肢の一覧を定義できます。
+各エージェントで、エージェントがタスクを前進させる方法を決定するために選択できる、送信先のハンドオフ オプションの在庫を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェント オーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェントの間で正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間で正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -95,7 +95,7 @@ async def main():
 
 ## ガードレールの追加
 
-入力または出力で実行するカスタム ガードレールを定義できます。
+入力または出力に対して実行するカスタム ガードレールを定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -123,7 +123,7 @@ async def homework_guardrail(ctx, agent, input_data):
 
 ## すべてをまとめる
 
-ハンドオフと入力ガードレールを使用して、すべてを組み合わせてワークフロー全体を実行しましょう。
+すべてを組み合わせて、ハンドオフと入力ガードレールを使い、ワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## トレースの表示
 
-エージェント実行中に何が起きたかを確認するには、OpenAI ダッシュボードの Trace viewer に移動し、エージェント実行のトレースを表示してください。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードのトレース ビューア](https://platform.openai.com/traces)でエージェント実行のトレースを確認してください。
 
 ## 次のステップ
 
 より複雑なエージェント フローの作り方を学びましょう:
 
--   [エージェント](agents.md)の設定について学ぶ。
--   [エージェントの実行](running_agents.md)について学ぶ。
--   [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md)について学ぶ。
+- Learn about how to configure [エージェント](agents.md)。
+- Learn about [エージェントの実行](running_agents.md)。
+- Learn about [tools](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md)。
