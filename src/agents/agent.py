@@ -384,6 +384,7 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        max_turns: int | None = None,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -402,6 +403,8 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
+            max_turns: The maximum number of turns the agent can take when running as a tool.
+                If not provided, the default value will be used.
         """
 
         @function_tool(
@@ -413,9 +416,7 @@ class Agent(AgentBase, Generic[TContext]):
             from .run import Runner
 
             output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
+                starting_agent=self, input=input, context=context.context, max_turns=max_turns
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
