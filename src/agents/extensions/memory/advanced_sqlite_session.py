@@ -6,7 +6,7 @@ import logging
 import threading
 from contextlib import closing
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Union, cast
 
 from agents.result import RunResult
 from agents.usage import Usage
@@ -480,7 +480,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         result = await asyncio.to_thread(_get_usage_sync)
 
-        return cast(dict[str, int] | None, result)
+        return cast(Union[dict[str, int], None], result)
 
     async def get_conversation_by_turns(
         self, include_inactive: bool = False
@@ -665,4 +665,4 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         result = await asyncio.to_thread(_get_turn_usage_sync)
 
-        return cast(list[dict[str, Any]] | dict[str, Any], result)
+        return cast(Union[list[dict[str, Any]], dict[str, Any]], result)
