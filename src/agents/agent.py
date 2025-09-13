@@ -32,7 +32,7 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from .lifecycle import AgentHooks
     from .mcp import MCPServer
-    from .result import RunResult
+    from .result import RunResult, RunResultStreaming
 
 
 @dataclass
@@ -381,9 +381,11 @@ class Agent(AgentBase, Generic[TContext]):
         self,
         tool_name: str | None,
         tool_description: str | None,
+        *,
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        stream_inner_events: bool = False,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -412,17 +414,36 @@ class Agent(AgentBase, Generic[TContext]):
         async def run_agent(context: RunContextWrapper, input: str) -> str:
             from .run import Runner
 
-            output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
-            )
+            output_run: RunResult | RunResultStreaming
+            if stream_inner_events:
+                from .stream_events import RunItemStreamEvent
+
+                sub_run = Runner.run_streamed(
+                    self,
+                    input=input,
+                    context=context.context,
+                )
+                parent_queue = getattr(context, "_event_queue", None)
+                async for ev in sub_run.stream_events():
+                    if parent_queue is not None and isinstance(ev, RunItemStreamEvent):
+                        if ev.name in ("tool_called", "tool_output"):
+                            parent_queue.put_nowait(ev)
+                output_run = sub_run
+            else:
+                output_run = await Runner.run(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                )
+
             if custom_output_extractor:
-                return await custom_output_extractor(output)
+                return await custom_output_extractor(cast(Any, output_run))
 
-            return ItemHelpers.text_message_outputs(output.new_items)
+            return ItemHelpers.text_message_outputs(output_run.new_items)
 
-        return run_agent
+        tool = run_agent
+        tool.stream_inner_events = stream_inner_events  # type: ignore[attr-defined]
+        return tool
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
         if isinstance(self.instructions, str):
