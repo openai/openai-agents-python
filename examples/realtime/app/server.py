@@ -198,9 +198,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 {"type": "input_text", "text": prompt_text},
                             ]
                             if prompt_text
-                            else [
-                                {"type": "input_image", "image_url": data_url, "detail": "high"}
-                            ]
+                            else [{"type": "input_image", "image_url": data_url, "detail": "high"}]
                         ),
                     }
                     await manager.send_user_message(session_id, user_msg)
@@ -271,7 +269,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "role": "user",
                             "content": (
                                 [
-                                    {"type": "input_image", "image_url": data_url, "detail": "high"},
+                                    {
+                                        "type": "input_image",
+                                        "image_url": data_url,
+                                        "detail": "high",
+                                    },
                                     {"type": "input_text", "text": prompt_text},
                                 ]
                                 if prompt_text

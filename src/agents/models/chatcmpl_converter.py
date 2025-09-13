@@ -106,6 +106,7 @@ class Converter:
                 # Store thinking blocks in the reasoning item's content
                 # Convert thinking blocks to Content objects
                 from openai.types.responses.response_reasoning_item import Content
+
                 reasoning_item.content = [
                     Content(text=str(block.get("thinking", "")), type="reasoning_text")
                     for block in message.thinking_blocks
@@ -282,9 +283,7 @@ class Converter:
                         f"Only file_data is supported for input_file {casted_file_param}"
                     )
                 if "filename" not in casted_file_param or not casted_file_param["filename"]:
-                    raise UserError(
-                        f"filename must be provided for input_file {casted_file_param}"
-                    )
+                    raise UserError(f"filename must be provided for input_file {casted_file_param}")
                 out.append(
                     File(
                         type="file",
