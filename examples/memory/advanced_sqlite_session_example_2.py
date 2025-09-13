@@ -1,8 +1,8 @@
 """
 Advanced example demonstrating conversation branching with AdvancedSQLiteSession.
 
-This example shows how to use soft deletion for conversation editing/branching,
-allowing you to "undo" parts of a conversation and continue from any point.
+This example shows how to use the new conversation branching system,
+allowing you to branch conversations from any user message and manage multiple timelines.
 """
 
 import asyncio
@@ -26,11 +26,14 @@ async def main():
         tools=[get_weather],
     )
 
-    # Create a advanced session instance
-    session = AdvancedSQLiteSession(session_id="conversation_advanced", create_tables=True)
+    # Create an advanced session instance
+    session = AdvancedSQLiteSession(
+        session_id="conversation_advanced",
+        create_tables=True,
+    )
 
     print("=== Advanced Session: Conversation Branching ===")
-    print("This example demonstrates conversation editing and branching.\n")
+    print("This example demonstrates the new conversation branching system.\n")
 
     # Build initial conversation
     print("Building initial conversation...")
@@ -84,18 +87,24 @@ async def main():
 
     # Demonstrate conversation branching
     print("\n=== Conversation Branching Demo ===")
-    print("Let's say we want to edit the conversation from turn 2 onwards...")
+    print("Let's explore a different path from turn 2...")
 
-    # Soft delete from turn 2 to create a branch point
-    print("\nSoft deleting from turn 2 onwards to create branch point...")
-    deleted = await session.deactivate_from_turn(2)
-    print(f"Deleted: {deleted}")
+    # Show available turns for branching
+    print("\nAvailable turns for branching:")
+    turns = await session.get_conversation_turns()
+    for turn in turns:
+        print(f"  Turn {turn['turn']}: {turn['content']}")
 
-    # Show only active items (turn 1 only)
-    active_items = await session.get_items()
-    print(f"Active items after deletion: {len(active_items)}")
-    print("Active conversation (turn 1 only):")
-    for i, item in enumerate(active_items, 1):
+    # Create a branch from turn 2
+    print("\nCreating new branch from turn 2...")
+    branch_id = await session.create_branch_from_turn(2)
+    print(f"Created branch: {branch_id}")
+
+    # Show what's in the new branch (should have conversation up to turn 2)
+    branch_items = await session.get_items()
+    print(f"Items copied to new branch: {len(branch_items)}")
+    print("New branch contains:")
+    for i, item in enumerate(branch_items, 1):
         role = str(item.get("role", item.get("type", "unknown")))
         if item.get("type") == "function_call":
             content = f"{item.get('name', 'unknown')}({item.get('arguments', '{}')})"
@@ -105,8 +114,8 @@ async def main():
             content = str(item.get("content", item.get("output", "")))
         print(f"  {i}. {role}: {content}")
 
-    # Create a new branch
-    print("\nCreating new conversation branch...")
+    # Continue conversation in new branch
+    print("\nContinuing conversation in new branch...")
     print("Turn 2 (new branch): User asks about New York instead")
     result = await Runner.run(
         agent,
@@ -140,51 +149,67 @@ async def main():
             content = str(item.get("content", item.get("output", "")))
         print(f"  {i}. {role}: {content}")
 
-    # Show that we can still access the original branch
-    all_items = await session.get_items(include_inactive=True)
-    print(f"\nTotal items including inactive (original + new branch): {len(all_items)}")
+    print(f"\nTotal items in new branch: {len(new_conversation)}")
 
-    print("\n=== Conversation Structure Analysis ===")
-    # Show conversation turns (active only)
-    conversation_turns = await session.get_conversation_by_turns()
-    print("Active conversation turns:")
-    for turn_num, items in conversation_turns.items():
-        print(f"  Turn {turn_num}: {len(items)} items")
-        for item in items:  # type: ignore
-            if item["tool_name"]:  # type: ignore
-                print(
-                    f"    - {item['type']} (tool: {item['tool_name']}) [active: {item['active']}]"  # type: ignore
-                )
-            else:
-                print(f"    - {item['type']} [active: {item['active']}]")  # type: ignore
+    print("\n=== Branch Management ===")
+    # Show all branches
+    branches = await session.list_branches()
+    print("All branches in this session:")
+    for branch in branches:
+        current = " (current)" if branch["is_current"] else ""
+        print(
+            f"  {branch['branch_id']}: {branch['user_turns']} user turns, {branch['message_count']} total messages{current}"
+        )
 
-    # Show all conversation turns (including inactive)
-    all_conversation_turns = await session.get_conversation_by_turns(include_inactive=True)
-    print("\nAll conversation turns (including inactive):")
-    for turn_num, items in all_conversation_turns.items():
-        print(f"  Turn {turn_num}: {len(items)} items")
-        for item in items:  # type: ignore
-            status = "ACTIVE" if item["active"] else "INACTIVE"  # type: ignore
-            if item["tool_name"]:  # type: ignore
-                print(f"    - {item['type']} (tool: {item['tool_name']}) [{status}]")  # type: ignore
-            else:
-                print(f"    - {item['type']} [{status}]")
+    # Show conversation turns in current branch
+    print("\nConversation turns in current branch:")
+    current_turns = await session.get_conversation_turns()
+    for turn in current_turns:
+        print(f"  Turn {turn['turn']}: {turn['content']}")
 
-    print("\n=== Reactivation Demo ===")
-    print("We can also reactivate the original conversation...")
+    print("\n=== Branch Switching Demo ===")
+    print("We can switch back to the main branch...")
 
-    # Reactivate the original conversation
-    reactivated = await session.reactivate_from_turn(2)
-    print(f"Reactivated: {reactivated}")
+    # Switch back to main branch
+    await session.switch_to_branch("main")
+    print("Switched to main branch")
 
-    # Show all active items now
-    all_active = await session.get_items()
-    print(f"All active items after reactivation: {len(all_active)}")
+    # Show what's in main branch
+    main_items = await session.get_items()
+    print(f"Items in main branch: {len(main_items)}")
+
+    # Switch back to new branch
+    await session.switch_to_branch(branch_id)
+    branch_items = await session.get_items()
+    print(f"Items in new branch: {len(branch_items)}")
+
+    print("\n=== Final Summary ===")
+    await session.switch_to_branch("main")
+    main_final = len(await session.get_items())
+    await session.switch_to_branch(branch_id)
+    branch_final = len(await session.get_items())
+
+    print(f"Main branch items: {main_final}")
+    print(f"New branch items: {branch_final}")
+
+    # Show that branches are completely independent
+    print("\nBranches are completely independent:")
+    print("- Main branch has full original conversation")
+    print("- New branch has turn 1 + new conversation path")
+    print("- No interference between branches!")
 
     print("\n=== Advanced Example Complete ===")
-    print("This demonstrates how soft deletion enables conversation editing/branching!")
-    print("You can 'undo' parts of a conversation and continue from any point.")
-    print("Perfect for building conversational AI systems with editing capabilities.")
+    print("This demonstrates the new conversation branching system!")
+    print("Key features:")
+    print("- Create branches from any user message")
+    print("- Branches inherit conversation history up to the branch point")
+    print("- Complete branch isolation - no interference between branches")
+    print("- Easy branch switching and management")
+    print("- No complex soft deletion - clean branch-based architecture")
+    print("- Perfect for building AI systems with conversation editing capabilities!")
+
+    # Cleanup
+    session.close()
 
 
 if __name__ == "__main__":

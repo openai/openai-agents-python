@@ -156,12 +156,12 @@ async def test_tool_usage_tracking(agent: Agent):
     session.close()
 
 
-async def test_soft_deletion_functionality(agent: Agent):
-    """Test soft deletion and reactivation functionality."""
-    session_id = "deletion_test"
+async def test_branching_functionality(agent: Agent):
+    """Test branching functionality - create, switch, and delete branches."""
+    session_id = "branching_test"
     session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
-    # Add multiple turns
+    # Add multiple turns to main branch
     turn_1_items: list[TResponseInputItem] = [
         {"role": "user", "content": "First question"},
         {"role": "assistant", "content": "First answer"},
@@ -180,31 +180,346 @@ async def test_soft_deletion_functionality(agent: Agent):
     ]
     await session.add_items(turn_3_items)
 
-    # Verify all items are active
+    # Verify all items are in main branch
     all_items = await session.get_items()
     assert len(all_items) == 6
 
-    # Soft delete from turn 2 onwards
-    deleted = await session.deactivate_from_turn(2)
-    assert deleted is True
+    # Create a branch from turn 2
+    branch_name = await session.create_branch_from_turn(2, "test_branch")
+    assert branch_name == "test_branch"
 
-    # Verify only turn 1 items are active
-    active_items = await session.get_items()
-    assert len(active_items) == 2
-    assert active_items[0].get("content") == "First question"
-    assert active_items[1].get("content") == "First answer"
+    # Verify we're now on the new branch
+    assert session._current_branch_id == "test_branch"
 
-    # Verify we can still get inactive items
-    all_items_including_inactive = await session.get_items(include_inactive=True)
-    assert len(all_items_including_inactive) == 6
+    # Verify the branch has the same content up to turn 2 (copies messages before turn 2)
+    branch_items = await session.get_items()
+    assert len(branch_items) == 2  # Only first turn items (before turn 2)
+    assert branch_items[0].get("content") == "First question"
+    assert branch_items[1].get("content") == "First answer"
 
-    # Test reactivation
-    reactivated = await session.reactivate_from_turn(2)
-    assert reactivated is True
+    # Switch back to main branch
+    await session.switch_to_branch("main")
+    assert session._current_branch_id == "main"
 
-    # Verify all items are active again
-    all_active_again = await session.get_items()
-    assert len(all_active_again) == 6
+    # Verify main branch still has all items
+    main_items = await session.get_items()
+    assert len(main_items) == 6
+
+    # List branches
+    branches = await session.list_branches()
+    assert len(branches) == 2
+    branch_ids = [b["branch_id"] for b in branches]
+    assert "main" in branch_ids
+    assert "test_branch" in branch_ids
+
+    # Delete the test branch
+    await session.delete_branch("test_branch")
+
+    # Verify branch is deleted
+    branches_after_delete = await session.list_branches()
+    assert len(branches_after_delete) == 1
+    assert branches_after_delete[0]["branch_id"] == "main"
+
+    session.close()
+
+
+async def test_get_conversation_turns():
+    """Test get_conversation_turns functionality."""
+    session_id = "conversation_turns_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add multiple turns
+    turn_1_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Hello there"},
+        {"role": "assistant", "content": "Hi!"},
+    ]
+    await session.add_items(turn_1_items)
+
+    turn_2_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "How are you doing today?"},
+        {"role": "assistant", "content": "I'm doing well, thanks!"},
+    ]
+    await session.add_items(turn_2_items)
+
+    # Get conversation turns
+    turns = await session.get_conversation_turns()
+    assert len(turns) == 2
+
+    # Verify turn structure
+    assert turns[0]["turn"] == 1
+    assert turns[0]["content"] == "Hello there"
+    assert turns[0]["full_content"] == "Hello there"
+    assert turns[0]["can_branch"] is True
+    assert "timestamp" in turns[0]
+
+    assert turns[1]["turn"] == 2
+    assert turns[1]["content"] == "How are you doing today?"
+    assert turns[1]["full_content"] == "How are you doing today?"
+    assert turns[1]["can_branch"] is True
+
+    session.close()
+
+
+async def test_find_turns_by_content():
+    """Test find_turns_by_content functionality."""
+    session_id = "find_turns_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add multiple turns with different content
+    turn_1_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Tell me about cats"},
+        {"role": "assistant", "content": "Cats are great pets"},
+    ]
+    await session.add_items(turn_1_items)
+
+    turn_2_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "What about dogs?"},
+        {"role": "assistant", "content": "Dogs are also great pets"},
+    ]
+    await session.add_items(turn_2_items)
+
+    turn_3_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Tell me about cats again"},
+        {"role": "assistant", "content": "Cats are wonderful companions"},
+    ]
+    await session.add_items(turn_3_items)
+
+    # Search for turns containing "cats"
+    cat_turns = await session.find_turns_by_content("cats")
+    assert len(cat_turns) == 2
+    assert cat_turns[0]["turn"] == 1
+    assert cat_turns[1]["turn"] == 3
+
+    # Search for turns containing "dogs"
+    dog_turns = await session.find_turns_by_content("dogs")
+    assert len(dog_turns) == 1
+    assert dog_turns[0]["turn"] == 2
+
+    # Search for non-existent content
+    no_turns = await session.find_turns_by_content("elephants")
+    assert len(no_turns) == 0
+
+    session.close()
+
+
+async def test_create_branch_from_content():
+    """Test create_branch_from_content functionality."""
+    session_id = "branch_from_content_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add multiple turns
+    turn_1_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question about math"},
+        {"role": "assistant", "content": "Math answer"},
+    ]
+    await session.add_items(turn_1_items)
+
+    turn_2_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Second question about science"},
+        {"role": "assistant", "content": "Science answer"},
+    ]
+    await session.add_items(turn_2_items)
+
+    turn_3_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Another math question"},
+        {"role": "assistant", "content": "Another math answer"},
+    ]
+    await session.add_items(turn_3_items)
+
+    # Create branch from first occurrence of "math"
+    branch_name = await session.create_branch_from_content("math", "math_branch")
+    assert branch_name == "math_branch"
+
+    # Verify we're on the new branch
+    assert session._current_branch_id == "math_branch"
+
+    # Verify branch contains only items up to the first math turn (copies messages before turn 1)
+    branch_items = await session.get_items()
+    assert len(branch_items) == 0  # No messages before turn 1
+
+    # Test error case - search term not found
+    with pytest.raises(ValueError, match="No user turns found containing 'nonexistent'"):
+        await session.create_branch_from_content("nonexistent", "error_branch")
+
+    session.close()
+
+
+async def test_branch_specific_operations():
+    """Test operations that work with specific branches."""
+    session_id = "branch_specific_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add items to main branch
+    turn_1_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Main branch question"},
+        {"role": "assistant", "content": "Main branch answer"},
+    ]
+    await session.add_items(turn_1_items)
+
+    # Add usage data for main branch
+    usage_main = Usage(requests=1, input_tokens=50, output_tokens=30, total_tokens=80)
+    run_result_main = create_mock_run_result(usage_main)
+    await session.store_run_usage(run_result_main)
+
+    # Create a branch from turn 1 (copies messages before turn 1, so empty)
+    await session.create_branch_from_turn(1, "test_branch")
+
+    # Add items to the new branch
+    turn_2_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch question"},
+        {"role": "assistant", "content": "Branch answer"},
+    ]
+    await session.add_items(turn_2_items)
+
+    # Add usage data for branch
+    usage_branch = Usage(requests=1, input_tokens=40, output_tokens=20, total_tokens=60)
+    run_result_branch = create_mock_run_result(usage_branch)
+    await session.store_run_usage(run_result_branch)
+
+    # Test get_items with branch_id parameter
+    main_items = await session.get_items(branch_id="main")
+    assert len(main_items) == 2
+    assert main_items[0].get("content") == "Main branch question"
+
+    current_items = await session.get_items()  # Should get from current branch
+    assert len(current_items) == 2  # Only the items added to the branch (copied branch is empty)
+
+    # Test get_conversation_turns with branch_id
+    main_turns = await session.get_conversation_turns(branch_id="main")
+    assert len(main_turns) == 1
+    assert main_turns[0]["content"] == "Main branch question"
+
+    current_turns = await session.get_conversation_turns()  # Should get from current branch
+    assert len(current_turns) == 1  # Only one turn in the current branch
+
+    # Test get_session_usage with branch_id
+    main_usage = await session.get_session_usage(branch_id="main")
+    assert main_usage is not None
+    assert main_usage["total_turns"] == 1
+
+    all_usage = await session.get_session_usage()  # Should get from all branches
+    assert all_usage is not None
+    assert all_usage["total_turns"] == 2  # Main branch has 1, current branch has 1
+
+    session.close()
+
+
+async def test_branch_error_handling():
+    """Test error handling in branching operations."""
+    session_id = "branch_error_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Test creating branch from non-existent turn
+    with pytest.raises(ValueError, match="Turn 5 does not contain an active user message"):
+        await session.create_branch_from_turn(5, "error_branch")
+
+    # Test switching to non-existent branch
+    with pytest.raises(ValueError, match="Branch 'nonexistent' does not exist"):
+        await session.switch_to_branch("nonexistent")
+
+    # Test deleting non-existent branch
+    with pytest.raises(ValueError, match="Branch 'nonexistent' does not exist"):
+        await session.delete_branch("nonexistent")
+
+    # Test deleting main branch
+    with pytest.raises(ValueError, match="Cannot delete the 'main' branch"):
+        await session.delete_branch("main")
+
+    # Test deleting empty branch ID
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.delete_branch("")
+
+    # Test deleting empty branch ID (whitespace only)
+    with pytest.raises(ValueError, match="Branch ID cannot be empty"):
+        await session.delete_branch("   ")
+
+    session.close()
+
+
+async def test_branch_deletion_with_force():
+    """Test branch deletion with force parameter."""
+    session_id = "force_delete_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add items to main branch
+    await session.add_items([{"role": "user", "content": "Main question"}])
+    await session.add_items([{"role": "user", "content": "Second question"}])
+
+    # Create and switch to a branch from turn 2
+    await session.create_branch_from_turn(2, "temp_branch")
+    assert session._current_branch_id == "temp_branch"
+
+    # Add some content to the branch so it exists
+    await session.add_items([{"role": "user", "content": "Branch question"}])
+
+    # Verify branch exists
+    branches = await session.list_branches()
+    branch_ids = [b["branch_id"] for b in branches]
+    assert "temp_branch" in branch_ids
+
+    # Try to delete current branch without force (should fail)
+    with pytest.raises(ValueError, match="Cannot delete current branch"):
+        await session.delete_branch("temp_branch")
+
+    # Delete current branch with force (should succeed and switch to main)
+    await session.delete_branch("temp_branch", force=True)
+
+    # Verify we're back on main branch
+    assert session._current_branch_id == "main"
+
+    # Verify branch is deleted
+    branches_after = await session.list_branches()
+    assert len(branches_after) == 1
+    assert branches_after[0]["branch_id"] == "main"
+
+    session.close()
+
+
+async def test_get_items_with_parameters():
+    """Test get_items with new parameters (include_inactive, branch_id)."""
+    session_id = "get_items_params_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add items to main branch
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+        {"role": "assistant", "content": "Second answer"},
+    ]
+    await session.add_items(items)
+
+    # Test get_items with limit (gets most recent N items)
+    limited_items = await session.get_items(limit=2)
+    assert len(limited_items) == 2
+    assert limited_items[0].get("content") == "Second question"  # Most recent first
+    assert limited_items[1].get("content") == "Second answer"
+
+    # Test get_items with branch_id
+    main_items = await session.get_items(branch_id="main")
+    assert len(main_items) == 4
+
+    # Test get_items with include_inactive (should be same as without it for now)
+    all_items = await session.get_items(include_inactive=True)
+    assert len(all_items) == 4
+
+    # Create a branch from turn 2 and test branch-specific get_items
+    await session.create_branch_from_turn(2, "test_branch")
+
+    # Add items to branch
+    branch_items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Branch question"},
+        {"role": "assistant", "content": "Branch answer"},
+    ]
+    await session.add_items(branch_items)
+
+    # Test getting items from specific branch (should include copied items + new items)
+    branch_items_result = await session.get_items(branch_id="test_branch")
+    assert len(branch_items_result) == 4  # 2 copied from main (before turn 2) + 2 new items
+
+    # Test getting items from main branch while on different branch
+    main_items_from_branch = await session.get_items(branch_id="main")
+    assert len(main_items_from_branch) == 4
 
     session.close()
 
@@ -413,9 +728,9 @@ async def test_empty_session_operations():
     session_usage = await session.get_session_usage()
     assert session_usage is None
 
-    # Test soft deletion on empty session
-    deleted = await session.deactivate_from_turn(1)
-    assert deleted is False
+    # Test getting turns from empty session
+    turns = await session.get_conversation_turns()
+    assert len(turns) == 0
 
     session.close()
 
@@ -506,6 +821,104 @@ async def test_error_handling_in_usage_tracking(usage_data: Usage):
 
     # This should not raise an exception (error should be caught)
     await session.store_run_usage(run_result)
+
+
+async def test_advanced_tool_name_extraction():
+    """Test advanced tool name extraction for different tool types."""
+    session_id = "advanced_tool_names_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add items with various tool types and naming patterns
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "Use various tools"},
+        # MCP tools with server labels
+        {"type": "mcp_call", "server_label": "filesystem", "name": "read_file", "arguments": "{}"},  # type: ignore
+        {
+            "type": "mcp_approval_request",
+            "server_label": "database",
+            "name": "execute_query",
+            "arguments": "{}",
+        },  # type: ignore
+        # Built-in tool types
+        {"type": "computer_call", "arguments": "{}"},  # type: ignore
+        {"type": "file_search_call", "arguments": "{}"},  # type: ignore
+        {"type": "web_search_call", "arguments": "{}"},  # type: ignore
+        {"type": "code_interpreter_call", "arguments": "{}"},  # type: ignore
+        # Regular function calls
+        {"type": "function_call", "name": "calculator", "arguments": "{}"},  # type: ignore
+        {"type": "custom_tool_call", "name": "custom_tool", "arguments": "{}"},  # type: ignore
+    ]
+    await session.add_items(items)
+
+    # Get conversation structure and verify tool names
+    conversation_turns = await session.get_conversation_by_turns()
+    turn_items = conversation_turns[1]
+
+    tool_items = [item for item in turn_items if item["tool_name"]]
+    tool_names = [item["tool_name"] for item in tool_items]
+
+    # Verify MCP tools get server_label.name format
+    assert "filesystem.read_file" in tool_names
+    assert "database.execute_query" in tool_names
+
+    # Verify built-in tools use their type as name
+    assert "computer_call" in tool_names
+    assert "file_search_call" in tool_names
+    assert "web_search_call" in tool_names
+    assert "code_interpreter_call" in tool_names
+
+    # Verify regular function calls use their name
+    assert "calculator" in tool_names
+    assert "custom_tool" in tool_names
+
+    session.close()
+
+
+async def test_branch_usage_tracking():
+    """Test usage tracking across different branches."""
+    session_id = "branch_usage_test"
+    session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
+
+    # Add items and usage to main branch
+    await session.add_items([{"role": "user", "content": "Main question"}])
+    usage_main = Usage(requests=1, input_tokens=50, output_tokens=30, total_tokens=80)
+    run_result_main = create_mock_run_result(usage_main)
+    await session.store_run_usage(run_result_main)
+
+    # Create a branch and add usage there
+    await session.create_branch_from_turn(1, "usage_branch")
+    await session.add_items([{"role": "user", "content": "Branch question"}])
+    usage_branch = Usage(requests=2, input_tokens=100, output_tokens=60, total_tokens=160)
+    run_result_branch = create_mock_run_result(usage_branch)
+    await session.store_run_usage(run_result_branch)
+
+    # Test branch-specific usage
+    main_usage = await session.get_session_usage(branch_id="main")
+    assert main_usage is not None
+    assert main_usage["requests"] == 1
+    assert main_usage["total_tokens"] == 80
+    assert main_usage["total_turns"] == 1
+
+    branch_usage = await session.get_session_usage(branch_id="usage_branch")
+    assert branch_usage is not None
+    assert branch_usage["requests"] == 2
+    assert branch_usage["total_tokens"] == 160
+    assert branch_usage["total_turns"] == 1
+
+    # Test total usage across all branches
+    total_usage = await session.get_session_usage()
+    assert total_usage is not None
+    assert total_usage["requests"] == 3  # 1 + 2
+    assert total_usage["total_tokens"] == 240  # 80 + 160
+    assert total_usage["total_turns"] == 2
+
+    # Test turn usage for specific branch
+    branch_turn_usage = await session.get_turn_usage(branch_id="usage_branch")
+    assert isinstance(branch_turn_usage, list)
+    assert len(branch_turn_usage) == 1
+    assert branch_turn_usage[0]["requests"] == 2
+
+    session.close()
 
 
 async def test_tool_name_extraction():
