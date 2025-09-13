@@ -88,7 +88,7 @@ async def main():
 
     # Soft delete from turn 2 to create a branch point
     print("\nSoft deleting from turn 2 onwards to create branch point...")
-    deleted = await session.soft_delete_from_turn(2)
+    deleted = await session.deactivate_from_turn(2)
     print(f"Deleted: {deleted}")
 
     # Show only active items (turn 1 only)

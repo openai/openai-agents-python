@@ -185,7 +185,7 @@ async def test_soft_deletion_functionality(agent: Agent):
     assert len(all_items) == 6
 
     # Soft delete from turn 2 onwards
-    deleted = await session.soft_delete_from_turn(2)
+    deleted = await session.deactivate_from_turn(2)
     assert deleted is True
 
     # Verify only turn 1 items are active
@@ -414,7 +414,7 @@ async def test_empty_session_operations():
     assert session_usage is None
 
     # Test soft deletion on empty session
-    deleted = await session.soft_delete_from_turn(1)
+    deleted = await session.deactivate_from_turn(1)
     assert deleted is False
 
     session.close()

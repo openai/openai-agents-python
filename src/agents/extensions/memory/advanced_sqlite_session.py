@@ -194,7 +194,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         current_turn += 1
                         self._current_user_turn = current_turn
 
-                    msg_type = self._classify_simple(item)
+                    msg_type = self._classify_message_type(item)
                     tool_name = self._extract_tool_name(item)
 
                     structure_data.append(
@@ -228,7 +228,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             )
             # Don't re-raise - structure metadata is supplementary
 
-    def _classify_simple(self, item: TResponseInputItem) -> str:
+    def _classify_message_type(self, item: TResponseInputItem) -> str:
         """Simple classification."""
         if isinstance(item, dict):
             if item.get("role") == "user":
@@ -328,10 +328,10 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return await asyncio.to_thread(_get_active_items_sync)
 
-    async def soft_delete_from_turn(self, user_turn_number: int) -> bool:
+    async def deactivate_from_turn(self, user_turn_number: int) -> bool:
         """Soft delete conversation from a specific user turn onwards."""
 
-        def _soft_delete_sync():
+        def _deactivate_sync():
             conn = self._get_connection()
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
@@ -347,7 +347,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                     conn.commit()
                     return affected > 0
 
-        return await asyncio.to_thread(_soft_delete_sync)
+        return await asyncio.to_thread(_deactivate_sync)
 
     async def reactivate_from_turn(self, user_turn_number: int) -> bool:
         """Reactivate soft-deleted conversation from a specific turn."""
