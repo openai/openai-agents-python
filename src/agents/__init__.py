@@ -53,6 +53,18 @@ from .models.multi_provider import MultiProvider
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
+from .optimizers import (
+    BootstrapFewShot,
+    BootstrapFewShotRandomSearch,
+    EvalResult,
+    InstructionOptimizer,
+    LabeledExample,
+    MetricFn,
+    OptimizerResult,
+    cross_validate_agent,
+    evaluate_agent,
+    exact_match_metric,
+)
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
@@ -122,18 +134,6 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
-from .optimizers import (
-    BootstrapFewShot,
-    BootstrapFewShotRandomSearch,
-    InstructionOptimizer,
-    EvalResult,
-    LabeledExample,
-    MetricFn,
-    OptimizerResult,
-    evaluate_agent,
-    cross_validate_agent,
-    exact_match_metric,
-)
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:

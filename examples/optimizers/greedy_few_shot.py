@@ -1,32 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-import pytest
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 
-from agents import Agent
-from agents.items import ModelResponse
-from agents.model_settings import ModelSettings
-from agents.models.interface import Model, ModelTracing
-from agents.optimizers import (
-    BootstrapFewShotRandomSearch,
+from agents import (
+    Agent,
+    BootstrapFewShot,
     LabeledExample,
     evaluate_agent,
     exact_match_metric,
 )
+from agents.items import ModelResponse
+from agents.model_settings import ModelSettings
+from agents.models.interface import Model, ModelTracing
 from agents.tool import Tool
 from agents.usage import Usage
 
 
-class MappingModel(Model):
-    """Deterministic model where assistant messages define outputs via few-shot."""
+class RuleBasedEchoModel(Model):
+    """Toy model used to demonstrate few-shot optimization.
+
+    Behavior:
+    - If there are any assistant messages in the input, return the last assistant message text.
+    - Otherwise, echo the last user message.
+    This lets few-shot examples (assistant messages) influence outputs.
+    """
 
     async def get_response(
         self,
         system_instructions: str | None,
-        input,
+        input: Any,
         model_settings: ModelSettings,
         tools: list[Tool],
         output_schema,
@@ -57,13 +63,15 @@ class MappingModel(Model):
         )
         return ModelResponse(output=[msg], usage=Usage(), response_id=None)
 
-    def stream_response(self, *args, **kwargs):  # pragma: no cover
+    def stream_response(self, *args, **kwargs):  # pragma: no cover - not needed here
         raise NotImplementedError
 
 
-@pytest.mark.asyncio
-async def test_bfs_random_search_improves_score():
-    agent = Agent(name="RS", model=MappingModel())
+async def main() -> None:
+    agent = Agent(name="GreedyFewShotDemo", model=RuleBasedEchoModel())
+
+    # Dataset where the ideal behavior is to answer with a fixed mapping
+    # We will rely on few-shot to inject assistant messages with the expected outputs.
     dataset = [
         LabeledExample(input="A?", expected="1"),
         LabeledExample(input="B?", expected="2"),
@@ -71,13 +79,24 @@ async def test_bfs_random_search_improves_score():
         LabeledExample(input="D?", expected="4"),
     ]
 
+    # Baseline without few-shot
     baseline = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric)
+    print("Baseline avg:", baseline.average)
 
-    rs = BootstrapFewShotRandomSearch(max_examples=3, num_trials=8, seed=42)
-    res = await rs.fit(agent, dataset)
+    # Optimize few-shot greedily
+    bfs = BootstrapFewShot(max_examples=3)
+    result = await bfs.fit(agent, dataset)
+    run_config = result.attach_to_runconfig()
 
-    cfg = res.attach_to_runconfig()
-    improved = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric, run_config=cfg)
-    assert improved.average >= baseline.average
+    # Re-evaluate with optimized config
+    improved = await evaluate_agent(
+        agent, dataset=dataset, metric=exact_match_metric, run_config=run_config
+    )
+    print("Improved avg:", improved.average)
+    print("Selected examples:", len(result.selected_examples))
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 

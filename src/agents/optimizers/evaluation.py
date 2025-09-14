@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from ..agent import Agent
-from ..run import RunConfig, Runner
 from ..items import ItemHelpers
-from ..run_context import RunContextWrapper
-from ..util._types import MaybeAwaitable
-from .types import EvalResult, LabeledExample, MetricFn, AsyncMetricFn
+from ..run import RunConfig, Runner
+from .types import AsyncMetricFn, EvalResult, LabeledExample, MetricFn
 
 
 def exact_match_metric(predicted: Any, expected: Any) -> float:
@@ -61,7 +60,7 @@ async def evaluate_agent(
         # Handle async metric functions or async __call__ on objects
         if inspect.iscoroutinefunction(metric):  # type: ignore[arg-type]
             return await metric(pred, expected)  # type: ignore[misc]
-        if hasattr(metric, "__call__") and inspect.iscoroutinefunction(getattr(metric, "__call__")):
+        if callable(metric) and inspect.iscoroutinefunction(metric.__call__):
             return await metric(pred, expected)  # type: ignore[misc]
         try:
             return float(metric(pred, expected))  # type: ignore[misc]

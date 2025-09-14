@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 
-from agents import Agent, Runner
+from agents import Agent
 from agents.items import ModelResponse
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing

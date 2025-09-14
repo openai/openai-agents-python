@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import itertools
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from ..agent import Agent
-from ..items import ItemHelpers
 from ..run import CallModelData, ModelInputData, RunConfig
-from ..run_context import RunContextWrapper
-from ..util._types import MaybeAwaitable
 from .evaluation import evaluate_agent
 from .types import LabeledExample, MetricFn, OptimizerResult
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, Awaitable
+from typing import Any, Protocol
 
 from ..run import RunConfig
 
@@ -88,7 +88,7 @@ class OptimizerResult:
             def composed_filter(data):  # type: ignore[no-untyped-def]
                 intermediate = combined_filter(data)
                 # Re-wrap with the same payload shape expected by ``existing``
-                from ..run import CallModelData, ModelInputData
+                from ..run import CallModelData
 
                 payload = CallModelData(  # type: ignore[type-arg]
                     model_data=intermediate,

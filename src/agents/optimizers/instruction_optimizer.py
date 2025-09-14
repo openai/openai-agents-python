@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 from ..agent import Agent
 from ..run import RunConfig
 from .evaluation import evaluate_agent
 from .types import LabeledExample, MetricFn, OptimizerResult
-
 
 CandidateGenerator = Callable[[list[LabeledExample]], list[str]]
 
@@ -72,7 +72,7 @@ class InstructionOptimizer:
 
         for instr in candidate_instructions:
             # Apply via RunConfig composition using OptimizerResult helper later.
-            from ..run import ModelInputData, CallModelData
+            from ..run import CallModelData, ModelInputData
 
             def call_model_input_filter(data: CallModelData[Any]) -> ModelInputData:  # type: ignore[misc]
                 original = data.model_data
