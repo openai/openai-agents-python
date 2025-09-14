@@ -82,6 +82,7 @@ plugins:
                 - Realtime agents:
                     - realtime/quickstart.md
                     - realtime/guide.md
+                - optimizers.md
             - API Reference:
                 - Agents:
                     - ref/index.md
@@ -155,6 +156,7 @@ plugins:
             - コード例: examples.md
             - ドキュメント:
                 - agents.md
+                - optimizers.md
                 - running_agents.md
                 - sessions.md
                 - results.md
