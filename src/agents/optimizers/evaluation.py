@@ -63,8 +63,7 @@ async def evaluate_agent(
             if inspect.iscoroutinefunction(metric_fn):
                 from typing import cast
                 return await cast(AsyncMetricFn, metric_fn)(pred, expected)
-            call_attr = getattr(metric_fn, "__call__", None)
-            if callable(metric_fn) and inspect.iscoroutinefunction(call_attr):
+            if callable(metric_fn) and inspect.iscoroutinefunction(metric_fn.__call__):
                 from typing import cast
                 return await cast(AsyncMetricFn, metric_fn)(pred, expected)
             from typing import cast
