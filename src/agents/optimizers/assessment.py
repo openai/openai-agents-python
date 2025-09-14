@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..agent import Agent
 from ..result import RunResult
 
 

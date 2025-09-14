@@ -6,8 +6,8 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..agent import Agent
-from .assessment import extract_prediction_for_metric
 from ..run import RunConfig, Runner
+from .assessment import extract_prediction_for_metric
 from .types import AsyncMetricFn, EvalResult, LabeledExample, MetricFn
 
 

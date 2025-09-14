@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-import json
 from typing import Any, cast
 
 from ..agent import Agent
