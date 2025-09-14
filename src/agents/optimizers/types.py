@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Awaitable
 
 from ..run import RunConfig
 
@@ -21,6 +21,10 @@ class LabeledExample:
 
 class MetricFn(Protocol):
     def __call__(self, predicted: Any, expected: Any) -> float: ...
+
+
+class AsyncMetricFn(Protocol):
+    async def __call__(self, predicted: Any, expected: Any) -> float: ...
 
 
 @dataclass

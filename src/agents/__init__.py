@@ -124,11 +124,14 @@ from .usage import Usage
 from .version import __version__
 from .optimizers import (
     BootstrapFewShot,
+    BootstrapFewShotRandomSearch,
+    InstructionOptimizer,
     EvalResult,
     LabeledExample,
     MetricFn,
     OptimizerResult,
     evaluate_agent,
+    cross_validate_agent,
     exact_match_metric,
 )
 
@@ -307,6 +310,9 @@ __all__ = [
     "MetricFn",
     "OptimizerResult",
     "evaluate_agent",
+    "cross_validate_agent",
     "exact_match_metric",
     "BootstrapFewShot",
+    "BootstrapFewShotRandomSearch",
+    "InstructionOptimizer",
 ]

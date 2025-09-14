@@ -299,15 +299,27 @@ make format-check # run style checker
 
 ### Optimizers (experimental)
 
-This SDK includes a lightweight optimization module inspired by DSPy that helps you evaluate and improve agents.
+This SDK includes an optimization module inspired by DSPy that helps you evaluate and improve agents.
 
-- `evaluate_agent(agent, dataset, metric=exact_match_metric)`: Evaluate an `Agent` on labeled examples.
+- `evaluate_agent(agent, dataset, metric=exact_match_metric)`: Evaluate an `Agent` on labeled examples. Supports async metrics (e.g., LLM-as-judge).
+- `cross_validate_agent(agent, dataset, k_folds=5)`: Simple k-fold cross validation.
 - `BootstrapFewShot(max_examples=4)`: Greedy selection of a few-shot set, injected into model input via `RunConfig.call_model_input_filter`.
+- `BootstrapFewShotRandomSearch(max_examples=4, num_trials=32)`: Random-search variant for few-shot selection.
+- `InstructionOptimizer(candidates=[...])`: Instruction search over candidate system prompts.
 
 Quick example:
 
 ```python
-from agents import Agent, evaluate_agent, exact_match_metric, LabeledExample, BootstrapFewShot
+from agents import (
+    Agent,
+    evaluate_agent,
+    cross_validate_agent,
+    exact_match_metric,
+    LabeledExample,
+    BootstrapFewShot,
+    BootstrapFewShotRandomSearch,
+    InstructionOptimizer,
+)
 
 agent = Agent(name="Assistant")
 dataset = [
@@ -318,7 +330,7 @@ dataset = [
 # Baseline
 baseline = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric)
 
-# Optimize few-shot
+# Optimize few-shot (greedy)
 opt = BootstrapFewShot(max_examples=2)
 result = await opt.fit(agent, dataset)
 run_config = result.attach_to_runconfig()
@@ -326,6 +338,22 @@ run_config = result.attach_to_runconfig()
 # Re-evaluate with optimized config
 improved = await evaluate_agent(agent, dataset=dataset, run_config=run_config)
 print(baseline.average, improved.average)
+
+# Random-search few-shot
+opt2 = BootstrapFewShotRandomSearch(max_examples=2, num_trials=16)
+result2 = await opt2.fit(agent, dataset)
+
+# Instruction search
+instr_opt = InstructionOptimizer(candidates=[
+    "You are a helpful assistant.",
+    "Answer with one concise sentence.",
+])
+instr = await instr_opt.fit(agent, dataset)
+run_config2 = instr.attach_to_runconfig()
+
+# Cross-validate
+folds = await cross_validate_agent(agent, dataset=dataset, k_folds=3)
+print([f.average for f in folds])
 ```
 
 Note: This is intentionally minimal and does not attempt full feature parity with DSPy.
