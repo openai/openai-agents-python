@@ -74,9 +74,11 @@ class InstructionOptimizer:
             # Apply via RunConfig composition using OptimizerResult helper later.
             from ..run import CallModelData, ModelInputData
 
-            def call_model_input_filter(data: CallModelData[Any]) -> ModelInputData:  # type: ignore[misc]
+            def call_model_input_filter(
+                data: CallModelData[Any], *, _instr: str = instr
+            ) -> ModelInputData:
                 original = data.model_data
-                return ModelInputData(input=original.input, instructions=instr)
+                return ModelInputData(input=original.input, instructions=_instr)
 
             cfg = RunConfig(call_model_input_filter=call_model_input_filter)
 
@@ -101,7 +103,7 @@ class InstructionOptimizer:
             )
 
         # Provide a pass-through filter (no change) and set updated_instructions.
-        def passthrough(data):  # type: ignore[no-untyped-def]
+        def passthrough(data):
             return data.model_data
 
         return OptimizerResult(

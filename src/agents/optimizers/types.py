@@ -68,12 +68,12 @@ class OptimizerResult:
 
         run_config = run_config or RunConfig()
 
-        def combined_filter(data):  # type: ignore[no-untyped-def]
+        def combined_filter(data):
             # If we have our own filter, call it; otherwise, pass through.
             if self.call_model_input_filter is None:
                 return data.model_data
 
-            result = self.call_model_input_filter(data)  # type: ignore[misc]
+            result = self.call_model_input_filter(data)
             # If we also have updated instructions, override them.
             if self.updated_instructions is not None and hasattr(result, "instructions"):
                 result.instructions = self.updated_instructions
@@ -85,17 +85,17 @@ class OptimizerResult:
         if existing is None:
             new_filter = combined_filter
         else:
-            def composed_filter(data):  # type: ignore[no-untyped-def]
+            def composed_filter(data):
                 intermediate = combined_filter(data)
                 # Re-wrap with the same payload shape expected by ``existing``
                 from ..run import CallModelData
 
-                payload = CallModelData(  # type: ignore[type-arg]
+                payload = CallModelData(
                     model_data=intermediate,
                     agent=data.agent,
                     context=data.context,
                 )
-                return existing(payload)  # type: ignore[misc]
+                return existing(payload)
 
             new_filter = composed_filter
 

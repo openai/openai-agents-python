@@ -58,16 +58,24 @@ async def evaluate_agent(
     # Support async metrics (e.g., LLM-as-a-judge)
     async def score_one(pred: Any, expected: Any) -> float:
         # Handle async metric functions or async __call__ on objects
-        if inspect.iscoroutinefunction(metric):  # type: ignore[arg-type]
-            return await metric(pred, expected)  # type: ignore[misc]
-        if callable(metric) and inspect.iscoroutinefunction(metric.__call__):
-            return await metric(pred, expected)  # type: ignore[misc]
+        metric_fn = metric
         try:
-            return float(metric(pred, expected))  # type: ignore[misc]
+            if inspect.iscoroutinefunction(metric_fn):
+                from typing import cast
+                return await cast(AsyncMetricFn, metric_fn)(pred, expected)
+            call_attr = getattr(metric_fn, "__call__", None)
+            if callable(metric_fn) and inspect.iscoroutinefunction(call_attr):
+                from typing import cast
+                return await cast(AsyncMetricFn, metric_fn)(pred, expected)
+            from typing import cast
+            result = cast(MetricFn, metric_fn)(pred, expected)
+            return float(result)
         except Exception:
             return 0.0
 
-    scores = await asyncio.gather(*(score_one(pred, ex.expected) for pred, ex in zip(predictions, examples)))
+    scores = await asyncio.gather(
+        *(score_one(pred, ex.expected) for pred, ex in zip(predictions, examples))
+    )
     return EvalResult(scores=scores, predictions=predictions)
 
 

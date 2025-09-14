@@ -3,10 +3,11 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ..agent import Agent
-from ..run import RunConfig
+from ..items import TResponseInputItem
+from ..run import ModelInputData, RunConfig
 from .bootstrap_few_shot import _format_few_shot_messages
 from .evaluation import evaluate_agent
 from .types import LabeledExample, MetricFn, OptimizerResult
@@ -72,21 +73,31 @@ class BootstrapFewShotRandomSearch:
             else:
                 if not train:
                     continue
-                k = self.sample_size if self.sample_size is not None else prng.randint(1, min(self.max_examples, len(train)))
+                k = (
+                    self.sample_size
+                    if self.sample_size is not None
+                    else prng.randint(1, min(self.max_examples, len(train)))
+                )
                 k = max(1, min(k, len(train), self.max_examples))
                 subset = prng.sample(train, k)
 
             # Build a filter that injects the few-shot examples and optional instructions
             few_shot_items = _format_few_shot_messages(subset)
 
-            def call_model_input_filter(data):  # type: ignore[no-untyped-def]
+            def call_model_input_filter(
+                data,
+                *,
+                _few_shot_items=few_shot_items,
+                _base_instructions=self.base_instructions,
+            ):
                 original = data.model_data
-                input_items = list(few_shot_items) + list(original.input)
-                instructions = (
-                    self.base_instructions if self.base_instructions is not None else original.instructions
+                input_items = cast(
+                    list[TResponseInputItem],
+                    list(_few_shot_items) + list(original.input),
                 )
-                from ..run import ModelInputData
-
+                instructions = (
+                    _base_instructions if _base_instructions is not None else original.instructions
+                )
                 return ModelInputData(input=input_items, instructions=instructions)
 
             cfg = RunConfig(call_model_input_filter=call_model_input_filter)
@@ -106,14 +117,20 @@ class BootstrapFewShotRandomSearch:
         # Return an optimizer result that applies the best subset and instructions
         few_shot_items = _format_few_shot_messages(best_subset)
 
-        def input_filter(data):  # type: ignore[no-untyped-def]
+        def input_filter(
+            data,
+            *,
+            _few_shot_items=few_shot_items,
+            _base_instructions=self.base_instructions,
+        ):
             original = data.model_data
-            input_items = list(few_shot_items) + list(original.input)
-            instructions = (
-                self.base_instructions if self.base_instructions is not None else original.instructions
+            input_items = cast(
+                list[TResponseInputItem],
+                list(_few_shot_items) + list(original.input),
             )
-            from ..run import ModelInputData
-
+            instructions = (
+                _base_instructions if _base_instructions is not None else original.instructions
+            )
             return ModelInputData(input=input_items, instructions=instructions)
 
         return OptimizerResult(

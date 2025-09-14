@@ -86,7 +86,9 @@ async def test_evaluate_agent_and_bootstrap_few_shot_improves_score():
 
     # Attach optimizer to a RunConfig and re-evaluate
     cfg = result.attach_to_runconfig()
-    improved = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric, run_config=cfg)
+    improved = await evaluate_agent(
+        agent, dataset=dataset, metric=exact_match_metric, run_config=cfg
+    )
 
     assert improved.average >= baseline.average
     assert len(result.selected_examples) > 0

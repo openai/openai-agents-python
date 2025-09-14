@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ..agent import Agent
+from ..items import TResponseInputItem
 from ..run import CallModelData, ModelInputData, RunConfig
 from .evaluation import evaluate_agent
 from .types import LabeledExample, MetricFn, OptimizerResult
@@ -105,11 +106,22 @@ class BootstrapFewShot:
         few_shot_items = _format_few_shot_messages(examples)
         base_instructions = self.base_instructions
 
-        def call_model_input_filter(data: CallModelData[Any]) -> ModelInputData:  # type: ignore[misc]
-            # Prepend the few-shot pairs to the model input messages. Also optionally set instructions.
+        def call_model_input_filter(
+            data: CallModelData[Any],
+            *,
+            _few_shot_items=few_shot_items,
+            _base_instructions=base_instructions,
+        ) -> ModelInputData:
+            # Prepend the few-shot pairs to the model input messages.
+            # Also optionally set instructions.
             original = data.model_data
-            input_items = list(few_shot_items) + list(original.input)
-            instructions = base_instructions if base_instructions is not None else original.instructions
+            input_items = cast(
+                list[TResponseInputItem],
+                list(_few_shot_items) + list(original.input),
+            )
+            instructions = (
+                _base_instructions if _base_instructions is not None else original.instructions
+            )
             return ModelInputData(input=input_items, instructions=instructions)
 
         return call_model_input_filter

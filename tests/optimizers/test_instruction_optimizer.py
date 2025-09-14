@@ -77,7 +77,9 @@ async def test_instruction_optimizer_improves_accuracy():
     res = await opt.fit(agent, dataset)
 
     cfg = res.attach_to_runconfig()
-    improved = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric, run_config=cfg)
+    improved = await evaluate_agent(
+        agent, dataset=dataset, metric=exact_match_metric, run_config=cfg
+    )
     assert improved.average >= base.average
 
 
