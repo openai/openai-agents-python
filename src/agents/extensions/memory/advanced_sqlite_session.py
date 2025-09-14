@@ -16,16 +16,14 @@ from ...memory import SQLiteSession
 
 
 class AdvancedSQLiteSession(SQLiteSession):
-    """Enhanced SQLite session with turn tracking, soft deletion, and usage analytics.
+    """Enhanced SQLite session with conversation branching and usage analytics.
 
     Features:
-    - Turn-based conversation management with soft delete/reactivate
+    - Conversation branching from any user message
+    - Independent branch management with turn tracking
     - Detailed usage tracking per turn with token breakdowns
     - Message structure metadata and tool usage statistics
     """
-
-    ACTIVE = 1  # Message is active and visible in conversation
-    INACTIVE = 0  # Message is soft-deleted (hidden but preserved)
 
     def __init__(
         self,
@@ -96,7 +94,6 @@ class AdvancedSQLiteSession(SQLiteSession):
             CREATE INDEX IF NOT EXISTS idx_structure_turn
             ON message_structure(session_id, branch_id, user_turn_number)
         """)
-        # Compound index for optimal performance on get_items queries
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_structure_branch_seq
             ON message_structure(session_id, branch_id, sequence_number)
@@ -375,15 +372,13 @@ class AdvancedSQLiteSession(SQLiteSession):
     async def get_items(
         self,
         limit: int | None = None,
-        include_inactive: bool = False,
         branch_id: str | None = None,
     ) -> list[TResponseInputItem]:
-        """Get items from current or specified branch, optionally including soft-deleted ones."""
+        """Get items from current or specified branch."""
         if branch_id is None:
             branch_id = self._current_branch_id
 
-        if include_inactive:
-            # Get all items (active and inactive) for this branch
+        # Get all items for this branch
             def _get_all_items_sync():
                 conn = self._get_connection()
                 with self._lock if self._is_memory_db else threading.Lock():
@@ -427,12 +422,11 @@ class AdvancedSQLiteSession(SQLiteSession):
 
             return await asyncio.to_thread(_get_all_items_sync)
 
-        # Filter to only active items in this branch
-        def _get_active_items_sync():
+        def _get_items_sync():
             conn = self._get_connection()
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
-                    # Get active message IDs in correct order for this branch
+                    # Get message IDs in correct order for this branch
                     if limit is None:
                         cursor.execute(
                             """
@@ -470,7 +464,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                         continue
                 return items
 
-        return await asyncio.to_thread(_get_active_items_sync)
+        return await asyncio.to_thread(_get_items_sync)
 
     async def _copy_messages_to_new_branch(self, new_branch_id: str, from_turn_number: int) -> None:
         """Copy messages before the branch point to the new branch."""
@@ -562,7 +556,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             The branch_id of the newly created branch
 
         Raises:
-            ValueError: If turn doesn't exist, isn't active, or doesn't contain a user message
+            ValueError: If turn doesn't exist or doesn't contain a user message
         """
         import time
 
@@ -576,14 +570,15 @@ class AdvancedSQLiteSession(SQLiteSession):
                     FROM message_structure ms
                     JOIN agent_messages am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
-                    AND ms.branch_turn_number = ? AND ms.message_type = 'user'                """,
+                    AND ms.branch_turn_number = ? AND ms.message_type = 'user'
+                    """,
                     (self.session_id, self._current_branch_id, turn_number),
                 )
 
                 result = cursor.fetchone()
                 if not result:
                     raise ValueError(
-                        f"Turn {turn_number} does not contain an active user message "
+                        f"Turn {turn_number} does not contain a user message "
                         f"in branch '{self._current_branch_id}'"
                     )
 
@@ -862,9 +857,9 @@ class AdvancedSQLiteSession(SQLiteSession):
         Returns:
             List of dicts with branch info: {
                 'branch_id': str,          # Branch identifier
-                'message_count': int,      # Number of active messages in branch
+                'message_count': int,      # Number of messages in branch
                 'user_turns': int,         # Number of user turns in branch
-                'is_current': bool,        # Whether this is the current active branch
+                'is_current': bool,        # Whether this is the current branch
                 'created_at': str          # When the branch was first created
             }
         """
@@ -880,7 +875,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                         COUNT(CASE WHEN ms.message_type = 'user' THEN 1 END) as user_turns,
                         MIN(ms.created_at) as created_at
                     FROM message_structure ms
-                    WHERE ms.session_id = ?                    GROUP BY ms.branch_id
+                    WHERE ms.session_id = ?
+                    GROUP BY ms.branch_id
                     ORDER BY created_at
                 """,
                     (self.session_id,),

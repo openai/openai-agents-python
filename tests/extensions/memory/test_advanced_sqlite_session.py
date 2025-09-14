@@ -410,7 +410,7 @@ async def test_branch_error_handling():
     session = AdvancedSQLiteSession(session_id=session_id, create_tables=True)
 
     # Test creating branch from non-existent turn
-    with pytest.raises(ValueError, match="Turn 5 does not contain an active user message"):
+    with pytest.raises(ValueError, match="Turn 5 does not contain a user message"):
         await session.create_branch_from_turn(5, "error_branch")
 
     # Test switching to non-existent branch
@@ -499,8 +499,8 @@ async def test_get_items_with_parameters():
     main_items = await session.get_items(branch_id="main")
     assert len(main_items) == 4
 
-    # Test get_items with include_inactive (should be same as without it for now)
-    all_items = await session.get_items(include_inactive=True)
+    # Test get_items (no longer has include_inactive parameter)
+    all_items = await session.get_items()
     assert len(all_items) == 4
 
     # Create a branch from turn 2 and test branch-specific get_items
