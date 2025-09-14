@@ -68,10 +68,15 @@ async def main():
                 if text:
                     print(f"  - Translation step: {text}")
 
-        synthesizer_result = await Runner.run(
-            synthesizer_agent, orchestrator_result.to_input_list()
+         # Create a simple input for the synthesizer agent combining user input and orchestrator's final output
+        synthesizer_input = (
+            f"Original Request: {msg}\n"
+            f"Orchestrator's Translation: {orchestrator_result.final_output}"
         )
 
+        synthesizer_result = await Runner.run(
+            synthesizer_agent, synthesizer_input, run_config=run_config
+        )
     print(f"\n\nFinal response:\n{synthesizer_result.final_output}")
 
 
