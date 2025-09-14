@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Any, cast
 
 from agents import Agent, ImageGenerationTool, Runner, trace
 
@@ -12,7 +13,8 @@ def open_file(path: str) -> None:
     if sys.platform.startswith("darwin"):
         subprocess.run(["open", path], check=False)  # macOS
     elif os.name == "nt":  # Windows
-        os.startfile(path)
+        # Cast to Any to appease type-checkers on non-Windows platforms.
+        cast(Any, os).startfile(path)
     elif os.name == "posix":
         subprocess.run(["xdg-open", path], check=False)  # Linux/Unix
     else:

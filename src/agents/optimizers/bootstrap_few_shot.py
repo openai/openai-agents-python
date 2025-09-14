@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+import json
 from typing import Any, cast
 
 from ..agent import Agent
@@ -15,7 +16,20 @@ def _format_few_shot_messages(examples: Sequence[LabeledExample]) -> list[dict[s
     messages: list[dict[str, Any]] = []
     for ex in examples:
         messages.append({"role": "user", "content": ex.input})
-        messages.append({"role": "assistant", "content": str(ex.expected)})
+        # Serialize expected output sensibly for both text and structured outputs.
+        expected = ex.expected
+        try:
+            if hasattr(expected, "model_dump"):
+                content = json.dumps(expected.model_dump(mode="json"))  # pydantic BaseModel
+            elif hasattr(expected, "dict"):
+                content = json.dumps(expected.dict())  # generic objects with dict()
+            elif isinstance(expected, (dict, list)):
+                content = json.dumps(expected)
+            else:
+                content = str(expected)
+        except Exception:
+            content = str(expected)
+        messages.append({"role": "assistant", "content": content})
     return messages
 
 

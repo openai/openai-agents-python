@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..agent import Agent
-from ..items import ItemHelpers
+from .assessment import extract_prediction_for_metric
 from ..run import RunConfig, Runner
 from .types import AsyncMetricFn, EvalResult, LabeledExample, MetricFn
 
@@ -23,11 +23,7 @@ async def _run_single_example(
     run_config: RunConfig | None,
 ) -> Any:
     result = await Runner.run(agent, input=example.input, run_config=run_config)
-    # Extract final text if possible; otherwise return raw final output
-    try:
-        return ItemHelpers.text_message_outputs(result.new_items) or result.final_output
-    except Exception:
-        return result.final_output
+    return extract_prediction_for_metric(result)
 
 
 async def evaluate_agent(
