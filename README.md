@@ -297,6 +297,39 @@ make lint   # run linter
 make format-check # run style checker
 ```
 
+### Optimizers (experimental)
+
+This SDK includes a lightweight optimization module inspired by DSPy that helps you evaluate and improve agents.
+
+- `evaluate_agent(agent, dataset, metric=exact_match_metric)`: Evaluate an `Agent` on labeled examples.
+- `BootstrapFewShot(max_examples=4)`: Greedy selection of a few-shot set, injected into model input via `RunConfig.call_model_input_filter`.
+
+Quick example:
+
+```python
+from agents import Agent, evaluate_agent, exact_match_metric, LabeledExample, BootstrapFewShot
+
+agent = Agent(name="Assistant")
+dataset = [
+    LabeledExample(input="A?", expected="1"),
+    LabeledExample(input="B?", expected="2"),
+]
+
+# Baseline
+baseline = await evaluate_agent(agent, dataset=dataset, metric=exact_match_metric)
+
+# Optimize few-shot
+opt = BootstrapFewShot(max_examples=2)
+result = await opt.fit(agent, dataset)
+run_config = result.attach_to_runconfig()
+
+# Re-evaluate with optimized config
+improved = await evaluate_agent(agent, dataset=dataset, run_config=run_config)
+print(baseline.average, improved.average)
+```
+
+Note: This is intentionally minimal and does not attempt full feature parity with DSPy.
+
 ## Acknowledgements
 
 We'd like to acknowledge the excellent work of the open-source community, especially:

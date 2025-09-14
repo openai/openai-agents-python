@@ -122,6 +122,15 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
+from .optimizers import (
+    BootstrapFewShot,
+    EvalResult,
+    LabeledExample,
+    MetricFn,
+    OptimizerResult,
+    evaluate_agent,
+    exact_match_metric,
+)
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
@@ -292,4 +301,12 @@ __all__ = [
     "gen_span_id",
     "default_tool_error_function",
     "__version__",
+    # Optimizers / Evaluation
+    "LabeledExample",
+    "EvalResult",
+    "MetricFn",
+    "OptimizerResult",
+    "evaluate_agent",
+    "exact_match_metric",
+    "BootstrapFewShot",
 ]
