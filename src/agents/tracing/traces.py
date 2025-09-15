@@ -13,8 +13,8 @@ from .scope import Scope
 class Trace(abc.ABC):
     """A complete end-to-end workflow containing related spans and metadata.
 
-    A trace represents a logical workflow or operation (e.g., "Customer Service Query" 
-    or "Code Generation") and contains all the spans (individual operations) that occur 
+    A trace represents a logical workflow or operation (e.g., "Customer Service Query"
+    or "Code Generation") and contains all the spans (individual operations) that occur
     during that workflow.
 
     Example:
@@ -127,7 +127,7 @@ class Trace(abc.ABC):
 
 class NoOpTrace(Trace):
     """A no-op implementation of Trace that doesn't record any data.
-    
+
     Used when tracing is disabled but trace operations still need to work.
     Maintains proper context management but doesn't store or export any data.
 

@@ -22,14 +22,14 @@ class TracingProcessor(abc.ABC):
 
             def on_trace_start(self, trace):
                 self.active_traces[trace.trace_id] = trace
-                
+
             def on_trace_end(self, trace):
                 # Process completed trace
                 del self.active_traces[trace.trace_id]
-                
+
             def on_span_start(self, span):
                 self.active_spans[span.span_id] = span
-                
+
             def on_span_end(self, span):
                 # Process completed span
                 del self.active_spans[span.span_id]
@@ -86,7 +86,7 @@ class TracingProcessor(abc.ABC):
             span: The span that started. Contains operation details and context.
 
         Notes:
-            - Called synchronously on span start 
+            - Called synchronously on span start
             - Should return quickly to avoid blocking execution
             - Spans are automatically nested under current trace/span
         """

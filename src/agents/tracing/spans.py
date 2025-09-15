@@ -180,7 +180,7 @@ class NoOpSpan(Span[TSpanData]):
     Args:
         span_data: The operation-specific data for this span.
     """
-    
+
     __slots__ = ("_span_data", "_prev_span_token")
 
     def __init__(self, span_data: TSpanData):
