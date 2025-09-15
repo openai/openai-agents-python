@@ -383,6 +383,7 @@ class Runner:
             previous_response_id: The ID of the previous response, if using OpenAI models via the
                 Responses API, this allows you to skip passing in input from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
+            session: The Session to manage conversation history.
         Returns:
             A result object that contains data about the run, as well as a method to stream events.
         """
