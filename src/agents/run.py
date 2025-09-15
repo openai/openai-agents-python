@@ -484,9 +484,7 @@ class AgentRunner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = _copy_str_or_list(
-                prepared_input
-            )
+            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
             generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
@@ -505,22 +503,16 @@ class AgentRunner:
 
             try:
                 while True:
-                    all_tools = await AgentRunner._get_all_tools(
-                        current_agent, context_wrapper
-                    )
+                    all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
 
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
                     if current_span is None:
                         handoff_names = [
                             h.agent_name
-                            for h in await AgentRunner._get_handoffs(
-                                current_agent, context_wrapper
-                            )
+                            for h in await AgentRunner._get_handoffs(current_agent, context_wrapper)
                         ]
-                        if output_schema := AgentRunner._get_output_schema(
-                            current_agent
-                        ):
+                        if output_schema := AgentRunner._get_output_schema(current_agent):
                             output_type_name = output_schema.name()
                         else:
                             output_type_name = "str"
@@ -593,8 +585,7 @@ class AgentRunner:
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
                         output_guardrail_results = await self._run_output_guardrails(
-                            current_agent.output_guardrails
-                            + (run_config.output_guardrails or []),
+                            current_agent.output_guardrails + (run_config.output_guardrails or []),
                             current_agent,
                             turn_result.next_step.output,
                             context_wrapper,
@@ -609,22 +600,16 @@ class AgentRunner:
                             output_guardrail_results=output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-                        await self._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        await self._save_result_to_session(session, [], turn_result.new_step_items)
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(
-                            Agent[TContext], turn_result.next_step.new_agent
-                        )
+                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                         current_span.finish(reset_current=True)
                         current_span = None
                         should_run_agent_start_hooks = True
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        await self._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        await self._save_result_to_session(session, [], turn_result.new_step_items)
                     else:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
@@ -762,9 +747,7 @@ class AgentRunner:
         effective_input: list[TResponseInputItem] = input_items
 
         if run_config.call_model_input_filter is None:
-            return ModelInputData(
-                input=effective_input, instructions=effective_instructions
-            )
+            return ModelInputData(input=effective_input, instructions=effective_instructions)
 
         try:
             model_input = ModelInputData(
@@ -777,21 +760,13 @@ class AgentRunner:
                 context=context_wrapper.context,
             )
             maybe_updated = run_config.call_model_input_filter(filter_payload)
-            updated = (
-                await maybe_updated
-                if inspect.isawaitable(maybe_updated)
-                else maybe_updated
-            )
+            updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
             if not isinstance(updated, ModelInputData):
-                raise UserError(
-                    "call_model_input_filter must return a ModelInputData instance"
-                )
+                raise UserError("call_model_input_filter must return a ModelInputData instance")
             return updated
         except Exception as e:
             _error_tracing.attach_error_to_current_span(
-                SpanError(
-                    message="Error in call_model_input_filter", data={"error": str(e)}
-                )
+                SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
             )
             raise
 
@@ -861,9 +836,7 @@ class AgentRunner:
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
 
-        streamed_result._event_queue.put_nowait(
-            AgentUpdatedStreamEvent(new_agent=current_agent)
-        )
+        streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
             # Prepare input with session if enabled
@@ -921,8 +894,7 @@ class AgentRunner:
                     streamed_result._input_guardrails_task = asyncio.create_task(
                         cls._run_input_guardrails_with_queue(
                             starting_agent,
-                            starting_agent.input_guardrails
-                            + (run_config.input_guardrails or []),
+                            starting_agent.input_guardrails + (run_config.input_guardrails or []),
                             ItemHelpers.input_to_new_input_list(prepared_input),
                             context_wrapper,
                             streamed_result,
@@ -970,16 +942,12 @@ class AgentRunner:
                         )
 
                         try:
-                            output_guardrail_results = (
-                                await streamed_result._output_guardrails_task
-                            )
+                            output_guardrail_results = await streamed_result._output_guardrails_task
                         except Exception:
                             # Exceptions will be checked in the stream_events loop
                             output_guardrail_results = []
 
-                        streamed_result.output_guardrail_results = (
-                            output_guardrail_results
-                        )
+                        streamed_result.output_guardrail_results = output_guardrail_results
                         streamed_result.final_output = turn_result.next_step.output
                         streamed_result.is_complete = True
 
@@ -1065,9 +1033,7 @@ class AgentRunner:
         handoffs = await cls._get_handoffs(agent, context_wrapper)
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
-        model_settings = RunImpl.maybe_reset_tool_choice(
-            agent, tool_use_tracker, model_settings
-        )
+        model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
         final_response: ModelResponse | None = None
 
@@ -1085,9 +1051,7 @@ class AgentRunner:
 
         # Call hook just before the model is invoked, with the correct system_prompt.
         await asyncio.gather(
-            hooks.on_llm_start(
-                context_wrapper, agent, filtered.instructions, filtered.input
-            ),
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
             (
                 agent.hooks.on_llm_start(
                     context_wrapper, agent, filtered.instructions, filtered.input
@@ -1211,12 +1175,8 @@ class AgentRunner:
         ]
 
         # Create filtered result and send to queue
-        filtered_result = _dc.replace(
-            single_step_result, new_step_items=items_to_filter
-        )
-        RunImpl.stream_step_result_to_queue(
-            filtered_result, streamed_result._event_queue
-        )
+        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
+        RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
     @classmethod
@@ -1254,9 +1214,7 @@ class AgentRunner:
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
         input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend(
-            [generated_item.to_input_item() for generated_item in generated_items]
-        )
+        input.extend([generated_item.to_input_item() for generated_item in generated_items])
 
         new_response = await cls._get_new_response(
             agent,
@@ -1318,14 +1276,10 @@ class AgentRunner:
         # Send handoff items immediately for streaming, but avoid duplicates
         if event_queue is not None and processed_response.new_items:
             handoff_items = [
-                item
-                for item in processed_response.new_items
-                if isinstance(item, HandoffCallItem)
+                item for item in processed_response.new_items if isinstance(item, HandoffCallItem)
             ]
             if handoff_items:
-                RunImpl.stream_step_items_to_queue(
-                    cast(list[RunItem], handoff_items), event_queue
-                )
+                RunImpl.stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)
 
         return await RunImpl.execute_tools_and_side_effects(
             agent=agent,
@@ -1440,9 +1394,7 @@ class AgentRunner:
 
         guardrail_tasks = [
             asyncio.create_task(
-                RunImpl.run_single_output_guardrail(
-                    guardrail, agent, agent_output, context
-                )
+                RunImpl.run_single_output_guardrail(guardrail, agent, agent_output, context)
             )
             for guardrail in guardrails
         ]
@@ -1495,15 +1447,11 @@ class AgentRunner:
 
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
-        model_settings = RunImpl.maybe_reset_tool_choice(
-            agent, tool_use_tracker, model_settings
-        )
+        model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
         # If we have run hooks, or if the agent has hooks, we need to call them before the LLM call
         await asyncio.gather(
-            hooks.on_llm_start(
-                context_wrapper, agent, filtered.instructions, filtered.input
-            ),
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
             (
                 agent.hooks.on_llm_start(
                     context_wrapper,
@@ -1665,9 +1613,7 @@ DEFAULT_AGENT_RUNNER = AgentRunner()
 _TOOL_CALL_TYPES: tuple[type, ...] = get_args(ToolCallItemTypes)
 
 
-def _copy_str_or_list(
-    input: str | list[TResponseInputItem],
-) -> str | list[TResponseInputItem]:
+def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
     if isinstance(input, str):
         return input
     return input.copy()
