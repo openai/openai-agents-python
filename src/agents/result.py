@@ -213,6 +213,9 @@ class RunResultStreaming(RunResultBase):
             yield item
             self._event_queue.task_done()
 
+       # Ensure main execution completes before cleanup to avoid race conditions with session operations
+        await self._await_task_safely(self._run_impl_task)
+        # Safely terminate all background tasks after main execution has finished
         self._cleanup_tasks()
 
         if self._stored_exception:
