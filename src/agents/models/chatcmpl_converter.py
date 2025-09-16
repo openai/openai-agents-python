@@ -356,12 +356,6 @@ class Converter:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["tool_calls"] = []
 
-            # If we have pending thinking blocks, use them as the content
-            # This is required for Anthropic API tool calls with interleaved thinking
-            if pending_thinking_blocks:
-                current_assistant_msg["content"] = pending_thinking_blocks  # type: ignore
-                pending_thinking_blocks = None  # Clear after using
-
             return current_assistant_msg
 
         for item in items:
@@ -477,6 +471,13 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
+
+                # If we have pending thinking blocks, use them as the content
+                # This is required for Anthropic API tool calls with interleaved thinking
+                if pending_thinking_blocks:
+                    asst["content"] = pending_thinking_blocks  # type: ignore
+                    pending_thinking_blocks = None  # Clear after using
+
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
                 new_tool_call = ChatCompletionMessageFunctionToolCallParam(
