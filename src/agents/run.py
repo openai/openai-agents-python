@@ -278,11 +278,12 @@ class Runner:
             conversation_id: The conversation ID
                 (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
                 If provided, the conversation will be used to read and write items.
-                Every agent will have access to the conversation history so far, and
-                its output items will be written to the conversation. We recommend only
-                using this if you are exclusively using OpenAI models; other model
-                providers don't write to the Conversation object, so you'll end up
-                having partial conversations stored.
+                Every agent will have access to the conversation history so far,
+                and it's output items will be written to the conversation.
+                We recommend only using this if you are exclusively using OpenAI models;
+                other model providers don't write to the Conversation object,
+                so you'll end up having partial conversations stored.
+            session: A session for automatic conversation history management.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -355,6 +356,7 @@ class Runner:
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
+            session: A session for automatic conversation history management.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -424,7 +426,8 @@ class Runner:
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
-
+            session: A session for automatic conversation history management.
+        
         Returns:
             A result object that contains data about the run, as well as a method to
             stream events.
