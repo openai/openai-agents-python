@@ -30,9 +30,11 @@ from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-    from .lifecycle import AgentHooks
+    from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
+    from .memory.session import Session
     from .result import RunResult
+    from .run import RunConfig
 
 
 @dataclass
@@ -384,6 +386,12 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        run_config: RunConfig | None = None,
+        max_turns: int | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        session: Session | None = None,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -416,6 +424,12 @@ class Agent(AgentBase, Generic[TContext]):
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                run_config=run_config,
+                max_turns=max_turns,
+                hooks=hooks,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                session=session,
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)
