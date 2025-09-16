@@ -315,9 +315,17 @@ class Converter:
     def items_to_messages(
         cls,
         items: str | Iterable[TResponseInputItem],
+        preserve_reasoning_message: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
+
+        Args:
+            items: A string or iterable of response input items to convert
+            preserve_reasoning_message: Whether to preserve reasoning messages (thinking blocks)
+                in tool calls for reasoning models like Claude 4 Sonnet/Opus which support
+                interleaved thinking. When True, thinking blocks are reconstructed and
+                included in assistant messages with tool calls.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -512,7 +520,7 @@ class Converter:
                 content_items = reasoning_item.get("content", [])
                 signature = reasoning_item.get("encrypted_content")
 
-                if content_items:
+                if content_items and preserve_reasoning_message:
                     # Reconstruct thinking blocks from content and signature
                     pending_thinking_blocks = []
                     for content_item in content_items:
