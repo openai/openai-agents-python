@@ -259,6 +259,10 @@ class OpenAIResponsesModel(Model):
         include_set: set[str] = set(converted_tools.includes)
         if model_settings.response_include is not None:
             include_set.update(model_settings.response_include)
+
+        if model_settings.store is False and model_settings.response_include is None:
+            include_set.add("reasoning.encrypted_content")
+
         if model_settings.top_logprobs is not None:
             include_set.add("message.output_text.logprobs")
         include = cast(list[ResponseIncludable], list(include_set))
