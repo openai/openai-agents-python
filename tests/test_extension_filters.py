@@ -25,6 +25,10 @@ def _get_message_input_item(content: str) -> TResponseInputItem:
     }
 
 
+def _get_reasoning_input_item() -> TResponseInputItem:
+    return {"id": "rid", "summary": [], "type": "reasoning"}
+
+
 def _get_function_result_input_item(content: str) -> TResponseInputItem:
     return {
         "call_id": "1",
@@ -169,6 +173,7 @@ def test_removes_tools_from_new_items_and_history():
     handoff_input_data = HandoffInputData(
         input_history=(
             _get_message_input_item("Hello1"),
+            _get_reasoning_input_item(),
             _get_function_result_input_item("World"),
             _get_message_input_item("Hello2"),
         ),
@@ -185,7 +190,7 @@ def test_removes_tools_from_new_items_and_history():
         run_context=RunContextWrapper(context=()),
     )
     filtered_data = remove_all_tools(handoff_input_data)
-    assert len(filtered_data.input_history) == 2
+    assert len(filtered_data.input_history) == 3
     assert len(filtered_data.pre_handoff_items) == 1
     assert len(filtered_data.new_items) == 1
 
