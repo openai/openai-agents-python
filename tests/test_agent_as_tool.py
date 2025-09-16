@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from pydantic import BaseModel
 
 from agents import (
@@ -13,9 +14,9 @@ from agents import (
     RunHooks,
     Runner,
     Session,
+    TResponseInputItem,
 )
 from agents.tool_context import ToolContext
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 
 class BoolCtx(BaseModel):
@@ -242,7 +243,11 @@ async def test_agent_as_tool_returns_concatenated_text(monkeypatch: pytest.Monke
         ],
     )
 
-    result = type("DummyResult", (), {"new_items": [MessageOutputItem(agent=agent, raw_item=message)]})()
+    result = type(
+        "DummyResult",
+        (),
+        {"new_items": [MessageOutputItem(agent=agent, raw_item=message)]},
+    )()
 
     async def fake_run(
         cls,
@@ -269,6 +274,7 @@ async def test_agent_as_tool_returns_concatenated_text(monkeypatch: pytest.Monke
         is_enabled=True,
     )
 
+    assert isinstance(tool, FunctionTool)
     tool_context = ToolContext(context=None, tool_name="story_tool", tool_call_id="call_1")
     output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
 
@@ -299,16 +305,16 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     class DummySession(Session):
         session_id = "sess_123"
 
-        async def get_items(self, limit: int | None = None):  # type: ignore[override]
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
             return []
 
-        async def add_items(self, items):  # type: ignore[override]
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
             return None
 
-        async def pop_item(self):  # type: ignore[override]
+        async def pop_item(self) -> TResponseInputItem | None:
             return None
 
-        async def clear_session(self):  # type: ignore[override]
+        async def clear_session(self) -> None:
             return None
 
     dummy_session = DummySession()
@@ -365,6 +371,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
         session=dummy_session,
     )
 
+    assert isinstance(tool, FunctionTool)
     tool_context = ToolContext(context=None, tool_name="summary_tool", tool_call_id="call_2")
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 

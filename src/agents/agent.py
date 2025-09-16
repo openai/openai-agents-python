@@ -418,14 +418,16 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled=is_enabled,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
+            from .run import DEFAULT_MAX_TURNS, Runner
+
+            resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
 
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
                 context=context.context,
                 run_config=run_config,
-                max_turns=max_turns,
+                max_turns=resolved_max_turns,
                 hooks=hooks,
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
