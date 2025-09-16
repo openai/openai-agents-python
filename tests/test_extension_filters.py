@@ -1,4 +1,5 @@
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import Agent, HandoffInputData, RunContextWrapper
 from agents.extensions.handoff_filters import remove_all_tools
@@ -80,7 +81,7 @@ def _get_handoff_output_run_item(content: str) -> HandoffOutputItem:
 
 def _get_reasoning_output_run_item() -> ReasoningItem:
     return ReasoningItem(
-        agent=fake_agent(), raw_item={"id": "rid", "summary": [], "type": "reasoning"}
+        agent=fake_agent(), raw_item=ResponseReasoningItem(id="rid", summary=[], type="reasoning")
     )
 
 
