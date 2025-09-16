@@ -53,7 +53,7 @@ from .items import (
     ToolCallItemTypes,
     TResponseInputItem,
 )
-from .lifecycle import RunHooks
+from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
 from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
@@ -417,13 +417,11 @@ class AgentRunner:
     ) -> RunResult:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = kwargs.get("hooks")
+        hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
-        if hooks is None:
-            hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
 
@@ -624,14 +622,12 @@ class AgentRunner:
     ) -> RunResultStreaming:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = kwargs.get("hooks")
+        hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        if hooks is None:
-            hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
 
@@ -687,6 +683,23 @@ class AgentRunner:
             )
         )
         return streamed_result
+
+    @staticmethod
+    def _validate_run_hooks(
+        hooks: RunHooksBase[Any, Agent[Any]] | AgentHooksBase[Any, Agent[Any]] | Any | None,
+    ) -> RunHooks[Any]:
+        if hooks is None:
+            return RunHooks[Any]()
+        input_hook_type = type(hooks).__name__
+        if isinstance(hooks, AgentHooksBase):
+            raise TypeError(
+                "Run hooks must be instances of RunHooks. "
+                f"Received agent-scoped hooks ({input_hook_type}). "
+                "Attach AgentHooks to an Agent via Agent(..., hooks=...)."
+            )
+        if not isinstance(hooks, RunHooksBase):
+            raise TypeError(f"Run hooks must be instances of RunHooks. Received {input_hook_type}.")
+        return hooks
 
     @classmethod
     async def _maybe_filter_model_input(
