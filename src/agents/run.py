@@ -279,7 +279,7 @@ class Runner:
                 (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
                 If provided, the conversation will be used to read and write items.
                 Every agent will have access to the conversation history so far,
-                and it's output items will be written to the conversation.
+                and its output items will be written to the conversation.
                 We recommend only using this if you are exclusively using OpenAI models;
                 other model providers don't write to the Conversation object,
                 so you'll end up having partial conversations stored.
@@ -427,7 +427,7 @@ class Runner:
                 from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
-        
+
         Returns:
             A result object that contains data about the run, as well as a method to
             stream events.
