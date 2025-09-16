@@ -4,9 +4,9 @@ search:
 ---
 # セッション
 
-Agents SDK は、複数の エージェント 実行にわたって会話履歴を自動的に保持する組み込みのセッションメモリを提供し、ターン間で `.to_input_list()` を手動で扱う必要をなくします。
+Agents SDK は、複数の エージェント 実行にわたって会話履歴を自動的に維持する組み込みのセッションメモリを提供し、ターン間で手動で `.to_input_list()` を扱う必要をなくします。
 
-セッションは特定のセッションに対して会話履歴を保存し、明示的な手動メモリ管理なしで エージェント がコンテキストを維持できるようにします。これは、チャットアプリケーションや、過去のやり取りを エージェント に覚えておいてほしいマルチターンの会話を構築する際に特に有用です。
+セッションは特定のセッションの会話履歴を保存し、明示的な手動メモリ管理なしで エージェント がコンテキストを維持できるようにします。これは、チャットアプリケーションや、エージェント に以前のやり取りを覚えさせたいマルチターンの会話を構築する際に特に有用です。
 
 ## クイックスタート
 
@@ -49,13 +49,13 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 仕組み
 
-セッションメモリを有効にすると:
+セッションメモリが有効な場合:
 
-1. **各実行の前**: ランナーがセッションの会話履歴を自動的に取得し、入力アイテムの先頭に追加します。
-2. **各実行の後**: 実行中に生成されたすべての新規アイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）が自動的にセッションに保存されます。
-3. **コンテキストの保持**: 同じセッションでの後続の実行には完全な会話履歴が含まれ、 エージェント がコンテキストを維持できます。
+1. **各実行前**: ランナーはセッションの会話履歴を自動取得し、入力アイテムの先頭に付加します。
+2. **各実行後**: 実行中に生成された新しいアイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）はすべて自動的にセッションへ保存されます。
+3. **コンテキストの保持**: 同じセッションでの以降の実行には完全な会話履歴が含まれ、 エージェント はコンテキストを維持できます。
 
-これにより、`.to_input_list()` を手動で呼び出したり、実行間で会話状態を管理したりする必要がなくなります。
+これにより、ターン間で `.to_input_list()` を手動で呼び出したり、会話状態を管理したりする必要がなくなります。
 
 ## メモリ操作
 
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### `pop_item` を用いた修正
+### 修正のための `pop_item` の使用
 
-`pop_item` メソッドは、会話の最後のアイテムを取り消したり変更したりしたい場合に特に有用です:
+`pop_item` メソッドは、会話内の最後のアイテムを取り消したり修正したりしたいときに特に便利です:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -129,7 +129,7 @@ result = await Runner.run(agent, "Hello")
 ### OpenAI Conversations API メモリ
 
 [OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api) を使用して、
-独自のデータベースを管理せずに会話状態を永続化します。会話履歴の保存に OpenAI がホストするインフラにすでに依存している場合に役立ちます。
+独自のデータベースを管理せずに会話状態を永続化します。会話履歴の保存に OpenAI ホスト型のインフラにすでに依存している場合に役立ちます。
 
 ```python
 from agents import OpenAIConversationsSession
@@ -188,13 +188,13 @@ result2 = await Runner.run(
 )
 ```
 
-### SQLAlchemy 対応セッション
+### SQLAlchemy 駆動のセッション
 
-さらに高度なユースケースでは、SQLAlchemy 駆動のセッションバックエンドを使用できます。これにより、セッションストレージに SQLAlchemy がサポートする任意のデータベース（PostgreSQL、MySQL、SQLite など）を使用できます。
+より高度なユースケースでは、SQLAlchemy 駆動のセッションバックエンドを使用できます。これにより、セッションストレージに SQLAlchemy がサポートする任意のデータベース（PostgreSQL、MySQL、SQLite など）を使用できます。
 
-**例 1: `from_url` とインメモリ SQLite の使用**
+**例 1: インメモリ SQLite で `from_url` を使用**
 
-これは最も簡単な導入方法で、開発やテストに最適です。
+これは最も簡単な開始方法で、開発やテストに最適です。
 
 ```python
 import asyncio
@@ -215,9 +215,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-**例 2: 既存の SQLAlchemy エンジンの使用**
+**例 2: 既存の SQLAlchemy エンジンを使用**
 
-本番アプリケーションでは、すでに SQLAlchemy の `AsyncEngine` インスタンスを持っている可能性があります。セッションに直接渡すことができます。
+本番アプリケーションでは、すでに SQLAlchemy の `AsyncEngine` インスタンスを持っている可能性が高いです。これをセッションに直接渡せます。
 
 ```python
 import asyncio
@@ -295,19 +295,19 @@ result = await Runner.run(
 
 ### セッション ID の命名
 
-会話を整理しやすくする意味のあるセッション ID を使用します:
+会話を整理するのに役立つ意味のあるセッション ID を使用します:
 
-- ユーザー基準: `"user_12345"`
-- スレッド基準: `"thread_abc123"`
-- コンテキスト基準: `"support_ticket_456"`
+- ユーザー ベース: `"user_12345"`
+- スレッド ベース: `"thread_abc123"`
+- コンテキスト ベース: `"support_ticket_456"`
 
 ### メモリ永続化
 
 - 一時的な会話にはインメモリ SQLite（`SQLiteSession("session_id")`）を使用
 - 永続的な会話にはファイルベース SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用
-- SQLAlchemy 対応セッション（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）は、SQLAlchemy がサポートする既存データベースを用いる本番システム向け
-- OpenAI ホスト型ストレージ（`OpenAIConversationsSession()`）は、履歴を OpenAI Conversations API に保存したい場合に使用
-- より高度なユースケースでは、他の本番システム（Redis、Django など）向けのカスタムセッションバックエンドの実装を検討
+- 既存のデータベースが SQLAlchemy でサポートされている本番システムには SQLAlchemy 駆動のセッション（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）を使用
+- 履歴を OpenAI Conversations API に保存したい場合は OpenAI ホスト型ストレージ（`OpenAIConversationsSession()`）を使用
+- より高度なユースケース向けに、他の本番システム（Redis、Django など）のカスタムセッションバックエンド実装を検討
 
 ### セッション管理
 
@@ -333,9 +333,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 完全な例
+## 完全なコード例
 
-セッションメモリの動作を示す完全な例です:
+セッションメモリがどのように動作するかを示す完全な例です:
 
 ```python
 import asyncio
@@ -399,9 +399,9 @@ if __name__ == "__main__":
 
 ## API リファレンス
 
-詳細な API ドキュメントについては次を参照してください:
+詳細な API ドキュメントは次を参照してください:
 
 - [`Session`][agents.memory.Session] - プロトコルインターフェース
 - [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
 - [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 実装
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 対応実装
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 駆動の実装
