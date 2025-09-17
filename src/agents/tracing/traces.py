@@ -11,8 +11,35 @@ from .scope import Scope
 
 
 class Trace(abc.ABC):
-    """
-    A trace is the root level object that tracing creates. It represents a logical "workflow".
+    """A complete end-to-end workflow containing related spans and metadata.
+
+    A trace represents a logical workflow or operation (e.g., "Customer Service Query"
+    or "Code Generation") and contains all the spans (individual operations) that occur
+    during that workflow.
+
+    Example:
+        ```python
+        # Basic trace usage
+        with trace("Order Processing") as t:
+            validation_result = await Runner.run(validator, order_data)
+            if validation_result.approved:
+                await Runner.run(processor, order_data)
+
+        # Trace with metadata and grouping
+        with trace(
+            "Customer Service",
+            group_id="chat_123",
+            metadata={"customer": "user_456"}
+        ) as t:
+            result = await Runner.run(support_agent, query)
+        ```
+
+    Notes:
+        - Use descriptive workflow names
+        - Group related traces with consistent group_ids
+        - Add relevant metadata for filtering/analysis
+        - Use context managers for reliable cleanup
+        - Consider privacy when adding trace data
     """
 
     @abc.abstractmethod
@@ -25,51 +52,92 @@ class Trace(abc.ABC):
 
     @abc.abstractmethod
     def start(self, mark_as_current: bool = False):
-        """
-        Start the trace.
+        """Start the trace and optionally mark it as the current trace.
 
         Args:
-            mark_as_current: If true, the trace will be marked as the current trace.
+            mark_as_current: If true, marks this trace as the current trace
+                in the execution context.
+
+        Notes:
+            - Must be called before any spans can be added
+            - Only one trace can be current at a time
+            - Thread-safe when using mark_as_current
         """
         pass
 
     @abc.abstractmethod
     def finish(self, reset_current: bool = False):
-        """
-        Finish the trace.
+        """Finish the trace and optionally reset the current trace.
 
         Args:
-            reset_current: If true, the trace will be reset as the current trace.
+            reset_current: If true, resets the current trace to the previous
+                trace in the execution context.
+
+        Notes:
+            - Must be called to complete the trace
+            - Finalizes all open spans
+            - Thread-safe when using reset_current
         """
         pass
 
     @property
     @abc.abstractmethod
     def trace_id(self) -> str:
-        """
-        The trace ID.
+        """Get the unique identifier for this trace.
+
+        Returns:
+            str: The trace's unique ID in the format 'trace_<32_alphanumeric>'
+
+        Notes:
+            - IDs are globally unique
+            - Used to link spans to their parent trace
+            - Can be used to look up traces in the dashboard
         """
         pass
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """
-        The name of the workflow being traced.
+        """Get the human-readable name of this workflow trace.
+
+        Returns:
+            str: The workflow name (e.g., "Customer Service", "Data Processing")
+
+        Notes:
+            - Should be descriptive and meaningful
+            - Used for grouping and filtering in the dashboard
+            - Helps identify the purpose of the trace
         """
         pass
 
     @abc.abstractmethod
     def export(self) -> dict[str, Any] | None:
-        """
-        Export the trace as a dictionary.
+        """Export the trace data as a serializable dictionary.
+
+        Returns:
+            dict | None: Dictionary containing trace data, or None if tracing is disabled.
+
+        Notes:
+            - Includes all spans and their data
+            - Used for sending traces to backends
+            - May include metadata and group ID
         """
         pass
 
 
 class NoOpTrace(Trace):
-    """
-    A no-op trace that will not be recorded.
+    """A no-op implementation of Trace that doesn't record any data.
+
+    Used when tracing is disabled but trace operations still need to work.
+    Maintains proper context management but doesn't store or export any data.
+
+    Example:
+        ```python
+        # When tracing is disabled, traces become NoOpTrace
+        with trace("Disabled Workflow") as t:
+            # Operations still work but nothing is recorded
+            await Runner.run(agent, "query")
+        ```
     """
 
     def __init__(self):
@@ -101,13 +169,28 @@ class NoOpTrace(Trace):
 
     @property
     def trace_id(self) -> str:
+        """The trace's unique identifier.
+
+        Returns:
+            str: A unique ID for this trace.
+        """
         return "no-op"
 
     @property
     def name(self) -> str:
+        """The workflow name for this trace.
+
+        Returns:
+            str: Human-readable name describing this workflow.
+        """
         return "no-op"
 
     def export(self) -> dict[str, Any] | None:
+        """Export the trace data as a dictionary.
+
+        Returns:
+            dict | None: Trace data in exportable format, or None if no data.
+        """
         return None
 
 

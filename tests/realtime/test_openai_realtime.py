@@ -1,3 +1,4 @@
+import json
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -95,6 +96,88 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
                 assert model._websocket == mock_websocket
         assert model._websocket_task is not None
         assert model.model == "gpt-4o-realtime-preview"
+
+    @pytest.mark.asyncio
+    async def test_session_update_includes_noise_reduction(self, model, mock_websocket):
+        """Session.update should pass through input_audio_noise_reduction config."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+                "input_audio_noise_reduction": {"type": "near_field"},
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update contains the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert session.get("audio", {}).get("input", {}).get("noise_reduction") == {
+            "type": "near_field"
+        }
+
+    @pytest.mark.asyncio
+    async def test_session_update_omits_noise_reduction_when_not_provided(
+        self, model, mock_websocket
+    ):
+        """Session.update should omit input_audio_noise_reduction when not provided."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update omits the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert "audio" in session and "input" in session["audio"]
+        assert "noise_reduction" not in session["audio"]["input"]
 
     @pytest.mark.asyncio
     async def test_connect_with_custom_headers_overrides_defaults(self, model, mock_websocket):

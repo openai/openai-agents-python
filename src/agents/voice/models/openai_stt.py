@@ -163,11 +163,16 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         await self._websocket.send(
             json.dumps(
                 {
-                    "type": "transcription_session.update",
+                    "type": "session.update",
                     "session": {
-                        "input_audio_format": "pcm16",
-                        "input_audio_transcription": {"model": self._model},
-                        "turn_detection": self._turn_detection,
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {"model": self._model},
+                                "turn_detection": self._turn_detection,
+                            }
+                        },
                     },
                 }
             )

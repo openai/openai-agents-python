@@ -10,7 +10,10 @@ This test validates the fix for issue #1704:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
+
+from openai.types.chat import ChatCompletionMessageToolCall
+from openai.types.chat.chat_completion_message_tool_call import Function
 
 from agents.extensions.models.litellm_model import InternalChatCompletionMessage
 from agents.models.chatcmpl_converter import Converter
@@ -99,3 +102,115 @@ def test_reasoning_items_preserved_in_message_conversion():
         thinking_block = reasoning_item.content[0]
         assert thinking_block.type == "reasoning_text"
         assert thinking_block.text == "I need to call the weather function for Paris"
+
+
+def test_anthropic_thinking_blocks_with_tool_calls():
+    """
+    Test for models with extended thinking and interleaved thinking with tool calls.
+
+    This test verifies the Anthropic's API's requirements for thinking blocks
+    to be the first content in assistant messages when reasoning is enabled and tool
+    calls are present.
+    """
+    # Create a message with reasoning, thinking blocks and tool calls
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="I'll check the weather for you.",
+        reasoning_content="The user wants weather information, I need to call the weather function",
+        thinking_blocks=[
+            {
+                "type": "thinking",
+                "thinking": (
+                    "The user is asking about weather. "
+                    "Let me use the weather tool to get this information."
+                ),
+                "signature": "TestSignature123",
+            }
+        ],
+        tool_calls=[
+            ChatCompletionMessageToolCall(
+                id="call_123",
+                type="function",
+                function=Function(name="get_weather", arguments='{"city": "Tokyo"}'),
+            )
+        ],
+    )
+
+    # Step 1: Convert message to output items
+    output_items = Converter.message_to_output_items(message)
+
+    # Verify reasoning item exists and contains thinking blocks
+    reasoning_items = [
+        item for item in output_items if hasattr(item, "type") and item.type == "reasoning"
+    ]
+    assert len(reasoning_items) == 1, "Should have exactly one reasoning item"
+
+    reasoning_item = reasoning_items[0]
+
+    # Verify thinking text is stored in content
+    assert hasattr(reasoning_item, "content") and reasoning_item.content, (
+        "Reasoning item should have content"
+    )
+    assert reasoning_item.content[0].type == "reasoning_text", (
+        "Content should be reasoning_text type"
+    )
+
+    # Verify signature is stored in encrypted_content
+    assert hasattr(reasoning_item, "encrypted_content"), (
+        "Reasoning item should have encrypted_content"
+    )
+    assert reasoning_item.encrypted_content == "TestSignature123", "Signature should be preserved"
+
+    # Verify tool calls are present
+    tool_call_items = [
+        item for item in output_items if hasattr(item, "type") and item.type == "function_call"
+    ]
+    assert len(tool_call_items) == 1, "Should have exactly one tool call"
+
+    # Step 2: Convert output items back to messages
+    # Convert items to dicts for the converter (simulating serialization/deserialization)
+    items_as_dicts: list[dict[str, Any]] = []
+    for item in output_items:
+        if hasattr(item, "model_dump"):
+            items_as_dicts.append(item.model_dump())
+        else:
+            items_as_dicts.append(cast(dict[str, Any], item))
+
+    messages = Converter.items_to_messages(items_as_dicts, preserve_thinking_blocks=True)  # type: ignore[arg-type]
+
+    # Find the assistant message with tool calls
+    assistant_messages = [
+        msg for msg in messages if msg.get("role") == "assistant" and msg.get("tool_calls")
+    ]
+    assert len(assistant_messages) == 1, "Should have exactly one assistant message with tool calls"
+
+    assistant_msg = assistant_messages[0]
+
+    # Content must start with thinking blocks, not text
+    content = assistant_msg.get("content")
+    assert content is not None, "Assistant message should have content"
+
+    assert isinstance(content, list) and len(content) > 0, (
+        "Assistant message content should be a non-empty list"
+    )
+
+    first_content = content[0]
+    assert first_content.get("type") == "thinking", (
+        f"First content must be 'thinking' type for Anthropic compatibility, "
+        f"but got '{first_content.get('type')}'"
+    )
+    expected_thinking = (
+        "The user is asking about weather. Let me use the weather tool to get this information."
+    )
+    assert first_content.get("thinking") == expected_thinking, (
+        "Thinking content should be preserved"
+    )
+    # Signature should also be preserved
+    assert first_content.get("signature") == "TestSignature123", (
+        "Signature should be preserved in thinking block"
+    )
+
+    # Verify tool calls are preserved
+    tool_calls = assistant_msg.get("tool_calls", [])
+    assert len(cast(list[Any], tool_calls)) == 1, "Tool calls should be preserved"
+    assert cast(list[Any], tool_calls)[0]["function"]["name"] == "get_weather"
