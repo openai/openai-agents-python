@@ -257,7 +257,15 @@ class LitellmModel(Model):
         stream: bool = False,
         prompt: Any | None = None,
     ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+        # Preserve reasoning messages for tool calls when reasoning is on
+        # This is needed for models like Claude 4 Sonnet/Opus which support interleaved thinking
+        preserve_thinking_blocks = (
+            model_settings.reasoning is not None and model_settings.reasoning.effort is not None
+        )
+
+        converted_messages = Converter.items_to_messages(
+            input, preserve_thinking_blocks=preserve_thinking_blocks
+        )
 
         if system_instructions:
             converted_messages.insert(

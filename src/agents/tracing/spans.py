@@ -22,6 +22,7 @@ class SpanError(TypedDict):
         message: A human-readable error description
         data: Optional dictionary containing additional error context
     """
+
     message: str
     data: dict[str, Any] | None
 

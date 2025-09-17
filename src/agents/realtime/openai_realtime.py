@@ -825,14 +825,24 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "output_audio_format",
             DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
         )
+        input_audio_noise_reduction = model_settings.get(
+            "input_audio_noise_reduction",
+            DEFAULT_MODEL_SETTINGS.get("input_audio_noise_reduction"),
+        )
 
         input_audio_config = None
         if any(
             value is not None
-            for value in [input_audio_format, input_audio_transcription, turn_detection]
+            for value in [
+                input_audio_format,
+                input_audio_noise_reduction,
+                input_audio_transcription,
+                turn_detection,
+            ]
         ):
             input_audio_config = OpenAIRealtimeAudioInput(
                 format=to_realtime_audio_format(input_audio_format),
+                noise_reduction=cast(Any, input_audio_noise_reduction),
                 transcription=cast(Any, input_audio_transcription),
                 turn_detection=cast(Any, turn_detection),
             )
