@@ -1,3 +1,9 @@
+"""Model Context Protocol (MCP) for OpenAI Agents SDK.
+
+Provides server implementations and utilities for Model Context Protocol,
+enabling standardized communication between agents and external tools.
+"""
+
 try:
     from .server import (
         MCPServer,

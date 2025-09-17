@@ -20,12 +20,33 @@ async def start_openai_conversations_session(openai_client: AsyncOpenAI | None =
 
 
 class OpenAIConversationsSession(SessionABC):
+    """Session implementation using OpenAI's Conversations API for persistence.
+    
+    This class provides conversation history storage and retrieval using OpenAI's
+    Conversations API. It automatically manages conversation IDs and handles
+    API communication for storing and retrieving conversation items.
+
+    Features:
+        - Automatic session creation and management
+        - Persistent storage via OpenAI's infrastructure
+        - Support for retrieving paginated history
+        - Automatic client configuration
+    """
+
     def __init__(
         self,
         *,
         conversation_id: str | None = None,
         openai_client: AsyncOpenAI | None = None,
     ):
+        """Initialize an OpenAI Conversations session.
+        
+        Args:
+            conversation_id: Optional existing conversation ID to use.
+                If None, a new conversation will be created.
+            openai_client: Optional custom OpenAI client to use.
+                If None, uses default client or creates a new one.
+        """
         self._session_id: str | None = conversation_id
         _openai_client = openai_client
         if _openai_client is None:

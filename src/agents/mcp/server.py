@@ -230,7 +230,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             GetSessionIdCallback | None,
         ]
     ]:
-        """Create the streams for the server."""
+        """Create communication streams for the MCP server.
+
+        Returns:
+            A context manager that yields a tuple containing:
+            - A receive stream for incoming messages and exceptions
+            - A send stream for outgoing messages
+            - An optional callback for getting session IDs
+
+        This method is used internally by server implementations to establish
+        bidirectional communication channels with the MCP service.
+        """
         pass
 
     async def __aenter__(self):
@@ -245,6 +255,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._cache_dirty = True
 
     async def _run_with_retries(self, func: Callable[[], Awaitable[T]]) -> T:
+        """Execute a function with exponential backoff retry logic.
+
+        Args:
+            func: Async function to execute with retries.
+
+        Returns:
+            The result of the function if successful.
+
+        Retries failed operations using exponential backoff based on
+        max_retry_attempts and retry_backoff_seconds_base settings.
+        """
         attempts = 0
         while True:
             try:

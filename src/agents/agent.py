@@ -37,6 +37,19 @@ if TYPE_CHECKING:
 
 @dataclass
 class ToolsToFinalOutputResult:
+    """Result type for processing tool outputs into final agent outputs.
+    
+    This class helps manage the transition between tool execution results
+    and the final output of an agent run. It determines whether more LLM
+    processing is needed or if we have reached the final output state.
+
+    Attributes:
+        is_final_output: Whether this is the final output. If False, the LLM 
+            will run again and receive the tool call output.
+        final_output: The final output value. Can be None if `is_final_output` 
+            is False, otherwise must match the `output_type` of the agent.
+    """
+
     is_final_output: bool
     """Whether this is the final output. If False, the LLM will run again and receive the tool call
     output.
@@ -73,10 +86,23 @@ class MCPConfig(TypedDict):
 
 @dataclass
 class AgentBase(Generic[TContext]):
-    """Base class for `Agent` and `RealtimeAgent`."""
+    """Base class for all agent implementations in the OpenAI Agents SDK.
+    
+    This class provides the core functionality shared between standard agents
+    and realtime agents. It manages tools, model settings, and agent configuration.
+    
+    Generic Args:
+        TContext: The type of context maintained during agent execution.
+        
+    Key Features:
+        - Tool management and execution
+        - Model configuration
+        - Handoff support for agent collaboration
+        - Context management across runs
+    """
 
     name: str
-    """The name of the agent."""
+    """The name of the agent, used for identification and logging."""
 
     handoff_description: str | None = None
     """A description of the agent. This is used when the agent is used as a handoff, so that an
@@ -84,7 +110,7 @@ class AgentBase(Generic[TContext]):
     """
 
     tools: list[Tool] = field(default_factory=list)
-    """A list of tools that the agent can use."""
+    """A list of tools that the agent has access to and can use during execution."""
 
     mcp_servers: list[MCPServer] = field(default_factory=list)
     """A list of [Model Context Protocol](https://modelcontextprotocol.io/) servers that

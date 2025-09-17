@@ -8,13 +8,37 @@ from .openai_provider import OpenAIProvider
 
 
 class MultiProviderMap:
-    """A map of model name prefixes to ModelProviders."""
+    """Registry for managing multiple model providers in the system.
+    
+    This class maintains a mapping between model name prefixes and their
+    corresponding ModelProvider implementations. It enables:
+    - Dynamic registration of model providers
+    - Provider lookup by model prefix
+    - Support for multiple model backends
+    - Flexible provider management
+    
+    Example:
+        ```python
+        map = MultiProviderMap()
+        map.add_provider("openai", OpenAIProvider())
+        map.add_provider("custom", CustomProvider())
+        provider = map.get_provider("openai")  # Get OpenAI provider
+        ```
+    """
 
     def __init__(self):
+        """Initialize an empty provider mapping."""
         self._mapping: dict[str, ModelProvider] = {}
 
     def has_prefix(self, prefix: str) -> bool:
-        """Returns True if the given prefix is in the mapping."""
+        """Check if a provider exists for the given prefix.
+        
+        Args:
+            prefix: The model name prefix to check
+
+        Returns:
+            True if a provider is registered for this prefix
+        """
         return prefix in self._mapping
 
     def get_mapping(self) -> dict[str, ModelProvider]:

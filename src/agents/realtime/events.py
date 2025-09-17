@@ -15,21 +15,33 @@ from .model_events import RealtimeModelAudioEvent, RealtimeModelEvent
 
 @dataclass
 class RealtimeEventInfo:
+    """Base information included in all realtime events.
+    
+    This class provides the common context and metadata that is
+    shared across all realtime event types in the system.
+    """
+
     context: RunContextWrapper
-    """The context for the event."""
+    """The execution context for the event, containing state and settings."""
 
 
 @dataclass
 class RealtimeAgentStartEvent:
-    """A new agent has started."""
+    """Event emitted when a new realtime agent begins execution.
+    
+    This event marks the beginning of an agent's lifecycle in a realtime
+    session. It provides access to the agent instance and execution context
+    for monitoring and management purposes.
+    """
 
     agent: RealtimeAgent
-    """The new agent."""
+    """The agent instance that is starting execution."""
 
     info: RealtimeEventInfo
-    """Common info for all events, such as the context."""
+    """Common event information including execution context."""
 
     type: Literal["agent_start"] = "agent_start"
+    """Discriminator field to identify this as an agent start event."""
 
 
 @dataclass

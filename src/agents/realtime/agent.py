@@ -25,18 +25,29 @@ RealtimeRunHooks = RunHooksBase[TContext, "RealtimeAgent[TContext]"]
 
 @dataclass
 class RealtimeAgent(AgentBase, Generic[TContext]):
-    """A specialized agent instance that is meant to be used within a `RealtimeSession` to build
-    voice agents. Due to the nature of this agent, some configuration options are not supported
-    that are supported by regular `Agent` instances. For example:
-    - `model` choice is not supported, as all RealtimeAgents will be handled by the same model
-      within a `RealtimeSession`.
-    - `modelSettings` is not supported, as all RealtimeAgents will be handled by the same model
-      within a `RealtimeSession`.
-    - `outputType` is not supported, as RealtimeAgents do not support structured outputs.
-    - `toolUseBehavior` is not supported, as all RealtimeAgents will be handled by the same model
-      within a `RealtimeSession`.
-    - `voice` can be configured on an `Agent` level; however, it cannot be changed after the first
-      agent within a `RealtimeSession` has spoken.
+    """Specialized agent for real-time interactive scenarios like voice conversations.
+    
+    RealtimeAgent is designed to operate within a RealtimeSession for building
+    interactive voice and streaming agents. It provides real-time response
+    capabilities while maintaining consistency across a session.
+
+    Key Features:
+        - Real-time streaming responses
+        - Voice interaction support
+        - Session-wide model consistency
+        - Streamlined configuration for real-time use
+
+    Limitations:
+        - Model selection is fixed per RealtimeSession
+        - Model settings are session-wide
+        - No structured output support
+        - Tool behavior is session-controlled
+        - Voice settings are immutable after first use
+
+    Note:
+        Unlike standard Agents, RealtimeAgents share core settings within
+        their session to ensure consistent behavior and performance in
+        real-time scenarios.
 
     See `AgentBase` for base parameters that are shared with `Agent`s.
     """

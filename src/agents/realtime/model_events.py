@@ -21,7 +21,19 @@ class RealtimeModelErrorEvent:
 
 @dataclass
 class RealtimeModelToolCallEvent:
-    """Model attempted a tool/function call."""
+    """Event emitted when a model attempts to call a tool/function in realtime.
+    
+    This event is generated during model streaming when the model decides
+    to use a tool. It contains all necessary information to execute the
+    tool call and track its lifecycle in the realtime session.
+
+    Attributes:
+        name: Name of the tool/function being called
+        call_id: Unique identifier for this specific tool call
+        arguments: JSON-formatted string containing the tool arguments
+        id: Optional unique identifier for this event
+        previous_item_id: Optional ID of the item that led to this tool call
+    """
 
     name: str
     call_id: str
@@ -35,7 +47,19 @@ class RealtimeModelToolCallEvent:
 
 @dataclass
 class RealtimeModelAudioEvent:
-    """Raw audio bytes emitted by the model."""
+    """Event containing streaming audio data from a model's response.
+    
+    This event is emitted when a model produces audio output during
+    a realtime session, typically as part of a text-to-speech or
+    voice response feature.
+
+    Attributes:
+        data: Raw audio bytes from the model
+        response_id: Identifier linking this audio to a specific model response
+        item_id: ID of the realtime item containing this audio content
+        content_index: Position of this audio chunk in the item's content array
+        type: Discriminator field identifying this as an audio event
+    """
 
     data: bytes
     response_id: str

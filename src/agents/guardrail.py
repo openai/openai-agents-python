@@ -18,7 +18,17 @@ if TYPE_CHECKING:
 
 @dataclass
 class GuardrailFunctionOutput:
-    """The output of a guardrail function."""
+    """Output from a guardrail function's validation check.
+    
+    This class represents the result of executing a guardrail's validation logic.
+    It includes both the validation result and optional detailed information about
+    what was checked and why the validation succeeded or failed.
+    
+    Use this to:
+    - Track guardrail validation results
+    - Provide detailed feedback about validation checks
+    - Control agent execution flow based on validation
+    """
 
     output_info: Any
     """
@@ -29,6 +39,7 @@ class GuardrailFunctionOutput:
     tripwire_triggered: bool
     """
     Whether the tripwire was triggered. If triggered, the agent's execution will be halted.
+    Set to True to stop agent execution when validation fails.
     """
 
 

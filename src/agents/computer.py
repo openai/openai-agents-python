@@ -6,8 +6,19 @@ Button = Literal["left", "right", "wheel", "back", "forward"]
 
 
 class Computer(abc.ABC):
-    """A computer implemented with sync operations. The Computer interface abstracts the
-    operations needed to control a computer or browser."""
+    """Abstract interface for computer and browser control operations.
+    
+    This interface defines the standard operations that can be performed on a computer
+    or browser environment, such as:
+    - Mouse movements and clicks
+    - Keyboard input
+    - Screenshot capture
+    - Window/viewport dimensions
+    - Environment detection
+    
+    Implementations should provide synchronous operations for each method to ensure
+    reliable control across different platforms and environments.
+    """
 
     @property
     @abc.abstractmethod

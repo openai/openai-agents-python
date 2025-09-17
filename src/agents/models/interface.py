@@ -17,24 +17,53 @@ if TYPE_CHECKING:
 
 
 class ModelTracing(enum.Enum):
+    """Configuration for model execution tracing and debugging.
+    
+    This enum controls how much information is collected during model execution
+    for debugging, monitoring, and analysis purposes.
+    """
+    
     DISABLED = 0
-    """Tracing is disabled entirely."""
+    """Tracing is disabled entirely. No debug information is collected."""
 
     ENABLED = 1
-    """Tracing is enabled, and all data is included."""
+    """Full tracing is enabled. All data including inputs and outputs is collected."""
 
     ENABLED_WITHOUT_DATA = 2
-    """Tracing is enabled, but inputs/outputs are not included."""
+    """Tracing is enabled but sensitive data is excluded. Useful for production monitoring."""
 
     def is_disabled(self) -> bool:
+        """Check if tracing is completely disabled.
+        
+        Returns:
+            True if no tracing information should be collected.
+        """
         return self == ModelTracing.DISABLED
 
     def include_data(self) -> bool:
+        """Check if full data should be included in traces.
+        
+        Returns:
+            True if input/output data should be included in traces.
+        """
         return self == ModelTracing.ENABLED
 
 
 class Model(abc.ABC):
-    """The base interface for calling an LLM."""
+    """Base interface for Large Language Model interactions.
+    
+    This abstract class defines the contract for all model implementations
+    in the OpenAI Agents SDK. It provides methods for both standard and
+    streaming responses from language models.
+    
+    Key responsibilities:
+        - Handle model API communication
+        - Process system instructions and user inputs
+        - Apply model settings and configurations
+        - Manage tool and handoff integrations
+        - Support tracing and debugging
+        - Handle both sync and streaming responses
+    """
 
     @abc.abstractmethod
     async def get_response(

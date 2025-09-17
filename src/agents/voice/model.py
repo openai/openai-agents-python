@@ -20,7 +20,17 @@ TTSVoice = Literal["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sa
 
 @dataclass
 class TTSModelSettings:
-    """Settings for a TTS model."""
+    """Configuration settings for Text-to-Speech (TTS) model behavior.
+    
+    This class defines all configurable aspects of TTS processing, including:
+    - Voice selection and characteristics
+    - Audio streaming and buffering
+    - Data format and transformation
+    - Model instructions and behavior
+    
+    These settings control how text is converted to speech and how the
+    audio is processed and streamed to clients.
+    """
 
     voice: TTSVoice | None = None
     """

@@ -10,8 +10,25 @@ HEADERS = {"User-Agent": _USER_AGENT}
 
 
 class ChatCmplHelpers:
+    """Helper utilities for OpenAI chat completions API integration.
+    
+    This class provides utilities for working with OpenAI's chat completions API,
+    handling common tasks like:
+    - Determining if a client is using OpenAI's official API
+    - Managing response storage settings
+    - Configuring streaming options
+    """
+
     @classmethod
-    def is_openai(cls, client: AsyncOpenAI):
+    def is_openai(cls, client: AsyncOpenAI) -> bool:
+        """Check if the client is using the official OpenAI API.
+        
+        Args:
+            client: The AsyncOpenAI client instance to check
+
+        Returns:
+            True if using api.openai.com, False otherwise
+        """
         return str(client.base_url).startswith("https://api.openai.com")
 
     @classmethod
