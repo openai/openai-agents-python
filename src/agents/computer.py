@@ -7,7 +7,7 @@ Button = Literal["left", "right", "wheel", "back", "forward"]
 
 class Computer(abc.ABC):
     """Abstract interface for computer and browser control operations.
-    
+
     This interface defines the standard operations that can be performed on a computer
     or browser environment, such as:
     - Mouse movements and clicks
@@ -15,7 +15,7 @@ class Computer(abc.ABC):
     - Screenshot capture
     - Window/viewport dimensions
     - Environment detection
-    
+
     Implementations should provide synchronous operations for each method to ensure
     reliable control across different platforms and environments.
     """
