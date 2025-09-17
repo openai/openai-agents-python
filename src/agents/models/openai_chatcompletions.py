@@ -24,6 +24,7 @@ from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
+from . import _openai_shared
 from .chatcmpl_converter import Converter
 from .chatcmpl_helpers import HEADERS, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
@@ -306,7 +307,7 @@ class OpenAIChatCompletionsModel(Model):
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             verbosity=self._non_null_or_not_given(model_settings.verbosity),
             top_logprobs=self._non_null_or_not_given(model_settings.top_logprobs),
-            extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),
@@ -349,3 +350,9 @@ class OpenAIChatCompletionsModel(Model):
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        merged = {**HEADERS, **(model_settings.extra_headers or {})}
+        if ua_override := _openai_shared.get_user_agent_override():
+            merged["User-Agent"] = ua_override
+        return merged

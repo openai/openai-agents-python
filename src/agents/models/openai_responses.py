@@ -40,6 +40,7 @@ from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
+from . import _openai_shared
 from .interface import Model, ModelTracing
 
 if TYPE_CHECKING:
@@ -312,7 +313,7 @@ class OpenAIResponsesModel(Model):
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             text=response_format,
@@ -326,6 +327,12 @@ class OpenAIResponsesModel(Model):
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        merged = {**_HEADERS, **(model_settings.extra_headers or {})}
+        if ua_override := _openai_shared.get_user_agent_override():
+            merged["User-Agent"] = ua_override
+        return merged
 
 
 @dataclass

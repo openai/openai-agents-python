@@ -10,6 +10,8 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from agents.exceptions import ModelBehaviorError
 
+from ...models import _openai_shared
+
 try:
     import litellm
 except ImportError as _e:
@@ -353,7 +355,7 @@ class LitellmModel(Model):
             stream_options=stream_options,
             reasoning_effort=reasoning_effort,
             top_logprobs=model_settings.top_logprobs,
-            extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             api_key=self.api_key,
             base_url=self.base_url,
             **extra_kwargs,
@@ -383,6 +385,12 @@ class LitellmModel(Model):
         if isinstance(value, NotGiven):
             return None
         return value
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        merged = {**HEADERS, **(model_settings.extra_headers or {})}
+        if ua_override := _openai_shared.get_user_agent_override():
+            merged["User-Agent"] = ua_override
+        return merged
 
 
 class LitellmConverter:
