@@ -1,12 +1,14 @@
+from contextlib import nullcontext
 import os
 from typing import Any
 
 import openai
-import pytest
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.responses import ResponseCompletedEvent
+import pytest
 
+from agents import __version__
 from agents import (
     ModelSettings,
     ModelTracing,
@@ -78,8 +80,10 @@ def test_set_default_openai_api():
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_user_agent_override_responses():
+@pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
+async def test_user_agent_header_responses(override_ua):
     called_kwargs = {}
+    expected_ua = override_ua or f"Agents/Python {__version__}"
 
     class DummyStream:
         def __aiter__(self):
@@ -98,13 +102,14 @@ async def test_user_agent_override_responses():
             called_kwargs = kwargs
             return DummyStream()
 
-    class DummyClient:
+    class DummyResponsesClient:
         def __init__(self):
             self.responses = DummyResponses()
 
-    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyClient())  # type: ignore
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore
 
-    with user_agent_override("test_user_agent"):
+    cm = user_agent_override(override_ua) if override_ua else nullcontext()
+    with cm:
         stream = model.stream_response(
             system_instructions=None,
             input="hi",
@@ -114,24 +119,24 @@ async def test_user_agent_override_responses():
             handoffs=[],
             tracing=ModelTracing.DISABLED,
         )
-
         async for _ in stream:
             pass
 
     assert "extra_headers" in called_kwargs
-    assert called_kwargs["extra_headers"]["User-Agent"] == "test_user_agent"
+    assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_user_agent_override_chat_completions():
+@pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
+async def test_user_agent_header_chat_completions(override_ua):
     called_kwargs = {}
+    expected_ua = override_ua or f"Agents/Python {__version__}"
 
     class DummyCompletions:
         async def create(self, **kwargs):
             nonlocal called_kwargs
             called_kwargs = kwargs
-
             msg = ChatCompletionMessage(role="assistant", content="Hello")
             choice = Choice(index=0, finish_reason="stop", message=msg)
             return ChatCompletion(
@@ -143,14 +148,15 @@ async def test_user_agent_override_chat_completions():
                 usage=None,
             )
 
-    class DummyClient:
+    class DummyChatClient:
         def __init__(self):
             self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
             self.base_url = "https://api.openai.com"
 
-    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyClient())  # type: ignore
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyChatClient())  # type: ignore
 
-    with user_agent_override("test_user_agent"):
+    cm = user_agent_override(override_ua) if override_ua else nullcontext()
+    with cm:
         await model.get_response(
             system_instructions=None,
             input="hi",
@@ -164,19 +170,20 @@ async def test_user_agent_override_chat_completions():
         )
 
     assert "extra_headers" in called_kwargs
-    assert called_kwargs["extra_headers"]["User-Agent"] == "test_user_agent"
+    assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_user_agent_override_litellm(monkeypatch):
+@pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
+async def test_user_agent_header_litellm(override_ua, monkeypatch):
+    called_kwargs = {}
+    expected_ua = override_ua or f"Agents/Python {__version__}"
+
     import importlib
     import sys
     import types as pytypes
 
-    called_kwargs = {}
-
-    # Create a fake litellm module so we don't need the real dependency
     litellm_fake: Any = pytypes.ModuleType("litellm")
 
     class DummyMessage:
@@ -196,7 +203,6 @@ async def test_user_agent_override_litellm(monkeypatch):
 
     class DummyModelResponse:
         def __init__(self):
-            # Minimal shape expected by get_response()
             self.choices = [Choices()]
 
     async def acompletion(**kwargs):
@@ -217,14 +223,14 @@ async def test_user_agent_override_litellm(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "litellm", litellm_fake)
 
-    # Import after injecting fake module and patch the module's symbol directly
     litellm_mod = importlib.import_module("agents.extensions.models.litellm_model")
     monkeypatch.setattr(litellm_mod, "litellm", litellm_fake, raising=True)
     LitellmModel = litellm_mod.LitellmModel
 
     model = LitellmModel(model="gpt-4")
 
-    with user_agent_override("test_user_agent"):
+    cm = user_agent_override(override_ua) if override_ua else nullcontext()
+    with cm:
         await model.get_response(
             system_instructions=None,
             input="hi",
@@ -239,4 +245,7 @@ async def test_user_agent_override_litellm(monkeypatch):
         )
 
     assert "extra_headers" in called_kwargs
-    assert called_kwargs["extra_headers"]["User-Agent"] == "test_user_agent"
+    assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
+
+
+# (Replaced by test_user_agent_header_parametrized)
