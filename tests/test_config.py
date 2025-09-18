@@ -1,4 +1,5 @@
 import os
+from typing import Any
 
 import openai
 import pytest
@@ -77,7 +78,7 @@ def test_set_default_openai_api():
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_user_agent_override():
+async def test_user_agent_override_responses():
     called_kwargs = {}
 
     class DummyStream:
@@ -160,6 +161,81 @@ async def test_user_agent_override_chat_completions():
             tracing=ModelTracing.DISABLED,
             previous_response_id=None,
             conversation_id=None,
+        )
+
+    assert "extra_headers" in called_kwargs
+    assert called_kwargs["extra_headers"]["User-Agent"] == "test_user_agent"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_user_agent_override_litellm(monkeypatch):
+    import importlib
+    import sys
+    import types as pytypes
+
+    called_kwargs = {}
+
+    # Create a fake litellm module so we don't need the real dependency
+    litellm_fake: Any = pytypes.ModuleType("litellm")
+
+    class DummyMessage:
+        role = "assistant"
+        content = "Hello"
+        tool_calls = None
+
+        def get(self, _key, _default=None):
+            return None
+
+        def model_dump(self):
+            return {"role": self.role, "content": self.content}
+
+    class Choices:  # noqa: N801 - mimic litellm naming
+        def __init__(self):
+            self.message = DummyMessage()
+
+    class DummyModelResponse:
+        def __init__(self):
+            # Minimal shape expected by get_response()
+            self.choices = [Choices()]
+
+    async def acompletion(**kwargs):
+        nonlocal called_kwargs
+        called_kwargs = kwargs
+        return DummyModelResponse()
+
+    utils_ns = pytypes.SimpleNamespace()
+    utils_ns.Choices = Choices
+    utils_ns.ModelResponse = DummyModelResponse
+
+    litellm_types = pytypes.SimpleNamespace(
+        utils=utils_ns,
+        llms=pytypes.SimpleNamespace(openai=pytypes.SimpleNamespace(ChatCompletionAnnotation=dict)),
+    )
+    litellm_fake.acompletion = acompletion
+    litellm_fake.types = litellm_types
+
+    monkeypatch.setitem(sys.modules, "litellm", litellm_fake)
+
+    # Import after injecting fake module and patch the module's symbol directly
+    litellm_mod = importlib.import_module("agents.extensions.models.litellm_model")
+    monkeypatch.setattr(litellm_mod, "litellm", litellm_fake, raising=True)
+    LitellmModel = litellm_mod.LitellmModel
+
+    model = LitellmModel(model="gpt-4")
+
+    with user_agent_override("test_user_agent"):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
         )
 
     assert "extra_headers" in called_kwargs
