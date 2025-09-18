@@ -1,9 +1,5 @@
-from __future__ import annotations
-
 import logging
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Literal
 
 from openai import AsyncOpenAI
@@ -163,20 +159,6 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
     _config.set_default_openai_api(api)
 
 
-@contextmanager
-def user_agent_override(user_agent: str | None) -> Iterator[None]:
-    """
-    Temporarily override the User-Agent header for outbound OpenAI LLM requests.
-
-    This is **not** part of the public API and may change or be removed at any time
-    without notice. Intended only for OpenAI-maintained packages and tests.
-
-    External integrators should use `model_settings.extra_headers` instead.
-    """
-    with _config.user_agent_override(user_agent):
-        yield
-
-
 def enable_verbose_stdout_logging():
     """Enables verbose logging to stdout. This is useful for debugging."""
     logger = logging.getLogger("openai.agents")
@@ -304,7 +286,6 @@ __all__ = [
     "set_default_openai_key",
     "set_default_openai_client",
     "set_default_openai_api",
-    "set_user_agent_override",
     "set_tracing_export_api_key",
     "enable_verbose_stdout_logging",
     "gen_trace_id",

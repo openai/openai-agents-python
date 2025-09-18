@@ -10,8 +10,6 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from agents.exceptions import ModelBehaviorError
 
-from ...models import _openai_shared
-
 try:
     import litellm
 except ImportError as _e:
@@ -41,7 +39,7 @@ from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models.chatcmpl_converter import Converter
-from ...models.chatcmpl_helpers import HEADERS
+from ...models.chatcmpl_helpers import HEADERS, USER_AGENT_OVERRIDE
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
@@ -388,8 +386,9 @@ class LitellmModel(Model):
 
     def _merge_headers(self, model_settings: ModelSettings):
         merged = {**HEADERS, **(model_settings.extra_headers or {})}
-        if ua_override := _openai_shared.get_user_agent_override():
-            merged["User-Agent"] = ua_override
+        ua_ctx = USER_AGENT_OVERRIDE.get()
+        if ua_ctx is not None:
+            merged["User-Agent"] = ua_ctx
         return merged
 
 

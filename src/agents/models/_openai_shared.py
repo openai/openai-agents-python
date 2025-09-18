@@ -38,7 +38,3 @@ def get_use_responses_by_default() -> bool:
 def set_user_agent_override(user_agent: str | None) -> None:
     global _user_agent_override
     _user_agent_override = user_agent
-
-
-def get_user_agent_override() -> str | None:
-    return _user_agent_override

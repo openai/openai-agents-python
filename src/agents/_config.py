@@ -1,8 +1,3 @@
-from __future__ import annotations
-
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 from openai import AsyncOpenAI
 from typing_extensions import Literal
 
@@ -29,12 +24,3 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
         _openai_shared.set_use_responses_by_default(False)
     else:
         _openai_shared.set_use_responses_by_default(True)
-
-
-@contextmanager
-def user_agent_override(user_agent: str | None) -> Iterator[None]:
-    try:
-        _openai_shared.set_user_agent_override(user_agent)
-        yield
-    finally:
-        _openai_shared.set_user_agent_override(None)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -40,7 +41,6 @@ from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
-from . import _openai_shared
 from .interface import Model, ModelTracing
 
 if TYPE_CHECKING:
@@ -49,6 +49,11 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
+
+# Override for the User-Agent header used by the Responses API.
+_USER_AGENT_OVERRIDE: ContextVar[str | None] = ContextVar(
+    "openai_responses_user_agent_override", default=None
+)
 
 
 class OpenAIResponsesModel(Model):
@@ -330,8 +335,9 @@ class OpenAIResponsesModel(Model):
 
     def _merge_headers(self, model_settings: ModelSettings):
         merged = {**_HEADERS, **(model_settings.extra_headers or {})}
-        if ua_override := _openai_shared.get_user_agent_override():
-            merged["User-Agent"] = ua_override
+        ua_ctx = _USER_AGENT_OVERRIDE.get()
+        if ua_ctx is not None:
+            merged["User-Agent"] = ua_ctx
         return merged
 
 
