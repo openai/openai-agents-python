@@ -5,6 +5,9 @@ The OpenAI Agents SDK is a lightweight yet powerful framework for building multi
 <img src="https://cdn.openai.com/API/docs/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
 
 > [!NOTE]
+> This tracing UI is powered by **Scorecard.io**.
+
+> [!NOTE]
 > Looking for the JavaScript/TypeScript version? Check out [Agents SDK JS/TS](https://github.com/openai/openai-agents-js).
 
 ### Core concepts:
