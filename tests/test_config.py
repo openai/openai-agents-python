@@ -1,17 +1,17 @@
-from contextlib import nullcontext
 import os
+from contextlib import nullcontext
 from typing import Any
 
 import openai
+import pytest
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.responses import ResponseCompletedEvent
-import pytest
 
-from agents import __version__
 from agents import (
     ModelSettings,
     ModelTracing,
+    __version__,
     set_default_openai_api,
     set_default_openai_client,
     set_default_openai_key,
