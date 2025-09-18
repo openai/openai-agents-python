@@ -5,7 +5,6 @@ from openai import AsyncOpenAI
 _default_openai_key: str | None = None
 _default_openai_client: AsyncOpenAI | None = None
 _use_responses_by_default: bool = True
-_user_agent_override: str | None = None
 
 
 def set_default_openai_key(key: str) -> None:
@@ -33,8 +32,3 @@ def set_use_responses_by_default(use_responses: bool) -> None:
 
 def get_use_responses_by_default() -> bool:
     return _use_responses_by_default
-
-
-def set_user_agent_override(user_agent: str | None) -> None:
-    global _user_agent_override
-    _user_agent_override = user_agent
