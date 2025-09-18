@@ -1,7 +1,7 @@
-from collections.abc import Iterator
-from contextlib import contextmanager
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
 
 from openai import AsyncOpenAI
@@ -163,8 +163,13 @@ def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> Non
 
 @contextmanager
 def user_agent_override(user_agent: str | None) -> Iterator[None]:
-    """Set the user agent override for OpenAI LLM requests. This is useful if you want to set a custom
-    user agent for OpenAI LLM requests.
+    """
+    Temporarily override the User-Agent header for outbound OpenAI LLM requests.
+
+    This is **not** part of the public API and may change or be removed at any time
+    without notice. Intended only for OpenAI-maintained packages and tests.
+
+    External integrators should use `model_settings.extra_headers` instead.
     """
     with _config.user_agent_override(user_agent):
         yield
