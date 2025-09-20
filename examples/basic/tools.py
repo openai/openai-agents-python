@@ -18,6 +18,7 @@ def get_weather(city: Annotated[str, "The city to get the weather for"]) -> Weat
     print("[debug] get_weather called")
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
 
+
 agent = Agent(
     name="Hello world",
     instructions="You are a helpful agent.",
