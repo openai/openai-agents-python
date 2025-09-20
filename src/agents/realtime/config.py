@@ -169,6 +169,29 @@ class RealtimeModelTracingConfig(TypedDict):
     """Additional metadata to include with the trace."""
 
 
+class RealtimeAudioStorageConfig(TypedDict):
+    """Configuration for audio storage in realtime sessions."""
+
+    enabled: NotRequired[bool]
+    """Whether audio storage is enabled. Defaults to False."""
+
+    storage_path: NotRequired[str]
+    """The path where audio files should be stored. If not provided, uses a
+    default temp directory."""
+
+    max_duration_seconds: NotRequired[int]
+    """Maximum duration in seconds for stored audio clips. Defaults to 300 (5 minutes)."""
+
+    audio_format: NotRequired[RealtimeAudioFormat]
+    """The format to store audio in. Defaults to 'pcm16'."""
+
+    compression_enabled: NotRequired[bool]
+    """Whether to compress stored audio files. Defaults to True."""
+
+    retention_days: NotRequired[int]
+    """Number of days to retain stored audio files. Defaults to 7."""
+
+
 class RealtimeRunConfig(TypedDict):
     """Configuration for running a realtime agent session."""
 
@@ -184,7 +207,8 @@ class RealtimeRunConfig(TypedDict):
     tracing_disabled: NotRequired[bool]
     """Whether tracing is disabled for this run."""
 
-    # TODO (rm) Add history audio storage config
+    audio_storage_config: NotRequired[RealtimeAudioStorageConfig]
+    """Configuration for audio storage in realtime sessions."""
 
 
 class RealtimeUserInputText(TypedDict):

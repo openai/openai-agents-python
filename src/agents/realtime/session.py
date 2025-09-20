@@ -512,7 +512,7 @@ class RealtimeSession(RealtimeModelListener):
                 )
             return new_history
 
-        # TODO (rm) Add support for audio storage config
+        # Audio storage config is now available in RealtimeRunConfig.audio_storage_config
 
         # If the item already exists, update it
         existing_index = next(
