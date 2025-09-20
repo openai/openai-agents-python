@@ -51,6 +51,8 @@ def _ensure_strict_json_schema(
     typ = json_schema.get("type")
     if typ == "object" and "additionalProperties" not in json_schema:
         json_schema["additionalProperties"] = False
+    elif typ == "object" and json_schema.get("additionalProperties") is None:
+        json_schema["additionalProperties"] = False
     elif (
         typ == "object"
         and "additionalProperties" in json_schema
@@ -106,6 +108,16 @@ def _ensure_strict_json_schema(
     # to using `None` anyway
     if json_schema.get("default", NOT_GIVEN) is None:
         json_schema.pop("default")
+
+    # Remove all null values to comply with JSON Schema Draft 2020-12
+    # This prevents LLM providers from rejecting schemas with null values
+    keys_to_remove = []
+    for key, value in json_schema.items():
+        if value is None:
+            keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        json_schema.pop(key)
 
     # we can't use `$ref`s if there are also other properties defined, e.g.
     # `{"$ref": "...", "description": "my description"}`
