@@ -378,7 +378,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         if branch_id is None:
             branch_id = self._current_branch_id
 
-        # Get all items for this branch
+            # Get all items for this branch
             def _get_all_items_sync():
                 conn = self._get_connection()
                 with self._lock if self._is_memory_db else threading.Lock():

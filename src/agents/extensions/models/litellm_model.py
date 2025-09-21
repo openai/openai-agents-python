@@ -39,7 +39,7 @@ from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models.chatcmpl_converter import Converter
-from ...models.chatcmpl_helpers import HEADERS
+from ...models.chatcmpl_helpers import HEADERS, USER_AGENT_OVERRIDE
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
@@ -257,7 +257,15 @@ class LitellmModel(Model):
         stream: bool = False,
         prompt: Any | None = None,
     ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+        # Preserve reasoning messages for tool calls when reasoning is on
+        # This is needed for models like Claude 4 Sonnet/Opus which support interleaved thinking
+        preserve_thinking_blocks = (
+            model_settings.reasoning is not None and model_settings.reasoning.effort is not None
+        )
+
+        converted_messages = Converter.items_to_messages(
+            input, preserve_thinking_blocks=preserve_thinking_blocks
+        )
 
         if system_instructions:
             converted_messages.insert(
@@ -345,7 +353,7 @@ class LitellmModel(Model):
             stream_options=stream_options,
             reasoning_effort=reasoning_effort,
             top_logprobs=model_settings.top_logprobs,
-            extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             api_key=self.api_key,
             base_url=self.base_url,
             **extra_kwargs,
@@ -375,6 +383,13 @@ class LitellmModel(Model):
         if isinstance(value, NotGiven):
             return None
         return value
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        merged = {**HEADERS, **(model_settings.extra_headers or {})}
+        ua_ctx = USER_AGENT_OVERRIDE.get()
+        if ua_ctx is not None:
+            merged["User-Agent"] = ua_ctx
+        return merged
 
 
 class LitellmConverter:
@@ -413,9 +428,9 @@ class LitellmConverter:
                 else:
                     # Convert object to dict by accessing its attributes
                     block_dict: dict[str, Any] = {}
-                    if hasattr(block, '__dict__'):
+                    if hasattr(block, "__dict__"):
                         block_dict = dict(block.__dict__.items())
-                    elif hasattr(block, 'model_dump'):
+                    elif hasattr(block, "model_dump"):
                         block_dict = block.model_dump()
                     else:
                         # Last resort: convert to string representation
