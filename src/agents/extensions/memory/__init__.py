@@ -39,6 +39,7 @@ def __getattr__(name: str) -> Any:
                 "SQLAlchemySession requires the 'sqlalchemy' extra. "
                 "Install it with: pip install openai-agents[sqlalchemy]"
             ) from e
+
     if name == "AdvancedSQLiteSession":
         try:
             from .advanced_sqlite_session import AdvancedSQLiteSession  # noqa: F401
@@ -46,8 +47,7 @@ def __getattr__(name: str) -> Any:
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
             raise ImportError(
-                "AdvancedSQLiteSession requires the 'aiosqlite' extra. "
-                "Install it with: pip install openai-agents[aiosqlite]"
+                f"Failed to import AdvancedSQLiteSession: {e}"
             ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
