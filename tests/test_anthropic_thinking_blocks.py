@@ -125,7 +125,12 @@ def test_anthropic_thinking_blocks_with_tool_calls():
                     "Let me use the weather tool to get this information."
                 ),
                 "signature": "TestSignature123",
-            }
+            },
+            {
+                "type": "thinking",
+                "thinking": ("We should use the city Tokyo as the city."),
+                "signature": "TestSignature456",
+            },
         ],
         tool_calls=[
             ChatCompletionMessageToolCall(
@@ -143,7 +148,7 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     reasoning_items = [
         item for item in output_items if hasattr(item, "type") and item.type == "reasoning"
     ]
-    assert len(reasoning_items) == 1, "Should have exactly one reasoning item"
+    assert len(reasoning_items) == 1, "Should have exactly two reasoning items"
 
     reasoning_item = reasoning_items[0]
 
@@ -159,7 +164,9 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     assert hasattr(reasoning_item, "encrypted_content"), (
         "Reasoning item should have encrypted_content"
     )
-    assert reasoning_item.encrypted_content == "TestSignature123", "Signature should be preserved"
+    assert reasoning_item.encrypted_content == "TestSignature123\nTestSignature456", (
+        "Signature should be preserved"
+    )
 
     # Verify tool calls are present
     tool_call_items = [
@@ -207,6 +214,20 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     )
     # Signature should also be preserved
     assert first_content.get("signature") == "TestSignature123", (
+        "Signature should be preserved in thinking block"
+    )
+
+    first_content = content[1]
+    assert first_content.get("type") == "thinking", (
+        f"Second content must be 'thinking' type for Anthropic compatibility, "
+        f"but got '{first_content.get('type')}'"
+    )
+    expected_thinking = "We should use the city Tokyo as the city."
+    assert first_content.get("thinking") == expected_thinking, (
+        "Thinking content should be preserved"
+    )
+    # Signature should also be preserved
+    assert first_content.get("signature") == "TestSignature456", (
         "Signature should be preserved in thinking block"
     )
 
