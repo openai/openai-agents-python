@@ -408,6 +408,7 @@ class RealtimeSession(RealtimeModelListener):
                 usage=self._context_wrapper.usage,
                 tool_name=event.name,
                 tool_call_id=event.call_id,
+                tool_arguments=event.arguments,
             )
             result = await func_tool.on_invoke_tool(tool_context, event.arguments)
 
@@ -432,6 +433,7 @@ class RealtimeSession(RealtimeModelListener):
                 usage=self._context_wrapper.usage,
                 tool_name=event.name,
                 tool_call_id=event.call_id,
+                tool_arguments=event.arguments,
             )
 
             # Execute the handoff to get the new agent
