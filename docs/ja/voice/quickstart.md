@@ -6,7 +6,7 @@ search:
 
 ## 前提条件
 
-Agents SDK のベースの[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしていることを確認します。次に、SDK から音声向けのオプション依存関係をインストールします。
+Agents SDK の基本的な [クイックスタート手順](../quickstart.md) に従い、仮想環境をセットアップしてください。次に、SDK から音声用のオプション依存関係をインストールします。
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -48,7 +48,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントをセットアップします。これは、この SDK でエージェントを作成したことがあれば見覚えがあるはずです。ここでは、複数のエージェント、ハンドオフ、そしてツールを用意します。
+まず、いくつかのエージェントを設定します。これは、この SDK でエージェントを構築したことがあれば馴染みがあるはずです。ここでは複数のエージェント、ハンドオフ、そしてツールを用意します。
 
 ```python
 import asyncio
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 音声パイプライン
 
-ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使い、シンプルな音声パイプラインをセットアップします。
+ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用して、シンプルな音声パイプラインを設定します。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 統合
+## まとめて実行
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-この例を実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例をご覧ください。
+この例を実行すると、エージェントがあなたに話しかけます。実際に自分でエージェントに話しかけられるデモについては、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。
