@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class CustomContext:
-    style: Literal["haiku", "pirate", "robot"] 
+    style: Literal["haiku", "pirate", "robot"]
 
 
 def custom_instructions(
