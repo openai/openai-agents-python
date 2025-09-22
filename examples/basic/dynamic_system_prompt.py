@@ -1,8 +1,9 @@
 import asyncio
 import random
-from typing import Literal
-from agents import Agent, RunContextWrapper, Runner
 from dataclasses import dataclass
+from typing import Literal
+
+from agents import Agent, RunContextWrapper, Runner
 
 @dataclass
 class CustomContext:
