@@ -59,6 +59,12 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
 """
 
 
+AgentInstructionsFunction: TypeAlias = Callable[
+    [RunContextWrapper[TContext], "Agent[TContext]"],
+    MaybeAwaitable[str],
+]
+
+
 class StopAtTools(TypedDict):
     stop_at_tool_names: list[str]
     """A list of tool names, any of which will stop the agent from running further."""
@@ -143,14 +149,7 @@ class Agent(AgentBase, Generic[TContext]):
     See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
     """
 
-    instructions: (
-        str
-        | Callable[
-            [RunContextWrapper[TContext], Agent[TContext]],
-            MaybeAwaitable[str],
-        ]
-        | None
-    ) = None
+    instructions: str | AgentInstructionsFunction | None = None
     """The instructions for the agent. Will be used as the "system prompt" when this agent is
     invoked. Describes what the agent should do, and how it responds.
 
