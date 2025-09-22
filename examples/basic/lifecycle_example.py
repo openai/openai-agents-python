@@ -4,9 +4,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from agents import Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
+from agents import Action, Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
 from agents.items import ModelResponse, TResponseInputItem
-
 
 class ExampleHooks(RunHooks):
     def __init__(self):
@@ -43,10 +42,10 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
-    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, action: Action) -> None:
         self.event_counter += 1
         print(
-            f"### {self.event_counter}: Tool {tool.name} started. Usage: {self._usage_to_str(context.usage)}"
+            f"### {self.event_counter}: Tool {action.function_tool.tool.name} started. Usage: {self._usage_to_str(context.usage)}"
         )
 
     async def on_tool_end(
