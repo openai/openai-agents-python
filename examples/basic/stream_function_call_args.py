@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Annotated,Optional
+from typing import Annotated, Any, Optional
 
 from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
 
