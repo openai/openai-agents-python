@@ -292,29 +292,35 @@ async def test_special_characters_and_json_safety():
         await session.close()
 
 
-async def test_injection_like_content():
-    """Test that session safely stores and retrieves SQL-injection-like content."""
+async def test_data_integrity_with_problematic_strings():
+    """Test that session preserves data integrity with strings that could break parsers."""
     session = await _create_test_session()
 
     try:
-        # Add items with SQL injection patterns and command injection attempts
+        # Add items with various problematic string patterns that could break JSON parsing,
+        # string escaping, or other serialization mechanisms
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": "O'Reilly"},
-            {"role": "assistant", "content": "DROP TABLE sessions;"},
+            {"role": "user", "content": "O'Reilly"},  # Single quote
+            {"role": "assistant", "content": "DROP TABLE sessions;"},  # SQL-like command
             {"role": "user", "content": '"SELECT * FROM users WHERE name = "admin";"'},
             {"role": "assistant", "content": "Robert'); DROP TABLE students;--"},
-            {"role": "user", "content": "Normal message"},
+            {"role": "user", "content": '{"malicious": "json"}'},  # JSON-like string
+            {"role": "assistant", "content": "\\n\\t\\r Special escapes"},  # Escape sequences
+            {"role": "user", "content": "Normal message"},  # Control case
         ]
         await session.add_items(items)
 
-        # Retrieve all items and verify they are stored correctly without modification
+        # Retrieve all items and verify they are stored exactly as provided
+        # This ensures the storage layer doesn't modify, escape, or corrupt data
         retrieved = await session.get_items()
         assert len(retrieved) == len(items)
         assert retrieved[0].get("content") == "O'Reilly"
         assert retrieved[1].get("content") == "DROP TABLE sessions;"
         assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = "admin";"'
         assert retrieved[3].get("content") == "Robert'); DROP TABLE students;--"
-        assert retrieved[4].get("content") == "Normal message"
+        assert retrieved[4].get("content") == '{"malicious": "json"}'
+        assert retrieved[5].get("content") == "\\n\\t\\r Special escapes"
+        assert retrieved[6].get("content") == "Normal message"
 
     finally:
         await session.close()
