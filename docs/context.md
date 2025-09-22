@@ -76,3 +76,28 @@ When an LLM is called, the **only** data it can see is from the conversation his
 2. Add it to the `input` when calling the `Runner.run` functions. This is similar to the `instructions` tactic, but allows you to have messages that are lower in the [chain of command](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command).
 3. Expose it via function tools. This is useful for _on-demand_ context - the LLM decides when it needs some data, and can call the tool to fetch that data.
 4. Use retrieval or web search. These are special tools that are able to fetch relevant data from files or databases (retrieval), or from the web (web search). This is useful for "grounding" the response in relevant contextual data.
+
+```python
+import asyncio
+from agents import Agent, Runner
+
+async def main():
+    agent = Agent(
+        name="Assistant",
+        instructions = (
+         "The user is John with UID 123. "
+         "If asked about John's age, reply: 'The user John is 47 years old.'"
+)
+    )
+
+    result = await Runner.run(
+        starting_agent=agent,
+        input="What is the age of the user?",
+    )
+
+    print(result.final_output)
+    # The user John is 47 years old.
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
