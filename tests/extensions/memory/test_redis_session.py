@@ -450,3 +450,175 @@ async def test_key_prefix_isolation():
             pass  # Ignore cleanup errors
         await session1.close()
         await session2.close()
+
+
+async def test_external_client_not_closed():
+    """Test that external Redis clients are not closed when session.close() is called."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for client state verification")
+
+    # Create a shared Redis client
+    shared_client = fake_redis
+
+    # Create session with external client
+    session = RedisSession(
+        session_id="external_client_test",
+        redis_client=shared_client,
+        key_prefix="test:",
+    )
+
+    try:
+        # Add some data to verify the client is working
+        await session.add_items([{"role": "user", "content": "test message"}])
+        items = await session.get_items()
+        assert len(items) == 1
+
+        # Verify client is working before close
+        assert await shared_client.ping() is True
+
+        # Close the session
+        await session.close()
+
+        # Verify the shared client is still usable after session.close()
+        # This would fail if we incorrectly closed the external client
+        assert await shared_client.ping() is True
+
+        # Should still be able to use the client for other operations
+        await shared_client.set("test_key", "test_value")
+        value = await shared_client.get("test_key")
+        assert value.decode("utf-8") == "test_value"
+
+    finally:
+        # Clean up
+        try:
+            await session.clear_session()
+        except Exception:
+            pass  # Ignore cleanup errors if connection is already closed
+
+
+async def test_internal_client_ownership():
+    """Test that clients created via from_url are properly managed."""
+    if USE_FAKE_REDIS:
+        pytest.skip("This test requires real Redis to test from_url behavior")
+
+    # Create session using from_url (internal client)
+    session = RedisSession.from_url("internal_client_test", url="redis://localhost:6379/15")
+
+    try:
+        if not await session.ping():
+            pytest.skip("Redis server not available")
+
+        # Add some data
+        await session.add_items([{"role": "user", "content": "test message"}])
+        items = await session.get_items()
+        assert len(items) == 1
+
+        # The session should properly manage its own client
+        # Note: We can't easily test that the client is actually closed
+        # without risking breaking the test, but we can verify the
+        # session was created with internal client ownership
+        assert hasattr(session, "_owns_client")
+        assert session._owns_client is True
+
+    finally:
+        # This should properly close the internal client
+        await session.close()
+
+
+async def test_decode_responses_client_compatibility():
+    """Test that RedisSession works with Redis clients configured with decode_responses=True."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for client configuration testing")
+
+    # Create a Redis client with decode_responses=True
+    import fakeredis.aioredis
+
+    decoded_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    # Create session with the decoded client
+    session = RedisSession(
+        session_id="decode_test",
+        redis_client=decoded_client,
+        key_prefix="test:",
+    )
+
+    try:
+        # Test that we can add and retrieve items even when Redis returns strings
+        test_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "Hello with decoded responses"},
+            {"role": "assistant", "content": "Response with unicode: 🚀"},
+        ]
+
+        await session.add_items(test_items)
+
+        # get_items should work with string responses
+        retrieved = await session.get_items()
+        assert len(retrieved) == 2
+        assert retrieved[0]["content"] == "Hello with decoded responses"
+        assert retrieved[1]["content"] == "Response with unicode: 🚀"
+
+        # pop_item should also work with string responses
+        popped = await session.pop_item()
+        assert popped is not None
+        assert popped["content"] == "Response with unicode: 🚀"
+
+        # Verify one item remains
+        remaining = await session.get_items()
+        assert len(remaining) == 1
+        assert remaining[0]["content"] == "Hello with decoded responses"
+
+    finally:
+        try:
+            await session.clear_session()
+        except Exception:
+            pass  # Ignore cleanup errors
+        await session.close()
+
+
+async def test_real_redis_decode_responses_compatibility():
+    """Test RedisSession with a real Redis client configured with decode_responses=True."""
+    if USE_FAKE_REDIS:
+        pytest.skip("This test requires real Redis to test decode_responses behavior")
+
+    import redis.asyncio as redis
+
+    # Create a Redis client with decode_responses=True
+    decoded_client = redis.Redis.from_url("redis://localhost:6379/15", decode_responses=True)
+
+    session = RedisSession(
+        session_id="real_decode_test",
+        redis_client=decoded_client,
+        key_prefix="test:",
+    )
+
+    try:
+        if not await session.ping():
+            pytest.skip("Redis server not available")
+
+        await session.clear_session()
+
+        # Test with decode_responses=True client
+        test_items: list[TResponseInputItem] = [
+            {"role": "user", "content": "Real Redis with decode_responses=True"},
+            {"role": "assistant", "content": "Unicode test: 🎯"},
+        ]
+
+        await session.add_items(test_items)
+
+        # Should work even though Redis returns strings instead of bytes
+        retrieved = await session.get_items()
+        assert len(retrieved) == 2
+        assert retrieved[0]["content"] == "Real Redis with decode_responses=True"
+        assert retrieved[1]["content"] == "Unicode test: 🎯"
+
+        # pop_item should also work
+        popped = await session.pop_item()
+        assert popped is not None
+        assert popped["content"] == "Unicode test: 🎯"
+
+    finally:
+        try:
+            await session.clear_session()
+        except Exception:
+            pass
+        await session.close()

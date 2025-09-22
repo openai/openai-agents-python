@@ -65,6 +65,7 @@ class RedisSession(SessionABC):
         self._key_prefix = key_prefix
         self._ttl = ttl
         self._lock = asyncio.Lock()
+        self._owns_client = False  # Track if we own the Redis client
 
         # Redis key patterns
         self._session_key = f"{self._key_prefix}:{self.session_id}"
@@ -101,7 +102,9 @@ class RedisSession(SessionABC):
             redis_kwargs.setdefault("ssl", True)
 
         redis_client = redis.from_url(url, **redis_kwargs)
-        return cls(session_id, redis_client=redis_client, **kwargs)
+        session = cls(session_id, redis_client=redis_client, **kwargs)
+        session._owns_client = True  # We created the client, so we own it
+        return session
 
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
@@ -152,7 +155,11 @@ class RedisSession(SessionABC):
             items: list[TResponseInputItem] = []
             for raw_msg in raw_messages:
                 try:
-                    msg_str = raw_msg.decode("utf-8")
+                    # Handle both bytes (default) and str (decode_responses=True) Redis clients
+                    if isinstance(raw_msg, bytes):
+                        msg_str = raw_msg.decode("utf-8")
+                    else:
+                        msg_str = raw_msg  # Already a string
                     item = await self._deserialize_item(msg_str)
                     items.append(item)
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -217,7 +224,11 @@ class RedisSession(SessionABC):
                 return None
 
             try:
-                msg_str = raw_msg.decode("utf-8")
+                # Handle both bytes (default) and str (decode_responses=True) Redis clients
+                if isinstance(raw_msg, bytes):
+                    msg_str = raw_msg.decode("utf-8")
+                else:
+                    msg_str = raw_msg  # Already a string
                 return await self._deserialize_item(msg_str)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 # Return None for corrupted messages (already removed)
@@ -234,8 +245,14 @@ class RedisSession(SessionABC):
             )
 
     async def close(self) -> None:
-        """Close the Redis connection."""
-        await self._redis.aclose()
+        """Close the Redis connection.
+
+        Only closes the connection if this session owns the Redis client
+        (i.e., created via from_url). If the client was injected externally,
+        the caller is responsible for managing its lifecycle.
+        """
+        if self._owns_client:
+            await self._redis.aclose()
 
     async def ping(self) -> bool:
         """Test Redis connectivity.
