@@ -7,13 +7,17 @@ from agents import Agent, Runner, function_tool
 
 
 @function_tool
-def write_file(filename:Annotated[str,"Name of the file"], content: str) -> str:
+def write_file(filename: Annotated[str, "Name of the file"], content: str) -> str:
     """Write content to a file."""
     return f"File {filename} written successfully"
 
 
 @function_tool
-def create_config(project_name:Annotated[str,"Project name"], version:Annotated[str,"Project version"], dependencies: Annotated[Optional[list[str]],"Dependencies (list of packages)"]) -> str:
+def create_config(
+    project_name: Annotated[str, "Project name"],
+    version: Annotated[str, "Project version"],
+    dependencies: Annotated[Optional[list[str]], "Dependencies (list of packages)"],
+) -> str:
     """Generate a project configuration file."""
     return f"Config for {project_name} v{version} created"
 
