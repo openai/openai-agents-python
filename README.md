@@ -31,6 +31,8 @@ pip install openai-agents
 
 For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`.
 
+For Redis session support, install with the optional `redis` group: `pip install 'openai-agents[redis]'`.
+
 ### uv
 
 If you're familiar with [uv](https://docs.astral.sh/uv/), using the tool would be even similar:
@@ -41,6 +43,8 @@ uv add openai-agents
 ```
 
 For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`.
+
+For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
 
 ## Hello world example
 
@@ -211,8 +215,13 @@ print(result.final_output)  # "Approximately 39 million"
 ```python
 from agents import Agent, Runner, SQLiteSession
 
-# Custom SQLite database file
+# SQLite - file-based or in-memory database
 session = SQLiteSession("user_123", "conversations.db")
+
+# Redis - for scalable, distributed deployments
+# from agents.extensions.memory import RedisSession
+# session = RedisSession.from_url("user_123", url="redis://localhost:6379/0")
+
 agent = Agent(name="Assistant")
 
 # Different session IDs maintain separate conversation histories

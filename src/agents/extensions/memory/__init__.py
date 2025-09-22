@@ -12,6 +12,7 @@ from typing import Any
 
 __all__: list[str] = [
     "EncryptedSession",
+    "RedisSession",
     "SQLAlchemySession",
 ]
 
@@ -26,6 +27,17 @@ def __getattr__(name: str) -> Any:
             raise ImportError(
                 "EncryptedSession requires the 'cryptography' extra. "
                 "Install it with: pip install openai-agents[encrypt]"
+            ) from e
+
+    if name == "RedisSession":
+        try:
+            from .redis_session import RedisSession  # noqa: F401
+
+            return RedisSession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "RedisSession requires the 'redis' extra. "
+                "Install it with: pip install openai-agents[redis]"
             ) from e
 
     if name == "SQLAlchemySession":
