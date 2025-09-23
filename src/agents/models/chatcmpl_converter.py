@@ -107,7 +107,7 @@ class Converter:
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
                 # Store thinking text in content and signature in encrypted_content
                 reasoning_item.content = []
-                signature = None
+                signatures: list[str] = []
                 for block in message.thinking_blocks:
                     if isinstance(block, dict):
                         thinking_text = block.get("thinking", "")
@@ -116,15 +116,12 @@ class Converter:
                                 Content(text=thinking_text, type="reasoning_text")
                             )
                         # Store the signature if present
-                        if block.get("signature"):
-                            signature = block.get("signature")
+                        if signature := block.get("signature"):
+                            signatures.append(signature)
 
-                # Store only the last signature in encrypted_content
-                # If there are multiple thinking blocks, this should be a problem.
-                # In practice, there should only be one signature for the entire reasoning step.
-                # Tested with: claude-sonnet-4-20250514
-                if signature:
-                    reasoning_item.encrypted_content = signature
+                # Store the signatures in encrypted_content with newline delimiter
+                if signatures:
+                    reasoning_item.encrypted_content = "\n".join(signatures)
 
             items.append(reasoning_item)
 
@@ -483,7 +480,20 @@ class Converter:
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
                 if pending_thinking_blocks:
-                    asst["content"] = pending_thinking_blocks  # type: ignore
+                    # If there is a text content, save it to append after thinking blocks
+                    # content type is Union[str, Iterable[ContentArrayOfContentPart], None]
+                    if "content" in asst and isinstance(asst["content"], str):
+                        text_content = ChatCompletionContentPartTextParam(
+                            text=asst["content"], type="text"
+                        )
+                        asst["content"] = [text_content]
+
+                    if "content" not in asst or asst["content"] is None:
+                        asst["content"] = []
+
+                    # Thinking blocks MUST come before any other content
+                    # We ignore type errors because pending_thinking_blocks is not openai standard
+                    asst["content"] = pending_thinking_blocks + asst["content"]  # type: ignore
                     pending_thinking_blocks = None  # Clear after using
 
                 tool_calls = list(asst.get("tool_calls", []))
@@ -518,7 +528,8 @@ class Converter:
             elif reasoning_item := cls.maybe_reasoning_message(item):
                 # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
                 content_items = reasoning_item.get("content", [])
-                signature = reasoning_item.get("encrypted_content")
+                encrypted_content = reasoning_item.get("encrypted_content")
+                signatures = encrypted_content.split("\n") if encrypted_content else []
 
                 if content_items and preserve_thinking_blocks:
                     # Reconstruct thinking blocks from content and signature
@@ -532,9 +543,9 @@ class Converter:
                                 "type": "thinking",
                                 "thinking": content_item.get("text", ""),
                             }
-                            # Add signature if available
-                            if signature:
-                                thinking_block["signature"] = signature
+                            # Add signatures if available
+                            if signatures:
+                                thinking_block["signature"] = signatures.pop(0)
                             pending_thinking_blocks.append(thinking_block)
 
             # 8) If we haven't recognized it => fail or ignore

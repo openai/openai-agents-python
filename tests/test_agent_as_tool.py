@@ -277,7 +277,12 @@ async def test_agent_as_tool_returns_concatenated_text(monkeypatch: pytest.Monke
     )
 
     assert isinstance(tool, FunctionTool)
-    tool_context = ToolContext(context=None, tool_name="story_tool", tool_call_id="call_1")
+    tool_context = ToolContext(
+        context=None,
+        tool_name="story_tool",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
     output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
 
     assert output == "Hello world"
@@ -374,7 +379,12 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     )
 
     assert isinstance(tool, FunctionTool)
-    tool_context = ToolContext(context=None, tool_name="summary_tool", tool_call_id="call_2")
+    tool_context = ToolContext(
+        context=None,
+        tool_name="summary_tool",
+        tool_call_id="call_2",
+        tool_arguments='{"input": "summarize this"}',
+    )
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
     assert output == "custom output"
