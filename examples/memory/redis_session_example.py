@@ -3,6 +3,9 @@ Example demonstrating Redis session memory functionality.
 
 This example shows how to use Redis-backed session memory to maintain conversation
 history across multiple agent runs with persistence and scalability.
+
+Note: This example clears the session at the start to ensure a clean demonstration.
+In production, you may want to preserve existing conversation history.
 """
 
 import asyncio
@@ -39,6 +42,10 @@ async def main():
 
         print("Connected to Redis successfully!")
         print(f"Session ID: {session_id}")
+
+        # Clear any existing session data for a clean start
+        await session.clear_session()
+        print("Session cleared for clean demonstration.")
         print("The agent will remember previous messages automatically.\n")
 
         # First turn
