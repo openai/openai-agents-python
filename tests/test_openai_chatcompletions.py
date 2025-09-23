@@ -34,7 +34,7 @@ from agents import (
     __version__,
     generation_span,
 )
-from agents.models.chatcmpl_helpers import USER_AGENT_OVERRIDE, ChatCmplHelpers
+from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
@@ -402,7 +402,7 @@ async def test_user_agent_header_chat_completions(override_ua):
     model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyChatClient())  # type: ignore
 
     if override_ua is not None:
-        token = USER_AGENT_OVERRIDE.set(override_ua)
+        token = HEADERS_OVERRIDE.set({"User-Agent": override_ua})
     else:
         token = None
 
@@ -420,7 +420,7 @@ async def test_user_agent_header_chat_completions(override_ua):
         )
     finally:
         if token is not None:
-            USER_AGENT_OVERRIDE.reset(token)
+            HEADERS_OVERRIDE.reset(token)
 
     assert "extra_headers" in called_kwargs
     assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua

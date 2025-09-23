@@ -25,7 +25,7 @@ from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from .chatcmpl_converter import Converter
-from .chatcmpl_helpers import HEADERS, USER_AGENT_OVERRIDE, ChatCmplHelpers
+from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
@@ -351,8 +351,8 @@ class OpenAIChatCompletionsModel(Model):
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):
-        merged = {**HEADERS, **(model_settings.extra_headers or {})}
-        ua_ctx = USER_AGENT_OVERRIDE.get()
-        if ua_ctx is not None:
-            merged["User-Agent"] = ua_ctx
-        return merged
+        return {
+            **HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(HEADERS_OVERRIDE.get() or {}),
+        }

@@ -39,7 +39,7 @@ from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models.chatcmpl_converter import Converter
-from ...models.chatcmpl_helpers import HEADERS, USER_AGENT_OVERRIDE
+from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
@@ -385,11 +385,7 @@ class LitellmModel(Model):
         return value
 
     def _merge_headers(self, model_settings: ModelSettings):
-        merged = {**HEADERS, **(model_settings.extra_headers or {})}
-        ua_ctx = USER_AGENT_OVERRIDE.get()
-        if ua_ctx is not None:
-            merged["User-Agent"] = ua_ctx
-        return merged
+        return {**HEADERS, **(model_settings.extra_headers or {}), **(HEADERS_OVERRIDE.get() or {})}
 
 
 class LitellmConverter:
