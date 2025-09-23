@@ -44,7 +44,13 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .agent import Agent, ToolsToFinalOutputResult
 from .agent_output import AgentOutputSchemaBase
 from .computer import AsyncComputer, Computer
-from .exceptions import AgentsException, ModelBehaviorError, UserError
+from .exceptions import (
+    AgentsException,
+    ModelBehaviorError,
+    ToolInputGuardrailTripwireTriggered,
+    ToolOutputGuardrailTripwireTriggered,
+    UserError,
+)
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
 from .handoffs import Handoff, HandoffInputData
 from .items import (
@@ -80,6 +86,10 @@ from .tool import (
     Tool,
 )
 from .tool_context import ToolContext
+from .tool_guardrails import (
+    ToolInputGuardrailData,
+    ToolOutputGuardrailData,
+)
 from .tracing import (
     SpanError,
     Trace,
@@ -569,24 +579,66 @@ class RunImpl:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(tool_context, agent, func_tool),
-                        (
-                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                            if agent.hooks
-                            else _coro.noop_coroutine()
-                        ),
-                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
-                    )
+                    # 1) Run input tool guardrails, if any
+                    final_result: Any | None = None
+                    if func_tool.tool_input_guardrails:
+                        for guardrail in func_tool.tool_input_guardrails:
+                            gr_out = await guardrail.run(
+                                ToolInputGuardrailData(
+                                    context=tool_context,
+                                    agent=agent,
+                                    tool_call=tool_call,
+                                )
+                            )
+                            if gr_out.tripwire_triggered:
+                                # Raise tripwire exception instead of just setting result
+                                raise ToolInputGuardrailTripwireTriggered(
+                                    guardrail=guardrail, output=gr_out
+                                )
 
-                    await asyncio.gather(
-                        hooks.on_tool_end(tool_context, agent, func_tool, result),
-                        (
-                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
-                            if agent.hooks
-                            else _coro.noop_coroutine()
-                        ),
-                    )
+                    if final_result is None:
+                        # 2) Actually run the tool
+                        await asyncio.gather(
+                            hooks.on_tool_start(tool_context, agent, func_tool),
+                            (
+                                agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                                if agent.hooks
+                                else _coro.noop_coroutine()
+                            ),
+                        )
+                        real_result = await func_tool.on_invoke_tool(
+                            tool_context, tool_call.arguments
+                        )
+
+                        # 3) Run output tool guardrails, if any
+                        final_result = real_result
+                        if func_tool.tool_output_guardrails:
+                            for output_guardrail in func_tool.tool_output_guardrails:
+                                gr_out = await output_guardrail.run(
+                                    ToolOutputGuardrailData(
+                                        context=tool_context,
+                                        agent=agent,
+                                        tool_call=tool_call,
+                                        output=real_result,
+                                    )
+                                )
+                                if gr_out.tripwire_triggered:
+                                    # Raise tripwire exception instead of just setting result
+                                    raise ToolOutputGuardrailTripwireTriggered(
+                                        guardrail=output_guardrail, output=gr_out
+                                    )
+                        # 4) Tool end hooks (with final result, which may have been overridden)
+                        await asyncio.gather(
+                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                            (
+                                agent.hooks.on_tool_end(
+                                    tool_context, agent, func_tool, final_result
+                                )
+                                if agent.hooks
+                                else _coro.noop_coroutine()
+                            ),
+                        )
+                    result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(

@@ -21,6 +21,8 @@ from .exceptions import (
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
+    ToolInputGuardrailTripwireTriggered,
+    ToolOutputGuardrailTripwireTriggered,
     UserError,
 )
 from .guardrail import (
@@ -82,6 +84,15 @@ from .tool import (
     WebSearchTool,
     default_tool_error_function,
     function_tool,
+)
+from .tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolInputGuardrailData,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailData,
+    tool_input_guardrail,
+    tool_output_guardrail,
 )
 from .tracing import (
     AgentSpanData,
@@ -191,6 +202,8 @@ __all__ = [
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
+    "ToolInputGuardrailTripwireTriggered",
+    "ToolOutputGuardrailTripwireTriggered",
     "DynamicPromptFunction",
     "GenerateDynamicPromptData",
     "Prompt",
@@ -204,6 +217,13 @@ __all__ = [
     "GuardrailFunctionOutput",
     "input_guardrail",
     "output_guardrail",
+    "ToolInputGuardrail",
+    "ToolOutputGuardrail",
+    "ToolGuardrailFunctionOutput",
+    "ToolInputGuardrailData",
+    "ToolOutputGuardrailData",
+    "tool_input_guardrail",
+    "tool_output_guardrail",
     "handoff",
     "Handoff",
     "HandoffInputData",
