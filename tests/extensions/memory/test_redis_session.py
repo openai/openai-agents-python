@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 pytest.importorskip("redis")  # Skip tests if Redis is not installed
@@ -15,16 +17,26 @@ pytestmark = pytest.mark.asyncio
 # Try to use fakeredis for in-memory testing, fall back to real Redis if not available
 try:
     import fakeredis.aioredis
+    from redis.asyncio import Redis
 
-    fake_redis = fakeredis.aioredis.FakeRedis()
+    # Use the actual Redis type annotation, but cast the FakeRedis implementation
+    fake_redis_instance = fakeredis.aioredis.FakeRedis()
+    fake_redis: Redis = cast("Redis", fake_redis_instance)
     USE_FAKE_REDIS = True
 except ImportError:
-    fake_redis = None
+    fake_redis = None  # type: ignore[assignment]
     USE_FAKE_REDIS = False
 
 if not USE_FAKE_REDIS:
     # Fallback to real Redis for tests that need it
     REDIS_URL = "redis://localhost:6379/15"  # Using database 15 for tests
+
+
+async def _safe_rpush(client: Redis, key: str, value: str) -> None:
+    """Safely handle rpush operations that might be sync or async in fakeredis."""
+    result = client.rpush(key, value)
+    if hasattr(result, "__await__"):
+        await result
 
 
 @pytest.fixture
@@ -560,18 +572,18 @@ async def test_decode_responses_client_compatibility():
         # get_items should work with string responses
         retrieved = await session.get_items()
         assert len(retrieved) == 2
-        assert retrieved[0]["content"] == "Hello with decoded responses"
-        assert retrieved[1]["content"] == "Response with unicode: 🚀"
+        assert retrieved[0].get("content") == "Hello with decoded responses"
+        assert retrieved[1].get("content") == "Response with unicode: 🚀"
 
         # pop_item should also work with string responses
         popped = await session.pop_item()
         assert popped is not None
-        assert popped["content"] == "Response with unicode: 🚀"
+        assert popped.get("content") == "Response with unicode: 🚀"
 
         # Verify one item remains
         remaining = await session.get_items()
         assert len(remaining) == 1
-        assert remaining[0]["content"] == "Hello with decoded responses"
+        assert remaining[0].get("content") == "Hello with decoded responses"
 
     finally:
         try:
@@ -614,13 +626,13 @@ async def test_real_redis_decode_responses_compatibility():
         # Should work even though Redis returns strings instead of bytes
         retrieved = await session.get_items()
         assert len(retrieved) == 2
-        assert retrieved[0]["content"] == "Real Redis with decode_responses=True"
-        assert retrieved[1]["content"] == "Unicode test: 🎯"
+        assert retrieved[0].get("content") == "Real Redis with decode_responses=True"
+        assert retrieved[1].get("content") == "Unicode test: 🎯"
 
         # pop_item should also work
         popped = await session.pop_item()
         assert popped is not None
-        assert popped["content"] == "Unicode test: 🎯"
+        assert popped.get("content") == "Unicode test: 🎯"
 
     finally:
         try:
@@ -683,37 +695,37 @@ async def test_corrupted_data_handling():
         # Inject corrupted data directly into Redis
         messages_key = "test:corruption_test:messages"
 
-        # Add invalid JSON
-        await fake_redis.rpush(messages_key, "invalid json data")
-        await fake_redis.rpush(messages_key, "{incomplete json")
+        # Add invalid JSON directly using the typed Redis client
+        await _safe_rpush(fake_redis, messages_key, "invalid json data")
+        await _safe_rpush(fake_redis, messages_key, "{incomplete json")
 
         # get_items should skip corrupted data and return valid items
         items = await session.get_items()
         assert len(items) == 1  # Only the original valid item
 
         # Now add a properly formatted valid item using the session's serialization
-        valid_item = {"role": "user", "content": "valid after corruption"}
+        valid_item: TResponseInputItem = {"role": "user", "content": "valid after corruption"}
         await session.add_items([valid_item])
 
         # Should now have 2 valid items (corrupted ones skipped)
         items = await session.get_items()
         assert len(items) == 2
-        assert items[0]["content"] == "valid message"
-        assert items[1]["content"] == "valid after corruption"
+        assert items[0].get("content") == "valid message"
+        assert items[1].get("content") == "valid after corruption"
 
         # Test pop_item with corrupted data at the end
-        await fake_redis.rpush(messages_key, "corrupted at end")
+        await _safe_rpush(fake_redis, messages_key, "corrupted at end")
 
         # The corrupted item should be handled gracefully
         # Since it's at the end, pop_item will encounter it first and return None
         # But first, let's pop the valid items to get to the corrupted one
         popped1 = await session.pop_item()
         assert popped1 is not None
-        assert popped1["content"] == "valid after corruption"
+        assert popped1.get("content") == "valid after corruption"
 
         popped2 = await session.pop_item()
         assert popped2 is not None
-        assert popped2["content"] == "valid message"
+        assert popped2.get("content") == "valid message"
 
         # Now we should hit the corrupted data - this should gracefully handle it
         # by returning None (and removing the corrupted item)
@@ -755,6 +767,7 @@ async def test_close_method_coverage():
 
     # Test 1: External client (should NOT be closed)
     external_client = fake_redis
+    assert external_client is not None  # Type assertion for mypy
     session1 = RedisSession(
         session_id="close_test_1",
         redis_client=external_client,
