@@ -628,3 +628,156 @@ async def test_real_redis_decode_responses_compatibility():
         except Exception:
             pass
         await session.close()
+
+
+async def test_get_next_id_method():
+    """Test the _get_next_id atomic counter functionality."""
+    session = await _create_test_session("counter_test")
+
+    try:
+        await session.clear_session()
+
+        # Test atomic counter increment
+        id1 = await session._get_next_id()
+        id2 = await session._get_next_id()
+        id3 = await session._get_next_id()
+
+        # IDs should be sequential
+        assert id1 == 1
+        assert id2 == 2
+        assert id3 == 3
+
+        # Test that counter persists across session instances with same session_id
+        if USE_FAKE_REDIS:
+            session2 = RedisSession(
+                session_id="counter_test",
+                redis_client=fake_redis,
+                key_prefix="test:",
+            )
+        else:
+            session2 = RedisSession.from_url("counter_test", url=REDIS_URL, key_prefix="test:")
+
+        try:
+            id4 = await session2._get_next_id()
+            assert id4 == 4  # Should continue from previous session's counter
+        finally:
+            await session2.close()
+
+    finally:
+        await session.close()
+
+
+async def test_corrupted_data_handling():
+    """Test that corrupted JSON data is handled gracefully."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for direct data manipulation")
+
+    session = await _create_test_session("corruption_test")
+
+    try:
+        await session.clear_session()
+
+        # Add some valid data first
+        await session.add_items([{"role": "user", "content": "valid message"}])
+
+        # Inject corrupted data directly into Redis
+        messages_key = "test:corruption_test:messages"
+
+        # Add invalid JSON
+        await fake_redis.rpush(messages_key, "invalid json data")
+        await fake_redis.rpush(messages_key, "{incomplete json")
+
+        # get_items should skip corrupted data and return valid items
+        items = await session.get_items()
+        assert len(items) == 1  # Only the original valid item
+
+        # Now add a properly formatted valid item using the session's serialization
+        valid_item = {"role": "user", "content": "valid after corruption"}
+        await session.add_items([valid_item])
+
+        # Should now have 2 valid items (corrupted ones skipped)
+        items = await session.get_items()
+        assert len(items) == 2
+        assert items[0]["content"] == "valid message"
+        assert items[1]["content"] == "valid after corruption"
+
+        # Test pop_item with corrupted data at the end
+        await fake_redis.rpush(messages_key, "corrupted at end")
+
+        # The corrupted item should be handled gracefully
+        # Since it's at the end, pop_item will encounter it first and return None
+        # But first, let's pop the valid items to get to the corrupted one
+        popped1 = await session.pop_item()
+        assert popped1 is not None
+        assert popped1["content"] == "valid after corruption"
+
+        popped2 = await session.pop_item()
+        assert popped2 is not None
+        assert popped2["content"] == "valid message"
+
+        # Now we should hit the corrupted data - this should gracefully handle it
+        # by returning None (and removing the corrupted item)
+        popped_corrupted = await session.pop_item()
+        assert popped_corrupted is None
+
+    finally:
+        await session.close()
+
+
+async def test_ping_connection_failure():
+    """Test ping method when Redis connection fails."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for connection mocking")
+
+    import unittest.mock
+
+    session = await _create_test_session("ping_failure_test")
+
+    try:
+        # First verify ping works normally
+        assert await session.ping() is True
+
+        # Mock the ping method to raise an exception
+        with unittest.mock.patch.object(
+            session._redis, "ping", side_effect=Exception("Connection failed")
+        ):
+            # ping should return False when connection fails
+            assert await session.ping() is False
+
+    finally:
+        await session.close()
+
+
+async def test_close_method_coverage():
+    """Test complete coverage of close() method behavior."""
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis for client state verification")
+
+    # Test 1: External client (should NOT be closed)
+    external_client = fake_redis
+    session1 = RedisSession(
+        session_id="close_test_1",
+        redis_client=external_client,
+        key_prefix="test:",
+    )
+
+    # Verify _owns_client is False for external client
+    assert session1._owns_client is False
+
+    # Close should not close the external client
+    await session1.close()
+
+    # Verify external client is still usable
+    assert await external_client.ping() is True
+
+    # Test 2: Internal client (should be closed)
+    # Create a session that owns its client
+    session2 = RedisSession(
+        session_id="close_test_2",
+        redis_client=fake_redis,
+        key_prefix="test:",
+    )
+    session2._owns_client = True  # Simulate ownership
+
+    # This should trigger the close path for owned clients
+    await session2.close()
