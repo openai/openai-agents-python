@@ -187,6 +187,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _add_structure_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 # Get the IDs of messages we just inserted, in order
                 with closing(conn.cursor()) as cursor:
@@ -290,6 +291,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _cleanup_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Find messages without structure metadata
@@ -381,6 +383,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             # Get all items for this branch
             def _get_all_items_sync():
                 conn = self._get_connection()
+                # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
                 with self._lock if self._is_memory_db else threading.Lock():
                     with closing(conn.cursor()) as cursor:
                         if limit is None:
@@ -424,6 +427,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _get_items_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
@@ -471,6 +475,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _copy_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Get all messages before the branch point
@@ -603,7 +608,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         old_branch = self._current_branch_id
         self._current_branch_id = branch_name
 
-        self._logger.info(
+        self._logger.debug(
             f"Created branch '{branch_name}' from turn {turn_number} ('{turn_content}') in '{old_branch}'"  # noqa: E501
         )
         return branch_name
@@ -671,6 +676,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _delete_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # First verify the branch exists
@@ -748,7 +754,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                     FROM message_structure ms
                     JOIN agent_messages am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
-                    AND ms.message_type = 'user'                    ORDER BY ms.branch_turn_number
+                    AND ms.message_type = 'user'
+                    ORDER BY ms.branch_turn_number
                 """,
                     (self.session_id, branch_id),
                 )
@@ -801,7 +808,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                     FROM message_structure ms
                     JOIN agent_messages am ON ms.message_id = am.id
                     WHERE ms.session_id = ? AND ms.branch_id = ?
-                    AND ms.message_type = 'user'                    AND am.message_data LIKE ?
+                    AND ms.message_type = 'user'
+                    AND am.message_data LIKE ?
                     ORDER BY ms.branch_turn_number
                 """,
                     (self.session_id, branch_id, f"%{search_term}%"),
@@ -904,6 +912,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _update_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 # Serialize token details as JSON
                 input_details_json = None
@@ -961,6 +970,7 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _get_usage_sync():
             conn = self._get_connection()
+            # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
             with self._lock if self._is_memory_db else threading.Lock():
                 if branch_id:
                     # Branch-specific usage
