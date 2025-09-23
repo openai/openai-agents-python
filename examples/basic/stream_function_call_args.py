@@ -1,9 +1,17 @@
 import asyncio
-from typing import Annotated, Any, Optional
+import json
+from dataclasses import dataclass
+from typing import Annotated, Optional
 
 from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
 
 from agents import Agent, Runner, function_tool
+
+
+@dataclass
+class FunctionCallInfo:
+    name: str
+    arguments: str = ""
 
 
 @function_tool
@@ -31,7 +39,8 @@ async def main():
     """
     agent = Agent(
         name="CodeGenerator",
-        instructions="You are a helpful coding assistant. Use the provided tools to create files and configurations.",
+        instructions="""You are a helpful coding assistant. Use the provided tools to create files and configurations. 
+        **Important: You must use the tools one at a time. Complete one function call before starting another.**""",
         tools=[write_file, create_config],
     )
 
@@ -42,45 +51,57 @@ async def main():
         input="Create a Python web project called 'my-app' with FastAPI. Version 1.0.0, dependencies: fastapi, uvicorn",
     )
 
-    # Track function calls for detailed output
-    function_calls: dict[Any, dict[str, Any]] = {}  # call_id -> {name, arguments}
-    current_active_call_id = None
+    function_calls: dict[str, FunctionCallInfo] = {}
+    current_active_call_id: Optional[str] = None
 
     async for event in result.stream_events():
-        if event.type == "raw_response_event":
-            # Function call started
-            if event.data.type == "response.output_item.added":
-                if getattr(event.data.item, "type", None) == "function_call":
-                    function_name = getattr(event.data.item, "name", "unknown")
-                    call_id = getattr(event.data.item, "call_id", "unknown")
+        if getattr(event, "type", None) == "raw_response_event":
+            data = getattr(event, "data", None)
+            item_type = getattr(data, "type", None)
 
-                    function_calls[call_id] = {"name": function_name, "arguments": ""}
+            # Function call started
+            if item_type == "response.output_item.added":
+                item = getattr(data, "item", None)
+                if getattr(item, "type", None) == "function_call":
+                    function_name = getattr(item, "name", "unknown")
+                    call_id = getattr(item, "call_id", "unknown")
+
+                    function_calls[call_id] = FunctionCallInfo(name=function_name)
                     current_active_call_id = call_id
                     print(f"\n📞 Function call streaming started: {function_name}()")
                     print("📝 Arguments building...")
 
             # Real-time argument streaming
-            elif isinstance(event.data, ResponseFunctionCallArgumentsDeltaEvent):
+            elif isinstance(data, ResponseFunctionCallArgumentsDeltaEvent):
                 if current_active_call_id and current_active_call_id in function_calls:
-                    function_calls[current_active_call_id]["arguments"] += event.data.delta
-                    print(event.data.delta, end="", flush=True)
+                    function_calls[current_active_call_id].arguments += data.delta
+                    print(data.delta, end="", flush=True)
 
             # Function call completed
-            elif event.data.type == "response.output_item.done":
-                if hasattr(event.data.item, "call_id"):
-                    call_id = getattr(event.data.item, "call_id", "unknown")
-                    if call_id in function_calls:
-                        function_info = function_calls[call_id]
-                        print(f"\n✅ Function call streaming completed: {function_info['name']}")
-                        print()
-                        if current_active_call_id == call_id:
-                            current_active_call_id = None
+            elif item_type == "response.output_item.done":
+                item = getattr(data, "item", None)
+                call_id = getattr(item, "call_id", None)
+                if call_id and call_id in function_calls:
+                    function_info = function_calls[call_id]
+                    print(f"\n✅ Function call streaming completed: {function_info.name}")
+                    # try parse JSON args
+                    try:
+                        parsed = (
+                            json.loads(function_info.arguments)
+                            if function_info.arguments.strip()
+                            else {}
+                        )
+                        print("Parsed args:", parsed)
+                    except json.JSONDecodeError:
+                        print("Args (raw):", function_info.arguments)
+                    if current_active_call_id == call_id:
+                        current_active_call_id = None
 
     print("Summary of all function calls:")
     for call_id, info in function_calls.items():
-        print(f"  - #{call_id}: {info['name']}({info['arguments']})")
+        print(f"  - #{call_id}: {info.name}({info.arguments})")
 
-    print(f"\nResult: {result.final_output}")
+    print(f"\nResult: {getattr(result, 'final_output', None)}")
 
 
 if __name__ == "__main__":
