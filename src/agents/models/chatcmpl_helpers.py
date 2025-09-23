@@ -10,8 +10,8 @@ from ..version import __version__
 _USER_AGENT = f"Agents/Python {__version__}"
 HEADERS = {"User-Agent": _USER_AGENT}
 
-USER_AGENT_OVERRIDE: ContextVar[str | None] = ContextVar(
-    "openai_chatcompletions_user_agent_override", default=None
+HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
+    "openai_chatcompletions_headers_override", default=None
 )
 
 

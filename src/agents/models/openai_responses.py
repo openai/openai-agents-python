@@ -50,9 +50,9 @@ if TYPE_CHECKING:
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
 
-# Override for the User-Agent header used by the Responses API.
-_USER_AGENT_OVERRIDE: ContextVar[str | None] = ContextVar(
-    "openai_responses_user_agent_override", default=None
+# Override headers used by the Responses API.
+_HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
+    "openai_responses_headers_override", default=None
 )
 
 
@@ -334,11 +334,11 @@ class OpenAIResponsesModel(Model):
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):
-        merged = {**_HEADERS, **(model_settings.extra_headers or {})}
-        ua_ctx = _USER_AGENT_OVERRIDE.get()
-        if ua_ctx is not None:
-            merged["User-Agent"] = ua_ctx
-        return merged
+        return {
+            **_HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(_HEADERS_OVERRIDE.get() or {}),
+        }
 
 
 @dataclass

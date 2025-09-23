@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agents import ModelSettings, ModelTracing, __version__
-from agents.models.chatcmpl_helpers import USER_AGENT_OVERRIDE
+from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
 
 
 @pytest.mark.allow_call_model_methods
@@ -65,7 +65,7 @@ async def test_user_agent_header_litellm(override_ua: str | None, monkeypatch):
     model = LitellmModel(model="gpt-4")
 
     if override_ua is not None:
-        token = USER_AGENT_OVERRIDE.set(override_ua)
+        token = HEADERS_OVERRIDE.set({"User-Agent": override_ua})
     else:
         token = None
     try:
@@ -83,7 +83,7 @@ async def test_user_agent_header_litellm(override_ua: str | None, monkeypatch):
         )
     finally:
         if token is not None:
-            USER_AGENT_OVERRIDE.reset(token)
+            HEADERS_OVERRIDE.reset(token)
 
     assert "extra_headers" in called_kwargs
     assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
