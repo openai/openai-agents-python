@@ -217,19 +217,26 @@ def test_anthropic_thinking_blocks_with_tool_calls():
         "Signature should be preserved in thinking block"
     )
 
-    first_content = content[1]
-    assert first_content.get("type") == "thinking", (
+    second_content = content[1]
+    assert second_content.get("type") == "thinking", (
         f"Second content must be 'thinking' type for Anthropic compatibility, "
-        f"but got '{first_content.get('type')}'"
+        f"but got '{second_content.get('type')}'"
     )
     expected_thinking = "We should use the city Tokyo as the city."
-    assert first_content.get("thinking") == expected_thinking, (
+    assert second_content.get("thinking") == expected_thinking, (
         "Thinking content should be preserved"
     )
     # Signature should also be preserved
-    assert first_content.get("signature") == "TestSignature456", (
+    assert second_content.get("signature") == "TestSignature456", (
         "Signature should be preserved in thinking block"
     )
+
+    last_content = content[2]
+    assert last_content.get("type") == "text", (
+        f"First content must be 'text' type but got '{last_content.get('type')}'"
+    )
+    expected_text = "I'll check the weather for you."
+    assert last_content.get("text") == expected_text, "Content text should be preserved"
 
     # Verify tool calls are preserved
     tool_calls = assistant_msg.get("tool_calls", [])

@@ -480,7 +480,20 @@ class Converter:
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
                 if pending_thinking_blocks:
-                    asst["content"] = pending_thinking_blocks  # type: ignore
+                    # If there is a text content, save it to append after thinking blocks
+                    # content type is Union[str, Iterable[ContentArrayOfContentPart], None]
+                    if "content" in asst and isinstance(asst["content"], str):
+                        text_content = ChatCompletionContentPartTextParam(
+                            text=asst["content"], type="text"
+                        )
+                        asst["content"] = [text_content]
+
+                    if "content" not in asst or asst["content"] is None:
+                        asst["content"] = []
+
+                    # Thinking blocks MUST come before any other content
+                    # We ignore type errors because pending_thinking_blocks is not openai standard
+                    asst["content"] = pending_thinking_blocks + asst["content"]  # type: ignore
                     pending_thinking_blocks = None  # Clear after using
 
                 tool_calls = list(asst.get("tool_calls", []))
