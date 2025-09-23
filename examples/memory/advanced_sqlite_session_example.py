@@ -1,8 +1,9 @@
 """
-Advanced example demonstrating conversation branching with AdvancedSQLiteSession.
+Comprehensive example demonstrating AdvancedSQLiteSession functionality.
 
-This example shows how to use the new conversation branching system,
-allowing you to branch conversations from any user message and manage multiple timelines.
+This example shows both basic session memory features and advanced conversation
+branching capabilities, including usage statistics, turn-based organization,
+and multi-timeline conversation management.
 """
 
 import asyncio
@@ -28,45 +29,103 @@ async def main():
 
     # Create an advanced session instance
     session = AdvancedSQLiteSession(
-        session_id="conversation_advanced",
+        session_id="conversation_comprehensive",
         create_tables=True,
     )
 
-    print("=== Advanced Session: Conversation Branching ===")
-    print("This example demonstrates the new conversation branching system.\n")
+    print("=== AdvancedSQLiteSession Comprehensive Example ===")
+    print("This example demonstrates both basic and advanced session features.\n")
 
-    # Build initial conversation
-    print("Building initial conversation...")
+    # === PART 1: Basic Session Functionality ===
+    print("=== PART 1: Basic Session Memory ===")
+    print("The agent will remember previous messages with structured tracking.\n")
 
-    # Turn 1
-    print("Turn 1: User asks about Golden Gate Bridge")
+    # First turn
+    print("First turn:")
+    print("User: What city is the Golden Gate Bridge in?")
     result = await Runner.run(
         agent,
         "What city is the Golden Gate Bridge in?",
         session=session,
     )
     print(f"Assistant: {result.final_output}")
-    await session.store_run_usage(result)
+    print(f"Usage: {result.context_wrapper.usage.total_tokens} tokens")
 
-    # Turn 2
-    print("Turn 2: User asks about weather")
+    # Store usage data automatically
+    await session.store_run_usage(result)
+    print()
+
+    # Second turn - continuing the conversation
+    print("Second turn:")
+    print("User: What's the weather in that city?")
     result = await Runner.run(
         agent,
         "What's the weather in that city?",
         session=session,
     )
     print(f"Assistant: {result.final_output}")
-    await session.store_run_usage(result)
+    print(f"Usage: {result.context_wrapper.usage.total_tokens} tokens")
 
-    # Turn 3
-    print("Turn 3: User asks about population")
+    # Store usage data automatically
+    await session.store_run_usage(result)
+    print()
+
+    # Third turn
+    print("Third turn:")
+    print("User: What's the population of that city?")
     result = await Runner.run(
         agent,
         "What's the population of that city?",
         session=session,
     )
     print(f"Assistant: {result.final_output}")
+    print(f"Usage: {result.context_wrapper.usage.total_tokens} tokens")
+
+    # Store usage data automatically
     await session.store_run_usage(result)
+    print()
+
+    # === PART 2: Usage Tracking and Analytics ===
+    print("=== PART 2: Usage Tracking and Analytics ===")
+    session_usage = await session.get_session_usage()
+    if session_usage:
+        print("Session Usage (aggregated from turns):")
+        print(f"  Total requests: {session_usage['requests']}")
+        print(f"  Total tokens: {session_usage['total_tokens']}")
+        print(f"  Input tokens: {session_usage['input_tokens']}")
+        print(f"  Output tokens: {session_usage['output_tokens']}")
+        print(f"  Total turns: {session_usage['total_turns']}")
+
+        # Show usage by turn
+        turn_usage_list = await session.get_turn_usage()
+        if turn_usage_list and isinstance(turn_usage_list, list):
+            print("\nUsage by turn:")
+            for turn_data in turn_usage_list:
+                turn_num = turn_data["user_turn_number"]
+                tokens = turn_data["total_tokens"]
+                print(f"  Turn {turn_num}: {tokens} tokens")
+    else:
+        print("No usage data found.")
+
+    print("\n=== Structured Query Demo ===")
+    conversation_turns = await session.get_conversation_by_turns()
+    print("Conversation by turns:")
+    for turn_num, items in conversation_turns.items():
+        print(f"  Turn {turn_num}: {len(items)} items")
+        for item in items:
+            if item["tool_name"]:
+                print(f"    - {item['type']} (tool: {item['tool_name']})")
+            else:
+                print(f"    - {item['type']}")
+
+    # Show tool usage
+    tool_usage = await session.get_tool_usage()
+    if tool_usage:
+        print("\nTool usage:")
+        for tool_name, count, turn in tool_usage:
+            print(f"  {tool_name}: used {count} times in turn {turn}")
+    else:
+        print("\nNo tool usage found.")
 
     print("\n=== Original Conversation Complete ===")
 
@@ -85,8 +144,8 @@ async def main():
 
     print(f"\nTotal items: {len(current_items)}")
 
-    # Demonstrate conversation branching
-    print("\n=== Conversation Branching Demo ===")
+    # === PART 3: Conversation Branching ===
+    print("\n=== PART 3: Conversation Branching ===")
     print("Let's explore a different path from turn 2...")
 
     # Show available turns for branching
@@ -151,7 +210,8 @@ async def main():
 
     print(f"\nTotal items in new branch: {len(new_conversation)}")
 
-    print("\n=== Branch Management ===")
+    # === PART 4: Branch Management ===
+    print("\n=== PART 4: Branch Management ===")
     # Show all branches
     branches = await session.list_branches()
     print("All branches in this session:")
@@ -198,9 +258,11 @@ async def main():
     print("- New branch has turn 1 + new conversation path")
     print("- No interference between branches!")
 
-    print("\n=== Advanced Example Complete ===")
-    print("This demonstrates the new conversation branching system!")
+    print("\n=== Comprehensive Example Complete ===")
+    print("This demonstrates the full AdvancedSQLiteSession capabilities!")
     print("Key features:")
+    print("- Structured conversation tracking with usage analytics")
+    print("- Turn-based organization and querying")
     print("- Create branches from any user message")
     print("- Branches inherit conversation history up to the branch point")
     print("- Complete branch isolation - no interference between branches")
