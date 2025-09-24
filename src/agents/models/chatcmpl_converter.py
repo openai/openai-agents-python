@@ -371,9 +371,10 @@ class Converter:
                     result.append(msg_developer)
                 elif role == "assistant":
                     flush_assistant_message()
+                    extracted_content = cls.extract_all_content(content)
                     msg_assistant: ChatCompletionAssistantMessageParam = {
                         "role": "assistant",
-                        "content": cls.extract_text_content(content),
+                        "content": extracted_content,  # type: ignore
                     }
                     result.append(msg_assistant)
                 else:
@@ -413,6 +414,8 @@ class Converter:
                 contents = resp_msg["content"]
 
                 text_segments = []
+                content_parts = []
+                
                 for c in contents:
                     if c["type"] == "output_text":
                         text_segments.append(c["text"])
@@ -423,10 +426,25 @@ class Converter:
                         raise UserError(
                             f"Only audio IDs are supported for chat completions, but got: {c}"
                         )
+                    # Handle standard ChatCompletion content types (for compatibility)
+                    elif c["type"] == "text":
+                        content_parts.append(ChatCompletionContentPartTextParam(
+                            type="text",
+                            text=c["text"]
+                        ))
+                    elif c["type"] == "image_url":
+                        content_parts.append(ChatCompletionContentPartImageParam(
+                            type="image_url",
+                            image_url=c["image_url"]
+                        ))
                     else:
                         raise UserError(f"Unknown content type in ResponseOutputMessage: {c}")
 
-                if text_segments:
+                # If we have content parts (text/image_url), use them as an array
+                if content_parts:
+                    new_asst["content"] = content_parts
+                # Otherwise, use the combined text segments
+                elif text_segments:
                     combined = "\n".join(text_segments)
                     new_asst["content"] = combined
 
