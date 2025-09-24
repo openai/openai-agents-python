@@ -2,16 +2,16 @@ import contextlib
 
 import anyio
 import pytest
+from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
 from mcp.types import InitializeResult
 
 from agents.mcp.server import (
     MCPServerSse,
-    MCPServerStreamableHttp,
     MCPServerStdio,
+    MCPServerStreamableHttp,
     _MCPServerWithClientSession,
 )
-from mcp.client.session import MessageHandlerFnT
 
 
 class _StubClientSession:
@@ -53,9 +53,8 @@ class _MessageHandlerTestServer(_MCPServerWithClientSession):
     def create_streams(self):
         @contextlib.asynccontextmanager
         async def _streams():
-            send_stream, recv_stream = anyio.create_memory_object_stream[SessionMessage | Exception](
-                1
-            )
+            send_stream, recv_stream = (
+                anyio.create_memory_object_stream[SessionMessage | Exception](1))
             try:
                 yield recv_stream, send_stream, None
             finally:
