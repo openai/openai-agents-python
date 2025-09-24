@@ -533,7 +533,7 @@ class Converter:
 
                 if content_items and preserve_thinking_blocks:
                     # Reconstruct thinking blocks from content and signature
-                    pending_thinking_blocks = []
+                    reconstructed_thinking_blocks = []
                     for content_item in content_items:
                         if (
                             isinstance(content_item, dict)
@@ -546,7 +546,11 @@ class Converter:
                             # Add signatures if available
                             if signatures:
                                 thinking_block["signature"] = signatures.pop(0)
-                            pending_thinking_blocks.append(thinking_block)
+                            reconstructed_thinking_blocks.append(thinking_block)
+
+                    # Store thinking blocks as pending for the next assistant message
+                    # This preserves the original behavior
+                    pending_thinking_blocks = reconstructed_thinking_blocks
 
             # 8) If we haven't recognized it => fail or ignore
             else:
