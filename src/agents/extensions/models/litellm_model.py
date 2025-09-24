@@ -433,6 +433,13 @@ class LitellmModel(Model):
             else:
                 other_messages.append((i, message))
 
+        # First, identify which tool results will be paired to avoid duplicates
+        paired_tool_result_indices = set()
+        for tool_id in tool_call_messages:
+            if tool_id in tool_result_messages:
+                tool_result_idx, _ = tool_result_messages[tool_id]
+                paired_tool_result_indices.add(tool_result_idx)
+
         # Create the fixed message sequence
         fixed_messages: list[ChatCompletionMessageParam] = []
         used_indices = set()
@@ -463,14 +470,14 @@ class LitellmModel(Model):
                             ):
                                 # Add tool_use → tool_result pair
                                 _, tool_call_msg = tool_call_messages[tool_id]
-                                _, tool_result_msg = tool_result_messages[tool_id]
+                                tool_result_idx, tool_result_msg = tool_result_messages[tool_id]
 
                                 fixed_messages.append(tool_call_msg)
                                 fixed_messages.append(tool_result_msg)
 
                                 # Mark both as used
                                 used_indices.add(tool_call_messages[tool_id][0])
-                                used_indices.add(tool_result_messages[tool_id][0])
+                                used_indices.add(tool_result_idx)
                             elif tool_id and tool_id in tool_call_messages:
                                 # Tool call without result - add just the tool call
                                 _, tool_call_msg = tool_call_messages[tool_id]
@@ -480,7 +487,9 @@ class LitellmModel(Model):
                 used_indices.add(i)  # Mark original multi-tool message as used
 
             elif role == "tool":
-                # Skip - these will be handled as part of tool pairs above
+                # Only preserve unmatched tool results to avoid duplicates
+                if i not in paired_tool_result_indices:
+                    fixed_messages.append(original_message)
                 used_indices.add(i)
 
             else:
