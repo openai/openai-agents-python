@@ -42,20 +42,27 @@ set_tracing_disabled(disabled=True)
 
 class CustomModelProvider(ModelProvider):
     def get_model(self, model_name: str | None) -> Model:
-        return OpenAIChatCompletionsModel(model=model_name or MODEL_NAME, openai_client=client)
+        return OpenAIChatCompletionsModel(
+            model=model_name or MODEL_NAME, openai_client=client
+        )
 
 
 CUSTOM_MODEL_PROVIDER = CustomModelProvider()
 
 
 @function_tool
-def get_weather(city: str):
+def get_weather(city: str) -> str:
+    """Get the current weather information for a specified city."""
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."
 
 
 async def main():
-    agent = Agent(name="Assistant", instructions="You only respond in haikus.", tools=[get_weather])
+    agent = Agent(
+        name="Assistant",
+        instructions="You only respond in haikus.",
+        tools=[get_weather],
+    )
 
     # This will use the custom model provider
     result = await Runner.run(

@@ -42,7 +42,8 @@ set_tracing_disabled(disabled=True)
 
 
 @function_tool
-def get_weather(city: str):
+def get_weather(city: str) -> str:
+    """Get the current weather information for a specified city."""
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."
 
