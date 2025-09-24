@@ -13,6 +13,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
 from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
@@ -103,6 +104,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """
         Args:
@@ -124,6 +126,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, used for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(use_structured_content=use_structured_content)
         self.session: ClientSession | None = None
@@ -135,6 +139,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.client_session_timeout_seconds = client_session_timeout_seconds
         self.max_retry_attempts = max_retry_attempts
         self.retry_backoff_seconds_base = retry_backoff_seconds_base
+        self.message_handler = message_handler
 
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
@@ -272,6 +277,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     timedelta(seconds=self.client_session_timeout_seconds)
                     if self.client_session_timeout_seconds
                     else None,
+                    message_handler=self.message_handler,
                 )
             )
             server_result = await session.initialize()
@@ -394,6 +400,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -421,6 +428,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -429,6 +438,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = StdioServerParameters(
@@ -492,6 +502,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -521,6 +532,8 @@ class MCPServerSse(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -529,6 +542,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = params
@@ -592,6 +606,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -622,6 +637,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -630,6 +647,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = params
