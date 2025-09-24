@@ -2,16 +2,16 @@ import contextlib
 
 import anyio
 import pytest
+from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
-from mcp.types import InitializeResult
+from mcp.types import Implementation, InitializeResult, ServerCapabilities
 
 from agents.mcp.server import (
     MCPServerSse,
-    MCPServerStreamableHttp,
     MCPServerStdio,
+    MCPServerStreamableHttp,
     _MCPServerWithClientSession,
 )
-from mcp.client.session import MessageHandlerFnT
 
 
 class _StubClientSession:
@@ -37,8 +37,8 @@ class _StubClientSession:
     async def initialize(self) -> InitializeResult:
         return InitializeResult(
             protocolVersion="2024-11-05",
-            capabilities={},
-            serverInfo={"name": "stub", "version": "1.0"},
+            capabilities=ServerCapabilities(),
+            serverInfo=Implementation(name="stub", version="1.0"),
         )
 
 
@@ -53,9 +53,9 @@ class _MessageHandlerTestServer(_MCPServerWithClientSession):
     def create_streams(self):
         @contextlib.asynccontextmanager
         async def _streams():
-            send_stream, recv_stream = anyio.create_memory_object_stream[SessionMessage | Exception](
-                1
-            )
+            send_stream, recv_stream = anyio.create_memory_object_stream[
+                SessionMessage | Exception
+            ](1)
             try:
                 yield recv_stream, send_stream, None
             finally:
@@ -80,8 +80,11 @@ async def test_client_session_receives_message_handler(monkeypatch):
 
     monkeypatch.setattr("agents.mcp.server.ClientSession", _recording_client_session)
 
-    async def handler(message: SessionMessage) -> None:
-        del message
+    class _AsyncHandler:
+        async def __call__(self, message):
+            del message
+
+    handler: MessageHandlerFnT = _AsyncHandler()
 
     server = _MessageHandlerTestServer(handler)
 
@@ -102,8 +105,11 @@ async def test_client_session_receives_message_handler(monkeypatch):
     ],
 )
 def test_message_handler_propagates_to_server_base(server_cls, params):
-    def handler(message: SessionMessage) -> None:
-        del message
+    class _AsyncHandler:
+        async def __call__(self, message):
+            del message
+
+    handler: MessageHandlerFnT = _AsyncHandler()
 
     server = server_cls(params, message_handler=handler)
 
