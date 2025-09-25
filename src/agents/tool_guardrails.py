@@ -3,10 +3,9 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Generic, overload
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, overload
 
-from openai.types.responses import ResponseFunctionToolCall
-from typing_extensions import TypeVar
+from typing_extensions import TypedDict, TypeVar
 
 from .exceptions import UserError
 from .tool_context import ToolContext
@@ -14,6 +13,47 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+
+
+@dataclass
+class ToolInputGuardrailResult:
+    """The result of a tool input guardrail run."""
+
+    guardrail: ToolInputGuardrail[Any]
+    """The guardrail that was run."""
+
+    output: ToolGuardrailFunctionOutput
+    """The output of the guardrail function."""
+
+
+@dataclass
+class ToolOutputGuardrailResult:
+    """The result of a tool output guardrail run."""
+
+    guardrail: ToolOutputGuardrail[Any]
+    """The guardrail that was run."""
+
+    output: ToolGuardrailFunctionOutput
+    """The output of the guardrail function."""
+
+
+class RejectContentBehavior(TypedDict):
+    """Rejects the tool call/output but continues execution with a message to the model."""
+
+    type: Literal["reject_content"]
+    message: str
+
+
+class RaiseExceptionBehavior(TypedDict):
+    """Raises an exception to halt execution."""
+
+    type: Literal["raise_exception"]
+
+
+class AllowBehavior(TypedDict):
+    """Allows normal tool execution to continue."""
+
+    type: Literal["allow"]
 
 
 @dataclass
@@ -26,15 +66,58 @@ class ToolGuardrailFunctionOutput:
     information about the checks it performed and granular results.
     """
 
-    tripwire_triggered: bool
+    behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior | None = None
     """
-    Whether the tripwire was triggered. If triggered, the tool execution will be halted.
+    Defines how the system should respond when this guardrail result is processed.
+    - None/allow: Allow normal tool execution to continue without interference (default)
+    - reject_content: Reject the tool call/output but continue execution with a message to the model
+    - raise_exception: Halt execution by raising a ToolGuardrailTripwireTriggered exception
     """
 
-    model_message: str | None = None
-    """
-    Message to send back to the model as the tool output if tripped.
-    """
+    def __post_init__(self) -> None:
+        """Set default behavior if none specified."""
+        if self.behavior is None:
+            self.behavior = AllowBehavior(type="allow")
+
+    @classmethod
+    def allow(cls, output_info: Any = None) -> ToolGuardrailFunctionOutput:
+        """Create a guardrail output that allows the tool execution to continue normally.
+
+        Args:
+            output_info: Optional data about checks performed.
+
+        Returns:
+            ToolGuardrailFunctionOutput configured to allow normal execution.
+        """
+        return cls(output_info=output_info, behavior=AllowBehavior(type="allow"))
+
+    @classmethod
+    def reject_content(cls, message: str, output_info: Any = None) -> ToolGuardrailFunctionOutput:
+        """Create a guardrail output that rejects the tool call/output but continues execution.
+
+        Args:
+            message: Message to send to the model instead of the tool result.
+            output_info: Optional data about checks performed.
+
+        Returns:
+            ToolGuardrailFunctionOutput configured to reject the content.
+        """
+        return cls(
+            output_info=output_info,
+            behavior=RejectContentBehavior(type="reject_content", message=message),
+        )
+
+    @classmethod
+    def raise_exception(cls, output_info: Any = None) -> ToolGuardrailFunctionOutput:
+        """Create a guardrail output that raises an exception to halt execution.
+
+        Args:
+            output_info: Optional data about checks performed.
+
+        Returns:
+            ToolGuardrailFunctionOutput configured to raise an exception.
+        """
+        return cls(output_info=output_info, behavior=RaiseExceptionBehavior(type="raise_exception"))
 
 
 @dataclass
@@ -49,11 +132,6 @@ class ToolInputGuardrailData:
     agent: Agent[Any]
     """
     The agent that is executing the tool.
-    """
-
-    tool_call: ResponseFunctionToolCall
-    """
-    The tool call data including the function name and arguments.
     """
 
 

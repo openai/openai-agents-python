@@ -88,7 +88,9 @@ from .tool import (
 from .tool_context import ToolContext
 from .tool_guardrails import (
     ToolInputGuardrailData,
+    ToolInputGuardrailResult,
     ToolOutputGuardrailData,
+    ToolOutputGuardrailResult,
 )
 from .tracing import (
     SpanError,
@@ -218,6 +220,12 @@ class SingleStepResult:
     next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
     """The next step to take."""
 
+    tool_input_guardrail_results: list[ToolInputGuardrailResult]
+    """Tool input guardrail results from this step."""
+
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult]
+    """Tool output guardrail results from this step."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
@@ -260,7 +268,10 @@ class RunImpl:
         new_step_items.extend(processed_response.new_items)
 
         # First, lets run the tool calls - function tools and computer actions
-        function_results, computer_results = await asyncio.gather(
+        (
+            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
+            computer_results,
+        ) = await asyncio.gather(
             cls.execute_function_tool_calls(
                 agent=agent,
                 tool_runs=processed_response.functions,
@@ -353,6 +364,8 @@ class RunImpl:
                     final_output=final_output,
                     hooks=hooks,
                     context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
                 )
             elif not output_schema or output_schema.is_plain_text():
                 return await cls.execute_final_output(
@@ -364,6 +377,8 @@ class RunImpl:
                     final_output=potential_final_output_text or "",
                     hooks=hooks,
                     context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
                 )
 
         # If there's no final output, we can just run again
@@ -373,6 +388,8 @@ class RunImpl:
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
             next_step=NextStepRunAgain(),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     @classmethod
@@ -566,7 +583,13 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
-    ) -> list[FunctionToolResult]:
+    ) -> tuple[
+        list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
+    ]:
+        # Collect guardrail results
+        tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+
         async def run_single_tool(
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
@@ -587,14 +610,29 @@ class RunImpl:
                                 ToolInputGuardrailData(
                                     context=tool_context,
                                     agent=agent,
-                                    tool_call=tool_call,
                                 )
                             )
-                            if gr_out.tripwire_triggered:
-                                # Raise tripwire exception instead of just setting result
+                            
+                            # Store the guardrail result
+                            tool_input_guardrail_results.append(
+                                ToolInputGuardrailResult(
+                                    guardrail=guardrail,
+                                    output=gr_out,
+                                )
+                            )
+                            
+                            # Handle different behavior types
+                            if gr_out.behavior["type"] == "raise_exception":
                                 raise ToolInputGuardrailTripwireTriggered(
                                     guardrail=guardrail, output=gr_out
                                 )
+                            elif gr_out.behavior["type"] == "reject_content":
+                                # Set final_result to the message and skip tool execution
+                                final_result = gr_out.behavior["message"]
+                                break
+                            elif gr_out.behavior["type"] == "allow":
+                                # Continue to next guardrail or tool execution
+                                continue
 
                     if final_result is None:
                         # 2) Actually run the tool
@@ -618,15 +656,30 @@ class RunImpl:
                                     ToolOutputGuardrailData(
                                         context=tool_context,
                                         agent=agent,
-                                        tool_call=tool_call,
                                         output=real_result,
                                     )
                                 )
-                                if gr_out.tripwire_triggered:
-                                    # Raise tripwire exception instead of just setting result
+
+                                # Store the guardrail result
+                                tool_output_guardrail_results.append(
+                                    ToolOutputGuardrailResult(
+                                        guardrail=output_guardrail,
+                                        output=gr_out,
+                                    )
+                                )
+                                
+                                # Handle different behavior types
+                                if gr_out.behavior["type"] == "raise_exception":
                                     raise ToolOutputGuardrailTripwireTriggered(
                                         guardrail=output_guardrail, output=gr_out
                                     )
+                                elif gr_out.behavior["type"] == "reject_content":
+                                    # Override the result with the guardrail message
+                                    final_result = gr_out.behavior["message"]
+                                    break
+                                elif gr_out.behavior["type"] == "allow":
+                                    # Continue to next guardrail
+                                    continue
                         # 4) Tool end hooks (with final result, which may have been overridden)
                         await asyncio.gather(
                             hooks.on_tool_end(tool_context, agent, func_tool, final_result),
@@ -661,7 +714,7 @@ class RunImpl:
 
         results = await asyncio.gather(*tasks)
 
-        return [
+        function_tool_results = [
             FunctionToolResult(
                 tool=tool_run.function_tool,
                 output=result,
@@ -673,6 +726,8 @@ class RunImpl:
             )
             for tool_run, result in zip(tool_runs, results)
         ]
+
+        return function_tool_results, tool_input_guardrail_results, tool_output_guardrail_results
 
     @classmethod
     async def execute_local_shell_calls(
@@ -925,6 +980,8 @@ class RunImpl:
         final_output: Any,
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
+        tool_input_guardrail_results: list[ToolInputGuardrailResult],
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     ) -> SingleStepResult:
         # Run the on_end hooks
         await cls.run_final_output_hooks(agent, hooks, context_wrapper, final_output)
@@ -935,6 +992,8 @@ class RunImpl:
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
             next_step=NextStepFinalOutput(final_output),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     @classmethod

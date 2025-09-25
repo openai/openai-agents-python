@@ -6,7 +6,6 @@ from agents import (
     Runner,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
-    ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailData,
     ToolOutputGuardrailTripwireTriggered,
     function_tool,
@@ -33,16 +32,24 @@ def get_user_data(user_id: str) -> dict[str, str]:
         "phone": "555-1234",
     }
 
+@function_tool
+def get_contact_info(user_id: str) -> dict[str, str]:
+    """Get contact info by ID."""
+    return {
+        "user_id": user_id,
+        "name": "Jane Smith",
+        "email": "jane@example.com",
+        "phone": "555-1234",
+    }
+
 
 @tool_input_guardrail
-def block_sensitive_words(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
-    """Block tool calls that contain sensitive words in arguments."""
+def reject_sensitive_words(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+    """Reject tool calls that contain sensitive words in arguments."""
     try:
-        args = json.loads(data.tool_call.arguments)
+        args = json.loads(data.context.tool_arguments) if data.context.tool_arguments else {}
     except json.JSONDecodeError:
-        return ToolGuardrailFunctionOutput(
-            tripwire_triggered=False, output_info="Invalid JSON arguments"
-        )
+        return ToolGuardrailFunctionOutput(output_info="Invalid JSON arguments")
 
     # Check for suspicious content
     sensitive_words = [
@@ -50,19 +57,19 @@ def block_sensitive_words(data: ToolInputGuardrailData) -> ToolGuardrailFunction
         "hack",
         "exploit",
         "malware",
-        "orange",
-    ]  # to mock sensitive words
+        "ACME",
+    ]
     for key, value in args.items():
         value_str = str(value).lower()
         for word in sensitive_words:
-            if word in value_str:
-                return ToolGuardrailFunctionOutput(
-                    tripwire_triggered=True,
-                    model_message=f"🚨 Tool call blocked: contains '{word}'",
+            if word.lower() in value_str:
+                # Reject tool call and inform the model the function was not called
+                return ToolGuardrailFunctionOutput.reject_content(
+                    message=f"🚨 Tool call blocked: contains '{word}'",
                     output_info={"blocked_word": word, "argument": key},
                 )
 
-    return ToolGuardrailFunctionOutput(tripwire_triggered=False, output_info="Input validated")
+    return ToolGuardrailFunctionOutput(output_info="Input validated")
 
 
 @tool_output_guardrail
@@ -72,57 +79,71 @@ def block_sensitive_output(data: ToolOutputGuardrailData) -> ToolGuardrailFuncti
 
     # Check for sensitive data patterns
     if "ssn" in output_str or "123-45-6789" in output_str:
-        return ToolGuardrailFunctionOutput(
-            tripwire_triggered=True,
-            model_message="🚨 Tool output blocked: contains sensitive data",
-            output_info={"blocked_pattern": "SSN", "tool": data.tool_call.name},
+        # Use raise_exception to halt execution completely for sensitive data
+        return ToolGuardrailFunctionOutput.raise_exception(
+            output_info={"blocked_pattern": "SSN", "tool": data.context.tool_name},
         )
 
-    return ToolGuardrailFunctionOutput(tripwire_triggered=False, output_info="Output validated")
+    return ToolGuardrailFunctionOutput(output_info="Output validated")
+
+
+@tool_output_guardrail
+def reject_phone_numbers(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+    """Reject function output containing phone numbers."""
+    output_str = str(data.output)
+    if "555-1234" in output_str:
+        return ToolGuardrailFunctionOutput.reject_content(
+            message="User data not retrieved as it contains a phone number which is restricted.",
+            output_info={"redacted": "phone_number"},
+        )
+    return ToolGuardrailFunctionOutput()
 
 
 # Apply guardrails to tools
-send_email.tool_input_guardrails = [block_sensitive_words]
+send_email.tool_input_guardrails = [reject_sensitive_words]
 get_user_data.tool_output_guardrails = [block_sensitive_output]
+get_contact_info.tool_output_guardrails = [reject_phone_numbers]
 
 agent = Agent(
     name="Secure Assistant",
     instructions="You are a helpful assistant with access to email and user data tools.",
-    tools=[send_email, get_user_data],
+    tools=[send_email, get_user_data, get_contact_info],
 )
 
 
 async def main():
     print("=== Tool Guardrails Example ===\n")
 
-    # Example 1: Normal operation - should work fine
-    print("1. Normal email sending:")
     try:
+        # Example 1: Normal operation - should work fine
+        print("1. Normal email sending:")
         result = await Runner.run(agent, "Send a welcome email to john@example.com")
-        print(f"✅ Success: {result.final_output}\n")
+        print(f"✅ Successful tool execution: {result.final_output}\n")
+
+        # Example 2: Input guardrail triggers - function tool call is rejected but execution continues
+        print("2. Attempting to send email with suspicious content:")
+        result = await Runner.run(agent, "Send an email to john@example.com introducing the company ACME corp.")
+        print(f"❌ Guardrail rejected function tool call: {result.final_output}\n")
     except Exception as e:
-        print(f"❌ Error: {e}\n")
+        print(f"Error: {e}\n")
 
-    # Example 2: Input guardrail triggers - should block suspicious content
-    print("2. Attempting to send email with suspicious content:")
     try:
-        result = await Runner.run(
-            agent, "Send an email to john@example.com with the subject: orange"
-        )
-        print(f"✅ Success: {result.final_output}\n")
-    except ToolInputGuardrailTripwireTriggered as e:
-        print(f"🚨 Input guardrail triggered: {e.output.model_message}")
-        print(f"   Details: {e.output.output_info}\n")
-
-    # Example 3: Output guardrail triggers - should block sensitive data
-    print("3. Attempting to get user data (contains SSN):")
-    try:
+        # Example 3: Output guardrail triggers - should raise exception for sensitive data
+        print("3. Attempting to get user data (contains SSN). Execution blocked:")
         result = await Runner.run(agent, "Get the data for user ID user123")
-        print(f"✅ Success: {result.final_output}\n")
+        print(f"✅ Successful tool execution: {result.final_output}\n")
     except ToolOutputGuardrailTripwireTriggered as e:
-        print(f"🚨 Output guardrail triggered: {e.output.model_message}")
-        print(f"   Details: {e.output.output_info}\n")
+        print("🚨 Output guardrail triggered: Execution halted for sensitive data")
+        print(f"Details: {e.output.output_info}\n")
 
+    
+    try:
+        # Example 4: Output guardrail triggers - reject returning function tool output but continue execution
+        print("4. Rejecting function tool output containing phone numbers:")
+        result = await Runner.run(agent, "Get contact info for user456")
+        print(f"❌ Guardrail rejected function tool output: {result.final_output}\n")
+    except Exception as e:
+        print(f"Error: {e}\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -133,13 +154,15 @@ Example output:
 === Tool Guardrails Example ===
 
 1. Normal email sending:
-✅ Success: I've sent a welcome email to john@example.com with an appropriate subject and greeting message.
+✅ Successful tool execution: I've sent a welcome email to john@example.com with an appropriate subject and greeting message.
 
 2. Attempting to send email with suspicious content:
-🚨 Input guardrail triggered: 🚨 Tool call blocked: contains 'orange'
-   Details: {'blocked_word': 'orange', 'argument': 'subject'}
+❌ Guardrail rejected function tool call: I'm unable to send the email mentioning ACME Corp as it was blocked by security guardrails.
 
-3. Attempting to get user data (contains SSN):
-🚨 Output guardrail triggered: 🚨 Tool output blocked: contains sensitive data
+3. Attempting to get user data (contains SSN). Execution blocked:
+🚨 Output guardrail triggered: Execution halted for sensitive data
    Details: {'blocked_pattern': 'SSN', 'tool': 'get_user_data'}
+
+4. Rejecting function tool output containing sensitive data:
+✅ Successful tool execution: User data retrieved (phone number redacted for privacy)
 """
