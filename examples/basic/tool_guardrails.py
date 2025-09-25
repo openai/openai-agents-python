@@ -97,7 +97,7 @@ def reject_phone_numbers(data: ToolOutputGuardrailData) -> ToolGuardrailFunction
             message="User data not retrieved as it contains a phone number which is restricted.",
             output_info={"redacted": "phone_number"},
         )
-    return ToolGuardrailFunctionOutput()
+    return ToolGuardrailFunctionOutput(output_info="Phone number check passed")
 
 
 # Apply guardrails to tools

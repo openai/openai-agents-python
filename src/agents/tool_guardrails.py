@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, overload
 
 from typing_extensions import TypedDict, TypeVar
@@ -66,18 +66,15 @@ class ToolGuardrailFunctionOutput:
     information about the checks it performed and granular results.
     """
 
-    behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior | None = None
+    behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior = field(
+        default_factory=lambda: AllowBehavior(type="allow")
+    )
     """
     Defines how the system should respond when this guardrail result is processed.
-    - None/allow: Allow normal tool execution to continue without interference (default)
+    - allow: Allow normal tool execution to continue without interference (default)
     - reject_content: Reject the tool call/output but continue execution with a message to the model
     - raise_exception: Halt execution by raising a ToolGuardrailTripwireTriggered exception
     """
-
-    def __post_init__(self) -> None:
-        """Set default behavior if none specified."""
-        if self.behavior is None:
-            self.behavior = AllowBehavior(type="allow")
 
     @classmethod
     def allow(cls, output_info: Any = None) -> ToolGuardrailFunctionOutput:
