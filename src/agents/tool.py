@@ -456,6 +456,13 @@ def function_tool(
                         },
                     )
                 )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool {schema.name} failed")
+                else:
+                    logger.error(
+                        f"Tool {schema.name} failed: {input} {e}",
+                        exc_info=e,
+                    )
                 return result
 
         return FunctionTool(
