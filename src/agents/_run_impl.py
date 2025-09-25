@@ -341,6 +341,8 @@ class RunImpl:
                 final_output=check_tool_use.final_output,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
             )
 
         # Now we can check if the model also produced a final output
@@ -575,6 +577,155 @@ class RunImpl:
         )
 
     @classmethod
+    async def _execute_input_guardrails(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    ) -> str | None:
+        """Execute input guardrails for a tool.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            tool_input_guardrail_results: List to append guardrail results to.
+
+        Returns:
+            None if tool execution should proceed, or a message string if execution should be
+            skipped.
+
+        Raises:
+            ToolInputGuardrailTripwireTriggered: If a guardrail triggers an exception.
+        """
+        if not func_tool.tool_input_guardrails:
+            return None
+
+        for guardrail in func_tool.tool_input_guardrails:
+            gr_out = await guardrail.run(
+                ToolInputGuardrailData(
+                    context=tool_context,
+                    agent=agent,
+                )
+            )
+
+            # Store the guardrail result
+            tool_input_guardrail_results.append(
+                ToolInputGuardrailResult(
+                    guardrail=guardrail,
+                    output=gr_out,
+                )
+            )
+
+            # Handle different behavior types
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolInputGuardrailTripwireTriggered(guardrail=guardrail, output=gr_out)
+            elif gr_out.behavior["type"] == "reject_content":
+                # Set final_result to the message and skip tool execution
+                return gr_out.behavior["message"]
+            elif gr_out.behavior["type"] == "allow":
+                # Continue to next guardrail or tool execution
+                continue
+
+        return None
+
+    @classmethod
+    async def _execute_output_guardrails(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        real_result: Any,
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+    ) -> Any:
+        """Execute output guardrails for a tool.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            real_result: The actual result from the tool execution.
+            tool_output_guardrail_results: List to append guardrail results to.
+
+        Returns:
+            The final result after guardrail processing (may be modified).
+
+        Raises:
+            ToolOutputGuardrailTripwireTriggered: If a guardrail triggers an exception.
+        """
+        if not func_tool.tool_output_guardrails:
+            return real_result
+
+        final_result = real_result
+        for output_guardrail in func_tool.tool_output_guardrails:
+            gr_out = await output_guardrail.run(
+                ToolOutputGuardrailData(
+                    context=tool_context,
+                    agent=agent,
+                    output=real_result,
+                )
+            )
+
+            # Store the guardrail result
+            tool_output_guardrail_results.append(
+                ToolOutputGuardrailResult(
+                    guardrail=output_guardrail,
+                    output=gr_out,
+                )
+            )
+
+            # Handle different behavior types
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolOutputGuardrailTripwireTriggered(
+                    guardrail=output_guardrail, output=gr_out
+                )
+            elif gr_out.behavior["type"] == "reject_content":
+                # Override the result with the guardrail message
+                final_result = gr_out.behavior["message"]
+                break
+            elif gr_out.behavior["type"] == "allow":
+                # Continue to next guardrail
+                continue
+
+        return final_result
+
+    @classmethod
+    async def _execute_tool_with_hooks(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        hooks: RunHooks[TContext],
+        tool_call: ResponseFunctionToolCall,
+    ) -> Any:
+        """Execute the core tool function with before/after hooks.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            hooks: The run hooks to execute.
+            tool_call: The tool call details.
+
+        Returns:
+            The result from the tool execution.
+        """
+        await asyncio.gather(
+            hooks.on_tool_start(tool_context, agent, func_tool),
+            (
+                agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        return await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    @classmethod
     async def execute_function_tool_calls(
         cls,
         *,
@@ -603,83 +754,35 @@ class RunImpl:
                     span_fn.span_data.input = tool_call.arguments
                 try:
                     # 1) Run input tool guardrails, if any
-                    final_result: Any | None = None
-                    if func_tool.tool_input_guardrails:
-                        for guardrail in func_tool.tool_input_guardrails:
-                            gr_out = await guardrail.run(
-                                ToolInputGuardrailData(
-                                    context=tool_context,
-                                    agent=agent,
-                                )
-                            )
-                            
-                            # Store the guardrail result
-                            tool_input_guardrail_results.append(
-                                ToolInputGuardrailResult(
-                                    guardrail=guardrail,
-                                    output=gr_out,
-                                )
-                            )
-                            
-                            # Handle different behavior types
-                            if gr_out.behavior["type"] == "raise_exception":
-                                raise ToolInputGuardrailTripwireTriggered(
-                                    guardrail=guardrail, output=gr_out
-                                )
-                            elif gr_out.behavior["type"] == "reject_content":
-                                # Set final_result to the message and skip tool execution
-                                final_result = gr_out.behavior["message"]
-                                break
-                            elif gr_out.behavior["type"] == "allow":
-                                # Continue to next guardrail or tool execution
-                                continue
+                    rejected_message = await cls._execute_input_guardrails(
+                        func_tool=func_tool,
+                        tool_context=tool_context,
+                        agent=agent,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                    )
 
-                    if final_result is None:
+                    if rejected_message is not None:
+                        # Input guardrail rejected the tool call
+                        final_result = rejected_message
+                    else:
                         # 2) Actually run the tool
-                        await asyncio.gather(
-                            hooks.on_tool_start(tool_context, agent, func_tool),
-                            (
-                                agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                                if agent.hooks
-                                else _coro.noop_coroutine()
-                            ),
-                        )
-                        real_result = await func_tool.on_invoke_tool(
-                            tool_context, tool_call.arguments
+                        real_result = await cls._execute_tool_with_hooks(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            hooks=hooks,
+                            tool_call=tool_call,
                         )
 
                         # 3) Run output tool guardrails, if any
-                        final_result = real_result
-                        if func_tool.tool_output_guardrails:
-                            for output_guardrail in func_tool.tool_output_guardrails:
-                                gr_out = await output_guardrail.run(
-                                    ToolOutputGuardrailData(
-                                        context=tool_context,
-                                        agent=agent,
-                                        output=real_result,
-                                    )
-                                )
+                        final_result = await cls._execute_output_guardrails(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            real_result=real_result,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                        )
 
-                                # Store the guardrail result
-                                tool_output_guardrail_results.append(
-                                    ToolOutputGuardrailResult(
-                                        guardrail=output_guardrail,
-                                        output=gr_out,
-                                    )
-                                )
-                                
-                                # Handle different behavior types
-                                if gr_out.behavior["type"] == "raise_exception":
-                                    raise ToolOutputGuardrailTripwireTriggered(
-                                        guardrail=output_guardrail, output=gr_out
-                                    )
-                                elif gr_out.behavior["type"] == "reject_content":
-                                    # Override the result with the guardrail message
-                                    final_result = gr_out.behavior["message"]
-                                    break
-                                elif gr_out.behavior["type"] == "allow":
-                                    # Continue to next guardrail
-                                    continue
                         # 4) Tool end hooks (with final result, which may have been overridden)
                         await asyncio.gather(
                             hooks.on_tool_end(tool_context, agent, func_tool, final_result),
@@ -932,6 +1035,8 @@ class RunImpl:
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
             next_step=NextStepHandoff(new_agent),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
         )
 
     @classmethod

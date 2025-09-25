@@ -715,6 +715,8 @@ class AgentRunner:
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
