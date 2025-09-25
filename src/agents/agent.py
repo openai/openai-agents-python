@@ -237,6 +237,14 @@ class Agent(AgentBase, Generic[TContext]):
         if not isinstance(self.name, str):
             raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
 
+        # Enhanced agent name validation with helpful guidance
+        from .util._transforms import validate_agent_name
+
+        try:
+            validate_agent_name(self.name)
+        except ValueError as e:
+            raise ValueError(f"Invalid agent name: {e}") from e
+
         if self.handoff_description is not None and not isinstance(self.handoff_description, str):
             raise TypeError(
                 f"Agent handoff_description must be a string or None, "
