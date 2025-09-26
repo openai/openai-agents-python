@@ -4,16 +4,16 @@ search:
 ---
 # エージェント
 
-エージェントはアプリにおける中核の構成要素です。エージェントは、instructions と tools で構成された大規模言語モデル（ LLM ）です。
+エージェントはアプリの中核となる構成要素です。エージェントは、instructions とツールで構成された大規模言語モデル（ LLM ）です。
 
 ## 基本構成
 
-エージェントで最も一般的に設定するプロパティは次のとおりです。
+最も一般的に設定するエージェントのプロパティは次のとおりです。
 
-- `name`: エージェントを識別する必須の文字列。
-- `instructions`: developer メッセージ、または system prompt とも呼ばれます。
-- `model`: 使用する LLM と、temperature、top_p などのモデル調整用の任意の `model_settings`。
-- `tools`: エージェントがタスク達成のために使用できるツール。
+-   `name`: エージェントを識別する必須の文字列です。
+-   `instructions`: developer message または system prompt とも呼ばれます。
+-   `model`: どの LLM を使用するかと、オプションの `model_settings`。temperature、top_p などのモデル調整パラメーターを設定します。
+-   `tools`: エージェントがタスクを達成するために使用できるツールです。
 
 ```python
 from agents import Agent, ModelSettings, function_tool
@@ -33,7 +33,7 @@ agent = Agent(
 
 ## コンテキスト
 
-エージェントはその `context` 型に対してジェネリックです。Context は依存性注入のためのツールです。あなたが作成して `Runner.run()` に渡すオブジェクトで、すべてのエージェント、ツール、ハンドオフなどに渡され、エージェントの実行に必要な依存関係と状態の寄せ集めとして機能します。任意の Python オブジェクトを context として提供できます。
+エージェントは `context` 型に対して汎用です。コンテキストは依存性注入のツールで、あなたが作成して `Runner.run()` に渡すオブジェクトです。これはすべてのエージェント、ツール、ハンドオフなどに渡され、エージェント実行のための依存関係と状態をまとめて持つ入れ物として機能します。任意の Python オブジェクトをコンテキストとして提供できます。
 
 ```python
 @dataclass
@@ -52,7 +52,7 @@ agent = Agent[UserContext](
 
 ## 出力タイプ
 
-デフォルトでは、エージェントはプレーンテキスト（`str`）出力を生成します。特定の型の出力をエージェントに生成させたい場合は、`output_type` パラメーターを使用できます。一般的な選択肢は [Pydantic](https://docs.pydantic.dev/) オブジェクトですが、Pydantic の [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/) でラップできる任意の型（dataclasses、lists、TypedDict など）をサポートします。
+デフォルトでは、エージェントはプレーンテキスト（つまり `str`）出力を生成します。特定の型の出力を生成させたい場合は、`output_type` パラメーターを使用できます。一般的な選択肢は [Pydantic](https://docs.pydantic.dev/) オブジェクトですが、Pydantic の [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/) にラップできる任意の型（dataclasses、lists、TypedDict など）をサポートします。
 
 ```python
 from pydantic import BaseModel
@@ -73,20 +73,20 @@ agent = Agent(
 
 !!! note
 
-    `output_type` を渡すと、通常のプレーンテキスト応答ではなく、[structured outputs](https://platform.openai.com/docs/guides/structured-outputs) を使用するようにモデルに指示します。
+    `output_type` を渡すと、モデルは通常のプレーンテキスト応答ではなく [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) を使用するように指示されます。
 
-## マルチエージェントの設計パターン
+## マルチ エージェント システムの設計パターン
 
-マルチエージェントシステムの設計方法は多数ありますが、一般的に広く適用できるパターンは次の 2 つです。
+マルチ エージェント システムの設計方法は多数ありますが、汎用的に適用できるパターンとして次の 2 つがよく見られます。
 
-1. マネージャー（エージェントをツールとして）: 中央のマネージャー/オーケストレーターが、ツールとして公開された専門のサブエージェントを呼び出し、会話の制御を維持します。
-2. ハンドオフ: ピアのエージェントが制御を専門のエージェントに引き渡し、そのエージェントが会話を引き継ぎます。これは分散型です。
+1. マネージャー（ツールとしての エージェント）: 中央のマネージャー/オーケストレーターが、ツールとして公開された専門のサブ エージェントを呼び出し、会話の制御を保持します。
+2. ハンドオフ: ピアのエージェントが制御を専門のエージェントに引き継ぎ、そのエージェントが会話を引き継ぎます。これは分散型です。
 
-詳細は [エージェント構築の実践ガイド](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf) を参照してください。
+詳細は、[エージェント構築の実践的ガイド](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf)をご覧ください。
 
-### マネージャー（エージェントをツールとして）
+### マネージャー（ツールとしての エージェント）
 
-`customer_facing_agent` はすべてのユーザー対応を処理し、ツールとして公開された専門のサブエージェントを呼び出します。詳細は [ツール](tools.md#agents-as-tools) ドキュメントをご覧ください。
+`customer_facing_agent` はすべての ユーザー とのやり取りを処理し、ツールとして公開された専門のサブ エージェントを呼び出します。詳細は [ツール](tools.md#agents-as-tools) のドキュメントをご覧ください。
 
 ```python
 from agents import Agent
@@ -115,7 +115,7 @@ customer_facing_agent = Agent(
 
 ### ハンドオフ
 
-ハンドオフは、エージェントが委譲できるサブエージェントです。ハンドオフが発生すると、委譲先のエージェントは会話履歴を受け取り、会話を引き継ぎます。このパターンにより、単一タスクに特化したモジュール式のエージェントが可能になります。詳細は [ハンドオフ](handoffs.md) ドキュメントをご覧ください。
+ハンドオフは、エージェントが委譲できるサブ エージェントです。ハンドオフが発生すると、委譲先のエージェントは会話履歴を受け取り、会話を引き継ぎます。このパターンにより、単一のタスクに優れたモジュール式の専門エージェントを実現できます。詳細は [ハンドオフ](handoffs.md) のドキュメントをご覧ください。
 
 ```python
 from agents import Agent
@@ -136,7 +136,7 @@ triage_agent = Agent(
 
 ## 動的 instructions
 
-多くの場合、エージェントを作成するときに instructions を指定できますが、関数を通じて動的な instructions を提供することもできます。この関数はエージェントと context を受け取り、プロンプトを返す必要があります。通常の関数と `async` 関数の両方を受け付けます。
+多くの場合、エージェントの作成時に instructions を指定できますが、関数を介して動的な instructions を提供することも可能です。関数はエージェントとコンテキストを受け取り、プロンプトを返す必要があります。通常の関数と `async` 関数のどちらも利用できます。
 
 ```python
 def dynamic_instructions(
@@ -153,15 +153,15 @@ agent = Agent[UserContext](
 
 ## ライフサイクルイベント（フック）
 
-場合によっては、エージェントのライフサイクルを観測したいことがあります。たとえば、イベントをログに記録したり、特定のイベント発生時にデータを事前取得したりします。`hooks` プロパティを使ってエージェントのライフサイクルにフックできます。[`AgentHooks`][agents.lifecycle.AgentHooks] クラスをサブクラス化し、関心のあるメソッドをオーバーライドしてください。
+場合によっては、エージェントのライフサイクルを観察したいことがあります。例えば、特定のイベント発生時にイベントをログに記録したり、データを事前取得したりする場合です。`hooks` プロパティを使用してエージェントのライフサイクルにフックできます。[`AgentHooks`][agents.lifecycle.AgentHooks] クラスをサブクラス化し、関心のあるメソッドをオーバーライドしてください。
 
 ## ガードレール
 
-ガードレールにより、エージェントの実行と並行してユーザー入力に対するチェック/バリデーションを実行し、エージェントの出力が生成された後にも同様のチェックを行えます。たとえば、ユーザーの入力とエージェントの出力の妥当性をスクリーニングできます。詳細は [ガードレール](guardrails.md) ドキュメントをご覧ください。
+ガードレールにより、エージェントの実行と並行して ユーザー 入力に対するチェック/検証を実行し、エージェントの出力が生成された後にはその出力に対してもチェック/検証を実行できます。たとえば、 ユーザー の入力やエージェントの出力の関連性をスクリーニングできます。詳細は [ガードレール](guardrails.md) のドキュメントをご覧ください。
 
 ## エージェントのクローン/コピー
 
-エージェントの `clone()` メソッドを使用すると、エージェントを複製し、任意のプロパティを変更できます。
+エージェントの `clone()` メソッドを使用すると、エージェントを複製し、必要に応じて任意のプロパティを変更できます。
 
 ```python
 pirate_agent = Agent(
@@ -178,12 +178,12 @@ robot_agent = pirate_agent.clone(
 
 ## ツール使用の強制
 
-ツールのリストを渡しても、LLM が必ずしもツールを使うとは限りません。[`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice] を設定することで、ツール使用を強制できます。有効な値は次のとおりです。
+ツールのリストを指定しても、必ずしも LLM がツールを使用するとは限りません。[`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice] を設定してツール使用を強制できます。有効な値は次のとおりです。
 
-1. `auto`: LLM にツールを使うかどうかの判断を任せます。
-2. `required`: LLM にツールの使用を要求します（ただし、どのツールを使うかは賢く判断できます）。
-3. `none`: LLM にツールを使わないよう要求します。
-4. 特定の文字列（例: `my_tool`）を設定し、その特定のツールの使用を要求します。
+1. `auto`: ツールを使用するかどうかを LLM に委ねます。
+2. `required`: LLM にツールの使用を必須にします（どのツールを使うかは賢く判断できます）。
+3. `none`: ツールを使用「しない」ことを LLM に要求します。
+4. 特定の文字列（例: `my_tool`）を設定し、その特定のツールを LLM に使用させます。
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -201,12 +201,12 @@ agent = Agent(
 )
 ```
 
-## ツール使用の動作
+## ツール使用時の動作
 
-`Agent` の `tool_use_behavior` パラメーターは、ツール出力の扱いを制御します。
+`Agent` 構成の `tool_use_behavior` パラメーターは、ツール出力の扱い方を制御します。
 
 - `"run_llm_again"`: デフォルト。ツールを実行し、その結果を LLM が処理して最終応答を生成します。
-- `"stop_on_first_tool"`: 最初のツール呼び出しの出力を、追加の LLM 処理なしに最終応答として使用します.
+- `"stop_on_first_tool"`: 最初のツール呼び出しの出力を、その後の LLM 処理なしで最終応答として使用します.
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -224,7 +224,7 @@ agent = Agent(
 )
 ```
 
-- `StopAtTools(stop_at_tool_names=[...])`: 指定したツールが呼び出された場合に停止し、その出力を最終応答として使用します。
+- `StopAtTools(stop_at_tool_names=[...])`: 指定したいずれかのツールが呼び出された場合に停止し、その出力を最終応答として使用します。
 
 ```python
 from agents import Agent, Runner, function_tool
@@ -248,7 +248,7 @@ agent = Agent(
 )
 ```
 
-- `ToolsToFinalOutputFunction`: ツール結果を処理し、停止するか LLM を継続するかを判断するカスタム関数です。
+- `ToolsToFinalOutputFunction`: ツール結果を処理し、停止するか LLM を続行するかを判断するカスタム関数です。
 
 ```python
 from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
@@ -286,4 +286,4 @@ agent = Agent(
 
 !!! note
 
-    無限ループを防ぐため、フレームワークはツール呼び出し後に `tool_choice` を自動的に "auto" にリセットします。この動作は [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice] で設定できます。無限ループは、ツール結果が LLM に送られ、`tool_choice` により LLM がさらに別のツール呼び出しを生成し続けるために発生します。
+    無限ループを防ぐため、フレームワークはツール呼び出し後に `tool_choice` を自動的に "auto" にリセットします。この動作は [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice] で構成できます。無限ループが起きる理由は、ツール結果が LLM に送られ、`tool_choice` により LLM がさらに別のツール呼び出しを生成し続けるためです。
