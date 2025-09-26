@@ -17,6 +17,11 @@ from .items import ItemHelpers
 from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
+from .models.default_models import (
+    get_default_model_settings,
+    gpt_5_reasoning_settings_required,
+    is_gpt_5_default,
+)
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
@@ -25,9 +30,11 @@ from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-    from .lifecycle import AgentHooks
+    from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
+    from .memory.session import Session
     from .result import RunResult
+    from .run import RunConfig
 
 
 @dataclass
@@ -168,10 +175,10 @@ class Agent(AgentBase, Generic[TContext]):
     """The model implementation to use when invoking the LLM.
 
     By default, if not set, the agent will use the default model configured in
-    `openai_provider.DEFAULT_MODEL` (currently "gpt-4o").
+    `agents.models.get_default_model()` (currently "gpt-4.1").
     """
 
-    model_settings: ModelSettings = field(default_factory=ModelSettings)
+    model_settings: ModelSettings = field(default_factory=get_default_model_settings)
     """Configures model-specific tuning parameters (e.g. temperature, top_p).
     """
 
@@ -286,6 +293,26 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.model_settings).__name__}"
             )
 
+        if (
+            # The user sets a non-default model
+            self.model is not None
+            and (
+                # The default model is gpt-5
+                is_gpt_5_default() is True
+                # However, the specified model is not a gpt-5 model
+                and (
+                    isinstance(self.model, str) is False
+                    or gpt_5_reasoning_settings_required(self.model) is False  # type: ignore
+                )
+                # The model settings are not customized for the specified model
+                and self.model_settings == get_default_model_settings()
+            )
+        ):
+            # In this scenario, we should use a generic model settings
+            # because non-gpt-5 models are not compatible with the default gpt-5 model settings.
+            # This is a best-effort attempt to make the agent work with non-gpt-5 models.
+            self.model_settings = ModelSettings()
+
         if not isinstance(self.input_guardrails, list):
             raise TypeError(
                 f"Agent input_guardrails must be a list, got {type(self.input_guardrails).__name__}"
@@ -359,6 +386,12 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        run_config: RunConfig | None = None,
+        max_turns: int | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        session: Session | None = None,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -385,12 +418,20 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled=is_enabled,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> str:
-            from .run import Runner
+            from .run import DEFAULT_MAX_TURNS, Runner
+
+            resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
 
             output = await Runner.run(
                 starting_agent=self,
                 input=input,
                 context=context.context,
+                run_config=run_config,
+                max_turns=resolved_max_turns,
+                hooks=hooks,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                session=session,
             )
             if custom_output_extractor:
                 return await custom_output_extractor(output)

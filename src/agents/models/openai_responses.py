@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -14,7 +15,6 @@ from openai.types.responses import (
     ResponseStreamEvent,
     ResponseTextConfigParam,
     ToolParam,
-    WebSearchToolParam,
     response_create_params,
 )
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -39,6 +39,7 @@ from ..tool import (
 )
 from ..tracing import SpanError, response_span
 from ..usage import Usage
+from ..util._json import _to_dump_compatible
 from ..version import __version__
 from .interface import Model, ModelTracing
 
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
+
+# Override headers used by the Responses API.
+_HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
+    "openai_responses_headers_override", default=None
+)
 
 
 class OpenAIResponsesModel(Model):
@@ -75,7 +81,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
@@ -87,7 +94,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=False,
                     prompt=prompt,
                 )
@@ -150,7 +158,8 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
@@ -165,7 +174,8 @@ class OpenAIResponsesModel(Model):
                     tools,
                     output_schema,
                     handoffs,
-                    previous_response_id,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
                     stream=True,
                     prompt=prompt,
                 )
@@ -203,6 +213,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[True],
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncStream[ResponseStreamEvent]: ...
@@ -217,6 +228,7 @@ class OpenAIResponsesModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         previous_response_id: str | None,
+        conversation_id: str | None,
         stream: Literal[False],
         prompt: ResponsePromptParam | None = None,
     ) -> Response: ...
@@ -229,11 +241,13 @@ class OpenAIResponsesModel(Model):
         tools: list[Tool],
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
         stream: Literal[True] | Literal[False] = False,
         prompt: ResponsePromptParam | None = None,
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
+        list_input = _to_dump_compatible(list_input)
 
         parallel_tool_calls = (
             True
@@ -245,6 +259,7 @@ class OpenAIResponsesModel(Model):
 
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
+        converted_tools_payload = _to_dump_compatible(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
 
         include_set: set[str] = set(converted_tools.includes)
@@ -257,14 +272,25 @@ class OpenAIResponsesModel(Model):
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            input_json = json.dumps(
+                list_input,
+                indent=2,
+                ensure_ascii=False,
+            )
+            tools_json = json.dumps(
+                converted_tools_payload,
+                indent=2,
+                ensure_ascii=False,
+            )
             logger.debug(
                 f"Calling LLM {self.model} with input:\n"
-                f"{json.dumps(list_input, indent=2, ensure_ascii=False)}\n"
-                f"Tools:\n{json.dumps(converted_tools.tools, indent=2, ensure_ascii=False)}\n"
+                f"{input_json}\n"
+                f"Tools:\n{tools_json}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
                 f"Previous response id: {previous_response_id}\n"
+                f"Conversation id: {conversation_id}\n"
             )
 
         extra_args = dict(model_settings.extra_args or {})
@@ -278,11 +304,12 @@ class OpenAIResponsesModel(Model):
 
         return await self._client.responses.create(
             previous_response_id=self._non_null_or_not_given(previous_response_id),
+            conversation=self._non_null_or_not_given(conversation_id),
             instructions=self._non_null_or_not_given(system_instructions),
             model=self.model,
             input=list_input,
             include=include,
-            tools=converted_tools.tools,
+            tools=converted_tools_payload,
             prompt=self._non_null_or_not_given(prompt),
             temperature=self._non_null_or_not_given(model_settings.temperature),
             top_p=self._non_null_or_not_given(model_settings.top_p),
@@ -291,7 +318,7 @@ class OpenAIResponsesModel(Model):
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             text=response_format,
@@ -305,6 +332,13 @@ class OpenAIResponsesModel(Model):
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        return {
+            **_HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(_HEADERS_OVERRIDE.get() or {}),
+        }
 
 
 @dataclass
@@ -335,6 +369,11 @@ class Converter:
         elif tool_choice == "file_search":
             return {
                 "type": "file_search",
+            }
+        elif tool_choice == "web_search":
+            return {
+                # TODO: revist the type: ignore comment when ToolChoice is updated in the future
+                "type": "web_search",  # type: ignore [typeddict-item]
             }
         elif tool_choice == "web_search_preview":
             return {
@@ -416,12 +455,13 @@ class Converter:
             }
             includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
-            ws: WebSearchToolParam = {
-                "type": "web_search_preview",
+            # TODO: revist the type: ignore comment when ToolParam is updated in the future
+            converted_tool = {
+                "type": "web_search",
+                "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
                 "user_location": tool.user_location,
                 "search_context_size": tool.search_context_size,
             }
-            converted_tool = ws
             includes = None
         elif isinstance(tool, FileSearchTool):
             converted_tool = {

@@ -86,6 +86,17 @@ class RealtimeModelInputAudioTranscriptionCompletedEvent:
 
 
 @dataclass
+class RealtimeModelInputAudioTimeoutTriggeredEvent:
+    """Input audio timeout triggered."""
+
+    item_id: str
+    audio_start_ms: int
+    audio_end_ms: int
+
+    type: Literal["input_audio_timeout_triggered"] = "input_audio_timeout_triggered"
+
+
+@dataclass
 class RealtimeModelTranscriptDeltaEvent:
     """Partial transcript update."""
 
@@ -174,6 +185,7 @@ RealtimeModelEvent: TypeAlias = Union[
     RealtimeModelAudioEvent,
     RealtimeModelAudioInterruptedEvent,
     RealtimeModelAudioDoneEvent,
+    RealtimeModelInputAudioTimeoutTriggeredEvent,
     RealtimeModelInputAudioTranscriptionCompletedEvent,
     RealtimeModelTranscriptDeltaEvent,
     RealtimeModelItemUpdatedEvent,

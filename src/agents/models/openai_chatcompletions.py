@@ -23,8 +23,9 @@ from ..tracing import generation_span
 from ..tracing.span_data import GenerationSpanData
 from ..tracing.spans import Span
 from ..usage import Usage
+from ..util._json import _to_dump_compatible
 from .chatcmpl_converter import Converter
-from .chatcmpl_helpers import HEADERS, ChatCmplHelpers
+from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
@@ -55,7 +56,8 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,  # unused
+        conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
         with generation_span(
@@ -142,7 +144,8 @@ class OpenAIChatCompletionsModel(Model):
         output_schema: AgentOutputSchemaBase | None,
         handoffs: list[Handoff],
         tracing: ModelTracing,
-        previous_response_id: str | None,
+        previous_response_id: str | None = None,  # unused
+        conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
@@ -235,6 +238,8 @@ class OpenAIChatCompletionsModel(Model):
                     "role": "system",
                 },
             )
+        converted_messages = _to_dump_compatible(converted_messages)
+
         if tracing.include_data():
             span.span_data.input = converted_messages
 
@@ -253,12 +258,24 @@ class OpenAIChatCompletionsModel(Model):
         for handoff in handoffs:
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
+        converted_tools = _to_dump_compatible(converted_tools)
+
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
+            messages_json = json.dumps(
+                converted_messages,
+                indent=2,
+                ensure_ascii=False,
+            )
+            tools_json = json.dumps(
+                converted_tools,
+                indent=2,
+                ensure_ascii=False,
+            )
             logger.debug(
-                f"{json.dumps(converted_messages, indent=2, ensure_ascii=False)}\n"
-                f"Tools:\n{json.dumps(converted_tools, indent=2, ensure_ascii=False)}\n"
+                f"{messages_json}\n"
+                f"Tools:\n{tools_json}\n"
                 f"Stream: {stream}\n"
                 f"Tool choice: {tool_choice}\n"
                 f"Response format: {response_format}\n"
@@ -289,7 +306,7 @@ class OpenAIChatCompletionsModel(Model):
             reasoning_effort=self._non_null_or_not_given(reasoning_effort),
             verbosity=self._non_null_or_not_given(model_settings.verbosity),
             top_logprobs=self._non_null_or_not_given(model_settings.top_logprobs),
-            extra_headers={**HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             metadata=self._non_null_or_not_given(model_settings.metadata),
@@ -332,3 +349,10 @@ class OpenAIChatCompletionsModel(Model):
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        return {
+            **HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(HEADERS_OVERRIDE.get() or {}),
+        }

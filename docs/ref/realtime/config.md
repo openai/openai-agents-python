@@ -11,6 +11,7 @@
 ## Audio Configuration
 
 ::: agents.realtime.config.RealtimeInputAudioTranscriptionConfig
+::: agents.realtime.config.RealtimeInputAudioNoiseReductionConfig
 ::: agents.realtime.config.RealtimeTurnDetectionConfig
 
 ## Guardrails Settings

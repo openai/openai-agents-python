@@ -1,14 +1,24 @@
-from typing import Any
+import json
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import websockets
 
+from agents import Agent
 from agents.exceptions import UserError
+from agents.handoffs import handoff
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
     RealtimeModelToolCallEvent,
+)
+from agents.realtime.model_inputs import (
+    RealtimeModelSendAudio,
+    RealtimeModelSendInterrupt,
+    RealtimeModelSendSessionUpdate,
+    RealtimeModelSendToolOutput,
+    RealtimeModelSendUserInput,
 )
 from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
 
@@ -77,15 +87,134 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
                 assert (
                     call_args[1]["additional_headers"]["Authorization"] == "Bearer test-api-key-123"
                 )
-                assert call_args[1]["additional_headers"]["OpenAI-Beta"] == "realtime=v1"
+                assert call_args[1]["additional_headers"].get("OpenAI-Beta") is None
 
                 # Verify task was created for message listening
                 mock_create_task.assert_called_once()
 
                 # Verify internal state
                 assert model._websocket == mock_websocket
-                assert model._websocket_task is not None
-                assert model.model == "gpt-4o-realtime-preview"
+        assert model._websocket_task is not None
+        assert model.model == "gpt-4o-realtime-preview"
+
+    @pytest.mark.asyncio
+    async def test_session_update_includes_noise_reduction(self, model, mock_websocket):
+        """Session.update should pass through input_audio_noise_reduction config."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+                "input_audio_noise_reduction": {"type": "near_field"},
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update contains the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert session.get("audio", {}).get("input", {}).get("noise_reduction") == {
+            "type": "near_field"
+        }
+
+    @pytest.mark.asyncio
+    async def test_session_update_omits_noise_reduction_when_not_provided(
+        self, model, mock_websocket
+    ):
+        """Session.update should omit input_audio_noise_reduction when not provided."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update omits the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert "audio" in session and "input" in session["audio"]
+        assert "noise_reduction" not in session["audio"]["input"]
+
+    @pytest.mark.asyncio
+    async def test_connect_with_custom_headers_overrides_defaults(self, model, mock_websocket):
+        """If custom headers are provided, use them verbatim without adding defaults."""
+        # Even when custom headers are provided, the implementation still requires api_key.
+        config = {
+            "api_key": "unused-because-headers-override",
+            "headers": {"api-key": "azure-key", "x-custom": "1"},
+            "url": "wss://custom.example.com/realtime?model=custom",
+            # Use a valid realtime model name for session.update to validate.
+            "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                # Verify WebSocket connection used the provided URL
+                called_url = mock_connect.call_args[0][0]
+                assert called_url == "wss://custom.example.com/realtime?model=custom"
+
+                # Verify headers are exactly as provided and no defaults were injected
+                headers = mock_connect.call_args.kwargs["additional_headers"]
+                assert headers == {"api-key": "azure-key", "x-custom": "1"}
+                assert "Authorization" not in headers
+                assert "OpenAI-Beta" not in headers
 
     @pytest.mark.asyncio
     async def test_connect_with_callable_api_key(self, model, mock_websocket):
@@ -191,7 +320,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         mock_listener = AsyncMock()
         model.add_listener(mock_listener)
 
-        invalid_event = {"type": "response.audio.delta"}  # Missing required fields
+        invalid_event = {"type": "response.output_audio.delta"}  # Missing required fields
 
         await model._handle_ws_event(invalid_event)
 
@@ -230,7 +359,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Valid audio delta event (minimal required fields for OpenAI spec)
         audio_event = {
-            "type": "response.audio.delta",
+            "type": "response.output_audio.delta",
             "event_id": "event_123",
             "response_id": "resp_123",
             "item_id": "item_456",
@@ -255,6 +384,165 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         audio_state = model._audio_state_tracker.get_state("item_456", 0)
         assert audio_state is not None
         assert audio_state.audio_length_ms > 0  # Should have some audio length
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_output_item_added_and_done(self, model):
+        """response.output_item.added/done paths emit item updates."""
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        msg_added = {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "m1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "audio", "audio": "...", "transcript": "hi"},
+                ],
+            },
+        }
+        await model._handle_ws_event(msg_added)
+
+        msg_done = {
+            "type": "response.output_item.done",
+            "item": {
+                "id": "m1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "bye"}],
+            },
+        }
+        await model._handle_ws_event(msg_done)
+
+        # Ensure we emitted item_updated events for both cases
+        types = [c[0][0].type for c in listener.on_event.call_args_list]
+        assert types.count("item_updated") >= 2
+
+    # Note: response.created/done require full OpenAI response payload which is
+    # out-of-scope for unit tests here; covered indirectly via other branches.
+
+    @pytest.mark.asyncio
+    async def test_transcription_related_and_timeouts_and_speech_started(self, model, monkeypatch):
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        # Prepare tracker state to simulate ongoing audio
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"aaaa")
+        model._ongoing_response = True
+
+        # Patch sending to avoid websocket dependency
+        monkeypatch.setattr(
+            model,
+            "_send_raw_message",
+            AsyncMock(),
+        )
+
+        # Speech started should emit interrupted and cancel the response
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "event_id": "es1",
+                "item_id": "i1",
+                "audio_start_ms": 0,
+                "audio_end_ms": 1,
+            }
+        )
+
+        # Output transcript delta
+        await model._handle_ws_event(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "event_id": "e3",
+                "item_id": "i3",
+                "response_id": "r3",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "abc",
+            }
+        )
+
+        # Timeout triggered
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.timeout_triggered",
+                "event_id": "e4",
+                "item_id": "i4",
+                "audio_start_ms": 0,
+                "audio_end_ms": 100,
+            }
+        )
+
+        # raw + interrupted, raw + transcript delta, raw + timeout
+        assert listener.on_event.call_count >= 6
+        types = [call[0][0].type for call in listener.on_event.call_args_list]
+        assert "audio_interrupted" in types
+        assert "transcript_delta" in types
+        assert "input_audio_timeout_triggered" in types
+
+
+class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
+    @pytest.mark.asyncio
+    async def test_send_event_dispatch(self, model, monkeypatch):
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+
+        await model.send_event(RealtimeModelSendUserInput(user_input="hi"))
+        await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=False))
+        await model.send_event(RealtimeModelSendAudio(audio=b"a", commit=True))
+        await model.send_event(
+            RealtimeModelSendToolOutput(
+                tool_call=RealtimeModelToolCallEvent(name="t", call_id="c", arguments="{}"),
+                output="ok",
+                start_response=True,
+            )
+        )
+        await model.send_event(RealtimeModelSendInterrupt())
+        await model.send_event(RealtimeModelSendSessionUpdate(session_settings={"voice": "nova"}))
+
+        # user_input -> 2 raw messages (item.create + response.create)
+        # audio append -> 1, commit -> +1
+        # tool output -> 1
+        # interrupt -> 1
+        # session update -> 1
+        assert send_raw.await_count == 8
+
+    def test_add_remove_listener_and_tools_conversion(self, model):
+        listener = AsyncMock()
+        model.add_listener(listener)
+        model.add_listener(listener)
+        assert len(model._listeners) == 1
+        model.remove_listener(listener)
+        assert len(model._listeners) == 0
+
+        # tools conversion rejects non function tools and includes handoffs
+        with pytest.raises(UserError):
+            from agents.tool import Tool
+
+            class X:
+                name = "x"
+
+            model._tools_to_session_tools(cast(list[Tool], [X()]), [])
+
+        h = handoff(Agent(name="a"))
+        out = model._tools_to_session_tools([], [h])
+        assert out[0].name.startswith("transfer_to_")
+
+    def test_get_and_update_session_config(self, model):
+        settings = {
+            "model_name": "gpt-realtime",
+            "voice": "verse",
+            "output_audio_format": "g711_ulaw",
+            "modalities": ["audio"],
+            "input_audio_format": "pcm16",
+            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
+            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+        }
+        cfg = model._get_session_config(settings)
+        assert cfg.audio is not None and cfg.audio.output is not None
+        assert cfg.audio.output.voice == "verse"
 
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
@@ -326,7 +614,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Send multiple audio deltas to test cumulative timing
         audio_deltas = [
             {
-                "type": "response.audio.delta",
+                "type": "response.output_audio.delta",
                 "event_id": "event_1",
                 "response_id": "resp_1",
                 "item_id": "item_1",
@@ -335,7 +623,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "delta": "dGVzdA==",  # 4 bytes -> "test"
             },
             {
-                "type": "response.audio.delta",
+                "type": "response.output_audio.delta",
                 "event_id": "event_2",
                 "response_id": "resp_1",
                 "item_id": "item_1",

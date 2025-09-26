@@ -13,6 +13,10 @@ on:
       - 'docs/**'
       - mkdocs.yml
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   update-docs:
     if: "!contains(github.event.head_commit.message, 'Update all translated document pages')"
@@ -55,6 +59,10 @@ jobs:
         with:
           commit-message: "Update all translated document pages"
           title: "Update all translated document pages"
-          body: "Automated update of translated documentation"
+          body: |
+            Automated update of translated documentation.
+
+            Triggered by commit: [${{ github.event.head_commit.id }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.head_commit.id }}).
+            Message: `${{ github.event.head_commit.message }}`
           branch: update-translated-docs-${{ github.run_id }}
           delete-branch: true

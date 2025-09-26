@@ -28,11 +28,17 @@ from openai.types.responses import (
     ResponseTextDeltaEvent,
     ResponseUsage,
 )
-from openai.types.responses.response_reasoning_item import Summary
+from openai.types.responses.response_reasoning_item import Content, Summary
 from openai.types.responses.response_reasoning_summary_part_added_event import (
     Part as AddedEventPart,
 )
 from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
+from openai.types.responses.response_reasoning_text_delta_event import (
+    ResponseReasoningTextDeltaEvent,
+)
+from openai.types.responses.response_reasoning_text_done_event import (
+    ResponseReasoningTextDoneEvent,
+)
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from ..items import TResponseStreamEvent
@@ -56,6 +62,9 @@ class StreamingState:
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
+    # Store accumulated thinking text and signature for Anthropic compatibility
+    thinking_text: str = ""
+    thinking_signature: str | None = None
 
 
 class SequenceNumber:
@@ -95,7 +104,20 @@ class ChatCmplStreamHandler:
 
             delta = chunk.choices[0].delta
 
-            # Handle reasoning content
+            # Handle thinking blocks from Anthropic (for preserving signatures)
+            if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+                for block in delta.thinking_blocks:
+                    if isinstance(block, dict):
+                        # Accumulate thinking text
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            state.thinking_text += thinking_text
+                        # Store signature if present
+                        signature = block.get("signature")
+                        if signature:
+                            state.thinking_signature = signature
+
+            # Handle reasoning content for reasoning summaries
             if hasattr(delta, "reasoning_content"):
                 reasoning_content = delta.reasoning_content
                 if reasoning_content and not state.reasoning_content_index_and_output:
@@ -138,10 +160,55 @@ class ChatCmplStreamHandler:
                     )
 
                     # Create a new summary with updated text
-                    current_summary = state.reasoning_content_index_and_output[1].summary[0]
-                    updated_text = current_summary.text + reasoning_content
-                    new_summary = Summary(text=updated_text, type="summary_text")
-                    state.reasoning_content_index_and_output[1].summary[0] = new_summary
+                    current_content = state.reasoning_content_index_and_output[1].summary[0]
+                    updated_text = current_content.text + reasoning_content
+                    new_content = Summary(text=updated_text, type="summary_text")
+                    state.reasoning_content_index_and_output[1].summary[0] = new_content
+
+            # Handle reasoning content from 3rd party platforms
+            if hasattr(delta, "reasoning"):
+                reasoning_text = delta.reasoning
+                if reasoning_text and not state.reasoning_content_index_and_output:
+                    state.reasoning_content_index_and_output = (
+                        0,
+                        ResponseReasoningItem(
+                            id=FAKE_RESPONSES_ID,
+                            summary=[],
+                            content=[Content(text="", type="reasoning_text")],
+                            type="reasoning",
+                        ),
+                    )
+                    yield ResponseOutputItemAddedEvent(
+                        item=ResponseReasoningItem(
+                            id=FAKE_RESPONSES_ID,
+                            summary=[],
+                            content=[Content(text="", type="reasoning_text")],
+                            type="reasoning",
+                        ),
+                        output_index=0,
+                        type="response.output_item.added",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                if reasoning_text and state.reasoning_content_index_and_output:
+                    yield ResponseReasoningTextDeltaEvent(
+                        delta=reasoning_text,
+                        item_id=FAKE_RESPONSES_ID,
+                        output_index=0,
+                        content_index=0,
+                        type="response.reasoning_text.delta",
+                        sequence_number=sequence_number.get_and_increment(),
+                    )
+
+                    # Create a new summary with updated text
+                    if state.reasoning_content_index_and_output[1].content is None:
+                        state.reasoning_content_index_and_output[1].content = [
+                            Content(text="", type="reasoning_text")
+                        ]
+                    current_text = state.reasoning_content_index_and_output[1].content[0]
+                    updated_text = current_text.text + reasoning_text
+                    new_text_content = Content(text=updated_text, type="reasoning_text")
+                    state.reasoning_content_index_and_output[1].content[0] = new_text_content
 
             # Handle regular content
             if delta.content is not None:
@@ -344,17 +411,30 @@ class ChatCmplStreamHandler:
                         )
 
         if state.reasoning_content_index_and_output:
-            yield ResponseReasoningSummaryPartDoneEvent(
-                item_id=FAKE_RESPONSES_ID,
-                output_index=0,
-                summary_index=0,
-                part=DoneEventPart(
-                    text=state.reasoning_content_index_and_output[1].summary[0].text,
-                    type="summary_text",
-                ),
-                type="response.reasoning_summary_part.done",
-                sequence_number=sequence_number.get_and_increment(),
-            )
+            if (
+                state.reasoning_content_index_and_output[1].summary
+                and len(state.reasoning_content_index_and_output[1].summary) > 0
+            ):
+                yield ResponseReasoningSummaryPartDoneEvent(
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=0,
+                    summary_index=0,
+                    part=DoneEventPart(
+                        text=state.reasoning_content_index_and_output[1].summary[0].text,
+                        type="summary_text",
+                    ),
+                    type="response.reasoning_summary_part.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
+            elif state.reasoning_content_index_and_output[1].content is not None:
+                yield ResponseReasoningTextDoneEvent(
+                    item_id=FAKE_RESPONSES_ID,
+                    output_index=0,
+                    content_index=0,
+                    text=state.reasoning_content_index_and_output[1].content[0].text,
+                    type="response.reasoning_text.done",
+                    sequence_number=sequence_number.get_and_increment(),
+                )
             yield ResponseOutputItemDoneEvent(
                 item=state.reasoning_content_index_and_output[1],
                 output_index=0,
@@ -463,7 +543,19 @@ class ChatCmplStreamHandler:
 
         # include Reasoning item if it exists
         if state.reasoning_content_index_and_output:
-            outputs.append(state.reasoning_content_index_and_output[1])
+            reasoning_item = state.reasoning_content_index_and_output[1]
+            # Store thinking text in content and signature in encrypted_content
+            if state.thinking_text:
+                # Add thinking text as a Content object
+                if not reasoning_item.content:
+                    reasoning_item.content = []
+                reasoning_item.content.append(
+                    Content(text=state.thinking_text, type="reasoning_text")
+                )
+            # Store signature in encrypted_content
+            if state.thinking_signature:
+                reasoning_item.encrypted_content = state.thinking_signature
+            outputs.append(reasoning_item)
 
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:

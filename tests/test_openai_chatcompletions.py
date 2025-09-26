@@ -31,9 +31,10 @@ from agents import (
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIProvider,
+    __version__,
     generation_span,
 )
-from agents.models.chatcmpl_helpers import ChatCmplHelpers
+from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
@@ -77,6 +78,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Should have produced exactly one output message with one text part
@@ -129,6 +131,7 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert len(resp.output) == 1
@@ -182,6 +185,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Expect a message item followed by a function tool call item.
@@ -224,6 +228,7 @@ async def test_get_response_with_no_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert resp.output == []
@@ -365,6 +370,60 @@ def test_store_param():
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
+async def test_user_agent_header_chat_completions(override_ua):
+    called_kwargs: dict[str, Any] = {}
+    expected_ua = override_ua or f"Agents/Python {__version__}"
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            msg = ChatCompletionMessage(role="assistant", content="Hello")
+            choice = Choice(index=0, finish_reason="stop", message=msg)
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="fake",
+                object="chat.completion",
+                choices=[choice],
+                usage=None,
+            )
+
+    class DummyChatClient:
+        def __init__(self):
+            self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
+            self.base_url = "https://api.openai.com"
+
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyChatClient())  # type: ignore
+
+    if override_ua is not None:
+        token = HEADERS_OVERRIDE.set({"User-Agent": override_ua})
+    else:
+        token = None
+
+    try:
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+    finally:
+        if token is not None:
+            HEADERS_OVERRIDE.reset(token)
+
+    assert "extra_headers" in called_kwargs
+    assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
 
     client = AsyncOpenAI(base_url="http://www.notopenai.com")
     model_settings = ModelSettings()

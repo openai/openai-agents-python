@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession, TResponseInputItem
+from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
 from agents.exceptions import UserError
 
 from .fake_model import FakeModel
@@ -394,10 +394,57 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
             await run_agent_async(runner_method, agent, list_input, session=session)
 
         # Verify the error message explains the issue
-        assert "Cannot provide both a session and a list of input items" in str(exc_info.value)
-        assert "manually manage conversation history" in str(exc_info.value)
+        assert "list inputs require a `RunConfig.session_input_callback" in str(exc_info.value)
+        assert "to manage the history manually" in str(exc_info.value)
 
         session.close()
+
+
+@pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
+@pytest.mark.asyncio
+async def test_session_callback_prepared_input(runner_method):
+    """Test if the user passes a list of items and want to append them."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test_memory.db"
+
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+
+        # Session
+        session_id = "session_1"
+        session = SQLiteSession(session_id, db_path)
+
+        # Add first messages manually
+        initial_history: list[TResponseInputItem] = [
+            {"role": "user", "content": "Hello there."},
+            {"role": "assistant", "content": "Hi, I'm here to assist you."},
+        ]
+        await session.add_items(initial_history)
+
+        def filter_assistant_messages(history, new_input):
+            # Only include user messages from history
+            return [item for item in history if item["role"] == "user"] + new_input
+
+        new_turn_input = [{"role": "user", "content": "What your name?"}]
+        model.set_next_output([get_text_message("I'm gpt-4o")])
+
+        # Run the agent with the callable
+        await run_agent_async(
+            runner_method,
+            agent,
+            new_turn_input,
+            session=session,
+            run_config=RunConfig(session_input_callback=filter_assistant_messages),
+        )
+
+        expected_model_input = [
+            initial_history[0],  # From history
+            new_turn_input[0],  # New input
+        ]
+
+        assert len(model.last_turn_args["input"]) == 2
+        assert model.last_turn_args["input"] == expected_model_input
+
 
 @pytest.mark.asyncio
 async def test_sqlite_session_unicode_content():
@@ -437,9 +484,7 @@ async def test_sqlite_session_special_characters_and_sql_injection():
         items: list[TResponseInputItem] = [
             {"role": "user", "content": "O'Reilly"},
             {"role": "assistant", "content": "DROP TABLE sessions;"},
-            {"role": "user", "content": (
-                '"SELECT * FROM users WHERE name = \"admin\";"'
-            )},
+            {"role": "user", "content": ('"SELECT * FROM users WHERE name = "admin";"')},
             {"role": "assistant", "content": "Robert'); DROP TABLE students;--"},
             {"role": "user", "content": "Normal message"},
         ]
@@ -450,10 +495,11 @@ async def test_sqlite_session_special_characters_and_sql_injection():
         assert len(retrieved) == len(items)
         assert retrieved[0].get("content") == "O'Reilly"
         assert retrieved[1].get("content") == "DROP TABLE sessions;"
-        assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = \"admin\";"'
+        assert retrieved[2].get("content") == '"SELECT * FROM users WHERE name = "admin";"'
         assert retrieved[3].get("content") == "Robert'); DROP TABLE students;--"
         assert retrieved[4].get("content") == "Normal message"
         session.close()
+
 
 @pytest.mark.asyncio
 async def test_sqlite_session_concurrent_access():
@@ -461,6 +507,7 @@ async def test_sqlite_session_concurrent_access():
     Test concurrent access to the same session to verify data integrity.
     """
     import concurrent.futures
+
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_concurrent.db"
         session_id = "concurrent_test"
@@ -477,6 +524,7 @@ async def test_sqlite_session_concurrent_access():
             asyncio.set_event_loop(loop)
             loop.run_until_complete(session.add_items([item]))
             loop.close()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             executor.map(add_item, items)
 

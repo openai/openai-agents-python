@@ -88,7 +88,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         self._trace_include_sensitive_data = trace_include_sensitive_data
         self._trace_include_sensitive_audio_data = trace_include_sensitive_audio_data
 
-        self._input_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32]] = input.queue
+        self._input_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None] = input.queue
         self._output_queue: asyncio.Queue[str | ErrorSentinel | SessionCompleteSentinel] = (
             asyncio.Queue()
         )
@@ -163,11 +163,16 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         await self._websocket.send(
             json.dumps(
                 {
-                    "type": "transcription_session.update",
+                    "type": "session.update",
                     "session": {
-                        "input_audio_format": "pcm16",
-                        "input_audio_transcription": {"model": self._model},
-                        "turn_detection": self._turn_detection,
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {"model": self._model},
+                                "turn_detection": self._turn_detection,
+                            }
+                        },
                     },
                 }
             )
@@ -226,7 +231,10 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                     break
 
                 event_type = event.get("type", "unknown")
-                if event_type == "input_audio_transcription_completed":
+                if event_type in [
+                    "input_audio_transcription_completed",  # legacy
+                    "conversation.item.input_audio_transcription.completed",
+                ]:
                     transcript = cast(str, event.get("transcript", ""))
                     if len(transcript) > 0:
                         self._end_turn(transcript)
@@ -242,7 +250,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         await self._output_queue.put(SessionCompleteSentinel())
 
     async def _stream_audio(
-        self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32]]
+        self, audio_queue: asyncio.Queue[npt.NDArray[np.int16 | np.float32] | None]
     ) -> None:
         assert self._websocket is not None, "Websocket not initialized"
         self._start_turn()
@@ -275,7 +283,6 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
                 "wss://api.openai.com/v1/realtime?intent=transcription",
                 additional_headers={
                     "Authorization": f"Bearer {self._client.api_key}",
-                    "OpenAI-Beta": "realtime=v1",
                     "OpenAI-Log-Session": "1",
                 },
             ) as ws:
