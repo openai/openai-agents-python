@@ -2,17 +2,17 @@
 search:
   exclude: true
 ---
-# ストリーミング
+# 스트리밍
 
-ストリーミングは、エージェントの実行が進行するにつれて更新を購読できるようにします。これは、エンド ユーザーに進行状況の更新や部分的なレスポンスを表示するのに役立ちます。
+스트리밍은 에이전트 실행이 진행되는 동안 업데이트를 구독할 수 있게 해줍니다. 이는 최종 사용자에게 진행 상황 업데이트와 부분 응답을 보여줄 때 유용합니다.
 
-ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が得られます。`result.stream_events()` を呼び出すと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
+스트리밍을 위해 [`Runner.run_streamed()`][agents.run.Runner.run_streamed]를 호출하면 [`RunResultStreaming`][agents.result.RunResultStreaming]을 받습니다. `result.stream_events()`를 호출하면 아래에 설명된 [`StreamEvent`][agents.stream_events.StreamEvent] 객체의 비동기 스트림을 제공합니다.
 
-## Raw レスポンスイベント
+## 원문 응답 이벤트
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw イベントです。これは OpenAI Responses API フォーマットであり、各イベントにはタイプ（`response.created`、`response.output_text.delta` など）とデータがあります。これらのイベントは、生成され次第、ユーザーにレスポンスメッセージをストリーミングしたい場合に有用です。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent]는 LLM에서 직접 전달되는 원문 이벤트입니다. 이는 OpenAI Responses API 형식이며, 각 이벤트에는 타입(예: `response.created`, `response.output_text.delta` 등)과 데이터가 있습니다. 이 이벤트는 생성 즉시 사용자에게 응답 메시지를 스트리밍하고 싶을 때 유용합니다.
 
-例えば、これは LLM が生成するテキストをトークンごとに出力します。
+예를 들어, 다음은 LLM이 생성한 텍스트를 토큰 단위로 출력합니다.
 
 ```python
 import asyncio
@@ -35,11 +35,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 実行アイテムイベントとエージェントイベント
+## 실행 항목 이벤트 및 에이전트 이벤트
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを通知します。これにより、各トークンではなく「メッセージが生成された」「ツールが実行された」などのレベルで進行状況をプッシュできます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変わったとき（例: ハンドオフの結果として）の更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]s는 더 상위 수준의 이벤트입니다. 항목이 완전히 생성되었을 때 알려줍니다. 이를 통해 각 토큰 대신 "메시지 생성됨", "도구 실행됨" 등의 수준에서 진행 상황을 전달할 수 있습니다. 유사하게, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent]는 현재 에이전트가 변경될 때(예: 핸드오프의 결과로) 업데이트를 제공합니다.
 
-例えば、これは raw イベントを無視し、ユーザーへ更新をストリーミングします。
+예를 들어, 다음은 원문 이벤트를 무시하고 사용자에게 업데이트를 스트리밍합니다.
 
 ```python
 import asyncio

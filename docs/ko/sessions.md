@@ -2,13 +2,13 @@
 search:
   exclude: true
 ---
-# セッション
+# 세션
 
-Agents SDK は、複数のエージェント実行にまたがって会話履歴を自動的に保持する組み込みのセッションメモリを提供し、ターン間で手動で `.to_input_list()` を扱う必要をなくします。
+Agents SDK 는 여러 에이전트 실행(run) 간 대화 기록을 자동으로 유지하는 빌트인 세션 메모리를 제공하여, 턴마다 `.to_input_list()` 를 수동으로 처리할 필요를 없앱니다.
 
-セッションは特定のセッションに対して会話履歴を保存し、明示的な手動メモリ管理なしでエージェントがコンテキストを維持できるようにします。これは、エージェントに以前のやり取りを記憶させたいチャットアプリケーションやマルチターンの会話を構築する際に特に有用です。
+세션은 특정 세션에 대한 대화 기록을 저장하여, 명시적인 수동 메모리 관리 없이도 에이전트가 컨텍스트를 유지할 수 있게 합니다. 이는 에이전트가 이전 상호작용을 기억하기를 원하는 채팅 애플리케이션이나 멀티 턴 대화를 구축할 때 특히 유용합니다.
 
-## クイックスタート
+## 빠른 시작
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -47,21 +47,21 @@ result = Runner.run_sync(
 print(result.final_output)  # "Approximately 39 million"
 ```
 
-## 仕組み
+## 동작 방식
 
-セッションメモリが有効な場合:
+세션 메모리가 활성화되면:
 
-1. **各実行の前**: Runner はセッションの会話履歴を自動的に取得し、入力アイテムの先頭に追加します。
-2. **各実行の後**: 実行中に生成された新しいすべてのアイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）は、自動的にセッションに保存されます。
-3. **コンテキストの維持**: 同じセッションでの後続の各実行には完全な会話履歴が含まれ、エージェントはコンテキストを維持できます。
+1. **각 실행 전**: 러너가 세션의 대화 기록을 자동으로 가져와 입력 아이템 앞에 추가합니다
+2. **각 실행 후**: 실행 중 생성된 모든 새 아이템(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 자동으로 세션에 저장됩니다
+3. **컨텍스트 유지**: 동일한 세션으로 이어지는 이후 실행에는 전체 대화 기록이 포함되어 에이전트가 컨텍스트를 유지할 수 있습니다
 
-これにより、手動で `.to_input_list()` を呼び出し、実行間で会話状態を管理する必要がなくなります。
+이는 실행 간 대화 상태를 관리하고 `.to_input_list()` 를 수동으로 호출해야 하는 필요를 없앱니다.
 
-## メモリ操作
+## 메모리 작업
 
-### 基本操作
+### 기본 작업
 
-セッションは、会話履歴を管理するためにいくつかの操作をサポートします:
+세션은 대화 기록을 관리하기 위한 여러 작업을 지원합니다:
 
 ```python
 from agents import SQLiteSession
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### 修正のための `pop_item` の使用
+### 수정용 pop_item 사용
 
-`pop_item` メソッドは、会話の最後のアイテムを取り消したり変更したりしたい場合に特に有用です:
+`pop_item` 메서드는 대화에서 마지막 아이템을 되돌리거나 수정하려는 경우 특히 유용합니다:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -117,19 +117,19 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## メモリオプション
+## 메모리 옵션
 
-### メモリなし（デフォルト）
+### 메모리 없음(기본값)
 
 ```python
 # Default behavior - no session memory
 result = await Runner.run(agent, "Hello")
 ```
 
-### OpenAI Conversations API メモリ
+### OpenAI Conversations API 메모리
 
-[OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api) を使用して、
-独自のデータベースを管理することなく会話状態を永続化します。これは、会話履歴の保存に OpenAI ホストのインフラストラクチャにすでに依存している場合に役立ちます。
+[OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api)를 사용하여
+직접 데이터베이스를 관리하지 않고도 대화 상태를 지속합니다. 이미 대화 기록 저장을 위해 OpenAI 호스팅 인프라에 의존하고 있는 경우 유용합니다.
 
 ```python
 from agents import OpenAIConversationsSession
@@ -146,7 +146,7 @@ result = await Runner.run(
 )
 ```
 
-### SQLite メモリ
+### SQLite 메모리
 
 ```python
 from agents import SQLiteSession
@@ -165,7 +165,7 @@ result = await Runner.run(
 )
 ```
 
-### 複数セッション
+### 다중 세션
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -188,13 +188,13 @@ result2 = await Runner.run(
 )
 ```
 
-### SQLAlchemy ベースのセッション
+### SQLAlchemy 기반 세션
 
-より高度なユースケースでは、SQLAlchemy 駆動のセッションバックエンドを使用できます。これにより、セッションの保存に SQLAlchemy がサポートするあらゆるデータベース（PostgreSQL、MySQL、SQLite など）を使用できます。
+더 고급 사용 사례의 경우 SQLAlchemy 기반 세션 백엔드를 사용할 수 있습니다. 이를 통해 세션 저장소로 SQLAlchemy 가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 사용할 수 있습니다.
 
-**例 1: `from_url` とインメモリ SQLite の使用**
+**예시 1: 인메모리 SQLite 와 `from_url` 사용**
 
-これは最も簡単な入門方法で、開発やテストに最適です。
+개발 및 테스트에 적합한 가장 간단한 시작 방법입니다.
 
 ```python
 import asyncio
@@ -215,9 +215,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-**例 2: 既存の SQLAlchemy エンジンの使用**
+**예시 2: 기존 SQLAlchemy 엔진 사용**
 
-本番アプリケーションでは、すでに SQLAlchemy の `AsyncEngine` インスタンスを持っている可能性があります。これをセッションに直接渡せます。
+프로덕션 애플리케이션에서는 이미 SQLAlchemy `AsyncEngine` 인스턴스를 보유하고 있을 가능성이 높습니다. 이를 세션에 직접 전달할 수 있습니다.
 
 ```python
 import asyncio
@@ -246,9 +246,9 @@ if __name__ == "__main__":
 ```
 
 
-## カスタムメモリ実装
+## 커스텀 메모리 구현
 
-[`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成することで、独自のセッションメモリを実装できます:
+[`Session`][agents.memory.session.Session] 프로토콜을 따르는 클래스를 만들어 자체 세션 메모리를 구현할 수 있습니다:
 
 ```python
 from agents.memory.session import SessionABC
@@ -291,25 +291,25 @@ result = await Runner.run(
 )
 ```
 
-## セッション管理
+## 세션 관리
 
-### セッション ID の命名
+### 세션 ID 네이밍
 
-会話を整理しやすい意味のあるセッション ID を使用します:
+대화를 정리하는 데 도움이 되는 의미 있는 세션 ID를 사용하세요:
 
-- ユーザー単位: `"user_12345"`
-- スレッド単位: `"thread_abc123"`
-- コンテキスト単位: `"support_ticket_456"`
+- User 기반: `"user_12345"`
+- 스레드 기반: `"thread_abc123"`
+- 컨텍스트 기반: `"support_ticket_456"`
 
-### メモリ永続化
+### 메모리 지속성
 
-- 一時的な会話にはインメモリ SQLite（`SQLiteSession("session_id")`）を使用します
-- 永続的な会話にはファイルベースの SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用します
-- 既存のデータベースがある本番システムには SQLAlchemy ベースのセッション（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）を使用します（SQLAlchemy がサポートするデータベース）
-- OpenAI ホストのストレージ（`OpenAIConversationsSession()`）は、履歴を OpenAI Conversations API に保存したい場合に使用します
-- より高度なユースケースでは、他の本番システム（Redis、Django など）向けにカスタムセッションバックエンドの実装を検討します
+- 임시 대화에는 인메모리 SQLite (`SQLiteSession("session_id")`) 사용
+- 지속적 대화에는 파일 기반 SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) 사용
+- SQLAlchemy 가 지원하는 기존 데이터베이스를 사용하는 프로덕션 시스템에는 SQLAlchemy 기반 세션 (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) 사용
+- 기록을 OpenAI Conversations API 에 저장하기를 원할 때는 OpenAI 호스티드 스토리지 (`OpenAIConversationsSession()`) 사용
+- 더 고급 사용 사례를 위해 다른 프로덕션 시스템(Redis, Django 등)에 맞춘 커스텀 세션 백엔드 구현 고려
 
-### セッション管理
+### 세션 관리
 
 ```python
 # Clear a session when conversation should start fresh
@@ -333,9 +333,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 完全な例
+## 전체 예제
 
-セッションメモリの動作を示す完全な例です:
+세션 메모리가 동작하는 전체 예제는 다음과 같습니다:
 
 ```python
 import asyncio
@@ -397,11 +397,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## API リファレンス
+## API 레퍼런스
 
-詳細な API ドキュメントは以下をご覧ください:
+자세한 API 문서는 다음을 참고하세요:
 
-- [`Session`][agents.memory.Session] - プロトコル インターフェース
-- [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 実装
-- [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 実装
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy ベースの実装
+- [`Session`][agents.memory.Session] - 프로토콜 인터페이스
+- [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 구현
+- [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 구현
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 기반 구현

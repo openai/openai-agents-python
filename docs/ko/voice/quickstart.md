@@ -2,23 +2,23 @@
 search:
   exclude: true
 ---
-# クイックスタート
+# 빠른 시작
 
-## 前提条件
+## 사전 준비
 
-Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK から音声用のオプション依存関係をインストールします。
+Agents SDK의 기본 [빠른 시작 안내](../quickstart.md)를 따라 가상 환경을 설정했는지 확인하세요. 그런 다음 SDK에서 선택적 음성 관련 종속성을 설치합니다:
 
 ```bash
 pip install 'openai-agents[voice]'
 ```
 
-## 概念
+## 개념
 
-主な概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは 3 ステップのプロセスです。
+핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 3단계 프로세스입니다:
 
-1. 音声認識モデルを実行して、音声をテキストに変換します。
-2. 通常はエージェント主導のワークフローであるあなたのコードを実行して、結果を生成します。
-3. 音声合成モデルを実行して、結果のテキストを音声に戻します。
+1. 음성을 텍스트로 변환하기 위해 음성 인식 모델을 실행
+2. 결과를 생성하기 위해 보통 에이전트 기반 워크플로인 코드를 실행
+3. 결과 텍스트를 다시 음성으로 변환하기 위해 음성 합성 모델을 실행
 
 ```mermaid
 graph LR
@@ -46,9 +46,9 @@ graph LR
 
 ```
 
-## エージェント
+## 에이전트
 
-まず、いくつかのエージェントを設定します。すでにこの SDK でエージェントを作成したことがあれば、見覚えがあるはずです。ここでは、複数のエージェント、ハンドオフ、そしてツールを用意します。
+먼저 에이전트를 몇 개 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙할 것입니다. 에이전트 두 개와 핸드오프, 그리고 도구를 사용합니다.
 
 ```python
 import asyncio
@@ -90,16 +90,16 @@ agent = Agent(
 )
 ```
 
-## 音声パイプライン
+## 음성 파이프라인
 
-ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用して、シンプルな音声パイプラインを設定します。
+[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]를 워크플로로 사용해 간단한 음성 파이프라인을 설정하겠습니다.
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
-## パイプラインの実行
+## 파이프라인 실행
 
 ```python
 import numpy as np
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 統合
+## 모두 합치기
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモについては、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。
+이 예제를 실행하면 에이전트가 직접 말합니다! [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) 예제를 확인해 직접 에이전트와 대화해 보세요.

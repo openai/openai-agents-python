@@ -2,11 +2,11 @@
 search:
   exclude: true
 ---
-# クイックスタート
+# 빠른 시작
 
-## プロジェクトと仮想環境の作成
+## 프로젝트 및 가상 환경 생성
 
-これは最初の一度だけ実行すれば十分です。
+한 번만 수행하면 됩니다.
 
 ```bash
 mkdir my_project
@@ -14,31 +14,31 @@ cd my_project
 python -m venv .venv
 ```
 
-### 仮想環境の有効化
+### 가상 환경 활성화
 
-新しいターミナルセッションを開始するたびに実行します。
+새 터미널 세션을 시작할 때마다 수행하세요.
 
 ```bash
 source .venv/bin/activate
 ```
 
-### Agents SDK のインストール
+### Agents SDK 설치
 
 ```bash
 pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
-### OpenAI API キーの設定
+### OpenAI API 키 설정
 
-まだお持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従って OpenAI API キーを作成してください。
+API 키가 없다면 [이 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따라 OpenAI API 키를 생성하세요.
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 最初のエージェントの作成
+## 첫 에이전트 생성
 
-エージェントは instructions、名前、任意の構成（`model_config` など）で定義します。
+에이전트는 instructions, 이름, 선택적 config(예: `model_config`)로 정의됩니다.
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## エージェントの追加
+## 에이전트 추가
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを決定するための追加コンテキストを提供します。
+추가 에이전트도 동일한 방식으로 정의할 수 있습니다. `handoff_descriptions`는 핸드오프 라우팅을 결정하는 데 필요한 추가 컨텍스트를 제공합니다.
 
 ```python
 from agents import Agent
@@ -69,9 +69,9 @@ math_tutor_agent = Agent(
 )
 ```
 
-## ハンドオフの定義
+## 핸드오프 정의
 
-各エージェントごとに、タスクを前進させる方法を判断するために選択できる送出側ハンドオフ候補の一覧を定義できます。
+각 에이전트에서, 작업 진행 방식을 결정하기 위해 선택할 수 있는 아웃바운드 핸드오프 옵션의 목록을 정의할 수 있습니다.
 
 ```python
 triage_agent = Agent(
@@ -81,9 +81,9 @@ triage_agent = Agent(
 )
 ```
 
-## エージェントオーケストレーションの実行
+## 에이전트 오케스트레이션 실행
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
+워크플로가 실행되고 분류 에이전트가 두 전문 에이전트 간에 올바르게 라우팅하는지 확인해 봅시다.
 
 ```python
 from agents import Runner
@@ -93,9 +93,9 @@ async def main():
     print(result.final_output)
 ```
 
-## ガードレールの追加
+## 가드레일 추가
 
-入力または出力に対して実行するカスタム ガードレールを定義できます。
+입력 또는 출력에 대해 실행할 사용자 정의 가드레일을 정의할 수 있습니다.
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## すべてを組み合わせる
+## 전체 통합
 
-ハンドオフと入力ガードレールを用いて、すべてを組み合わせてワークフロー全体を実行しましょう。
+모두 통합하여 핸드오프와 입력 가드레일을 사용해 전체 워크플로를 실행해 봅시다.
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -190,14 +190,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの表示
+## 트레이스 보기
 
-エージェントの実行中に何が起きたかを確認するには、[OpenAI Dashboard の Trace viewer](https://platform.openai.com/traces) に移動し、エージェントのトレースを表示します。
+에이전트 실행 중에 어떤 일이 발생했는지 검토하려면 [OpenAI 대시보드의 Trace viewer](https://platform.openai.com/traces)로 이동해 실행 트레이스를 확인하세요.
 
-## 次のステップ
+## 다음 단계
 
-より複雑なエージェント フローの構築方法を学びましょう:
+더 복잡한 에이전트 플로우를 만드는 방법을 알아보세요:
 
-- エージェントの設定方法について学びます: [エージェント](agents.md)。
-- [エージェントの実行](running_agents.md) について学びます。
-- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学びます。
+- 에이전트 구성 방법을 알아보세요: [에이전트](agents.md)
+- 에이전트 실행에 대해 알아보세요: [에이전트 실행](running_agents.md)
+- [도구](tools.md), [가드레일](guardrails.md), [모델](models/index.md)에 대해 알아보세요.
