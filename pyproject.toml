@@ -1,6 +1,6 @@
 [project]
 name = "openai-agents"
-version = "0.3.1"
+version = "0.3.2"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,6 +40,7 @@ litellm = ["litellm>=1.67.4.post1, <2"]
 realtime = ["websockets>=15.0, <16"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
+redis = ["redis>=6.4.0"]
 
 [dependency-groups]
 dev = [
@@ -67,6 +68,7 @@ dev = [
     "fastapi >= 0.110.0, <1",
     "aiosqlite>=0.21.0",
     "cryptography>=45.0, <46",
+    "fakeredis>=2.31.3",
 ]
 
 [tool.uv.workspace]

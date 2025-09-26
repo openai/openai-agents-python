@@ -68,6 +68,7 @@ from .stream_events import (
     StreamEvent,
 )
 from .tool import Tool
+from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
@@ -494,6 +495,8 @@ class AgentRunner:
             )
 
             input_guardrail_results: list[InputGuardrailResult] = []
+            tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+            tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
             current_span: Span[AgentSpanData] | None = None
             current_agent = starting_agent
@@ -584,6 +587,10 @@ class AgentRunner:
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
 
+                    # Collect tool guardrail results from this turn
+                    tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
+                    tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
+
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
                         output_guardrail_results = await self._run_output_guardrails(
                             current_agent.output_guardrails + (run_config.output_guardrails or []),
@@ -599,6 +606,8 @@ class AgentRunner:
                             _last_agent=current_agent,
                             input_guardrail_results=input_guardrail_results,
                             output_guardrail_results=output_guardrail_results,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
                         await self._save_result_to_session(session, [], turn_result.new_step_items)
@@ -706,6 +715,8 @@ class AgentRunner:
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
