@@ -21,7 +21,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-4o-mini",
+    model="gpt-4.1",
 )
 
 agent = Agent(
@@ -29,7 +29,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
     ),
-    model="gpt-4o-mini",
+    model="gpt-4.1",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )
