@@ -4,32 +4,32 @@ search:
 ---
 # Model context protocol (MCP)
 
-[Model context protocol](https://modelcontextprotocol.io/introduction) (MCP) は、アプリケーションがツールとコンテキストを言語モデルに公開する方法を標準化します。公式ドキュメントより:
+[Model context protocol](https://modelcontextprotocol.io/introduction) (MCP) は、アプリケーションがツールやコンテキストを言語モデルに公開する方法を標準化します。公式ドキュメントより:
 
-> MCP は、アプリケーションが LLM にコンテキストを提供する方法を標準化するオープンなプロトコルです。MCP は AI アプリケーションのための USB‑C ポートのようなものだと考えてください。USB‑C がデバイスをさまざまな周辺機器やアクセサリに接続する標準的な方法を提供するのと同様に、MCP は AI モデルをさまざまなデータソースやツールに接続する標準的な方法を提供します。
+> MCP は、アプリケーションが LLMs にコンテキストを提供する方法を標準化するオープンプロトコルです。MCP は AI アプリケーションのための USB-C ポートのようなものです。USB-C がデバイスをさまざまな周辺機器やアクセサリに標準化された方法で接続できるのと同様に、MCP は AI モデルをさまざまなデータソースやツールに標準化された方法で接続します。
 
-Agents Python SDK は複数の MCP トランスポートを理解します。これにより、既存の MCP サーバーを再利用したり、独自に構築してファイルシステム、HTTP、またはコネクタに裏付けられたツールをエージェントに公開できます。
+Agents Python SDK は複数の MCP トランスポートに対応しています。これにより、既存の MCP サーバーを再利用したり、ファイルシステム、HTTP、またはコネクタで支えられたツールをエージェントに公開するために独自のサーバーを構築したりできます。
 
 ## Choosing an MCP integration
 
-MCP サーバーをエージェントに接続する前に、ツール呼び出しをどこで実行するか、どのトランスポートに到達できるかを決めます。以下のマトリクスは Python SDK がサポートするオプションをまとめたものです。
+エージェントに MCP サーバーを接続する前に、ツール呼び出しをどこで実行するか、どのトランスポートに到達できるかを決めます。以下のマトリクスは Python SDK がサポートするオプションの概要です。
 
-| What you need                                                                        | Recommended option                                    |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| モデルに代わって OpenAI の Responses API が公開到達可能な MCP サーバーを呼び出すようにする | **Hosted MCP server tools** 経由の [`HostedMCPTool`][agents.tool.HostedMCPTool] |
-| ローカルまたはリモートで稼働する Streamable HTTP サーバーに接続する                         | **Streamable HTTP MCP servers** 経由の [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] |
-| Server‑Sent Events を実装する HTTP サーバーと通信する                                   | **HTTP with SSE MCP servers** 経由の [`MCPServerSse`][agents.mcp.server.MCPServerSse] |
-| ローカルプロセスを起動し stdin/stdout 経由で通信する                                      | **stdio MCP servers** 経由の [`MCPServerStdio`][agents.mcp.server.MCPServerStdio] |
+| 必要なこと                                                                              | 推奨オプション                                              |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| モデルの代わりに OpenAI の Responses API からパブリックに到達可能な MCP サーバーを呼び出す | [`HostedMCPTool`][agents.tool.HostedMCPTool] による **Hosted MCP server tools** |
+| ローカルまたはリモートで実行する Streamable HTTP サーバーに接続する                      | [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] による **Streamable HTTP MCP servers** |
+| Server-Sent Events を用いた HTTP を実装するサーバーと通信する                            | [`MCPServerSse`][agents.mcp.server.MCPServerSse] による **HTTP with SSE MCP servers** |
+| ローカルプロセスを起動して stdin/stdout 経由で通信する                                   | [`MCPServerStdio`][agents.mcp.server.MCPServerStdio] による **stdio MCP servers** |
 
-以下のセクションでは各オプションの使い方、設定方法、どのトランスポートを選ぶべきかを説明します。
+以下のセクションでは、それぞれのオプションの設定方法と、どのトランスポートを選ぶべきかを説明します。
 
 ## 1. Hosted MCP server tools
 
-Hosted ツールは、ツールの往復処理全体を OpenAI のインフラに委ねます。あなたのコードがツールの列挙や呼び出しを行う代わりに、[`HostedMCPTool`][agents.tool.HostedMCPTool] が Responses API にサーバーのラベル（および任意のコネクタメタデータ）を転送します。モデルはリモートサーバーのツールを列挙し、あなたの Python プロセスへの追加のコールバックなしにそれらを呼び出します。Hosted ツールは現在、Responses API の hosted MCP 連携をサポートする OpenAI モデルで動作します。
+ホスト型ツールは、ツールの往復処理全体を OpenAI のインフラストラクチャに移します。コードでツールの列挙や呼び出しを行う代わりに、[`HostedMCPTool`][agents.tool.HostedMCPTool] はサーバーラベル（および任意のコネクタメタデータ）を Responses API に転送します。モデルはリモートサーバーのツールを列挙し、Python プロセスへの追加のコールバックなしでそれらを呼び出します。ホスト型ツールは現在、Responses API の hosted MCP 連携をサポートする OpenAI モデルで動作します。
 
 ### Basic hosted MCP tool
 
-エージェントの `tools` リストに [`HostedMCPTool`][agents.tool.HostedMCPTool] を追加して hosted ツールを作成します。`tool_config` 辞書は REST API に送る JSON を反映します:
+エージェントの `tools` リストに [`HostedMCPTool`][agents.tool.HostedMCPTool] を追加してホスト型ツールを作成します。`tool_config` 辞書は REST API に送る JSON と同じ構造です:
 
 ```python
 import asyncio
@@ -57,11 +57,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Hosted サーバーは自動的にそのツールを公開します。`mcp_servers` に追加する必要はありません。
+ホストされたサーバーは自動的にそのツールを公開します。`mcp_servers` に追加する必要はありません。
 
 ### Streaming hosted MCP results
 
-Hosted ツールは、関数ツールとまったく同じ方法で結果の ストリーミング をサポートします。`Runner.run_streamed` に `stream=True` を渡すと、モデルの処理中に増分的な MCP 出力を消費できます:
+ホスト型ツールは、関数ツールとまったく同じ方法でストリーミング結果をサポートします。`Runner.run_streamed` に `stream=True` を渡すと、モデルが実行中でも増分的な MCP 出力を消費できます:
 
 ```python
 result = Runner.run_streamed(agent, "Summarise this repository's top languages")
@@ -73,7 +73,7 @@ print(result.final_output)
 
 ### Optional approval flows
 
-サーバーが機微な操作を実行できる場合、各ツール実行の前に人間またはプログラムによる承認を必須にできます。`tool_config` の `require_approval` を単一のポリシー（`"always"`、`"never"`）またはツール名からポリシーへの辞書で設定します。判断を Python 内で行うには、`on_approval_request` コールバックを指定します。
+サーバーが機微な操作を実行できる場合、各ツール実行の前に人間またはプログラムによる承認を必須にできます。`tool_config` の `require_approval` を単一のポリシー（`"always"`、`"never"`）またはツール名からポリシーへの辞書で設定します。Python 内で判断するには、`on_approval_request` コールバックを指定します。
 
 ```python
 from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
@@ -101,11 +101,11 @@ agent = Agent(
 )
 ```
 
-コールバックは同期・非同期のいずれでもかまわず、モデルが実行を継続するために承認データを必要とするたびに呼び出されます。
+コールバックは同期・非同期のどちらでもよく、モデルが継続実行に必要な承認データを求めるたびに呼び出されます。
 
 ### Connector-backed hosted servers
 
-Hosted MCP は OpenAI コネクタもサポートします。`server_url` を指定する代わりに、`connector_id` とアクセストークンを指定します。Responses API が認証を処理し、hosted サーバーがコネクタのツールを公開します。
+Hosted MCP は OpenAI コネクタにも対応しています。`server_url` を指定する代わりに、`connector_id` とアクセストークンを指定します。Responses API が認証を処理し、ホストされたサーバーがコネクタのツールを公開します。
 
 ```python
 import os
@@ -121,13 +121,13 @@ HostedMCPTool(
 )
 ```
 
-ストリーミング、承認、コネクタを含む完全な Hosted ツールのサンプルは
+ストリーミング、承認、コネクタを含む完全なホスト型ツールのサンプルは
 [`examples/hosted_mcp`](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) にあります。
 
 ## 2. Streamable HTTP MCP servers
 
-ネットワーク接続を自分で管理したい場合は
-[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] を使用します。Streamable HTTP サーバーは、トランスポートを自分で制御したい場合や、自身のインフラ内でサーバーを稼働させつつ遅延を低く保ちたい場合に最適です。
+ネットワーク接続を自分で管理したい場合は、
+[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] を使用します。Streamable HTTP サーバーは、トランスポートを自分で制御したい場合や、レイテンシを低く保ちながら自社インフラ内でサーバーを実行したい場合に最適です。
 
 ```python
 import asyncio
@@ -162,23 +162,23 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-コンストラクターは追加のオプションを受け付けます:
+コンストラクタは次の追加オプションを受け付けます:
 
 - `client_session_timeout_seconds` は HTTP の読み取りタイムアウトを制御します。
-- `use_structured_content` は `tool_result.structured_content` をテキスト出力より優先するかを切り替えます。
+- `use_structured_content` は、テキスト出力よりも `tool_result.structured_content` を優先するかどうかを切り替えます。
 - `max_retry_attempts` と `retry_backoff_seconds_base` は `list_tools()` と `call_tool()` に自動リトライを追加します。
-- `tool_filter` は公開するツールのサブセットのみを露出できます（[Tool filtering](#tool-filtering) を参照）。
+- `tool_filter` は公開するツールのサブセットを制限できます（[Tool filtering](#tool-filtering) を参照）。
 
 ## 3. HTTP with SSE MCP servers
 
 MCP サーバーが HTTP with SSE トランスポートを実装している場合は、
-[`MCPServerSse`][agents.mcp.server.MCPServerSse] をインスタンス化します。トランスポート以外は、API は Streamable HTTP サーバーと同一です。
+[`MCPServerSse`][agents.mcp.server.MCPServerSse] をインスタンス化します。トランスポート以外の API は Streamable HTTP サーバーと同一です。
 
 ```python
 
 from agents import Agent, Runner
 from agents.model_settings import ModelSettings
-from mcp import MCPServerSse
+from agents.mcp import MCPServerSse
 
 workspace_id = "demo-workspace"
 
@@ -201,7 +201,7 @@ async with MCPServerSse(
 
 ## 4. stdio MCP servers
 
-ローカルのサブプロセスとして実行する MCP サーバーには [`MCPServerStdio`][agents.mcp.server.MCPServerStdio] を使用します。SDK はプロセスを起動し、パイプを開いたままにし、コンテキストマネージャが終了すると自動的に閉じます。これは迅速なプロトタイプや、サーバーがコマンドラインのエントリポイントのみを公開している場合に便利です。
+ローカルのサブプロセスとして動作する MCP サーバーには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] を使用します。SDK はプロセスを起動し、パイプを開いたままにし、コンテキストマネージャの終了時に自動的にクローズします。これは、迅速なプロトタイプや、サーバーがコマンドラインのエントリポイントのみを公開している場合に役立ちます。
 
 ```python
 from pathlib import Path
@@ -229,11 +229,11 @@ async with MCPServerStdio(
 
 ## Tool filtering
 
-各 MCP サーバーはツールフィルターをサポートしており、エージェントに必要な関数のみを公開できます。フィルタリングは構築時にも、実行ごとの動的設定でも可能です。
+各 MCP サーバーはツールフィルターをサポートしており、エージェントに必要な関数だけを公開できます。フィルタリングは構築時にも、実行ごとに動的にも行えます。
 
 ### Static tool filtering
 
-[`create_static_tool_filter`][agents.mcp.create_static_tool_filter] を使用して、簡単な許可/ブロックリストを設定します:
+[`create_static_tool_filter`][agents.mcp.create_static_tool_filter] を使用して、単純な許可/ブロックリストを構成します:
 
 ```python
 from pathlib import Path
@@ -251,11 +251,11 @@ filesystem_server = MCPServerStdio(
 )
 ```
 
-`allowed_tool_names` と `blocked_tool_names` の両方が指定された場合、SDK はまず許可リストを適用し、その後残りの集合からブロック対象のツールを取り除きます。
+`allowed_tool_names` と `blocked_tool_names` の両方が指定された場合、SDK はまず許可リストを適用し、その後に残りの集合からブロック対象のツールを除外します。
 
 ### Dynamic tool filtering
 
-より精緻なロジックには、[`ToolFilterContext`][agents.mcp.ToolFilterContext] を受け取る呼び出し可能オブジェクトを渡します。これは同期・非同期のいずれでもよく、ツールを公開すべき場合に `True` を返します。
+より複雑なロジックには、[`ToolFilterContext`][agents.mcp.ToolFilterContext] を受け取る呼び出し可能オブジェクトを渡します。同期・非同期のどちらでもよく、ツールを公開すべきときに `True` を返します。
 
 ```python
 from pathlib import Path
@@ -286,7 +286,7 @@ async with MCPServerStdio(
 MCP サーバーは、エージェントの instructions を動的に生成する Prompts も提供できます。Prompts をサポートするサーバーは次の 2 つのメソッドを公開します:
 
 - `list_prompts()` は利用可能なプロンプトテンプレートを列挙します。
-- `get_prompt(name, arguments)` は、必要に応じてパラメーター付きの具体的なプロンプトを取得します。
+- `get_prompt(name, arguments)` は、必要に応じてパラメーター付きで具体的なプロンプトを取得します。
 
 ```python
 from agents import Agent
@@ -306,13 +306,13 @@ agent = Agent(
 
 ## Caching
 
-各エージェント実行は、各 MCP サーバーに対して `list_tools()` を呼び出します。リモートサーバーは顕著なレイテンシーを招く可能性があるため、すべての MCP サーバークラスは `cache_tools_list` オプションを公開しています。ツール定義が頻繁に変わらないと確信できる場合にのみ `True` に設定してください。後で新しいリストを強制するには、サーバーインスタンスで `invalidate_tools_cache()` を呼び出します。
+各エージェント実行は、各 MCP サーバーに対して `list_tools()` を呼び出します。リモートサーバーは顕著なレイテンシを生む可能性があるため、すべての MCP サーバークラスは `cache_tools_list` オプションを公開しています。ツール定義が頻繁に変化しないと確信できる場合にのみ `True` に設定してください。後で新しい一覧を強制するには、サーバーインスタンスで `invalidate_tools_cache()` を呼び出します。
 
 ## Tracing
 
-[Tracing](./tracing.md) は MCP のアクティビティを自動的に捕捉します。以下を含みます:
+[Tracing](./tracing.md) は、次を含む MCP アクティビティを自動的に捕捉します:
 
-1. ツールを列挙するための MCP サーバーへの呼び出し。
+1. ツール一覧のための MCP サーバーへの呼び出し。
 2. ツール呼び出しに関する MCP 関連情報。
 
 ![MCP Tracing Screenshot](../assets/images/mcp-tracing.jpg)
@@ -321,4 +321,4 @@ agent = Agent(
 
 - [Model Context Protocol](https://modelcontextprotocol.io/) – 仕様と設計ガイド。
 - [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) – 実行可能な stdio、SSE、Streamable HTTP のサンプル。
-- [examples/hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) – 承認やコネクタを含む完全な hosted MCP のデモ。
+- [examples/hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) – 承認やコネクタを含む完全な hosted MCP デモ。
