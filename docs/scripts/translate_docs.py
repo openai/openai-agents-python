@@ -90,7 +90,7 @@ eng_to_non_eng_mapping = {
         "file search": "ファイル検索",
         "streaming": "ストリーミング",
         "system prompt": "システムプロンプト",
-        "Python first": "Python ファースト",
+        "Python-first": "Python ファースト",
         # Add more Japanese mappings here
     },
     "ko": {
@@ -116,6 +116,7 @@ eng_to_non_eng_mapping = {
         "file search": "파일 검색",
         "streaming": "스트리밍",
         "system prompt": "시스템 프롬프트",
+        "Python-first": "파이썬 우선",
         "interruption": "인터럽션(중단 처리)",
         "TypeScript-first": "TypeScript 우선",
         "Human in the loop": "휴먼인더루프 (HITL)",
