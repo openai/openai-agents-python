@@ -317,3 +317,14 @@ We'd like to acknowledge the excellent work of the open-source community, especi
 -   [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
 
 We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
+
+### Submitting a Contribution 🤝
+
+We welcome contributions! If you've made a fix or added a new feature:
+
+1.  **Read the Guidelines:** Please consult our dedicated contribution guidelines (usually in a file like `CONTRIBUTING.md` in the root directory) for style and best practices.
+2.  **Fork & Branch:** Fork the repository and create a new branch for your changes.
+3.  **Run Checks:** Ensure all tests, linters, and type checkers pass locally (`make check`).
+4.  **Submit a Pull Request (PR):** Open a Pull Request on GitHub to propose your changes to the `main` branch.
+
+We appreciate your help in making the Agents SDK better!
