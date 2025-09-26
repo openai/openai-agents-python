@@ -4,12 +4,6 @@ import sys
 import argparse
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
-
-try:
-    import yaml  # type: ignore
-except Exception:
-    yaml = None  # PyYAML may not be available in some environments
 
 # import logging
 # logging.basicConfig(level=logging.INFO)
@@ -35,13 +29,6 @@ languages = {
     "ko": "Korean",
     # Add more languages here, e.g., "fr": "French"
 }
-
-# Comma-separated list to restrict which languages to translate (e.g., "ko" or "ja,ko")
-ONLY_LANGS = [
-    s.strip()
-    for s in (os.environ.get("ONLY_LANG") or os.environ.get("LANGS") or "").split(",")
-    if s.strip()
-]
 
 # Initialize OpenAI client
 api_key = os.getenv("PROD_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -90,7 +77,7 @@ eng_to_non_eng_mapping = {
         "file search": "ファイル検索",
         "streaming": "ストリーミング",
         "system prompt": "システムプロンプト",
-        "Python-first": "Python ファースト",
+        "Python first": "Python ファースト",
         # Add more Japanese mappings here
     },
     "ko": {
@@ -153,71 +140,7 @@ eng_to_non_eng_instructions = {
 }
 
 
-def _extract_sidebar_translations(lang_code: str) -> Dict[str, Dict[str, Optional[str]]]:
-    """Extract mapping of doc file paths to labels/translations from mkdocs.yml.
-
-    Returns a map: { path: { "label": str, "translation": str|None } }
-    """
-    sidebar_map: Dict[str, Dict[str, Optional[str]]] = {}
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
-    if yaml is None:
-        return sidebar_map
-    try:
-        with open(mkdocs_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except Exception:
-        return sidebar_map
-
-    try:
-        languages_block = []
-        for plugin in data.get("plugins", []):
-            if isinstance(plugin, dict) and "i18n" in plugin:
-                languages_block = plugin["i18n"].get("languages", [])
-                break
-        if not languages_block:
-            return sidebar_map
-
-        nav_by_locale: Dict[str, Any] = {}
-        for lang in languages_block:
-            locale = lang.get("locale")
-            nav_by_locale[locale] = lang.get("nav")
-
-        en_nav = nav_by_locale.get("en")
-        tgt_nav = nav_by_locale.get(lang_code)
-
-        def collect(nav: Any) -> Dict[str, str]:
-            result: Dict[str, str] = {}
-            if not isinstance(nav, list):
-                return result
-            for item in nav:
-                if isinstance(item, dict):
-                    for label, value in item.items():
-                        if isinstance(value, str):
-                            result[value] = str(label)
-                        else:
-                            result.update(collect(value))
-                elif isinstance(item, str):
-                    continue
-            return result
-
-        en_map = collect(en_nav) if en_nav else {}
-        tgt_map = collect(tgt_nav) if tgt_nav else {}
-        for path_key, en_label in en_map.items():
-            sidebar_map[path_key] = {
-                "label": en_label,
-                "translation": tgt_map.get(path_key),
-            }
-    except Exception:
-        return {}
-    return sidebar_map
-
-
-def built_instructions(
-    target_language: str,
-    lang_code: str,
-    sidebar_map: Optional[Dict[str, Dict[str, Optional[str]]]] = None,
-) -> str:
+def built_instructions(target_language: str, lang_code: str) -> str:
     do_not_translate_terms = "\n".join(do_not_translate)
     specific_terms = "\n".join(
         [f"* {k} -> {v}" for k, v in eng_to_non_eng_mapping.get(lang_code, {}).items()]
@@ -226,23 +149,6 @@ def built_instructions(
         eng_to_non_eng_instructions.get("common", [])
         + eng_to_non_eng_instructions.get(lang_code, [])
     )
-    sidebar_labels_block = ""
-    if sidebar_map:
-        label_lines: List[str] = []
-        for link, entry in sidebar_map.items():
-            if entry.get("translation"):
-                label_lines.append(
-                    f"- {link}: {entry['translation']} (sidebar translation)"
-                )
-            elif entry.get("label"):
-                label_lines.append(f"- {link}: {entry['label']} (sidebar label)")
-        if label_lines:
-            sidebar_labels_block = (
-                "\n\n#########################\n##  PAGE TITLES        ##\n#########################\n"
-                "When you see links to another page, consistently use the following labels:\n"
-                + "\n".join(label_lines)
-                + "\n\nAlways use these canonical translations for page titles and references."
-            )
     return f"""You are an expert technical translator.
 
 Your task: translate the markdown passed as a user input from English into {target_language}.
@@ -270,8 +176,6 @@ You must return **only** the translated markdown. Do not include any commentary,
   - Inline code surrounded by single back‑ticks ( `like_this` ).
   - Fenced code blocks delimited by ``` or ~~~, including all comments inside them.
   - Link URLs inside `[label](URL)` – translate the label, never the URL.
-- When translating Markdown tables, preserve the exact table structure, including all delimiters (|), header separators (---), and row/column counts. Only translate the cell contents. Do not add, remove, or reorder columns or rows.
-{sidebar_labels_block}
 
 #########################
 ##  HARD CONSTRAINTS   ##
@@ -362,15 +266,6 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     code_blocks: list[str] = []
     code_block_chunks: list[str] = []
     for line in lines:
-        # Treat single-line import statements as code blocks to avoid accidental translation
-        if (
-            ENABLE_CODE_SNIPPET_EXCLUSION is True
-            and (in_code_block is False)
-            and line.startswith("import ")
-        ):
-            code_blocks.append(line)
-            current_chunk.append(f"CODE_BLOCK_{(len(code_blocks) - 1):02}")
-            continue
         if (
             ENABLE_SMALL_CHUNK_TRANSLATION is True
             and len(current_chunk) >= 120  # required for gpt-4.5
@@ -397,11 +292,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
     # Translate each chunk separately and combine results
     translated_content: list[str] = []
     for chunk in chunks:
-        instructions = built_instructions(
-            languages[lang_code],
-            lang_code,
-            sidebar_map=_extract_sidebar_translations(lang_code),
-        )
+        instructions = built_instructions(languages[lang_code], lang_code)
         if OPENAI_MODEL.startswith("gpt-5"):
             response = openai_client.responses.create(
                 model=OPENAI_MODEL,
@@ -440,18 +331,10 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
 
 def translate_single_source_file(file_path: str) -> None:
     relative_path = os.path.relpath(file_path, source_dir)
-    if "ref/" in relative_path or not (
-        file_path.endswith(".md") or file_path.endswith(".mdx")
-    ):
+    if "ref/" in relative_path or not file_path.endswith(".md"):
         return
 
-    # Determine target languages
-    target_langs = (
-        [code for code in ONLY_LANGS if code in languages]
-        if ONLY_LANGS
-        else list(languages.keys())
-    )
-    for lang_code in target_langs:
+    for lang_code in languages:
         target_dir = os.path.join(source_dir, lang_code)
         target_path = os.path.join(target_dir, relative_path)
 
