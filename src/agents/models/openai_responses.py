@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
+from openai._models import add_request_id
 from openai.types import ChatModel
 from openai.types.responses import (
     Response,
@@ -180,6 +181,13 @@ class OpenAIResponsesModel(Model):
                     prompt=prompt,
                 )
 
+                request_id = None
+                stream_response = getattr(stream, "response", None)
+                if stream_response is not None:
+                    headers = getattr(stream_response, "headers", None)
+                    if headers is not None:
+                        request_id = headers.get("x-request-id")
+
                 final_response: Response | None = None
 
                 async for chunk in stream:
@@ -187,9 +195,12 @@ class OpenAIResponsesModel(Model):
                         final_response = chunk.response
                     yield chunk
 
-                if final_response and tracing.include_data():
-                    span_response.span_data.response = final_response
-                    span_response.span_data.input = input
+                if final_response:
+                    if request_id:
+                        add_request_id(final_response, request_id)
+                    if tracing.include_data():
+                        span_response.span_data.response = final_response
+                        span_response.span_data.input = input
 
             except Exception as e:
                 span_response.set_error(
