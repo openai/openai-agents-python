@@ -4,8 +4,34 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from agents import Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
+from agents import (
+    Agent,
+    AgentHooks,
+    RunContextWrapper,
+    RunHooks,
+    Runner,
+    Tool,
+    Usage,
+    function_tool,
+)
 from agents.items import ModelResponse, TResponseInputItem
+
+
+class LoggingHooks(AgentHooks[Any]):
+    async def on_start(
+        self,
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> None:
+        print(f"#### {agent.name} is starting.")
+
+    async def on_end(
+        self,
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        output: Any,
+    ) -> None:
+        print(f"#### {agent.name} produced output: {output}.")
 
 
 class ExampleHooks(RunHooks):
@@ -92,6 +118,7 @@ multiply_agent = Agent(
     instructions="Multiply the number by 2 and then return the final result.",
     tools=[multiply_by_two],
     output_type=FinalResult,
+    hooks=LoggingHooks(),
 )
 
 start_agent = Agent(
@@ -100,6 +127,7 @@ start_agent = Agent(
     tools=[random_number],
     output_type=FinalResult,
     handoffs=[multiply_agent],
+    hooks=LoggingHooks(),
 )
 
 
