@@ -2,18 +2,18 @@
 search:
   exclude: true
 ---
-# 빠른 시작
+# 퀵스타트
 
-실시간 에이전트는 OpenAI의 Realtime API를 사용해 AI 에이전트와 음성 대화를 가능하게 합니다. 이 가이드는 첫 실시간 음성 에이전트를 만드는 과정을 안내합니다.
+실시간 에이전트를 사용하면 OpenAI의 Realtime API로 AI 에이전트와 음성 대화를 할 수 있습니다. 이 가이드는 첫 번째 실시간 음성 에이전트를 만드는 과정을 안내합니다.
 
 !!! warning "베타 기능"
-실시간 에이전트는 베타 단계입니다. 구현을 개선하는 동안 호환성 깨짐이 발생할 수 있습니다.
+실시간 에이전트는 베타 단계입니다. 구현을 개선하는 과정에서 호환성 문제가 발생할 수 있습니다.
 
 ## 사전 준비
 
 - Python 3.9 이상
 - OpenAI API 키
-- OpenAI Agents SDK에 대한 기본 이해
+- OpenAI Agents SDK에 대한 기본 지식
 
 ## 설치
 
@@ -25,7 +25,7 @@ pip install openai-agents
 
 ## 첫 실시간 에이전트 만들기
 
-### 1. 필요한 구성요소 가져오기
+### 1. 필수 구성 요소 가져오기
 
 ```python
 import asyncio
@@ -109,9 +109,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## 전체 코드 예제
+## 전체 예제
 
-다음은 완전한 동작 예제입니다:
+작동하는 전체 예제는 다음과 같습니다:
 
 ```python
 import asyncio
@@ -200,18 +200,18 @@ if __name__ == "__main__":
 
 - `input_audio_format`: 입력 오디오 형식 (`pcm16`, `g711_ulaw`, `g711_alaw`)
 - `output_audio_format`: 출력 오디오 형식
-- `input_audio_transcription`: 전사 설정
+- `input_audio_transcription`: 전사 구성
 
 ### 턴 감지
 
 - `type`: 감지 방식 (`server_vad`, `semantic_vad`)
 - `threshold`: 음성 활동 임계값 (0.0-1.0)
-- `silence_duration_ms`: 턴 종료 감지를 위한 무음 지속 시간
+- `silence_duration_ms`: 턴 종료를 감지할 무음 지속 시간
 - `prefix_padding_ms`: 발화 전 오디오 패딩
 
 ## 다음 단계
 
-- [실시간 에이전트 더 알아보기](guide.md)
+- [실시간 에이전트 자세히 알아보기](guide.md)
 - [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작 예제 확인
 - 에이전트에 도구 추가
 - 에이전트 간 핸드오프 구현
@@ -219,13 +219,13 @@ if __name__ == "__main__":
 
 ## 인증
 
-환경에 OpenAI API 키가 설정되어 있는지 확인하세요:
+환경 변수에 OpenAI API 키가 설정되어 있는지 확인하세요:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-또는 세션을 생성할 때 직접 전달하세요:
+또는 세션을 만들 때 직접 전달할 수 있습니다:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

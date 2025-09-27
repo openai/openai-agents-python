@@ -4,16 +4,16 @@ search:
 ---
 # クイックスタート
 
-Realtime エージェントは、OpenAI の Realtime API を使用して AI エージェントとの音声対話を可能にします。本ガイドでは、最初の リアルタイム 音声エージェントの作成手順を説明します。
+Realtime エージェントは、OpenAI の Realtime API を使用して AI エージェントとの音声対話を可能にします。このガイドでは、最初の Realtime 音声エージェントを作成する手順を説明します。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装の改善に伴い、後方互換性のない変更が入る可能性があります。
+Realtime エージェントはベータ版です。実装の改善に伴い、非互換の変更が発生する可能性があります。
 
 ## 前提条件
 
 - Python 3.9 以上
 - OpenAI API キー
-- OpenAI Agents SDK の基本的な知識
+- OpenAI Agents SDK の基本的な理解
 
 ## インストール
 
@@ -23,7 +23,7 @@ Realtime エージェントはベータ版です。実装の改善に伴い、�
 pip install openai-agents
 ```
 
-## 最初の リアルタイム エージェントの作成
+## 最初の Realtime エージェントの作成
 
 ### 1. 必要なコンポーネントのインポート
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. リアルタイム エージェントの作成
+### 2. Realtime エージェントの作成
 
 ```python
 agent = RealtimeAgent(
@@ -109,9 +109,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## 完全な例
+## 完全なサンプル
 
-以下は動作する完全な例です:
+以下は動作する完全なサンプルです:
 
 ```python
 import asyncio
@@ -192,7 +192,7 @@ if __name__ == "__main__":
 
 ### モデル設定
 
-- `model_name`: 利用可能な リアルタイム モデルから選択 (例: `gpt-realtime`)
+- `model_name`: 利用可能な Realtime モデルから選択 (例: `gpt-realtime`)
 - `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 - `modalities`: テキストまたは音声を有効化 (`["text"]` または `["audio"]`)
 
@@ -204,18 +204,18 @@ if __name__ == "__main__":
 
 ### ターン検出
 
-- `type`: 検出方式 (`server_vad`, `semantic_vad`)
-- `threshold`: 音声活動のしきい値 (0.0-1.0)
+- `type`: 検出方法 (`server_vad`, `semantic_vad`)
+- `threshold`: 音声アクティビティのしきい値 (0.0-1.0)
 - `silence_duration_ms`: ターン終了を検出する無音時間
 - `prefix_padding_ms`: 発話前の音声パディング
 
 ## 次のステップ
 
-- [リアルタイム エージェントの詳細](guide.md)
-- 動作する code examples は [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダをご覧ください
-- エージェントに tools を追加
-- エージェント間のハンドオフを実装
-- 安全性のためのガードレールを設定
+- [Realtime エージェントの詳細](guide.md)
+- 動作するサンプルは [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダを参照してください
+- エージェントにツールを追加する
+- エージェント間のハンドオフを実装する
+- 安全性のためのガードレールを設定する
 
 ## 認証
 
@@ -225,7 +225,7 @@ OpenAI API キーが環境に設定されていることを確認してくださ
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-また、セッション作成時に直接渡すこともできます:
+または、セッション作成時に直接渡します:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
