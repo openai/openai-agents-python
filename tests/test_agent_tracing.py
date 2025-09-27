@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from inline_snapshot import snapshot
+from openai.types.responses import ResponseCompletedEvent
 
-from agents import Agent, RunConfig, Runner, trace
+from agents import Agent, OpenAIResponsesModel, RunConfig, Runner, trace
+from agents.tracing import ResponseSpanData
 
-from .fake_model import FakeModel
+from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
-from .testing_processor import assert_no_traces, fetch_normalized_spans
+from .testing_processor import (
+    assert_no_traces,
+    fetch_normalized_spans,
+    fetch_ordered_spans,
+)
 
 
 @pytest.mark.asyncio
@@ -289,6 +296,58 @@ async def test_streaming_single_run_is_single_trace():
                 ],
             }
         ]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_streamed_response_request_id_recorded():
+    request_id = "req_test_123"
+
+    class DummyStream:
+        def __init__(self) -> None:
+            self.response = SimpleNamespace(headers={"x-request-id": request_id})
+
+        def __aiter__(self):
+            async def gen():
+                yield ResponseCompletedEvent(
+                    type="response.completed",
+                    response=get_response_obj([get_text_message("first_test")]),
+                    sequence_number=0,
+                )
+
+            return gen()
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            assert kwargs.get("stream") is True
+            return DummyStream()
+
+    class DummyResponsesClient:
+        def __init__(self) -> None:
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    agent = Agent(
+        name="test_agent",
+        model=model,
+    )
+
+    result = Runner.run_streamed(agent, input="first_test")
+    async for _ in result.stream_events():
+        pass
+
+    response_spans = [
+        span
+        for span in fetch_ordered_spans()
+        if isinstance(span.span_data, ResponseSpanData) and span.span_data.response is not None
+    ]
+
+    assert response_spans
+    assert any(
+        getattr(span.span_data.response, "_request_id", None) == request_id
+        for span in response_spans
     )
 
 
