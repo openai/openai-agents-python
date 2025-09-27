@@ -6,19 +6,19 @@ search:
 
 ## 前提条件
 
-Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK から音声用のオプション依存関係をインストールします。
+Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK からオプションの音声関連の依存関係をインストールします。
 
 ```bash
 pip install 'openai-agents[voice]'
 ```
 
-## 基本概念
+## 概念
 
-主な概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] で、3 ステップのプロセスです。
+主な概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは 3 ステップのプロセスです。
 
 1. 音声をテキストに変換するために音声認識モデルを実行します。
-2. 通常はエージェント的なワークフローであるあなたのコードを実行して、結果を生成します。
-3. 結果のテキストを音声に戻すために音声合成モデルを実行します。
+2. 通常はエージェント的なワークフローであるあなたのコードを実行し、結果を生成します。
+3. テキスト読み上げモデルを実行し、結果のテキストを音声に戻します。
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントをセットアップしましょう。これは、この SDK でエージェントを作ったことがあれば見覚えがあるはずです。ここでは複数のエージェント、ハンドオフ、そしてツールを用意します。
+まず、いくつかのエージェントをセットアップしましょう。すでにこの SDK でエージェントを作成したことがあれば、なじみがあるはずです。ここでは、複数のエージェント、ハンドオフ、そして 1 つのツールを用意します。
 
 ```python
 import asyncio
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 全体の統合
+## 統合
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントと話せるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。
+このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。

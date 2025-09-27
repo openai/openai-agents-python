@@ -4,9 +4,9 @@ search:
 ---
 # 빠른 시작
 
-## 준비 사항
+## 사전 준비사항
 
-Agents SDK에 대한 기본 [빠른 시작 안내](../quickstart.md)를 완료하고 가상 환경을 설정했는지 확인하세요. 그런 다음, SDK의 선택적 음성 종속성을 설치하세요:
+Agents SDK의 기본 [빠른 시작 안내](../quickstart.md)를 따라 가상 환경을 설정했는지 확인하세요. 그런 다음, SDK에서 음성 관련 선택적 의존성을 설치하세요:
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,11 +14,11 @@ pip install 'openai-agents[voice]'
 
 ## 개념
 
-핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 이는 3단계 프로세스입니다:
+핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 이는 다음 3단계로 구성됩니다:
 
-1. 음성을 텍스트로 변환하기 위해 음성-텍스트 모델을 실행
-2. 보통 에이전트형 워크플로인 코드를 실행하여 결과 생성
-3. 결과 텍스트를 다시 오디오로 변환하기 위해 텍스트-음성 모델을 실행
+1. 음성-텍스트 모델을 실행해 오디오를 텍스트로 변환
+2. 보통 에이전트형 워크플로인 사용자 코드를 실행해 결과 생성
+3. 텍스트-음성 모델을 실행해 결과 텍스트를 다시 오디오로 변환
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## 에이전트
 
-먼저 에이전트를 설정하겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 에이전트 몇 개와 핸드오프, 그리고 도구 하나를 사용합니다.
+먼저 에이전트를 몇 개 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 에이전트 두 개, 핸드오프, 그리고 도구 하나를 사용합니다.
 
 ```python
 import asyncio
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 전체 통합
+## 통합
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-이 예제를 실행하면 에이전트가 직접 말해 줍니다! 직접 에이전트와 대화할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)에서 확인하세요.
+이 예제를 실행하면 에이전트가 직접 말합니다! 직접 말로 상호작용하는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)에서 확인하세요.
