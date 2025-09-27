@@ -6,3 +6,4 @@
         members:
             - Session
             - SQLiteSession
+            - OpenAIConversationsSession

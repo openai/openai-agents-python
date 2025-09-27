@@ -57,7 +57,11 @@ plugins:
             - Documentation:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - Sessions:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/encrypted_session.md
+                    - sessions/advanced_sqlite_session.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -145,7 +149,8 @@ plugins:
                     - ref/extensions/handoff_prompt.md
                     - ref/extensions/litellm.md
                     - ref/extensions/memory/sqlalchemy_session.md
-
+                    - ref/extensions/memory/encrypted_session.md
+                    - ref/extensions/memory/advanced_sqlite_session.md
         - locale: ja
           name: 日本語
           build: true
@@ -156,7 +161,11 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - Sessions:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/encrypted_session.md
+                    - sessions/advanced_sqlite_session.md
                 - results.md
                 - streaming.md
                 - repl.md

@@ -113,37 +113,13 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## Memory options
+## Session types
 
-### No memory (default)
+The SDK provides several session implementations for different use cases:
 
-```python
-# Default behavior - no session memory
-result = await Runner.run(agent, "Hello")
-```
+### SQLite sessions
 
-### OpenAI Conversations API memory
-
-Use the [OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api) to persist
-conversation state without managing your own database. This is helpful when you already rely on OpenAI-hosted infrastructure
-for storing conversation history.
-
-```python
-from agents import OpenAIConversationsSession
-
-session = OpenAIConversationsSession()
-
-# Optionally resume a previous conversation by passing a conversation ID
-# session = OpenAIConversationsSession(conversation_id="conv_123")
-
-result = await Runner.run(
-    agent,
-    "Hello",
-    session=session,
-)
-```
-
-### SQLite memory
+The default, lightweight session implementation using SQLite:
 
 ```python
 from agents import SQLiteSession
@@ -162,131 +138,114 @@ result = await Runner.run(
 )
 ```
 
-### Multiple sessions
+### OpenAI Conversations API sessions
+
+Use [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations) through `OpenAIConversationsSession`.
 
 ```python
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, Runner, OpenAIConversationsSession
 
-agent = Agent(name="Assistant")
-
-# Different sessions maintain separate conversation histories
-session_1 = SQLiteSession("user_123", "conversations.db")
-session_2 = SQLiteSession("user_456", "conversations.db")
-
-result1 = await Runner.run(
-    agent,
-    "Hello",
-    session=session_1
+# Create agent
+agent = Agent(
+    name="Assistant",
+    instructions="Reply very concisely.",
 )
-result2 = await Runner.run(
-    agent,
-    "Hello",
-    session=session_2
-)
-```
 
-### SQLAlchemy-powered sessions
+# Create a new conversation
+session = OpenAIConversationsSession()
 
-For more advanced use cases, you can use a SQLAlchemy-powered session backend. This allows you to use any database supported by SQLAlchemy (PostgreSQL, MySQL, SQLite, etc.) for session storage.
+# Optionally resume a previous conversation by passing a conversation ID
+# session = OpenAIConversationsSession(conversation_id="conv_123")
 
-**Example 1: Using `from_url` with in-memory SQLite**
-
-This is the simplest way to get started, ideal for development and testing.
-
-```python
-import asyncio
-from agents import Agent, Runner
-from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
-
-async def main():
-    agent = Agent("Assistant")
-    session = SQLAlchemySession.from_url(
-        "user-123",
-        url="sqlite+aiosqlite:///:memory:",
-        create_tables=True,  # Auto-create tables for the demo
-    )
-
-    result = await Runner.run(agent, "Hello", session=session)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-**Example 2: Using an existing SQLAlchemy engine**
-
-In a production application, you likely already have a SQLAlchemy `AsyncEngine` instance. You can pass it directly to the session.
-
-```python
-import asyncio
-from agents import Agent, Runner
-from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
-from sqlalchemy.ext.asyncio import create_async_engine
-
-async def main():
-    # In your application, you would use your existing engine
-    engine = create_async_engine("sqlite+aiosqlite:///conversations.db")
-
-    agent = Agent("Assistant")
-    session = SQLAlchemySession(
-        "user-456",
-        engine=engine,
-        create_tables=True,  # Auto-create tables for the demo
-    )
-
-    result = await Runner.run(agent, "Hello", session=session)
-    print(result.final_output)
-
-    await engine.dispose()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-
-## Custom memory implementations
-
-You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
-
-```python
-from agents.memory.session import SessionABC
-from agents.items import TResponseInputItem
-from typing import List
-
-class MyCustomSession(SessionABC):
-    """Custom session implementation following the Session protocol."""
-
-    def __init__(self, session_id: str):
-        self.session_id = session_id
-        # Your initialization here
-
-    async def get_items(self, limit: int | None = None) -> List[TResponseInputItem]:
-        """Retrieve conversation history for this session."""
-        # Your implementation here
-        pass
-
-    async def add_items(self, items: List[TResponseInputItem]) -> None:
-        """Store new items for this session."""
-        # Your implementation here
-        pass
-
-    async def pop_item(self) -> TResponseInputItem | None:
-        """Remove and return the most recent item from this session."""
-        # Your implementation here
-        pass
-
-    async def clear_session(self) -> None:
-        """Clear all items for this session."""
-        # Your implementation here
-        pass
-
-# Use your custom session
-agent = Agent(name="Assistant")
+# Start conversation
 result = await Runner.run(
     agent,
-    "Hello",
-    session=MyCustomSession("my_session")
+    "What city is the Golden Gate Bridge in?",
+    session=session
 )
+print(result.final_output)  # "San Francisco"
+
+# Continue the conversation
+result = await Runner.run(
+    agent,
+    "What state is it in?",
+    session=session
+)
+print(result.final_output)  # "California"
 ```
+
+### SQLAlchemy sessions
+
+Production-ready sessions using any SQLAlchemy-supported database:
+
+```python
+from agents.extensions.memory import SQLAlchemySession
+
+# Using database URL
+session = SQLAlchemySession.from_url(
+    "user_123",
+    url="postgresql+asyncpg://user:pass@localhost/db",
+    create_tables=True
+)
+
+# Using existing engine
+from sqlalchemy.ext.asyncio import create_async_engine
+engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
+session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
+```
+
+See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
+
+### Advanced SQLite sessions
+
+Enhanced SQLite sessions with conversation branching, usage analytics, and structured queries:
+
+```python
+from agents.extensions.memory import AdvancedSQLiteSession
+
+# Create with advanced features
+session = AdvancedSQLiteSession(
+    session_id="user_123",
+    db_path="conversations.db",
+    create_tables=True
+)
+
+# Automatic usage tracking
+result = await Runner.run(agent, "Hello", session=session)
+await session.store_run_usage(result)  # Track token usage
+
+# Conversation branching
+await session.create_branch_from_turn(2)  # Branch from turn 2
+```
+
+See [Advanced SQLite Sessions](advanced_sqlite_session.md) for detailed documentation.
+
+### Encrypted sessions
+
+Transparent encryption wrapper for any session implementation:
+
+```python
+from agents.extensions.memory import EncryptedSession, SQLAlchemySession
+
+# Create underlying session
+underlying_session = SQLAlchemySession.from_url(
+    "user_123",
+    url="sqlite+aiosqlite:///conversations.db",
+    create_tables=True
+)
+
+# Wrap with encryption and TTL
+session = EncryptedSession(
+    session_id="user_123",
+    underlying_session=underlying_session,
+    encryption_key="your-secret-key",
+    ttl=600  # 10 minutes
+)
+
+result = await Runner.run(agent, "Hello", session=session)
+```
+
+See [Encrypted Sessions](encrypted_session.md) for detailed documentation.
 
 ## Session management
 
@@ -306,12 +265,32 @@ Use meaningful session IDs that help you organize conversations:
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
 
-### Session management
+### Multiple sessions
 
 ```python
-# Clear a session when conversation should start fresh
-await session.clear_session()
+from agents import Agent, Runner, SQLiteSession
 
+agent = Agent(name="Assistant")
+
+# Different sessions maintain separate conversation histories
+session_1 = SQLiteSession("user_123", "conversations.db")
+session_2 = SQLiteSession("user_456", "conversations.db")
+
+result1 = await Runner.run(
+    agent,
+    "Help me with my account",
+    session=session_1
+)
+result2 = await Runner.run(
+    agent,
+    "What are my charges?",
+    session=session_2
+)
+```
+
+### Session sharing
+
+```python
 # Different agents can share the same session
 support_agent = Agent(name="Support")
 billing_agent = Agent(name="Billing")
@@ -394,11 +373,58 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## Custom session implementations
+
+You can implement your own session memory by creating a class that follows the [`Session`][agents.memory.session.Session] protocol:
+
+```python
+from agents.memory.session import SessionABC
+from agents.items import TResponseInputItem
+from typing import List
+
+class MyCustomSession(SessionABC):
+    """Custom session implementation following the Session protocol."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        # Your initialization here
+
+    async def get_items(self, limit: int | None = None) -> List[TResponseInputItem]:
+        """Retrieve conversation history for this session."""
+        # Your implementation here
+        pass
+
+    async def add_items(self, items: List[TResponseInputItem]) -> None:
+        """Store new items for this session."""
+        # Your implementation here
+        pass
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        """Remove and return the most recent item from this session."""
+        # Your implementation here
+        pass
+
+    async def clear_session(self) -> None:
+        """Clear all items for this session."""
+        # Your implementation here
+        pass
+
+# Use your custom session
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=MyCustomSession("my_session")
+)
+```
+
 ## API Reference
 
 For detailed API documentation, see:
 
--   [`Session`][agents.memory.Session] - Protocol interface
--   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
--   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API implementation
+-   [`Session`][agents.memory.session.Session] - Protocol interface
+-   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
+-   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
+-   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics
+-   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Encrypted wrapper for any session
