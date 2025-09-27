@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-この作業は 1 回だけで済みます。
+これは最初の一度だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは instructions、名前、任意の config（例: `model_config`）で定義します。
+エージェントは instructions、名前、任意の構成（`model_config` など）で定義します。
 
 ```python
 from agents import Agent
@@ -51,7 +51,7 @@ agent = Agent(
 
 ## エージェントの追加
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
+追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを決定するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントで、タスクを進める方法を決める際に選択できる、送出側ハンドオフのオプションの一覧を定義できます。
+各エージェントごとに、タスクを前進させる方法を判断するために選択できる送出側ハンドオフ候補の一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェントオーケストレーションの実行
 
-ワークフローが実行され、振り分け用エージェントが 2 つの専門エージェント間で正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 統合
+## すべてを組み合わせる
 
-ハンドオフと入力用ガードレールを使い、すべてを統合してワークフロー全体を実行しましょう。
+ハンドオフと入力ガードレールを用いて、すべてを組み合わせてワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## トレースの表示
 
-エージェントの実行中に何が起きたかを確認するには、OpenAI ダッシュボードの [Trace viewer](https://platform.openai.com/traces) に移動し、実行のトレースを表示します。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI Dashboard の Trace viewer](https://platform.openai.com/traces) に移動し、エージェントのトレースを表示します。
 
 ## 次のステップ
 
 より複雑なエージェント フローの構築方法を学びましょう:
 
-- [エージェント](agents.md) の設定方法を学びます。
+- エージェントの設定方法について学びます: [エージェント](agents.md)。
 - [エージェントの実行](running_agents.md) について学びます。
-- [tools](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学びます。
+- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学びます。

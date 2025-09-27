@@ -4,11 +4,11 @@ search:
 ---
 # 使用状況
 
-Agents SDK は各 run のトークン使用状況を自動で追跡します。run のコンテキストから参照でき、コストの監視、上限の適用、分析の記録に利用できます。
+Agents SDK は、すべての実行についてトークン使用状況を自動追跡します。実行コンテキストから参照でき、コストの監視、制限の適用、分析の記録に使えます。
 
 ## 追跡対象
 
-- **requests**: 実行された LLM API 呼び出しの回数
+- **requests**: 実行された LLM API コール数
 - **input_tokens**: 送信された入力トークンの合計
 - **output_tokens**: 受信した出力トークンの合計
 - **total_tokens**: input + output
@@ -16,9 +16,9 @@ Agents SDK は各 run のトークン使用状況を自動で追跡します。r
   - `input_tokens_details.cached_tokens`
   - `output_tokens_details.reasoning_tokens`
 
-## 実行からの使用状況の取得
+## 実行から使用状況へのアクセス
 
-`Runner.run(...)` の後、`result.context_wrapper.usage` から使用状況にアクセスできます。
+`Runner.run(...)` の後、`result.context_wrapper.usage` から使用状況にアクセスします。
 
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
@@ -30,7 +30,7 @@ print("Output tokens:", usage.output_tokens)
 print("Total tokens:", usage.total_tokens)
 ```
 
-使用状況は run 中のすべてのモデル呼び出し（ツール呼び出しやハンドオフを含む）を集計します。
+使用状況は、実行中のすべてのモデル呼び出し（ツール呼び出しやハンドオフを含む）にわたって集計されます。
 
 ### LiteLLM モデルでの使用状況の有効化
 
@@ -50,9 +50,9 @@ result = await Runner.run(agent, "What's the weather in Tokyo?")
 print(result.context_wrapper.usage.total_tokens)
 ```
 
-## セッションでの使用状況の取得
+## セッションでの使用状況へのアクセス
 
-`Session`（例: `SQLiteSession`）を使用する場合、`Runner.run(...)` の各呼び出しはその特定の run の使用状況を返します。セッションはコンテキスト用に会話履歴を保持しますが、各 run の使用状況は独立しています。
+`Session`（例: `SQLiteSession`）を使用する場合、`Runner.run(...)` の各呼び出しはその実行に固有の使用状況を返します。セッションはコンテキスト用に会話履歴を保持しますが、各実行の使用状況は独立しています。
 
 ```python
 session = SQLiteSession("my_conversation")
@@ -64,7 +64,7 @@ second = await Runner.run(agent, "Can you elaborate?", session=session)
 print(second.context_wrapper.usage.total_tokens)  # Usage for second run
 ```
 
-セッションは run 間で会話コンテキストを保持しますが、各 `Runner.run()` 呼び出しで返される使用状況メトリクスは、その実行のみを表します。セッションでは、前のメッセージが各 run の入力として再投入されることがあり、その結果、後続ターンの入力トークン数に影響します。
+セッションは実行間で会話コンテキストを保持しますが、各 `Runner.run()` 呼び出しで返される使用状況メトリクスは、その特定の実行のみを表します。セッションでは、前のメッセージが各実行の入力として再投入されることがあり、その結果として後続ターンの入力トークン数に影響します。
 
 ## フックでの使用状況の利用
 
@@ -79,8 +79,8 @@ class MyHooks(RunHooks):
 
 ## API リファレンス
 
-詳細な API ドキュメントは以下を参照してください。
+詳細な API ドキュメントは次をご覧ください。
 
-- [`Usage`][agents.usage.Usage] - 使用状況の追跡データ構造
-- [`RunContextWrapper`][agents.run.RunContextWrapper] - run コンテキストから使用状況へアクセス
-- [`RunHooks`][agents.run.RunHooks] - 使用状況トラッキングのライフサイクルにフックする
+-   [`Usage`][agents.usage.Usage] - 使用状況の追跡データ構造
+-   [`RunContextWrapper`][agents.run.RunContextWrapper] - 実行コンテキストから使用状況にアクセス
+-   [`RunHooks`][agents.run.RunHooks] - 使用状況トラッキングのライフサイクルにフック

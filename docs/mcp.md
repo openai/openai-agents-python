@@ -188,7 +188,7 @@ If the MCP server implements the HTTP with SSE transport, instantiate
 
 from agents import Agent, Runner
 from agents.model_settings import ModelSettings
-from mcp import MCPServerSse
+from agents.mcp import MCPServerSse
 
 workspace_id = "demo-workspace"
 
