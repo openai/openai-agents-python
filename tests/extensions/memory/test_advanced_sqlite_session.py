@@ -70,6 +70,8 @@ def create_mock_run_result(
         final_output="test output",
         input_guardrail_results=[],
         output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
         context_wrapper=context_wrapper,
         _last_agent=agent,
     )
