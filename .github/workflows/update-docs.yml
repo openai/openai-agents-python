@@ -5,6 +5,11 @@ name: "Update Translated Docs"
 # 2. When you add a new page to the left-hand menu, **make sure to manually update mkdocs.yml** to include the new item.
 # 3. If you switch to a different LLM (for example, from o3 to a newer model), be sure to conduct thorough testing before making the switch.
 
+# To add more languages, you will update the following:
+# 1.  Add '!docs/{lang}/**' to `on.push.paths` in this file
+# 2. Update mkdocs.yml to have the new language
+# 3. Update docs/scripts/translate_docs.py to have the new language
+
 on:
   push:
     branches:
@@ -12,6 +17,8 @@ on:
     paths:
       - 'docs/**'
       - mkdocs.yml
+      - '!docs/ja/**'
+      - '!docs/ko/**'
 
 permissions:
   contents: write
