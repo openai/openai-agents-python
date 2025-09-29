@@ -4,20 +4,20 @@ search:
 ---
 # クイックスタート
 
-Realtime エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声会話を可能にします。このガイドでは、最初の Realtime 音声エージェントの作成手順を説明します。
+Realtime エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声会話を可能にします。このガイドでは、最初のリアルタイム音声エージェントの作成手順を説明します。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装の改良に伴い、互換性のない変更が発生する可能性があります。
+Realtime エージェントはベータ版です。実装を改善する過程で破壊的変更が発生する可能性があります。
 
 ## 前提条件
 
 -   Python 3.9 以上
 -   OpenAI API キー
--   OpenAI Agents SDK に関する基本的な理解
+-   OpenAI Agents SDK に関する基本的な知識
 
 ## インストール
 
-まだの場合は、OpenAI Agents SDK をインストールしてください:
+まだであれば、OpenAI Agents SDK をインストールします:
 
 ```bash
 pip install openai-agents
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. Realtime エージェントの作成
+### 2. リアルタイムエージェントの作成
 
 ```python
 agent = RealtimeAgent(
@@ -109,9 +109,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## 完全なサンプルコード
+## 完全な例
 
-動作する完全なサンプルコードは次のとおりです:
+動作する完全な例はこちらです:
 
 ```python
 import asyncio
@@ -192,11 +192,11 @@ if __name__ == "__main__":
 
 ### モデル設定
 
--   `model_name`: 利用可能な Realtime モデルから選択します (例: `gpt-realtime`)
--   `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
+-   `model_name`: 利用可能なリアルタイムモデルから選択 (例: `gpt-realtime`)
+-   `voice`: 声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 -   `modalities`: テキストまたは音声を有効化 (`["text"]` または `["audio"]`)
 
-### 音声設定
+### オーディオ設定
 
 -   `input_audio_format`: 入力音声の形式 (`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: 出力音声の形式
@@ -211,15 +211,15 @@ if __name__ == "__main__":
 
 ## 次のステップ
 
--   [Realtime エージェントの詳細](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダにある動作するサンプルコードを確認する
+-   [リアルタイムエージェントの詳細を見る](guide.md)
+-   動作する例は [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダを参照してください
 -   エージェントにツールを追加する
 -   エージェント間のハンドオフを実装する
--   安全性のためのガードレールを設定する
+-   安全性のためにガードレールを設定する
 
 ## 認証
 
-環境に OpenAI API キーが設定されていることを確認してください:
+OpenAI API キーが環境に設定されていることを確認してください:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
