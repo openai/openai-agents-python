@@ -262,10 +262,10 @@ class LitellmModel(Model):
                                 ),
                                 model=self.model,
                             )
-                            cost = litellm.completion_cost(completion_response=mock_response)
+                            cost = litellm.completion_cost(completion_response=mock_response)  # type: ignore[attr-defined]
                             # Attach cost as a custom attribute on the Response object so
                             # run.py can access it when creating the Usage object.
-                            final_response._litellm_cost = cost
+                            final_response._litellm_cost = cost  # type: ignore[attr-defined]
                         except Exception:
                             # If cost calculation fails (e.g., unknown model), continue
                             # without cost.
