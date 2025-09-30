@@ -1106,7 +1106,7 @@ class AgentRunner:
             if isinstance(event, ResponseCompletedEvent):
                 # Extract cost if it was attached by LiteLLM model.
                 cost = getattr(event.response, "_litellm_cost", None)
-                
+
                 usage = (
                     Usage(
                         requests=1,
