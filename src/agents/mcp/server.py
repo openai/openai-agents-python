@@ -649,14 +649,24 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         ]
     ]:
         """Create the streams for the server."""
-        return streamablehttp_client(
-            url=self.params["url"],
-            headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 5),
-            sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-            terminate_on_close=self.params.get("terminate_on_close", True),
-            httpx_client_factory=self.params.get("httpx_client_factory", None),
-        )
+        # Only pass httpx_client_factory if it's provided
+        if "httpx_client_factory" in self.params:
+            return streamablehttp_client(
+                url=self.params["url"],
+                headers=self.params.get("headers", None),
+                timeout=self.params.get("timeout", 5),
+                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+                terminate_on_close=self.params.get("terminate_on_close", True),
+                httpx_client_factory=self.params["httpx_client_factory"],
+            )
+        else:
+            return streamablehttp_client(
+                url=self.params["url"],
+                headers=self.params.get("headers", None),
+                timeout=self.params.get("timeout", 5),
+                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+                terminate_on_close=self.params.get("terminate_on_close", True),
+            )
 
     @property
     def name(self) -> str:

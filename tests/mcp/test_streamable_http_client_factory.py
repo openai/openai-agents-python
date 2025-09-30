@@ -36,7 +36,7 @@ class TestMCPServerStreamableHttpClientFactory:
                 timeout=10,
                 sse_read_timeout=300,  # Default value
                 terminate_on_close=True,  # Default value
-                httpx_client_factory=None,  # Should be None when not provided
+                # httpx_client_factory should not be passed when not provided
             )
 
     @pytest.mark.asyncio
@@ -44,7 +44,11 @@ class TestMCPServerStreamableHttpClientFactory:
         """Test that custom httpx_client_factory is passed correctly."""
 
         # Create a custom factory function
-        def custom_factory() -> httpx.AsyncClient:
+        def custom_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+        ) -> httpx.AsyncClient:
             return httpx.AsyncClient(
                 verify=False,  # Disable SSL verification for testing
                 timeout=httpx.Timeout(60.0),
@@ -81,7 +85,11 @@ class TestMCPServerStreamableHttpClientFactory:
     async def test_custom_httpx_client_factory_with_ssl_cert(self):
         """Test custom factory with SSL certificate configuration."""
 
-        def ssl_cert_factory() -> httpx.AsyncClient:
+        def ssl_cert_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+        ) -> httpx.AsyncClient:
             return httpx.AsyncClient(
                 verify="/path/to/cert.pem",  # Custom SSL certificate
                 timeout=httpx.Timeout(120.0),
@@ -113,9 +121,13 @@ class TestMCPServerStreamableHttpClientFactory:
     async def test_custom_httpx_client_factory_with_proxy(self):
         """Test custom factory with proxy configuration."""
 
-        def proxy_factory() -> httpx.AsyncClient:
+        def proxy_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+        ) -> httpx.AsyncClient:
             return httpx.AsyncClient(
-                proxies="http://proxy.example.com:8080",
+                proxy="http://proxy.example.com:8080",
                 timeout=httpx.Timeout(60.0),
             )
 
@@ -144,7 +156,11 @@ class TestMCPServerStreamableHttpClientFactory:
     async def test_custom_httpx_client_factory_with_retry_logic(self):
         """Test custom factory with retry logic configuration."""
 
-        def retry_factory() -> httpx.AsyncClient:
+        def retry_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+        ) -> httpx.AsyncClient:
             return httpx.AsyncClient(
                 timeout=httpx.Timeout(30.0),
                 # Note: httpx doesn't have built-in retry, but this shows how
@@ -194,7 +210,11 @@ class TestMCPServerStreamableHttpClientFactory:
     async def test_all_parameters_with_custom_factory(self):
         """Test that all parameters work together with custom factory."""
 
-        def comprehensive_factory() -> httpx.AsyncClient:
+        def comprehensive_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+        ) -> httpx.AsyncClient:
             return httpx.AsyncClient(
                 verify=False,
                 timeout=httpx.Timeout(90.0),
