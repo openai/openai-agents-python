@@ -13,6 +13,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
+from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp.shared.message import SessionMessage
 from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
@@ -575,6 +576,9 @@ class MCPServerStreamableHttpParams(TypedDict):
     terminate_on_close: NotRequired[bool]
     """Terminate on close"""
 
+    httpx_client_factory: NotRequired[McpHttpClientFactory]
+    """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
     """MCP server implementation that uses the Streamable HTTP transport. See the [spec]
@@ -597,9 +601,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
 
         Args:
             params: The params that configure the server. This includes the URL of the server,
-                the headers to send to the server, the timeout for the HTTP request, and the
-                timeout for the Streamable HTTP connection and whether we need to
-                terminate on close.
+                the headers to send to the server, the timeout for the HTTP request, the
+                timeout for the Streamable HTTP connection, whether we need to
+                terminate on close, and an optional custom HTTP client factory.
 
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
                 cached and only fetched from the server once. If `False`, the tools list will be
@@ -651,6 +655,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             timeout=self.params.get("timeout", 5),
             sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
             terminate_on_close=self.params.get("terminate_on_close", True),
+            httpx_client_factory=self.params.get("httpx_client_factory", None),
         )
 
     @property
