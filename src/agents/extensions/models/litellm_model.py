@@ -124,6 +124,15 @@ class LitellmModel(Model):
 
             if hasattr(response, "usage"):
                 response_usage = response.usage
+
+                # Extract cost from LiteLLM's hidden params if cost tracking is enabled.
+                cost = None
+                if model_settings.track_cost:
+                    if hasattr(response, "_hidden_params") and isinstance(
+                        response._hidden_params, dict
+                    ):
+                        cost = response._hidden_params.get("response_cost")
+
                 usage = (
                     Usage(
                         requests=1,
@@ -142,6 +151,7 @@ class LitellmModel(Model):
                             )
                             or 0
                         ),
+                        cost=cost,
                     )
                     if response.usage
                     else Usage()
@@ -201,10 +211,67 @@ class LitellmModel(Model):
 
             final_response: Response | None = None
             async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
-                yield chunk
-
+                # Intercept the response.completed event to calculate and attach cost.
                 if chunk.type == "response.completed":
                     final_response = chunk.response
+                    # Calculate cost using LiteLLM's completion_cost function if enabled.
+                    # Streaming responses don't include cost in _hidden_params, so we
+                    # calculate it from the final token counts.
+                    if model_settings.track_cost and final_response.usage:
+                        try:
+                            # Create a mock ModelResponse for cost calculation.
+                            # Include token details (cached, reasoning) for accurate pricing.
+                            from litellm.types.utils import (
+                                Choices as LitellmChoices,
+                                CompletionTokensDetailsWrapper,
+                                Message as LitellmMessage,
+                                ModelResponse as LitellmModelResponse,
+                                PromptTokensDetailsWrapper,
+                                Usage as LitellmUsage,
+                            )
+
+                            # Extract token details for accurate cost calculation.
+                            cached_tokens = (
+                                final_response.usage.input_tokens_details.cached_tokens
+                                if final_response.usage.input_tokens_details
+                                else 0
+                            )
+                            reasoning_tokens = (
+                                final_response.usage.output_tokens_details.reasoning_tokens
+                                if final_response.usage.output_tokens_details
+                                else 0
+                            )
+
+                            mock_response = LitellmModelResponse(
+                                choices=[
+                                    LitellmChoices(
+                                        index=0,
+                                        message=LitellmMessage(role="assistant", content=""),
+                                    )
+                                ],
+                                usage=LitellmUsage(
+                                    prompt_tokens=final_response.usage.input_tokens,
+                                    completion_tokens=final_response.usage.output_tokens,
+                                    total_tokens=final_response.usage.total_tokens,
+                                    prompt_tokens_details=PromptTokensDetailsWrapper(
+                                        cached_tokens=cached_tokens
+                                    ),
+                                    completion_tokens_details=CompletionTokensDetailsWrapper(
+                                        reasoning_tokens=reasoning_tokens
+                                    ),
+                                ),
+                                model=self.model,
+                            )
+                            cost = litellm.completion_cost(completion_response=mock_response)
+                            # Attach cost as a custom attribute on the Response object so
+                            # run.py can access it when creating the Usage object.
+                            final_response._litellm_cost = cost
+                        except Exception:
+                            # If cost calculation fails (e.g., unknown model), continue
+                            # without cost.
+                            pass
+
+                yield chunk
 
             if tracing.include_data() and final_response:
                 span_generation.span_data.output = [final_response.model_dump()]

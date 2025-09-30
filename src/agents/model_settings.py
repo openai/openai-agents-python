@@ -120,6 +120,12 @@ class ModelSettings:
     """Whether to include usage chunk.
     Only available for Chat Completions API."""
 
+    track_cost: bool = False
+    """Whether to track and calculate cost for model calls.
+    When enabled, the SDK will populate `Usage.cost` with cost estimates.
+    Currently only supported for LiteLLM models. For other providers, cost will remain None.
+    Defaults to False."""
+
     # TODO: revisit ResponseIncludable | str if ResponseIncludable covers more cases
     # We've added str to support missing ones like
     # "web_search_call.action.sources" etc.

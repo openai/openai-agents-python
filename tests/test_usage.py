@@ -50,3 +50,52 @@ def test_usage_add_aggregates_with_none_values():
     assert u1.total_tokens == 15
     assert u1.input_tokens_details.cached_tokens == 4
     assert u1.output_tokens_details.reasoning_tokens == 6
+
+
+def test_usage_cost_defaults_to_none():
+    """Test that cost field defaults to None."""
+    usage = Usage()
+    assert usage.cost is None
+
+
+def test_usage_add_with_cost():
+    """Test that cost is aggregated correctly when both usages have cost."""
+    u1 = Usage(requests=1, input_tokens=10, output_tokens=20, total_tokens=30, cost=0.001)
+    u2 = Usage(requests=1, input_tokens=15, output_tokens=25, total_tokens=40, cost=0.002)
+
+    u1.add(u2)
+
+    assert u1.cost == 0.003
+    assert u1.requests == 2
+    assert u1.total_tokens == 70
+
+
+def test_usage_add_with_partial_cost():
+    """Test that cost is preserved when only one usage has cost."""
+    u1 = Usage(requests=1, input_tokens=10, output_tokens=20, total_tokens=30, cost=0.001)
+    u2 = Usage(requests=1, input_tokens=15, output_tokens=25, total_tokens=40)  # no cost
+
+    u1.add(u2)
+
+    assert u1.cost == 0.001
+    assert u1.requests == 2
+
+
+def test_usage_add_with_cost_none_plus_value():
+    """Test that cost aggregation works when first usage has no cost."""
+    u1 = Usage(requests=1, input_tokens=10, output_tokens=20, total_tokens=30)
+    u2 = Usage(requests=1, input_tokens=15, output_tokens=25, total_tokens=40, cost=0.002)
+
+    u1.add(u2)
+
+    assert u1.cost == 0.002
+
+
+def test_usage_add_with_both_cost_none():
+    """Test that cost remains None when neither usage has cost."""
+    u1 = Usage(requests=1, input_tokens=10, output_tokens=20, total_tokens=30)
+    u2 = Usage(requests=1, input_tokens=15, output_tokens=25, total_tokens=40)
+
+    u1.add(u2)
+
+    assert u1.cost is None
