@@ -1,4 +1,5 @@
 from dataclasses import field
+from typing import Optional
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic.dataclasses import dataclass
@@ -27,7 +28,7 @@ class Usage:
     total_tokens: int = 0
     """Total tokens sent and received, across all requests."""
 
-    cost: float | None = None
+    cost: Optional[float] = None
     """Total cost in USD for the requests. Only available for certain model providers
     (e.g., LiteLLM). Will be None for models that don't provide cost information."""
 
