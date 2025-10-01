@@ -31,9 +31,9 @@ class HttpClientFactory(Protocol):
 
     def __call__(
         self,
-        headers: dict[str, str] | None = None,
-        timeout: httpx.Timeout | None = None,
-        auth: httpx.Auth | None = None,
+        headers: Optional[dict[str, str]] = None,
+        timeout: Optional[httpx.Timeout] = None,
+        auth: Optional[httpx.Auth] = None,
     ) -> httpx.AsyncClient: ...
 
 
