@@ -293,17 +293,12 @@ class Converter:
                     raise UserError(
                         f"Only file_data is supported for input_file {casted_file_param}"
                     )
-                if "filename" not in casted_file_param or not casted_file_param["filename"]:
-                    raise UserError(f"filename must be provided for input_file {casted_file_param}")
-                out.append(
-                    File(
-                        type="file",
-                        file=FileFile(
-                            file_data=casted_file_param["file_data"],
-                            filename=casted_file_param["filename"],
-                        ),
-                    )
-                )
+                filedata = FileFile(file_data=casted_file_param["file_data"])
+
+                if "filename" in casted_file_param and casted_file_param["filename"]:
+                    filedata["filename"] = casted_file_param["filename"]
+
+                out.append(File(type="file", file=filedata))
             else:
                 raise UserError(f"Unknown content: {c}")
         return out
