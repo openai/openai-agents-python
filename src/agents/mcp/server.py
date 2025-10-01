@@ -13,7 +13,6 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
-from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp.shared.message import SessionMessage
 from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
 from typing_extensions import NotRequired, TypedDict
@@ -21,7 +20,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import ToolFilter, ToolFilterContext, ToolFilterStatic
+from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
 
 T = TypeVar("T")
 
@@ -576,7 +575,7 @@ class MCPServerStreamableHttpParams(TypedDict):
     terminate_on_close: NotRequired[bool]
     """Terminate on close"""
 
-    httpx_client_factory: NotRequired[McpHttpClientFactory]
+    httpx_client_factory: NotRequired[HttpClientFactory]
     """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
 
 

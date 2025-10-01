@@ -1,8 +1,9 @@
 import functools
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
 
+import httpx
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
@@ -19,6 +20,21 @@ if TYPE_CHECKING:
 
     from ..agent import AgentBase
     from .server import MCPServer
+
+
+class HttpClientFactory(Protocol):
+    """Protocol for HTTP client factory functions.
+
+    This interface matches the MCP SDK's McpHttpClientFactory but is defined locally
+    to avoid accessing internal MCP SDK modules.
+    """
+
+    def __call__(
+        self,
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient: ...
 
 
 @dataclass

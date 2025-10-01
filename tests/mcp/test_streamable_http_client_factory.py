@@ -204,7 +204,7 @@ class TestMCPServerStreamableHttpClientFactory:
 
         # The annotation should contain the string representation of the type
         annotation_str = str(annotations["httpx_client_factory"])
-        assert "McpHttpClientFactory" in annotation_str
+        assert "HttpClientFactory" in annotation_str
 
     @pytest.mark.asyncio
     async def test_all_parameters_with_custom_factory(self):
