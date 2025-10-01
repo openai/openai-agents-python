@@ -663,7 +663,13 @@ class AgentRunner:
                             tool_output_guardrail_results=tool_output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-                        await self._save_result_to_session(session, [], turn_result.new_step_items)
+                        if not any(
+                            guardrail_result.output.tripwire_triggered
+                            for guardrail_result in input_guardrail_results
+                        ):
+                            await self._save_result_to_session(
+                                session, [], turn_result.new_step_items
+                            )
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -672,7 +678,13 @@ class AgentRunner:
                         current_span = None
                         should_run_agent_start_hooks = True
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        await self._save_result_to_session(session, [], turn_result.new_step_items)
+                        if not any(
+                            guardrail_result.output.tripwire_triggered
+                            for guardrail_result in input_guardrail_results
+                        ):
+                            await self._save_result_to_session(
+                                session, [], turn_result.new_step_items
+                            )
                     else:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
@@ -1041,15 +1053,29 @@ class AgentRunner:
                         streamed_result.is_complete = True
 
                         # Save the conversation to session if enabled
-                        await AgentRunner._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        await AgentRunner._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1718,6 +1744,24 @@ class AgentRunner:
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
         await session.add_items(items_to_save)
+
+    @staticmethod
+    async def _input_guardrail_tripwire_triggered_for_stream(
+        streamed_result: RunResultStreaming,
+    ) -> bool:
+        """Return True if any input guardrail triggered during a streamed run."""
+
+        task = streamed_result._input_guardrails_task
+        if task is None:
+            return False
+
+        if not task.done():
+            await task
+
+        return any(
+            guardrail_result.output.tripwire_triggered
+            for guardrail_result in streamed_result.input_guardrail_results
+        )
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
