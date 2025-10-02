@@ -49,7 +49,7 @@ async def test_cost_extracted_when_track_cost_enabled(monkeypatch):
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_cost_none_when_track_cost_disabled(monkeypatch):
-    """Test that cost is None when track_cost=False (default)."""
+    """Test that cost is None when track_cost is not set (defaults to None/False)."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content="Test response")
@@ -61,13 +61,13 @@ async def test_cost_none_when_track_cost_disabled(monkeypatch):
         return response
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
-    # Note: completion_cost should not be called when track_cost=False
+    # Note: completion_cost should not be called when track_cost is None (default)
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
         system_instructions=None,
         input=[],
-        model_settings=ModelSettings(track_cost=False),  # Disabled (default)
+        model_settings=ModelSettings(),  # track_cost defaults to None (disabled)
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -192,3 +192,29 @@ async def test_cost_extraction_preserves_other_usage_fields(monkeypatch):
     assert result.usage.total_tokens == 150
     assert result.usage.cost == 0.001
     assert result.usage.requests == 1
+
+
+def test_track_cost_sticky_through_resolve():
+    """Test that track_cost=True is not overwritten by resolve() with empty override."""
+    base = ModelSettings(track_cost=True, temperature=0.7)
+    override = ModelSettings(max_tokens=100)  # Only setting max_tokens, track_cost is None
+
+    resolved = base.resolve(override)
+
+    # track_cost should remain True because override's track_cost is None (not False)
+    assert resolved.track_cost is True
+    assert resolved.temperature == 0.7
+    assert resolved.max_tokens == 100
+
+
+def test_track_cost_can_be_explicitly_disabled():
+    """Test that track_cost=True can be explicitly overridden to False."""
+    base = ModelSettings(track_cost=True, temperature=0.7)
+    override = ModelSettings(track_cost=False, max_tokens=100)
+
+    resolved = base.resolve(override)
+
+    # track_cost should be False because override explicitly set it to False
+    assert resolved.track_cost is False
+    assert resolved.temperature == 0.7
+    assert resolved.max_tokens == 100
