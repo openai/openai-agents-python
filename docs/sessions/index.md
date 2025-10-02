@@ -117,27 +117,6 @@ print(f"Agent: {result.final_output}")
 
 The SDK provides several session implementations for different use cases:
 
-### SQLite sessions
-
-The default, lightweight session implementation using SQLite:
-
-```python
-from agents import SQLiteSession
-
-# In-memory database (lost when process ends)
-session = SQLiteSession("user_123")
-
-# Persistent file-based database
-session = SQLiteSession("user_123", "conversations.db")
-
-# Use the session
-result = await Runner.run(
-    agent,
-    "Hello",
-    session=session
-)
-```
-
 ### OpenAI Conversations API sessions
 
 Use [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations) through `OpenAIConversationsSession`.
@@ -172,6 +151,27 @@ result = await Runner.run(
     session=session
 )
 print(result.final_output)  # "California"
+```
+
+### SQLite sessions
+
+The default, lightweight session implementation using SQLite:
+
+```python
+from agents import SQLiteSession
+
+# In-memory database (lost when process ends)
+session = SQLiteSession("user_123")
+
+# Persistent file-based database
+session = SQLiteSession("user_123", "conversations.db")
+
+# Use the session
+result = await Runner.run(
+    agent,
+    "Hello",
+    session=session
+)
 ```
 
 ### SQLAlchemy sessions
@@ -423,8 +423,8 @@ result = await Runner.run(
 For detailed API documentation, see:
 
 -   [`Session`][agents.memory.session.Session] - Protocol interface
--   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
 -   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API implementation
+-   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
 -   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics
 -   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Encrypted wrapper for any session
