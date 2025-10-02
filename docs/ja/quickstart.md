@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これは一度だけ行います。
+これは一度だけ実行すれば大丈夫です。
 
 ```bash
 mkdir my_project
@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 仮想環境の有効化
 
-新しいターミナルセッションを開始するたびに実行します。
+新しいターミナル セッションを開始するたびに実行します。
 
 ```bash
 source .venv/bin/activate
@@ -30,15 +30,15 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-まだお持ちでない場合は、[これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+まだお持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 最初の エージェント の作成
+## 最初のエージェントの作成
 
-エージェントは instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェントは instructions、名前、任意の config（例: `model_config`）で定義します。
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## エージェントの追加
+## さらにエージェントを追加
 
-同じ方法で追加の エージェント を定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
+追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフ ルーティングを判断するための追加のコンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各 エージェント に、タスクを前進させる方法を決めるために選択できる、送信側ハンドオフオプションのインベントリを定義できます。
+各エージェントで、タスクを進める方法を決定するために選択できる送信側ハンドオフ オプションの一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェント オーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェント が 2 つの専門 エージェント 間を正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -95,7 +95,7 @@ async def main():
 
 ## ガードレールの追加
 
-入力または出力に対してカスタム ガードレールを定義できます。
+入力または出力に対して実行するカスタム ガードレールを定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## まとめて実行
+## すべてを組み合わせる
 
-すべてを組み合わせて、ハンドオフと入力ガードレールを使用してワークフロー全体を実行しましょう。
+すべてを組み合わせて、ハンドオフと入力用ガードレールを使い、ワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## トレースの表示
 
-エージェント実行時に何が起こったかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示します。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces)に移動して実行のトレースを表示します。
 
 ## 次のステップ
 
-より複雑なエージェント フローの作り方を学びましょう。
+より複雑なエージェント フローの作り方を学びましょう:
 
-- エージェントの設定について学ぶ: [エージェント](agents.md)
-- エージェントの実行について学ぶ: [エージェントの実行](running_agents.md)
-- ツール、ガードレール、モデルについて学ぶ: [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md)
+- [Agents](agents.md) の設定方法について学ぶ。
+- [エージェントの実行](running_agents.md)について学ぶ。
+- [tools](tools.md)、[guardrails](guardrails.md)、[モデル](models/index.md)について学ぶ。
