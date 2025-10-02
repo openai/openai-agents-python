@@ -125,13 +125,15 @@ class LitellmModel(Model):
             if hasattr(response, "usage"):
                 response_usage = response.usage
 
-                # Extract cost from LiteLLM's hidden params if cost tracking is enabled.
+                # Calculate cost using LiteLLM's completion_cost function if cost tracking is enabled.  # noqa: E501
                 cost = None
                 if model_settings.track_cost:
-                    if hasattr(response, "_hidden_params") and isinstance(
-                        response._hidden_params, dict
-                    ):
-                        cost = response._hidden_params.get("response_cost")
+                    try:
+                        # Use LiteLLM's public API to calculate cost from the response.
+                        cost = litellm.completion_cost(completion_response=response)  # type: ignore[attr-defined]
+                    except Exception:
+                        # If cost calculation fails (e.g., unknown model), continue without cost.
+                        pass
 
                 usage = (
                     Usage(

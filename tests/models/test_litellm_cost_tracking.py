@@ -12,7 +12,7 @@ from agents.models.interface import ModelTracing
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_cost_extracted_when_track_cost_enabled(monkeypatch):
-    """Test that cost is extracted from LiteLLM response when track_cost=True."""
+    """Test that cost is calculated using LiteLLM's completion_cost API when track_cost=True."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content="Test response")
@@ -21,11 +21,14 @@ async def test_cost_extracted_when_track_cost_enabled(monkeypatch):
             choices=[choice],
             usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
         )
-        # Simulate LiteLLM's hidden params with cost.
-        response._hidden_params = {"response_cost": 0.00042}
         return response
 
+    def fake_completion_cost(completion_response):
+        """Mock litellm.completion_cost to return a test cost value."""
+        return 0.00042
+
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
@@ -39,7 +42,7 @@ async def test_cost_extracted_when_track_cost_enabled(monkeypatch):
         previous_response_id=None,
     )
 
-    # Verify that cost was extracted.
+    # Verify that cost was calculated.
     assert result.usage.cost == 0.00042
 
 
@@ -55,11 +58,10 @@ async def test_cost_none_when_track_cost_disabled(monkeypatch):
             choices=[choice],
             usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
         )
-        # Even if LiteLLM provides cost, it should be ignored.
-        response._hidden_params = {"response_cost": 0.00042}
         return response
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    # Note: completion_cost should not be called when track_cost=False
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
@@ -80,7 +82,7 @@ async def test_cost_none_when_track_cost_disabled(monkeypatch):
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_cost_none_when_not_provided(monkeypatch):
-    """Test that cost is None when LiteLLM doesn't provide it."""
+    """Test that cost is None when completion_cost raises an exception."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content="Test response")
@@ -89,10 +91,14 @@ async def test_cost_none_when_not_provided(monkeypatch):
             choices=[choice],
             usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
         )
-        # No _hidden_params or no cost in hidden params.
         return response
 
+    def fake_completion_cost(completion_response):
+        """Mock completion_cost to raise an exception (e.g., unknown model)."""
+        raise Exception("Model not found in pricing database")
+
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
@@ -106,14 +112,14 @@ async def test_cost_none_when_not_provided(monkeypatch):
         previous_response_id=None,
     )
 
-    # Verify that cost is None when not provided.
+    # Verify that cost is None when completion_cost fails.
     assert result.usage.cost is None
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_cost_with_empty_hidden_params(monkeypatch):
-    """Test that cost extraction handles empty _hidden_params gracefully."""
+async def test_cost_zero_when_completion_cost_returns_zero(monkeypatch):
+    """Test that cost is 0 when completion_cost returns 0 (e.g., free model)."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content="Test response")
@@ -122,11 +128,14 @@ async def test_cost_with_empty_hidden_params(monkeypatch):
             choices=[choice],
             usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
         )
-        # Empty hidden params.
-        response._hidden_params = {}
         return response
 
+    def fake_completion_cost(completion_response):
+        """Mock completion_cost to return 0 (e.g., free model)."""
+        return 0.0
+
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
@@ -140,14 +149,14 @@ async def test_cost_with_empty_hidden_params(monkeypatch):
         previous_response_id=None,
     )
 
-    # Verify that cost is None with empty hidden params.
-    assert result.usage.cost is None
+    # Verify that cost is 0 for free models.
+    assert result.usage.cost == 0.0
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 async def test_cost_extraction_preserves_other_usage_fields(monkeypatch):
-    """Test that cost extraction doesn't affect other usage fields."""
+    """Test that cost calculation doesn't affect other usage fields."""
 
     async def fake_acompletion(model, messages=None, **kwargs):
         msg = Message(role="assistant", content="Test response")
@@ -156,10 +165,14 @@ async def test_cost_extraction_preserves_other_usage_fields(monkeypatch):
             choices=[choice],
             usage=Usage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
         )
-        response._hidden_params = {"response_cost": 0.001}
         return response
 
+    def fake_completion_cost(completion_response):
+        """Mock litellm.completion_cost to return a test cost value."""
+        return 0.001
+
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
 
     model = LitellmModel(model="test-model", api_key="test-key")
     result = await model.get_response(
