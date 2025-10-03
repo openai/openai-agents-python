@@ -10,12 +10,9 @@ You can mix and match these patterns. Each has their own tradeoffs, described be
 ## Orchestrating via LLM
 
 An agent is an LLM equipped with instructions, tools and handoffs. This means that given an open-ended task, the LLM can autonomously plan how it will tackle the task, using tools to take actions and acquire data, and using handoffs to delegate tasks to sub-agents. For example, a research agent could be equipped with tools like:
+<img width="620" height="404" alt="Screen Shot 2025-10-02 at 5 39 59 PM" src="https://github.com/user-attachments/assets/223a083d-80b9-4b58-b7d8-f49f282b81b2" />
 
--   Web search to find information online
--   File search and retrieval to search through proprietary data and connections
--   Computer use to take actions on a computer
--   Code execution to do data analysis
--   Handoffs to specialized agents that are great at planning, report writing and more.
+
 
 This pattern is great when the task is open-ended and you want to rely on the intelligence of an LLM. The most important tactics here are:
 
