@@ -267,10 +267,11 @@ class RunImpl:
         new_step_items: list[RunItem] = []
         new_step_items.extend(processed_response.new_items)
 
-        # First, lets run the tool calls - function tools and computer actions
+        # First, lets run the tool calls - function tools, computer actions, and local shell calls
         (
             (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
             computer_results,
+            local_shell_results,
         ) = await asyncio.gather(
             cls.execute_function_tool_calls(
                 agent=agent,
@@ -286,9 +287,17 @@ class RunImpl:
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
+            cls.execute_local_shell_calls(
+                agent=agent,
+                calls=processed_response.local_shell_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
         )
         new_step_items.extend([result.run_item for result in function_results])
         new_step_items.extend(computer_results)
+        new_step_items.extend(local_shell_results)
 
         # Next, run the MCP approval requests
         if processed_response.mcp_approval_requests:
@@ -1414,12 +1423,13 @@ class LocalShellAction:
 
         return ToolCallOutputItem(
             agent=agent,
-            output=output,
-            raw_item={
+            output=result,
+            # LocalShellCallOutput type uses the field name "id", but the server wants "call_id".
+            # raw_item keeps the upstream type, so we ignore the type checker here.
+            raw_item={  # type: ignore[misc, arg-type]
                 "type": "local_shell_call_output",
-                "id": call.tool_call.call_id,
+                "call_id": call.tool_call.call_id,
                 "output": result,
-                # "id": "out" + call.tool_call.id,  # TODO remove this, it should be optional
             },
         )
 
