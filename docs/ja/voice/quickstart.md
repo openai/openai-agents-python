@@ -6,7 +6,7 @@ search:
 
 ## 前提条件
 
-Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK から音声用のオプション依存関係をインストールします。
+OpenAI Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK から音声用のオプション依存関係をインストールします:
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,11 +14,11 @@ pip install 'openai-agents[voice]'
 
 ## 概念
 
-主に知っておくべき概念は、[`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは 3 段階のプロセスです。
+主な概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] で、3 つのステップから成るプロセスです:
 
 1. 音声をテキストに変換するために音声認識モデルを実行します。
-2. 通常はエージェントのワークフローであるあなたのコードを実行して、結果を生成します。
-3. 結果のテキストを音声に戻すために音声合成モデルを実行します。
+2. 通常はエージェント駆動のワークフローであるあなたのコードを実行し、結果を生成します。
+3. 結果のテキストを音声に戻すためにテキスト読み上げモデルを実行します。
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントをセットアップします。これは、この SDK でエージェントを構築したことがあれば馴染みがあるはずです。ここでは 2 つのエージェント、ハンドオフ、そしてツールを用意します。
+まず、いくつかのエージェントをセットアップします。この SDK でエージェントを作成したことがあれば、見覚えがあるはずです。ここでは 2 つのエージェント、ハンドオフ、ツールを用意します。
 
 ```python
 import asyncio
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 音声パイプライン
 
-[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] をワークフローとして使い、シンプルな音声パイプラインをセットアップします。
+ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用し、シンプルな音声パイプラインを設定します。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## すべてをまとめる
+## 統合
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例を参照してください。
+この例を実行すると、エージェントが話します。自分でエージェントに話しかけられるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) の例をご覧ください。
