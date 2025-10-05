@@ -288,9 +288,9 @@ async def run_my_agent() -> str:
 
 In certain cases, you might want to modify the output of the tool-agents before returning it to the central agent. This may be useful if you want to:
 
--   Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
--   Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
--   Validate the output or provide a fallback value when the agent’s response is missing or malformed.
+- Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
+- Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
+- Validate the output or provide a fallback value when the agent’s response is missing or malformed.
 
 You can do this by supplying the `custom_output_extractor` argument to the `as_tool` method:
 
@@ -370,16 +370,16 @@ asyncio.run(main())
 
 The `is_enabled` parameter accepts:
 
--   **Boolean values**: `True` (always enabled) or `False` (always disabled)
--   **Callable functions**: Functions that take `(context, agent)` and return a boolean
--   **Async functions**: Async functions for complex conditional logic
+- **Boolean values**: `True` (always enabled) or `False` (always disabled)
+- **Callable functions**: Functions that take `(context, agent)` and return a boolean
+- **Async functions**: Async functions for complex conditional logic
 
 Disabled tools are completely hidden from the LLM at runtime, making this useful for:
 
--   Feature gating based on user permissions
--   Environment-specific tool availability (dev vs prod)
--   A/B testing different tool configurations
--   Dynamic tool filtering based on runtime state
+- Feature gating based on user permissions
+- Environment-specific tool availability (dev vs prod)
+- A/B testing different tool configurations
+- Dynamic tool filtering based on runtime state
 
 ## Handling errors in function tools
 
