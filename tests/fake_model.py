@@ -34,6 +34,7 @@ class FakeModel(Model):
         )
         self.tracing_enabled = tracing_enabled
         self.last_turn_args: dict[str, Any] = {}
+        self.first_turn_args: dict[str, Any] | None = None
         self.hardcoded_usage: Usage | None = None
 
     def set_hardcoded_usage(self, usage: Usage):
@@ -64,7 +65,7 @@ class FakeModel(Model):
         conversation_id: str | None,
         prompt: Any | None,
     ) -> ModelResponse:
-        self.last_turn_args = {
+        turn_args = {
             "system_instructions": system_instructions,
             "input": input,
             "model_settings": model_settings,
@@ -73,6 +74,11 @@ class FakeModel(Model):
             "previous_response_id": previous_response_id,
             "conversation_id": conversation_id,
         }
+
+        if self.first_turn_args is None:
+            self.first_turn_args = turn_args.copy()
+
+        self.last_turn_args = turn_args
 
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
@@ -92,7 +98,7 @@ class FakeModel(Model):
             return ModelResponse(
                 output=output,
                 usage=self.hardcoded_usage or Usage(),
-                response_id=None,
+                response_id="resp-789",
             )
 
     async def stream_response(
@@ -109,7 +115,7 @@ class FakeModel(Model):
         conversation_id: str | None = None,
         prompt: Any | None = None,
     ) -> AsyncIterator[TResponseStreamEvent]:
-        self.last_turn_args = {
+        turn_args = {
             "system_instructions": system_instructions,
             "input": input,
             "model_settings": model_settings,
@@ -118,6 +124,11 @@ class FakeModel(Model):
             "previous_response_id": previous_response_id,
             "conversation_id": conversation_id,
         }
+
+        if self.first_turn_args is None:
+            self.first_turn_args = turn_args.copy()
+
+        self.last_turn_args = turn_args
         with generation_span(disabled=not self.tracing_enabled) as span:
             output = self.get_next_output()
             if isinstance(output, Exception):
@@ -145,7 +156,7 @@ def get_response_obj(
     usage: Usage | None = None,
 ) -> Response:
     return Response(
-        id=response_id or "123",
+        id=response_id or "resp-789",
         created_at=123,
         model="test_model",
         object="response",
