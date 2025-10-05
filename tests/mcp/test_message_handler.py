@@ -4,13 +4,28 @@ import anyio
 import pytest
 from mcp.client.session import MessageHandlerFnT
 from mcp.shared.message import SessionMessage
-from mcp.types import Implementation, InitializeResult, ServerCapabilities
+from mcp.shared.session import RequestResponder
+from mcp.types import (
+    ClientResult,
+    Implementation,
+    InitializeResult,
+    ServerCapabilities,
+    ServerNotification,
+    ServerRequest,
+)
 
 from agents.mcp.server import (
     MCPServerSse,
     MCPServerStdio,
     MCPServerStreamableHttp,
     _MCPServerWithClientSession,
+)
+
+
+HandlerMessage = (
+    RequestResponder[ServerRequest, ClientResult]
+    | ServerNotification
+    | Exception
 )
 
 
@@ -35,10 +50,12 @@ class _StubClientSession:
         return False
 
     async def initialize(self) -> InitializeResult:
+        capabilities = ServerCapabilities.model_construct()
+        server_info = Implementation.model_construct(name="stub", version="1.0")
         return InitializeResult(
             protocolVersion="2024-11-05",
-            capabilities=ServerCapabilities(),
-            serverInfo=Implementation(name="stub", version="1.0"),
+            capabilities=capabilities,
+            serverInfo=server_info,
         )
 
 
@@ -81,7 +98,7 @@ async def test_client_session_receives_message_handler(monkeypatch):
     monkeypatch.setattr("agents.mcp.server.ClientSession", _recording_client_session)
 
     class _AsyncHandler:
-        async def __call__(self, message):
+        async def __call__(self, message: HandlerMessage) -> None:
             del message
 
     handler: MessageHandlerFnT = _AsyncHandler()
@@ -106,7 +123,7 @@ async def test_client_session_receives_message_handler(monkeypatch):
 )
 def test_message_handler_propagates_to_server_base(server_cls, params):
     class _AsyncHandler:
-        async def __call__(self, message):
+        async def __call__(self, message: HandlerMessage) -> None:
             del message
 
     handler: MessageHandlerFnT = _AsyncHandler()
