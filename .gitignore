@@ -144,3 +144,6 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .aider*
+
+# Redis database files
+dump.rdb
