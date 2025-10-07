@@ -68,6 +68,44 @@ if __name__ == "__main__":
 4. The context is passed to the `run` function.
 5. The agent correctly calls the tool and gets the age.
 
+---
+
+### Advanced: `ToolContext`
+
+In some cases, you might want to access extra metadata about the tool being executed — such as its name, call ID, or raw argument string.  
+For this, you can use the [`ToolContext`][agents.tool_context.ToolContext] class, which extends `RunContextWrapper`.
+
+```python
+from dataclasses import dataclass
+from agents import function_tool
+from agents.tool_context import ToolContext
+
+@dataclass
+class UserInfo:
+    name: str
+    uid: int
+
+@function_tool
+async def fetch_user_age(ctx: ToolContext[UserInfo]) -> str:
+    """Fetch the age of the user, with access to tool metadata."""
+    print(ctx.tool_name)        # e.g. "fetch_user_age"
+    print(ctx.tool_call_id)     # unique ID for this invocation
+    print(ctx.tool_arguments)   # raw arguments as string
+    return f"The user {ctx.context.name} is 47 years old."
+```
+
+`ToolContext` provides the same `.context` property as `RunContextWrapper`,  
+plus additional fields specific to the current tool call:
+
+- `tool_name` – the name of the tool being invoked  
+- `tool_call_id` – a unique identifier for this tool call  
+- `tool_arguments` – the raw argument string passed to the tool  
+
+Use `ToolContext` when you need tool-level metadata during execution.  
+For general context sharing between agents and tools, `RunContextWrapper` remains sufficient.
+
+---
+
 ## Agent/LLM context
 
 When an LLM is called, the **only** data it can see is from the conversation history. This means that if you want to make some new data available to the LLM, you must do it in a way that makes it available in that history. There are a few ways to do this:
