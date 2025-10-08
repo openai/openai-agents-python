@@ -124,8 +124,8 @@ result = await Runner.run(agent, "Hello")
 
 ### OpenAI Conversations API memory
 
-Use the [OpenAI Conversations API](https://platform.openai.com/docs/guides/conversational-agents/conversations-api) to persist
-conversation state without managing your own database. This is helpful when you already rely on OpenAI-hosted infrastructure
+Use the [OpenAI Conversations API](https://platform.openai.com/docs/api-reference/conversations/create) to persist
+[conversation state](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#using-the-conversations-api) without managing your own database. This is helpful when you already rely on OpenAI-hosted infrastructure
 for storing conversation history.
 
 ```python

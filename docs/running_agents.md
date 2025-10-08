@@ -121,6 +121,71 @@ Sessions automatically:
 
 See the [Sessions documentation](sessions.md) for more details.
 
+
+### Server-managed conversations
+
+You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
+
+OpenAI provides two ways to track state across turns:
+
+#### 1. Using `conversation_id`
+
+You first create a conversation using the OpenAI Conversations API and then reuse its ID for every subsequent call:
+
+```python
+from agents import Agent, Runner
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+async def main():
+    # Create a server-managed conversation
+    conversation = await client.conversations.create()
+    conv_id = conversation.id    
+
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    # First turn
+    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?", conversation_id=conv_id)
+    print(result1.final_output)
+    # San Francisco
+
+    # Second turn reuses the same conversation_id
+    result2 = await Runner.run(
+        agent,
+        "What state is it in?",
+        conversation_id=conv_id,
+    )
+    print(result2.final_output)
+    # California
+```
+
+#### 2. Using `previous_response_id`
+
+Another option is **response chaining**, where each turn links explicitly to the response ID from the previous turn.
+
+```python
+from agents import Agent, Runner
+
+async def main():
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    # First turn
+    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
+    print(result1.final_output)
+    # San Francisco
+
+    # Second turn, chained to the previous response
+    result2 = await Runner.run(
+        agent,
+        "What state is it in?",
+        previous_response_id=result1.last_response_id,
+    )
+    print(result2.final_output)
+    # California
+```
+
+
 ## Long running agents & human-in-the-loop
 
 You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8), and [view docs here](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents).
