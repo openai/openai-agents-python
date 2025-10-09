@@ -3,7 +3,33 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai.types.responses import Response, ResponseCompletedEvent, ResponseUsage
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseCreatedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseFunctionToolCall,
+    ResponseInProgressEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
+    ResponseTextDeltaEvent,
+    ResponseTextDoneEvent,
+    ResponseUsage,
+)
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+from openai.types.responses.response_reasoning_summary_part_added_event import (
+    Part as AddedEventPart,
+)
+from openai.types.responses.response_reasoning_summary_part_done_event import Part as DoneEventPart
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents.agent_output import AgentOutputSchemaBase
@@ -143,10 +169,151 @@ class FakeModel(Model):
                 )
                 raise output
 
+            response = get_response_obj(output, usage=self.hardcoded_usage)
+            sequence_number = 0
+
+            yield ResponseCreatedEvent(
+                type="response.created",
+                response=response,
+                sequence_number=sequence_number,
+            )
+            sequence_number += 1
+
+            yield ResponseInProgressEvent(
+                type="response.in_progress",
+                response=response,
+                sequence_number=sequence_number,
+            )
+            sequence_number += 1
+
+            for output_index, output_item in enumerate(output):
+                yield ResponseOutputItemAddedEvent(
+                    type="response.output_item.added",
+                    item=output_item,
+                    output_index=output_index,
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
+
+                if isinstance(output_item, ResponseReasoningItem):
+                    if output_item.summary:
+                        for summary_index, summary in enumerate(output_item.summary):
+                            yield ResponseReasoningSummaryPartAddedEvent(
+                                type="response.reasoning_summary_part.added",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                part=AddedEventPart(text=summary.text, type=summary.type),
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseReasoningSummaryTextDeltaEvent(
+                                type="response.reasoning_summary_text.delta",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                delta=summary.text,
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseReasoningSummaryTextDoneEvent(
+                                type="response.reasoning_summary_text.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                text=summary.text,
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseReasoningSummaryPartDoneEvent(
+                                type="response.reasoning_summary_part.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                summary_index=summary_index,
+                                part=DoneEventPart(text=summary.text, type=summary.type),
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                elif isinstance(output_item, ResponseFunctionToolCall):
+                    yield ResponseFunctionCallArgumentsDeltaEvent(
+                        type="response.function_call_arguments.delta",
+                        item_id=output_item.call_id,
+                        output_index=output_index,
+                        delta=output_item.arguments,
+                        sequence_number=sequence_number,
+                    )
+                    sequence_number += 1
+
+                    yield ResponseFunctionCallArgumentsDoneEvent(
+                        type="response.function_call_arguments.done",
+                        item_id=output_item.call_id,
+                        output_index=output_index,
+                        arguments=output_item.arguments,
+                        sequence_number=sequence_number,
+                    )
+                    sequence_number += 1
+
+                elif isinstance(output_item, ResponseOutputMessage):
+                    for content_index, content_part in enumerate(output_item.content):
+                        if isinstance(content_part, ResponseOutputText):
+                            yield ResponseContentPartAddedEvent(
+                                type="response.content_part.added",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                content_index=content_index,
+                                part=content_part,
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseTextDeltaEvent(
+                                type="response.output_text.delta",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                content_index=content_index,
+                                delta=content_part.text,
+                                logprobs=[],
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseTextDoneEvent(
+                                type="response.output_text.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                content_index=content_index,
+                                text=content_part.text,
+                                logprobs=[],
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                            yield ResponseContentPartDoneEvent(
+                                type="response.content_part.done",
+                                item_id=output_item.id,
+                                output_index=output_index,
+                                content_index=content_index,
+                                part=content_part,
+                                sequence_number=sequence_number,
+                            )
+                            sequence_number += 1
+
+                yield ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    item=output_item,
+                    output_index=output_index,
+                    sequence_number=sequence_number,
+                )
+                sequence_number += 1
+
             yield ResponseCompletedEvent(
                 type="response.completed",
-                response=get_response_obj(output, usage=self.hardcoded_usage),
-                sequence_number=0,
+                response=response,
+                sequence_number=sequence_number,
             )
 
 

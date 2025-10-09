@@ -242,6 +242,57 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+### Encrypted sessions
+
+For applications requiring encryption of conversation data at rest, you can use `EncryptedSession` to wrap any session backend with transparent encryption and automatic TTL-based expiration. This requires the `encrypt` extra: `pip install openai-agents[encrypt]`.
+
+The `EncryptedSession` uses Fernet encryption with per-session key derivation (HKDF) and supports automatic expiration of old messages. When items exceed the TTL, they are silently skipped during retrieval.
+
+**Example: Encrypting SQLAlchemy session data**
+
+```python
+import asyncio
+from agents import Agent, Runner
+from agents.extensions.memory import EncryptedSession, SQLAlchemySession
+
+async def main():
+    # Create underlying session (works with any SessionABC implementation)
+    underlying_session = SQLAlchemySession.from_url(
+        session_id="user-123",
+        url="postgresql+asyncpg://app:secret@db.example.com/agents",
+        create_tables=True,
+    )
+
+    # Wrap with encryption and TTL-based expiration
+    session = EncryptedSession(
+        session_id="user-123",
+        underlying_session=underlying_session,
+        encryption_key="your-encryption-key",  # Use a secure key from your secrets management
+        ttl=600,  # 10 minutes - items older than this are silently skipped
+    )
+
+    agent = Agent("Assistant")
+    result = await Runner.run(agent, "Hello", session=session)
+    print(result.final_output)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Key features:**
+
+-   **Transparent encryption**: Automatically encrypts all session items before storage and decrypts on retrieval
+-   **Per-session key derivation**: Uses HKDF with the session ID as salt to derive unique encryption keys
+-   **TTL-based expiration**: Automatically expires old messages based on configurable time-to-live (default: 10 minutes)
+-   **Flexible key input**: Accepts either Fernet keys or raw strings as encryption keys
+-   **Wraps any session**: Works with SQLite, SQLAlchemy, or custom session implementations
+
+!!! warning "Important security notes"
+
+    -   Store your encryption key securely (e.g., environment variables, secrets manager)
+    -   Expired tokens are rejected based on the application server's system clock - ensure all servers are time-synchronized with NTP to avoid valid tokens being rejected due to clock drift
+    -   The underlying session still stores encrypted data, so you maintain control over your database infrastructure
+
 
 ## Custom memory implementations
 
@@ -304,6 +355,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
+-   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
 -   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
 
 ### Session management
@@ -402,3 +454,4 @@ For detailed API documentation, see:
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite implementation
 -   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
+-   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Encrypted session wrapper with TTL
