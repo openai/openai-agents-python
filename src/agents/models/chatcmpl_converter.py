@@ -293,17 +293,12 @@ class Converter:
                     raise UserError(
                         f"Only file_data is supported for input_file {casted_file_param}"
                     )
-                if "filename" not in casted_file_param or not casted_file_param["filename"]:
-                    raise UserError(f"filename must be provided for input_file {casted_file_param}")
-                out.append(
-                    File(
-                        type="file",
-                        file=FileFile(
-                            file_data=casted_file_param["file_data"],
-                            filename=casted_file_param["filename"],
-                        ),
-                    )
-                )
+                filedata = FileFile(file_data=casted_file_param["file_data"])
+
+                if "filename" in casted_file_param and casted_file_param["filename"]:
+                    filedata["filename"] = casted_file_param["filename"]
+
+                out.append(File(type="file", file=filedata))
             else:
                 raise UserError(f"Unknown content: {c}")
         return out
@@ -551,7 +546,7 @@ class Converter:
 
                 if content_items and preserve_thinking_blocks:
                     # Reconstruct thinking blocks from content and signature
-                    pending_thinking_blocks = []
+                    reconstructed_thinking_blocks = []
                     for content_item in content_items:
                         if (
                             isinstance(content_item, dict)
@@ -564,7 +559,11 @@ class Converter:
                             # Add signatures if available
                             if signatures:
                                 thinking_block["signature"] = signatures.pop(0)
-                            pending_thinking_blocks.append(thinking_block)
+                            reconstructed_thinking_blocks.append(thinking_block)
+
+                    # Store thinking blocks as pending for the next assistant message
+                    # This preserves the original behavior
+                    pending_thinking_blocks = reconstructed_thinking_blocks
 
             # 8) If we haven't recognized it => fail or ignore
             else:

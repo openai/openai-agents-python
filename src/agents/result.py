@@ -31,6 +31,7 @@ from .util._pretty_print import (
 if TYPE_CHECKING:
     from ._run_impl import QueueCompleteSentinel
     from .agent import Agent
+    from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 
 T = TypeVar("T")
 
@@ -58,6 +59,12 @@ class RunResultBase(abc.ABC):
 
     output_guardrail_results: list[OutputGuardrailResult]
     """Guardrail results for the final output of the agent."""
+
+    tool_input_guardrail_results: list[ToolInputGuardrailResult]
+    """Tool input guardrail results from all tools executed during the run."""
+
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult]
+    """Tool output guardrail results from all tools executed during the run."""
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""

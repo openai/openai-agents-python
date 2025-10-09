@@ -26,6 +26,7 @@ search:
 source_dir = "docs"
 languages = {
     "ja": "Japanese",
+    "ko": "Korean",
     # Add more languages here, e.g., "fr": "French"
 }
 
@@ -79,6 +80,40 @@ eng_to_non_eng_mapping = {
         "Python first": "Python ファースト",
         # Add more Japanese mappings here
     },
+    "ko": {
+        "agents": "에이전트",
+        "computer use": "컴퓨터 사용",
+        "OAI hosted tools": "OpenAI 호스트하는 도구",
+        "well formed data": "적절한 형식의 데이터",
+        "guardrail": "가드레일",
+        "orchestrating multiple agents": "멀티 에이전트 오케스트레이션",
+        "handoffs": "핸드오프",
+        "function tools": "함수 도구",
+        "function calling": "함수 호출",
+        "tracing": "트레이싱",
+        "code examples": "코드 예제",
+        "vector store": "벡터 스토어",
+        "deep research": "딥 리서치",
+        "category": "카테고리",
+        "user": "사용자",
+        "parameter": "매개변수",
+        "processor": "프로세서",
+        "server": "서버",
+        "web search": "웹 검색",
+        "file search": "파일 검색",
+        "streaming": "스트리밍",
+        "system prompt": "시스템 프롬프트",
+        "Python-first": "파이썬 우선",
+        "interruption": "인터럽션(중단 처리)",
+        "TypeScript-first": "TypeScript 우선",
+        "Human in the loop": "휴먼인더루프 (HITL)",
+        "Hosted tool": "호스티드 툴",
+        "Hosted MCP server tools": "호스티드 MCP 서버 도구",
+        "raw": "원문",
+        "Realtime Agents": "실시간 에이전트",
+        "Build your first agent in minutes.": "단 몇 분 만에 첫 에이전트를 만들 수 있습니다",
+        "Let's build": "시작하기",
+    },
     # Add more languages here
 }
 eng_to_non_eng_instructions = {
@@ -94,6 +129,12 @@ eng_to_non_eng_instructions = {
         "* The term 'raw' in 'raw response events' must be kept as is",
         "* You must consistently use polite wording such as です/ます rather than である/なのだ.",
         # Add more Japanese mappings here
+    ],
+    "ko": [
+        "* 공손하고 중립적인 문체(합니다/입니다체)를 일관되게 사용하세요.",
+        "* 개발자 문서이므로 자연스러운 의역을 허용하되 정확성을 유지하세요.",
+        "* 'instructions', 'tools' 같은 API 매개변수와 temperature, top_p, max_tokens, presence_penalty, frequency_penalty 등은 영문 그대로 유지하세요.",
+        "* 문장이 아닌 불릿 항목 끝에는 마침표를 찍지 마세요.",
     ],
     # Add more languages here
 }
@@ -163,6 +204,9 @@ You must return **only** the translated markdown. Do not include any commentary,
 *(applies only when {target_language} = Japanese)*  
 - Insert a half‑width space before and after all alphanumeric terms.  
 - Add a half‑width space just outside markdown emphasis markers: ` **太字** ` (good) vs `** 太字 **` (bad).
+*(applies only when {target_language} = Korean)*  
+- Do not alter spaces around code/identifiers; keep them as in the original.  
+- Do not add stray spaces around markdown emphasis: `**굵게**` (good) vs `** 굵게 **` (bad).
 
 #########################
 ##  DO NOT TRANSLATE   ##
