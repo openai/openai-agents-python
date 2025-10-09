@@ -48,9 +48,9 @@ async def main():
 - 工具的名称将是Python函数的名称（或者你可以提供一个名称）
 - 工具描述将从函数的文档字符串中获取（或者你可以提供一个描述）
 - 函数输入的模式会自动从函数的参数创建
-- 每个输入的描述从函数的文档字符串中获取，除非禁用
+- 每个输入的描述从函数的文档字符串中获取，除非被禁用
 
-我们使用Python的 `inspect` 模块来提取函数签名，以及 [`griffe`](https://mkdocstrings.github.io/griffe/) 来解析文档字符串，`pydantic` 用于模式创建。
+我们使用Python的 `inspect` 模块来提取函数签名，同时使用 [`griffe`](https://mkdocstrings.github.io/griffe/) 来解析文档字符串，使用 `pydantic` 来创建模式。
 
 ```python
 import json
@@ -102,10 +102,10 @@ for tool in agent.tools:
 
 ```
 
-1. 你可以使用任何Python类型作为函数参数，函数可以是同步或异步的。
-2. 如果存在文档字符串，它们用于捕获描述和参数描述。
-3. 函数可以选择性地接收 `context`（必须是第一个参数）。你也可以设置覆盖项，比如工具的名称、描述、使用哪种文档字符串风格等。
-4. 你可以将装饰过的函数传递给工具列表。
+1.  你可以使用任何Python类型作为函数的参数，函数可以是同步或异步的。
+2.  如果存在文档字符串，它们会被用来捕获描述和参数描述
+3.  函数可以选择性地接收 `context`（必须是第一个参数）。你也可以设置覆盖项，比如工具的名称、描述、使用哪种文档字符串风格等。
+4.  你可以将装饰后的函数传递给工具列表。
 
 ??? note "展开查看输出"
 
@@ -179,12 +179,12 @@ for tool in agent.tools:
 
 ### 自定义函数工具
 
-有时候，你不想使用Python函数作为工具。如果你愿意，可以直接创建 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
+有时候，你不想使用Python函数作为工具。如果你愿意，可以直接创建一个 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
 
-- `name`
-- `description`
-- `params_json_schema`，这是参数的JSON模式
-- `on_invoke_tool`，这是一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和作为JSON字符串的参数，并且必须返回字符串形式的工具输出。
+-   `name`
+-   `description`
+-   `params_json_schema`，这是参数的JSON模式
+-   `on_invoke_tool`，这是一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和作为JSON字符串的参数，并且必须返回作为字符串的工具输出。
 
 ```python
 from typing import Any
@@ -211,7 +211,7 @@ async def run_function(ctx: RunContextWrapper[Any], args: str) -> str:
 
 tool = FunctionTool(
     name="process_user",
-    description="处理提取的用户数据",
+    description="Processes extracted user data",
     params_json_schema=FunctionArgs.model_json_schema(),
     on_invoke_tool=run_function,
 )
@@ -219,16 +219,16 @@ tool = FunctionTool(
 
 ### 自动参数和文档字符串解析
 
-如前所述，我们自动解析函数签名以提取工具的模式，并解析文档字符串以提取工具的描述和各个参数的描述。关于这方面的一些说明：
+如前所述，我们自动解析函数签名来提取工具的模式，并且解析文档字符串来提取工具的描述和各个参数的描述。一些注意事项：
 
-1. 签名解析通过 `inspect` 模块完成。我们使用类型注解来理解参数的类型，并动态构建Pydantic模型来表示整体模式。它支持大多数类型，包括Python原语、Pydantic模型、TypedDict等。
+1. 签名解析通过 `inspect` 模块完成。我们使用类型注解来理解参数的类型，并动态构建一个Pydantic模型来表示整体模式。它支持大多数类型，包括Python原语、Pydantic模型、TypedDict等。
 2. 我们使用 `griffe` 来解析文档字符串。支持的文档字符串格式有 `google`、`sphinx` 和 `numpy`。我们尝试自动检测文档字符串格式，但这是尽力而为的，你可以在调用 `function_tool` 时显式设置它。你也可以通过设置 `use_docstring_info` 为 `False` 来禁用文档字符串解析。
 
 模式提取的代码位于 [`agents.function_schema`][] 中。
 
 ## 智能体作为工具
 
-在某些工作流程中，你可能希望一个中央智能体来协调一组专门的智能体，而不是交接控制权。你可以通过将智能体建模为工具来实现这一点。
+在某些工作流中，你可能希望一个中央智能体来协调一组专门的智能体网络，而不是交接控制权。你可以通过将智能体建模为工具来实现这一点。
 
 ```python
 from agents import Agent, Runner
@@ -269,12 +269,12 @@ async def main():
 
 ### 自定义工具智能体
 
-`agent.as_tool` 函数是一个便利方法，使得将智能体转换为工具变得容易。然而，它不支持所有配置；例如，你不能设置 `max_turns`。对于高级用例，直接在工具实现中使用 `Runner.run`：
+`agent.as_tool` 函数是一个方便的方法，使得将智能体转换为工具变得容易。然而，它不支持所有配置；例如，你不能设置 `max_turns`。对于高级用例，直接在工具实现中使用 `Runner.run`：
 
 ```python
 @function_tool
 async def run_my_agent() -> str:
-    """使用自定义配置运行智能体的工具"""
+    """A tool that runs the agent with custom configs"""
 
     agent = Agent(name="My agent", instructions="...")
 
@@ -290,17 +290,17 @@ async def run_my_agent() -> str:
 
 ### 自定义输出提取
 
-在某些情况下，你可能希望在将工具智能体的输出返回给中央智能体之前修改它。如果你想执行以下操作，这可能很有用：
+在某些情况下，你可能希望在将工具智能体的输出返回给中央智能体之前修改它。这可能有用，如果你想：
 
-- 从子智能体的聊天历史中提取特定信息（例如，JSON有效载荷）。
+- 从子智能体的聊天记录中提取特定信息（例如，JSON有效载荷）。
 - 转换或重新格式化智能体的最终答案（例如，将Markdown转换为纯文本或CSV）。
-- 验证输出或在智能体响应缺失或格式错误时提供回退值。
+- 验证输出或在智能体的响应缺失或格式错误时提供回退值。
 
-你可以通过向 `as_tool` 方法提供 `custom_output_extractor` 参数来实现这一点。
+你可以通过向 `as_tool` 方法提供 `custom_output_extractor` 参数来做到这一点：
 
 ```python
 async def extract_json_payload(run_result: RunResult) -> str:
-    # 反向扫描智能体的输出，直到找到工具调用中的JSON类消息。
+    # 以相反的顺序扫描智能体的输出，直到我们找到来自工具调用的类似JSON的消息。
     for item in reversed(run_result.new_items):
         if isinstance(item, ToolCallOutputItem) and item.output.strip().startswith("{"):
             return item.output.strip()
@@ -310,14 +310,14 @@ async def extract_json_payload(run_result: RunResult) -> str:
 
 json_tool = data_agent.as_tool(
     tool_name="get_data_json",
-    tool_description="运行数据智能体并仅返回其JSON有效载荷",
+    tool_description="Run the data agent and return only its JSON payload",
     custom_output_extractor=extract_json_payload,
 )
 ```
 
 ### 条件工具启用
 
-你可以使用 `is_enabled` 参数在运行时条件性地启用或禁用智能体工具。这允许你根据上下文、用户偏好或运行时条件动态过滤LLM可用的工具。
+你可以使用 `is_enabled` 参数在运行时条件性地启用或禁用智能体工具。这允许你根据上下文、用户偏好或运行时条件动态过滤哪些工具可供LLM使用。
 
 ```python
 import asyncio
@@ -328,10 +328,10 @@ class LanguageContext(BaseModel):
     language_preference: str = "french_spanish"
 
 def french_enabled(ctx: RunContextWrapper[LanguageContext], agent: AgentBase) -> bool:
-    """为法语+西班牙语偏好启用法语。"""
+    """Enable French for French+Spanish preference."""
     return ctx.context.language_preference == "french_spanish"
 
-# 创建专门的智能体
+# Create specialized agents
 spanish_agent = Agent(
     name="spanish_agent",
     instructions="You respond in Spanish. Always reply to the user's question in Spanish.",
@@ -342,7 +342,7 @@ french_agent = Agent(
     instructions="You respond in French. Always reply to the user's question in French.",
 )
 
-# 创建带条件工具的编排器
+# Create orchestrator with conditional tools
 orchestrator = Agent(
     name="orchestrator",
     instructions=(
@@ -354,7 +354,7 @@ orchestrator = Agent(
         spanish_agent.as_tool(
             tool_name="respond_spanish",
             tool_description="Respond to the user's question in Spanish",
-            is_enabled=True,  # 始终启用
+            is_enabled=True,  # Always enabled
         ),
         french_agent.as_tool(
             tool_name="respond_french",
@@ -374,38 +374,38 @@ asyncio.run(main())
 
 `is_enabled` 参数接受：
 
-- **布尔值**: `True`（始终启用）或 `False`（始终禁用）
-- **可调用函数**: 接收 `(context, agent)` 并返回布尔值的函数
-- **异步函数**: 用于复杂条件逻辑的异步函数
+- **布尔值**：`True`（始终启用）或 `False`（始终禁用）
+- **可调用函数**：接收 `(context, agent)` 并返回布尔值的函数
+- **异步函数**：用于复杂条件逻辑的异步函数
 
-禁用的工具在运行时对LLM完全隐藏，这使得它对于以下方面很有用：
+禁用的工具在运行时对LLM完全隐藏，这使得它适用于：
 
-- 基于用户权限的功能门控
+- 基于用户权限的功能开关
 - 环境特定的工具可用性（开发环境 vs 生产环境）
-- 不同工具配置的A/B测试
+- A/B测试不同的工具配置
 - 基于运行时状态的动态工具过滤
 
-## 处理函数工具中的错误
+## 函数工具中的错误处理
 
-当你通过 `@function_tool` 创建函数工具时，你可以传递一个 `failure_error_function`。这是一个在工具调用崩溃时为LLM提供错误响应的函数。
+当你通过 `@function_tool` 创建函数工具时，你可以传递一个 `failure_error_function`。这是一个函数，在工具调用崩溃的情况下向LLM提供错误响应。
 
-- 默认情况下（即如果你没有传递任何内容），它会运行 `default_tool_error_function`，告诉LLM发生了错误。
-- 如果你传递自己的错误函数，它会运行该函数，并将响应发送给LLM。
-- 如果你显式传递 `None`，那么任何工具调用错误都会被重新抛出，供你处理。这可能是 `ModelBehaviorError`（如果模型产生了无效的JSON），或者 `UserError`（如果你的代码崩溃了）等。
+- 默认情况下（即如果你没有传递任何东西），它会运行一个 `default_tool_error_function`，告诉LLM发生了错误。
+- 如果你传递自己的错误函数，它会运行那个函数，并将响应发送给LLM。
+- 如果你显式地传递 `None`，那么任何工具调用错误都会被重新抛出，供你处理。这可能是 `ModelBehaviorError`（如果模型产生了无效的JSON），或者 `UserError`（如果你的代码崩溃了）等。
 
 ```python
 from agents import function_tool, RunContextWrapper
 from typing import Any
 
 def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
-    """提供用户友好错误消息的自定义函数。"""
-    print(f"工具调用失败，出现以下错误：{error}")
-    return "发生内部服务器错误。请稍后再试。"
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
 
 @function_tool(failure_error_function=my_custom_error_function)
 def get_user_profile(user_id: str) -> str:
-    """从模拟API获取用户配置文件。
-     此函数演示了一个'不稳定的'或失败的API调用。
+    """Fetches a user profile from a mock API.
+     This function demonstrates a 'flaky' or failing API call.
     """
     if user_id == "user_123":
         return "User profile for user_123 successfully retrieved."
@@ -414,4 +414,4 @@ def get_user_profile(user_id: str) -> str:
 
 ```
 
-`FunctionTool` オブジェクトを手動で作成する場合は、`on_invoke_tool` 関数内でエラーを処理する必要があります。
+如果你手动创建一个 `FunctionTool` 对象，那么你必须在 `on_invoke_tool` 函数内部处理错误。
