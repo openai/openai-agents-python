@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -48,6 +49,11 @@ if TYPE_CHECKING:
 
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
+
+# Override headers used by the Responses API.
+_HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
+    "openai_responses_headers_override", default=None
+)
 
 
 class OpenAIResponsesModel(Model):
@@ -312,7 +318,7 @@ class OpenAIResponsesModel(Model):
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             stream=stream,
-            extra_headers={**_HEADERS, **(model_settings.extra_headers or {})},
+            extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             text=response_format,
@@ -326,6 +332,13 @@ class OpenAIResponsesModel(Model):
         if self._client is None:
             self._client = AsyncOpenAI()
         return self._client
+
+    def _merge_headers(self, model_settings: ModelSettings):
+        return {
+            **_HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(_HEADERS_OVERRIDE.get() or {}),
+        }
 
 
 @dataclass

@@ -1,11 +1,11 @@
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pytest
 
 from agents.agent import Agent
 from agents.items import ItemHelpers, ModelResponse, TResponseInputItem
-from agents.lifecycle import RunHooks
+from agents.lifecycle import AgentHooks, RunHooks
 from agents.models.interface import Model
 from agents.run import Runner
 from agents.run_context import RunContextWrapper, TContext
@@ -189,6 +189,29 @@ async def test_run_hooks_llm_error_non_streaming(monkeypatch):
     assert hooks.events["on_llm_start"] == 1
     assert hooks.events["on_llm_end"] == 0
     assert hooks.events["on_agent_end"] == 0
+
+
+class DummyAgentHooks(AgentHooks):
+    """Agent-scoped hooks used to verify runtime validation."""
+
+
+@pytest.mark.asyncio
+async def test_runner_run_rejects_agent_hooks():
+    model = FakeModel()
+    agent = Agent(name="A", model=model)
+    hooks = cast(RunHooks, DummyAgentHooks())
+
+    with pytest.raises(TypeError, match="Run hooks must be instances of RunHooks"):
+        await Runner.run(agent, input="hello", hooks=hooks)
+
+
+def test_runner_run_streamed_rejects_agent_hooks():
+    model = FakeModel()
+    agent = Agent(name="A", model=model)
+    hooks = cast(RunHooks, DummyAgentHooks())
+
+    with pytest.raises(TypeError, match="Run hooks must be instances of RunHooks"):
+        Runner.run_streamed(agent, input="hello", hooks=hooks)
 
 
 class BoomModel(Model):

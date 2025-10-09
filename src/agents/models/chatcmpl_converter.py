@@ -39,7 +39,7 @@ from openai.types.responses import (
     ResponseReasoningItemParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
-from openai.types.responses.response_reasoning_item import Summary
+from openai.types.responses.response_reasoning_item import Content, Summary
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
@@ -93,7 +93,9 @@ class Converter:
     def message_to_output_items(cls, message: ChatCompletionMessage) -> list[TResponseOutputItem]:
         items: list[TResponseOutputItem] = []
 
-        # Handle reasoning content if available
+        # Check if message is agents.extentions.models.litellm_model.InternalChatCompletionMessage
+        # We can't actually import it here because litellm is an optional dependency
+        # So we use hasattr to check for reasoning_content and thinking_blocks
         if hasattr(message, "reasoning_content") and message.reasoning_content:
             reasoning_item = ResponseReasoningItem(
                 id=FAKE_RESPONSES_ID,
@@ -101,16 +103,25 @@ class Converter:
                 type="reasoning",
             )
 
-            # Store full thinking blocks for Anthropic compatibility
+            # Store thinking blocks for Anthropic compatibility
             if hasattr(message, "thinking_blocks") and message.thinking_blocks:
-                # Store thinking blocks in the reasoning item's content
-                # Convert thinking blocks to Content objects
-                from openai.types.responses.response_reasoning_item import Content
+                # Store thinking text in content and signature in encrypted_content
+                reasoning_item.content = []
+                signatures: list[str] = []
+                for block in message.thinking_blocks:
+                    if isinstance(block, dict):
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            reasoning_item.content.append(
+                                Content(text=thinking_text, type="reasoning_text")
+                            )
+                        # Store the signature if present
+                        if signature := block.get("signature"):
+                            signatures.append(signature)
 
-                reasoning_item.content = [
-                    Content(text=str(block.get("thinking", "")), type="reasoning_text")
-                    for block in message.thinking_blocks
-                ]
+                # Store the signatures in encrypted_content with newline delimiter
+                if signatures:
+                    reasoning_item.encrypted_content = "\n".join(signatures)
 
             items.append(reasoning_item)
 
@@ -301,9 +312,17 @@ class Converter:
     def items_to_messages(
         cls,
         items: str | Iterable[TResponseInputItem],
+        preserve_thinking_blocks: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
+
+        Args:
+            items: A string or iterable of response input items to convert
+            preserve_thinking_blocks: Whether to preserve thinking blocks in tool calls
+                for reasoning models like Claude 4 Sonnet/Opus which support interleaved
+                thinking. When True, thinking blocks are reconstructed and included in
+                assistant messages with tool calls.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -325,6 +344,7 @@ class Converter:
 
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
+        pending_thinking_blocks: list[dict[str, str]] | None = None
 
         def flush_assistant_message() -> None:
             nonlocal current_assistant_msg
@@ -336,10 +356,11 @@ class Converter:
                 current_assistant_msg = None
 
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
-            nonlocal current_assistant_msg
+            nonlocal current_assistant_msg, pending_thinking_blocks
             if current_assistant_msg is None:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["tool_calls"] = []
+
             return current_assistant_msg
 
         for item in items:
@@ -473,6 +494,26 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
+
+                # If we have pending thinking blocks, use them as the content
+                # This is required for Anthropic API tool calls with interleaved thinking
+                if pending_thinking_blocks:
+                    # If there is a text content, save it to append after thinking blocks
+                    # content type is Union[str, Iterable[ContentArrayOfContentPart], None]
+                    if "content" in asst and isinstance(asst["content"], str):
+                        text_content = ChatCompletionContentPartTextParam(
+                            text=asst["content"], type="text"
+                        )
+                        asst["content"] = [text_content]
+
+                    if "content" not in asst or asst["content"] is None:
+                        asst["content"] = []
+
+                    # Thinking blocks MUST come before any other content
+                    # We ignore type errors because pending_thinking_blocks is not openai standard
+                    asst["content"] = pending_thinking_blocks + asst["content"]  # type: ignore
+                    pending_thinking_blocks = None  # Clear after using
+
                 tool_calls = list(asst.get("tool_calls", []))
                 arguments = func_call["arguments"] if func_call["arguments"] else "{}"
                 new_tool_call = ChatCompletionMessageFunctionToolCallParam(
@@ -501,9 +542,29 @@ class Converter:
                     f"Encountered an item_reference, which is not supported: {item_ref}"
                 )
 
-            # 7) reasoning message => not handled
-            elif cls.maybe_reasoning_message(item):
-                pass
+            # 7) reasoning message => extract thinking blocks if present
+            elif reasoning_item := cls.maybe_reasoning_message(item):
+                # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
+                content_items = reasoning_item.get("content", [])
+                encrypted_content = reasoning_item.get("encrypted_content")
+                signatures = encrypted_content.split("\n") if encrypted_content else []
+
+                if content_items and preserve_thinking_blocks:
+                    # Reconstruct thinking blocks from content and signature
+                    pending_thinking_blocks = []
+                    for content_item in content_items:
+                        if (
+                            isinstance(content_item, dict)
+                            and content_item.get("type") == "reasoning_text"
+                        ):
+                            thinking_block = {
+                                "type": "thinking",
+                                "thinking": content_item.get("text", ""),
+                            }
+                            # Add signatures if available
+                            if signatures:
+                                thinking_block["signature"] = signatures.pop(0)
+                            pending_thinking_blocks.append(thinking_block)
 
             # 8) If we haven't recognized it => fail or ignore
             else:
