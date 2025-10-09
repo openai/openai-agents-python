@@ -369,11 +369,13 @@ asyncio.run(main())
 ```
 
 The `is_enabled` parameter accepts:
+
 - **Boolean values**: `True` (always enabled) or `False` (always disabled)
 - **Callable functions**: Functions that take `(context, agent)` and return a boolean
 - **Async functions**: Async functions for complex conditional logic
 
 Disabled tools are completely hidden from the LLM at runtime, making this useful for:
+
 - Feature gating based on user permissions
 - Environment-specific tool availability (dev vs prod)
 - A/B testing different tool configurations

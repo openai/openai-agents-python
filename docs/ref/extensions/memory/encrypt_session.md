@@ -1,3 +1,3 @@
-# `Encrypt Session`
+# `EncryptedSession`
 
-::: agents.extensions.memory.encrypt_session
+::: agents.extensions.memory.encrypt_session.EncryptedSession
