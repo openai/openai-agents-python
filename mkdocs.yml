@@ -145,6 +145,7 @@ plugins:
                     - ref/extensions/handoff_prompt.md
                     - ref/extensions/litellm.md
                     - ref/extensions/memory/sqlalchemy_session.md
+                    - ref/extensions/memory/encrypt_session.md
 
         - locale: ja
           name: 日本語
