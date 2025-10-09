@@ -354,15 +354,15 @@ class LitellmModel(Model):
         if isinstance(ret, litellm.types.utils.ModelResponse):
             return ret
 
+        responses_tool_choice = self._convert_to_responses_tool_choice(tool_choice)
+
         response = Response(
             id=FAKE_RESPONSES_ID,
             created_at=time.time(),
             model=self.model,
             object="response",
             output=[],
-            tool_choice=cast(Literal["auto", "required", "none"], tool_choice)
-            if tool_choice != NOT_GIVEN
-            else "auto",
+            tool_choice=responses_tool_choice,  # type: ignore[arg-type]
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
             tools=[],
@@ -376,7 +376,20 @@ class LitellmModel(Model):
             return None
         return value
 
-
+    def _convert_to_responses_tool_choice(self, tool_choice: Any) -> Any:
+        if tool_choice is None or tool_choice == NOT_GIVEN:
+            return "auto"
+        if isinstance(tool_choice, str):
+            return tool_choice
+        if isinstance(tool_choice, dict):
+            if tool_choice.get("type") == "function" and "function" in tool_choice:
+                return {
+                    "type": "function",
+                    "name": tool_choice["function"]["name"],
+                }
+            return tool_choice
+        return "auto"
+        
 class LitellmConverter:
     @classmethod
     def convert_message_to_openai(
