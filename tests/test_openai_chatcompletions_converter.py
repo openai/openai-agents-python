@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Literal, cast
 
 import pytest
+from openai import omit
 from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageFunctionToolCall
 from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import (
@@ -197,12 +198,12 @@ def test_items_to_messages_with_output_message_and_function_call():
 
 def test_convert_tool_choice_handles_standard_and_named_options() -> None:
     """
-    The `Converter.convert_tool_choice` method should return NOT_GIVEN
+    The `Converter.convert_tool_choice` method should return the omit sentinel
     if no choice is provided, pass through values like "auto", "required",
     or "none" unchanged, and translate any other string into a function
     selection dict.
     """
-    assert Converter.convert_tool_choice(None).__class__.__name__ == "NotGiven"
+    assert Converter.convert_tool_choice(None) is omit
     assert Converter.convert_tool_choice("auto") == "auto"
     assert Converter.convert_tool_choice("required") == "required"
     assert Converter.convert_tool_choice("none") == "none"
@@ -214,17 +215,15 @@ def test_convert_tool_choice_handles_standard_and_named_options() -> None:
 
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:
     """
-    The `Converter.convert_response_format` method should return NOT_GIVEN
+    The `Converter.convert_response_format` method should return the omit sentinel
     when no output schema is provided or if the output schema indicates
     plain text. For structured output schemas, it should return a dict
     with type `json_schema` and include the generated JSON schema and
     strict flag from the provided `AgentOutputSchema`.
     """
     # when output is plain text (schema None or output_type str), do not include response_format
-    assert Converter.convert_response_format(None).__class__.__name__ == "NotGiven"
-    assert (
-        Converter.convert_response_format(AgentOutputSchema(str)).__class__.__name__ == "NotGiven"
-    )
+    assert Converter.convert_response_format(None) is omit
+    assert Converter.convert_response_format(AgentOutputSchema(str)) is omit
     # For e.g. integer output, we expect a response_format dict
     schema = AgentOutputSchema(int)
     resp_format = Converter.convert_response_format(schema)
