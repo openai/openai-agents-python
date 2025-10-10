@@ -37,32 +37,32 @@ search:
 
 会话维护对话历史并管理与实时模型的持久连接。
 
-## エージェント設定
+## 智能体配置
 
-RealtimeAgent は、通常の Agent クラスと同様に動作しますが、いくつか重要な違いがあります。完全な API の詳細は、[`RealtimeAgent`][agents.realtime.agent.RealtimeAgent] の API リファレンスをご確認ください。
+RealtimeAgent 的工作方式与常规的 Agent 类相似，但有一些关键区别。有关完整的 API 详情，请参阅 [`RealtimeAgent`][agents.realtime.agent.RealtimeAgent] API 参考。
 
-通常のエージェントとの主な違い:
+与常规智能体的主要区别:
 
-- モデルの選択はエージェント レベルではなく、セッション レベルで設定します。
-- structured outputs のサポートはありません（`outputType` はサポートされません）。
-- 声質はエージェントごとに設定できますが、最初のエージェントが話し始めた後は変更できません。
-- ツール、ハンドオフ、instructions などのその他の機能は同様に動作します。
+-   模型选择在会话级别配置，而不是智能体级别。
+-   不支持结构化输出（不支持 `outputType`）。
+-   可以为每个智能体配置语音，但在第一个智能体发言后无法更改。
+-   所有其他功能如工具、交接和指令的工作方式相同。
 
-## セッション設定
+## 会话配置
 
-### モデル設定
+### 模型设置
 
-セッション設定では、基盤となる realtime モデルの動作を制御できます。モデル名（`gpt-realtime` など）、声質（alloy、echo、fable、onyx、nova、shimmer）およびサポートするモダリティ（テキストおよび/または音声）を設定できます。音声フォーマットは入力と出力の両方に設定でき、デフォルトは PCM16 です。
+会话配置允许您控制底层实时模型的行为。您可以配置模型名称（如 `gpt-realtime`）、语音选择（alloy、echo、fable、onyx、nova、shimmer）以及支持的模态（文本和/或音频）。输入和输出的音频格式都可以设置，PCM16 是默认格式。
 
-### 音声設定
+### 音频配置
 
-音声設定は、セッションが音声入力と出力をどのように扱うかを制御します。Whisper などのモデルを使用した入力音声の書き起こし、言語設定、ドメイン固有用語の精度を高めるための書き起こしプロンプトを設定できます。発話区間検出（turn detection）の設定では、エージェントが応答を開始・終了するタイミングを制御でき、音声活動検出のしきい値、無音時間、検出された音声の前後に付与するパディングなどのオプションがあります。
+音频设置控制会话如何处理语音输入和输出。您可以配置使用 Whisper 等模型的输入音频转录，设置语言偏好，并提供转录提示以提高特定领域术语的准确性。轮流检测设置控制智能体何时开始和停止响应，包括语音活动检测阈值、静音持续时间和检测到的语音周围的填充选项。
 
-## ツールと関数
+## 工具和函数
 
-### ツールの追加
+### 添加工具
 
-通常のエージェントと同様に、realtime エージェントは会話中に実行される 関数ツール をサポートします:
+就像常规智能体一样，实时智能体支持在对话期间执行的函数工具：
 
 ```python
 from agents import function_tool
@@ -86,11 +86,11 @@ agent = RealtimeAgent(
 )
 ```
 
-## ハンドオフ
+## 交接
 
-### ハンドオフの作成
+### 创建交接
 
-ハンドオフにより、専門化されたエージェント間で会話を引き継ぐことができます。
+交接允许在专门智能体之间转移对话。
 
 ```python
 from agents.realtime import realtime_handoff
@@ -117,24 +117,24 @@ main_agent = RealtimeAgent(
 )
 ```
 
-## イベント処理
+## 事件处理
 
-セッションはイベントをストリーミングし、セッションオブジェクトを反復処理してリッスンできます。イベントには、音声出力チャンク、書き起こし結果、ツール実行の開始・終了、エージェントのハンドオフ、エラーが含まれます。特に処理すべき主要イベントは次のとおりです:
+会话流式传输事件，您可以通过迭代会话对象来监听这些事件。事件包括音频输出块、转录结果、工具执行开始和结束、智能体交接和错误。需要处理的关键事件包括：
 
-- **audio**: エージェントの応答からの生の音声データ
-- **audio_end**: エージェントの発話が完了
-- **audio_interrupted**: ユーザー によるエージェントの発話の割り込み
-- **tool_start/tool_end**: ツール実行のライフサイクル
-- **handoff**: エージェントのハンドオフが発生
-- **error**: 処理中にエラーが発生
+-   **audio**：来自智能体响应的原始音频数据
+-   **audio_end**：智能体结束发言
+-   **audio_interrupted**：用户打断智能体
+-   **tool_start/tool_end**：工具执行生命周期
+-   **handoff**：发生智能体交接
+-   **error**：处理过程中发生错误
 
-完全なイベントの詳細は、[`RealtimeSessionEvent`][agents.realtime.events.RealtimeSessionEvent] を参照してください。
+有关完整的事件详情，请参阅 [`RealtimeSessionEvent`][agents.realtime.events.RealtimeSessionEvent]。
 
-## ガードレール
+## 护栏功能
 
-Realtime エージェントでサポートされるのは出力用ガードレールのみです。これらのガードレールはデバウンスされ、リアルタイム生成中のパフォーマンス問題を避けるため、（単語ごとではなく）定期的に実行されます。デフォルトのデバウンス長は 100 文字ですが、設定可能です。
+实时智能体仅支持输出护栏。这些护栏会进行防抖处理并定期运行（不是每个词都运行），以避免实时生成期间的性能问题。默认的防抖长度是 100 个字符，但这是可配置的。
 
-ガードレールは `RealtimeAgent` に直接アタッチするか、セッションの `run_config` を通じて提供できます。両方のソースのガードレールは併用して実行されます。
+护栏可以直接附加到 `RealtimeAgent`，也可以通过会话的 `run_config` 提供。来自两个来源的护栏会一起运行。
 
 ```python
 from agents.guardrail import GuardrailFunctionOutput, OutputGuardrail
@@ -152,25 +152,25 @@ agent = RealtimeAgent(
 )
 ```
 
-ガードレールがトリガーされると、`guardrail_tripped` イベントが生成され、エージェントの現在の応答を中断できます。デバウンス動作により、安全性とリアルタイム性能要件のバランスを取ります。テキスト エージェントと異なり、realtime エージェントはガードレールが作動しても **Exception** は発生させません。
+当护栏被触发时，它会生成一个 `guardrail_tripped` 事件，并可以中断智能体的当前响应。防抖行为有助于在安全性和实时性能需求之间取得平衡。与文本智能体不同，实时智能体在护栏被触发时**不会**引发异常。
 
-## 音声処理
+## 音频处理
 
-[`session.send_audio(audio_bytes)`][agents.realtime.session.RealtimeSession.send_audio] を使用してセッションに音声を送信するか、[`session.send_message()`][agents.realtime.session.RealtimeSession.send_message] を使用してテキストを送信します。
+使用 [`session.send_audio(audio_bytes)`][agents.realtime.session.RealtimeSession.send_audio] 向会话发送音频，或使用 [`session.send_message()`][agents.realtime.session.RealtimeSession.send_message] 发送文本。
 
-音声出力については、`audio` イベントをリッスンし、任意の音声ライブラリで音声データを再生してください。ユーザー がエージェントを割り込んだ場合に即座に再生を停止し、キューにある音声をクリアするため、`audio_interrupted` イベントも必ずリッスンしてください。
+对于音频输出，监听 `audio` 事件并通过您首选的音频库播放音频数据。确保监听 `audio_interrupted` 事件，以便在用户打断智能体时立即停止播放并清除任何排队的音频。
 
-## 直接モデルアクセス
+## 直接模型访问
 
-基盤となるモデルにアクセスして、カスタムリスナーを追加したり高度な操作を実行したりできます:
+您可以访问底层模型以添加自定义监听器或执行高级操作：
 
 ```python
 # Add a custom listener to the model
 session.model.add_listener(my_custom_listener)
 ```
 
-これにより、接続を低レベルで制御する必要がある高度なユースケース向けに、[`RealtimeModel`][agents.realtime.model.RealtimeModel] インターフェースへ直接アクセスできます。
+这使您可以直接访问 [`RealtimeModel`][agents.realtime.model.RealtimeModel] 接口，用于需要更底层连接控制的高级用例。
 
-## 例
+## 示例
 
-動作する完全な例は、[examples/realtime ディレクトリ](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) を参照してください。UI コンポーネントの有無それぞれのデモが含まれています。
+有关完整的工作示例，请查看 [examples/realtime 目录](https://github.com/openai/openai-agents-python/tree/main/examples/realtime)，其中包含带 UI 组件和不带 UI 组件的演示。

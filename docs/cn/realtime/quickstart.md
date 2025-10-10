@@ -11,9 +11,9 @@ search:
 
 ## 前提条件
 
--   Python 3.9 以上
--   OpenAI API キー
--   OpenAI Agents SDK の基礎知識
+-   Python 3.9 或更高版本
+-   OpenAI API 密钥
+-   对 OpenAI Agents SDK 的基本了解
 
 ## 安装
 
