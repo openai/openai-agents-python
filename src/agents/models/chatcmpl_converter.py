@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from typing import Any, Literal, cast
+from typing import Any, Literal, Union, cast
 
 from openai import Omit, omit
 from openai.types.chat import (
@@ -507,7 +507,7 @@ class Converter:
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
                 output_content = cast(
-                    str | Iterable[ResponseInputContentParam], func_output["output"]
+                    Union[str, Iterable[ResponseInputContentParam]], func_output["output"]
                 )
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
