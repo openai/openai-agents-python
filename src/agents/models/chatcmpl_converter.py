@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterable
 from typing import Any, Literal, cast
 
-from openai import NOT_GIVEN, NotGiven
+from openai import Omit, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -54,9 +54,9 @@ class Converter:
     @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
-    ) -> ChatCompletionToolChoiceOptionParam | NotGiven:
+    ) -> ChatCompletionToolChoiceOptionParam | Omit:
         if tool_choice is None:
-            return NOT_GIVEN
+            return omit
         elif isinstance(tool_choice, MCPToolChoice):
             raise UserError("MCPToolChoice is not supported for Chat Completions models")
         elif tool_choice == "auto":
@@ -76,9 +76,9 @@ class Converter:
     @classmethod
     def convert_response_format(
         cls, final_output_schema: AgentOutputSchemaBase | None
-    ) -> ResponseFormat | NotGiven:
+    ) -> ResponseFormat | Omit:
         if not final_output_schema or final_output_schema.is_plain_text():
-            return NOT_GIVEN
+            return omit
 
         return {
             "type": "json_schema",
@@ -524,10 +524,13 @@ class Converter:
             # 5) function call output => tool message
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
+                output_content = cast(
+                    str | Iterable[ResponseInputContentParam], func_output["output"]
+                )
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
-                    "content": func_output["output"],
+                    "content": cls.extract_text_content(output_content),
                 }
                 result.append(msg)
 

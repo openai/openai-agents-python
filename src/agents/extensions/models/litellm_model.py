@@ -18,7 +18,7 @@ except ImportError as _e:
         "dependency group: `pip install 'openai-agents[litellm]'`."
     ) from _e
 
-from openai import NOT_GIVEN, AsyncStream, NotGiven
+from openai import AsyncStream, NotGiven, omit
 from openai.types.chat import (
     ChatCompletionChunk,
     ChatCompletionMessageCustomToolCall,
