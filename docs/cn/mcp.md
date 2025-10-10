@@ -57,11 +57,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-hosted サーバーはそのツールを自動的に公開します。`mcp_servers` に追加する必要はありません。
+托管服务器会自动公开其工具，无需将其添加到 `mcp_servers`。
 
-### ストリーミング対応の hosted MCP 実行結果
+### 支持流式传输的托管MCP执行结果
 
-Hosted ツールは 関数ツール とまったく同じ方法で ストリーミング に対応します。`Runner.run_streamed` に `stream=True` を渡すと、モデルがまだ動作中でも MCP の出力を増分で取り込めます:
+托管工具以与函数工具完全相同的方式支持流式传输。向 `Runner.run_streamed` 传递 `stream=True`，即可在模型仍在运行时增量获取MCP输出：
 
 ```python
 result = Runner.run_streamed(agent, "Summarise this repository's top languages")
@@ -71,9 +71,9 @@ async for event in result.stream_events():
 print(result.final_output)
 ```
 
-### オプションの承認フロー
+### 可选的审批流程
 
-サーバーが機密性の高い操作を行える場合、各ツール実行前に人間またはプログラムによる承認を要求できます。`tool_config` の `require_approval` を、単一のポリシー（`"always"`、`"never"`）またはツール名からポリシーへの dict で設定します。Python 内で判断するには、`on_approval_request` コールバックを指定します。
+如果服务器能够执行敏感操作，可以在每次工具执行前要求人工或程序审批。将 `tool_config` 中的 `require_approval` 设置为单一策略（`"always"`、`"never"`）或从工具名到策略的字典。要在Python中进行判断，请指定 `on_approval_request` 回调函数。
 
 ```python
 from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
@@ -101,11 +101,11 @@ agent = Agent(
 )
 ```
 
-コールバックは同期・非同期のどちらでもよく、モデルが実行を続けるために承認データを必要とするたびに呼び出されます。
+回调可以是同步或异步的，每当模型需要审批数据才能继续执行时就会被调用。
 
-### コネクタ対応の hosted サーバー
+### 支持连接器的托管服务器
 
-Hosted MCP は OpenAI connectors にも対応します。`server_url` を指定する代わりに、`connector_id` とアクセストークンを指定します。Responses API が認証を処理し、hosted サーバーがそのコネクタのツールを公開します。
+托管MCP也支持OpenAI连接器。不指定 `server_url`，而是指定 `connector_id` 和访问令牌。Responses API会处理认证，托管服务器会公开该连接器的工具。
 
 ```python
 import os
@@ -121,12 +121,12 @@ HostedMCPTool(
 )
 ```
 
-ストリーミング、承認、コネクタを含む、完全に動作する hosted ツールのサンプルは
-[`examples/hosted_mcp`](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) にあります。
+包含流式传输、审批和连接器的完整可运行托管工具示例可在
+[`examples/hosted_mcp`](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) 中找到。
 
-## 2. Streamable HTTP MCP servers
+## 2. 可流式HTTP MCP服务器
 
-ネットワーク接続を自分で管理したい場合は、[`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp] を使用します。Streamable HTTP サーバーは、トランスポートを自分で制御したい場合や、レイテンシを低く保ちながら自分のインフラ内でサーバーを実行したい場合に最適です。
+如果你想自己管理网络连接，可以使用 [`MCPServerStreamableHttp`][agents.mcp.server.MCPServerStreamableHttp]。可流式HTTP服务器最适合需要自己控制传输方式的场景，或者在自己的基础设施中运行服务器同时保持低延迟的情况。
 
 ```python
 import asyncio
@@ -161,16 +161,16 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-コンストラクタは追加のオプションを受け付けます:
+构造函数接受额外的选项：
 
-- `client_session_timeout_seconds` は HTTP の読み取りタイムアウトを制御します。
-- `use_structured_content` は、テキスト出力よりも `tool_result.structured_content` を優先するかどうかを切り替えます。
-- `max_retry_attempts` と `retry_backoff_seconds_base` は、`list_tools()` と `call_tool()` に自動リトライを追加します。
-- `tool_filter` は、公開するツールをサブセットに限定できます（[Tool filtering](#tool-filtering) を参照）。
+- `client_session_timeout_seconds` 控制HTTP读取超时时间。
+- `use_structured_content` 切换是否优先使用 `tool_result.structured_content` 而非文本输出。
+- `max_retry_attempts` 和 `retry_backoff_seconds_base` 为 `list_tools()` 和 `call_tool()` 添加自动重试。
+- `tool_filter` 可以将公开的工具限制为子集（参见[工具过滤](#工具过滤)）。
 
-## 3. HTTP with SSE MCP servers
+## 3. 带SSE的HTTP MCP服务器
 
-MCP サーバーが HTTP with SSE トランスポートを実装している場合は、[`MCPServerSse`][agents.mcp.server.MCPServerSse] をインスタンス化します。トランスポート以外は、API は Streamable HTTP サーバーと同一です。
+如果MCP服务器实现了带SSE（服务器发送事件）的HTTP传输，可以实例化 [`MCPServerSse`][agents.mcp.server.MCPServerSse]。除了传输方式外，API与可流式HTTP服务器完全相同。
 
 ```python
 
@@ -197,9 +197,9 @@ async with MCPServerSse(
     print(result.final_output)
 ```
 
-## 4. stdio MCP servers
+## 4. stdio MCP服务器
 
-ローカルのサブプロセスとして実行する MCP サーバーには、[`MCPServerStdio`][agents.mcp.server.MCPServerStdio] を使用します。SDK がプロセスを起動し、パイプを開いたまま維持し、コンテキストマネージャの終了時に自動的に閉じます。このオプションは、迅速なプロトタイピングや、サーバーがコマンドラインのエントリポイントのみを公開している場合に役立ちます。
+对于作为本地子进程运行的MCP服务器，使用 [`MCPServerStdio`][agents.mcp.server.MCPServerStdio]。SDK会启动进程，保持管道打开，并在上下文管理器退出时自动关闭。此选项适用于快速原型开发，或者当服务器仅公开命令行入口点时。
 
 ```python
 from pathlib import Path
@@ -225,13 +225,13 @@ async with MCPServerStdio(
     print(result.final_output)
 ```
 
-## ツールのフィルタリング
+## 工具过滤
 
-各 MCP サーバーはツールフィルタに対応しており、エージェント が必要とする関数だけを公開できます。フィルタリングは構築時にも、実行ごとに動的にも行えます。
+每个MCP服务器都支持工具过滤器，可以只公开智能体需要的函数。过滤可以在构建时进行，也可以在每次运行时动态进行。
 
-### 静的なツールフィルタリング
+### 静态工具过滤
 
-[`create_static_tool_filter`][agents.mcp.create_static_tool_filter] を使用して、単純な許可/ブロックリストを設定します:
+使用 [`create_static_tool_filter`][agents.mcp.create_static_tool_filter] 设置简单的允许/阻止列表：
 
 ```python
 from pathlib import Path
@@ -249,11 +249,11 @@ filesystem_server = MCPServerStdio(
 )
 ```
 
-`allowed_tool_names` と `blocked_tool_names` の両方が指定された場合、SDK は最初に許可リストを適用し、その後残りのセットからブロックされたツールを削除します。
+如果同时指定了 `allowed_tool_names` 和 `blocked_tool_names`，SDK会首先应用允许列表，然后从剩余集合中删除被阻止的工具。
 
-### 動的なツールフィルタリング
+### 动态工具过滤
 
-より高度なロジックには、[`ToolFilterContext`][agents.mcp.ToolFilterContext] を受け取る呼び出し可能オブジェクトを渡します。呼び出し可能オブジェクトは同期・非同期のどちらでもよく、ツールを公開すべきときに `True` を返します。
+对于更高级的逻辑，可以传递一个接受 [`ToolFilterContext`][agents.mcp.ToolFilterContext] 的可调用对象。可调用对象可以是同步或异步的，当应该公开工具时返回 `True`。
 
 ```python
 from pathlib import Path
@@ -277,14 +277,14 @@ async with MCPServerStdio(
     ...
 ```
 
-フィルタコンテキストは、アクティブな `run_context`、ツールを要求している `agent`、そして `server_name` を公開します。
+过滤器上下文公开了活动的 `run_context`、请求工具的 `agent` 以及 `server_name`。
 
-## プロンプト
+## 提示词
 
-MCP サーバーは、エージェントの instructions を動的に生成するプロンプトも提供できます。プロンプトに対応するサーバーは次の 2 つのメソッドを公開します:
+MCP服务器还可以提供提示词来动态生成智能体的指令。支持提示词的服务器会公开以下两个方法：
 
-- `list_prompts()` は利用可能なプロンプトテンプレートを列挙します。
-- `get_prompt(name, arguments)` は、必要に応じて パラメーター 付きの具体的なプロンプトを取得します。
+- `list_prompts()` 枚举可用的提示词模板。
+- `get_prompt(name, arguments)` 获取具体的提示词，必要时可带参数。
 
 ```python
 from agents import Agent
@@ -302,21 +302,21 @@ agent = Agent(
 )
 ```
 
-## キャッシュ
+## 缓存
 
-すべての エージェント 実行は各 MCP サーバーに対して `list_tools()` を呼び出します。リモートサーバーは顕著なレイテンシを招く可能性があるため、すべての MCP サーバークラスは `cache_tools_list` オプションを公開します。ツール定義が頻繁に変わらないと確信できる場合にのみ `True` に設定してください。後で新しいリストを強制するには、サーバーインスタンスで `invalidate_tools_cache()` を呼び出します。
+所有智能体执行都会对每个MCP服务器调用 `list_tools()`。由于远程服务器可能导致显著的延迟，所有MCP服务器类都公开了 `cache_tools_list` 选项。只有当你确信工具定义不会频繁更改时才设置为 `True`。如需在之后强制获取新列表，可以在服务器实例上调用 `invalidate_tools_cache()`。
 
-## トレーシング
+## 追踪
 
-[Tracing](./tracing.md) は MCP のアクティビティを自動的に捕捉します。含まれるもの:
+[追踪](./tracing.md)会自动捕获MCP活动，包括：
 
-1. ツールを列挙するための MCP サーバーへの呼び出し。
-2. ツール呼び出しに関する MCP 関連情報。
+1. 为枚举工具而对MCP服务器的调用。
+2. 与工具调用相关的MCP信息。
 
-![MCP Tracing Screenshot](../assets/images/mcp-tracing.jpg)
+![MCP追踪截图](../assets/images/mcp-tracing.jpg)
 
-## 参考情報
+## 参考资料
 
-- [Model Context Protocol](https://modelcontextprotocol.io/) – 仕様と設計ガイド。
-- [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) – 実行可能な stdio、SSE、Streamable HTTP のサンプル。
-- [examples/hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) – 承認やコネクタを含む、完全な hosted MCP のデモ。
+- [模型上下文协议](https://modelcontextprotocol.io/) – 规范与设计指南。
+- [examples/mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp) – 可运行的stdio、SSE、可流式HTTP示例。
+- [examples/hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp) – 包含审批和连接器的完整托管MCP演示。

@@ -29,27 +29,27 @@ Agents SDK包含内置的追踪功能，可全面记录智能体运行期间的�
     -   `parent_id`，指向此跨度的父跨度（如果有）
     -   `span_data`，这是关于跨度的信息。例如，`AgentSpanData` 包含关于智能体的信息，`GenerationSpanData` 包含关于LLM生成的信息等。
 
-## デフォルトのトレーシング
+## 默认追踪
 
-デフォルトでは、 SDK は次をトレースします:
+默认情况下，SDK会追踪以下内容：
 
--   全体の `Runner.{run, run_sync, run_streamed}()` は `trace()` でラップされます。
--   エージェントが実行されるたびに、`agent_span()` でラップされます
--   LLM 生成は `generation_span()` でラップされます
--   関数ツールの呼び出しは個々に `function_span()` でラップされます
--   ガードレールは `guardrail_span()` でラップされます
--   ハンドオフは `handoff_span()` でラップされます
--   音声入力（音声認識）は `transcription_span()` でラップされます
--   音声出力（音声合成）は `speech_span()` でラップされます
--   関連する音声スパンは `speech_group_span()` の子になる場合があります
+-   整个 `Runner.{run, run_sync, run_streamed}()` 调用被 `trace()` 包装。
+-   每次智能体执行时，都会被 `agent_span()` 包装
+-   LLM生成被 `generation_span()` 包装
+-   函数工具的调用分别被 `function_span()` 包装
+-   护栏被 `guardrail_span()` 包装
+-   交接被 `handoff_span()` 包装
+-   语音输入（语音识别）被 `transcription_span()` 包装
+-   语音输出（语音合成）被 `speech_span()` 包装
+-   相关的语音跨度可能成为 `speech_group_span()` 的子跨度
 
-デフォルトでは、トレース名は "Agent workflow" です。`trace` を使う場合にこの名前を設定できますし、[`RunConfig`][agents.run.RunConfig] で名前やその他のプロパティを設定することもできます。
+默认情况下，追踪名称为"Agent workflow"。你可以在使用 `trace` 时设置此名称，也可以在 [`RunConfig`][agents.run.RunConfig] 中设置名称和其他属性。
 
-さらに、[カスタム トレース プロセッサー](#custom-tracing-processors) を設定して、トレースを他の送信先に出力できます（置き換え、または副次的な送信先として）。
+此外，你可以配置[自定义追踪处理器](#自定义追踪处理器)来将追踪输出到其他目标（作为替代或附加目标）。
 
-## 上位レベルのトレース
+## 高层级追踪
 
-`run()` への複数回の呼び出しを 1 つのトレースにまとめたい場合があります。これを行うには、コード全体を `trace()` でラップします。
+有时你可能想将多次 `run()` 调用合并到一个追踪中。要做到这一点，可以用 `trace()` 包装整个代码块。
 
 ```python
 from agents import Agent, Runner, trace
@@ -64,46 +64,46 @@ async def main():
         print(f"Rating: {second_result.final_output}")
 ```
 
-1. `Runner.run` への 2 回の呼び出しが `with trace()` でラップされているため、個々の実行は 2 つのトレースを作成するのではなく、全体のトレースの一部になります。
+1. 由于对 `Runner.run` 的两次调用都被 `with trace()` 包装，各个执行不会创建两个追踪，而是成为整体追踪的一部分。
 
-## トレースの作成
+## 创建追踪
 
-[`trace()`][agents.tracing.trace] 関数を使ってトレースを作成できます。トレースは開始と終了が必要です。方法は 2 つあります:
+你可以使用 [`trace()`][agents.tracing.trace] 函数创建追踪。追踪需要开始和结束，有两种方法：
 
-1. 推奨: トレースをコンテキストマネージャとして使用します（例: `with trace(...) as my_trace`）。これにより、適切なタイミングで自動的に開始・終了します。
-2. 手動で [`trace.start()`][agents.tracing.Trace.start] と [`trace.finish()`][agents.tracing.Trace.finish] を呼び出すこともできます。
+1. 推荐：将追踪作为上下文管理器使用（例如：`with trace(...) as my_trace`）。这会在适当的时候自动开始和结束。
+2. 也可以手动调用 [`trace.start()`][agents.tracing.Trace.start] 和 [`trace.finish()`][agents.tracing.Trace.finish]。
 
-現在のトレースは Python の [`contextvar`](https://docs.python.org/3/library/contextvars.html) によって追跡されます。これは自動的に並行処理で機能することを意味します。トレースを手動で開始/終了する場合、現在のトレースを更新するために `start()`/`finish()` に `mark_as_current` と `reset_current` を渡す必要があります。
+当前追踪由Python的 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 跟踪。这意味着它在并发处理中自动工作。如果手动开始/结束追踪，需要向 `start()`/`finish()` 传递 `mark_as_current` 和 `reset_current` 来更新当前追踪。
 
-## スパンの作成
+## 创建跨度
 
-各種の [`*_span()`][agents.tracing.create] メソッドを使ってスパンを作成できます。一般的にはスパンを手動で作成する必要はありません。カスタムのスパン情報を追跡するために、[`custom_span()`][agents.tracing.custom_span] 関数を利用できます。
+你可以使用各种 [`*_span()`][agents.tracing.create] 方法创建跨度。通常不需要手动创建跨度。要追踪自定义跨度信息，可以使用 [`custom_span()`][agents.tracing.custom_span] 函数。
 
-スパンは自動的に現在のトレースの一部となり、Python の [`contextvar`](https://docs.python.org/3/library/contextvars.html) によって追跡される、最も近い現在のスパンの下にネストされます。
+跨度会自动成为当前追踪的一部分，并嵌套在由Python的 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 跟踪的最近的当前跨度之下。
 
-## 機微データ
+## 敏感数据
 
-一部のスパンは機微なデータを取得する可能性があります。
+某些跨度可能会捕获敏感数据。
 
-`generation_span()` は LLM 生成の入力/出力を保存し、`function_span()` は関数呼び出しの入力/出力を保存します。これらには機微なデータが含まれる可能性があるため、[`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] によってその取得を無効化できます。
+`generation_span()` 保存LLM生成的输入/输出，`function_span()` 保存函数调用的输入/输出。这些可能包含敏感数据，因此可以通过 [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] 禁用其捕获。
 
-同様に、音声スパンはデフォルトで入出力の音声に対して base64 でエンコードされた PCM データを含みます。[`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data] を設定して、この音声データの取得を無効化できます。
+类似地，语音跨度默认包含输入/输出音频的base64编码PCM数据。可以设置 [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data] 来禁用此音频数据的捕获。
 
-## カスタム トレーシング プロセッサー
+## 自定义追踪处理器
 
-トレーシングの高レベルなアーキテクチャは次のとおりです:
+追踪的高层级架构如下：
 
--   初期化時に、トレースを作成する役割を持つグローバルな [`TraceProvider`][agents.tracing.setup.TraceProvider] を作成します。
--   `TraceProvider` に、スパン/トレースをバッチで [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter] に送信する [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] を設定します。`BackendSpanExporter` は OpenAI バックエンドへバッチでエクスポートします。
+-   初始化时，创建一个全局的 [`TraceProvider`][agents.tracing.setup.TraceProvider]，负责创建追踪。
+-   为 `TraceProvider` 设置一个 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor]，它将跨度/追踪批量发送到 [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter]。`BackendSpanExporter` 将其批量导出到OpenAI后端。
 
-デフォルト設定をカスタマイズし、別のバックエンドに送る／追加のバックエンドに複製する／エクスポーターの挙動を変更するには、次の 2 つの方法があります:
+要自定义默认设置，发送到其他后端/复制到额外后端/更改导出器行为，有两种方法：
 
-1. [`add_trace_processor()`][agents.tracing.add_trace_processor] は、トレースとスパンの準備が整い次第それらを受け取る、**追加の** トレースプロセッサーを追加できます。これにより、OpenAI のバックエンドへの送信に加えて、独自の処理を行えます。
-2. [`set_trace_processors()`][agents.tracing.set_trace_processors] は、デフォルトのプロセッサーを独自のトレースプロセッサーに**置き換え**られます。OpenAI バックエンドにトレースを送るには、その処理を行う `TracingProcessor` を含める必要があります。
+1. [`add_trace_processor()`][agents.tracing.add_trace_processor] 可以添加**额外的**追踪处理器，一旦追踪和跨度准备就绪就会接收它们。这允许你在发送到OpenAI后端的同时执行自己的处理。
+2. [`set_trace_processors()`][agents.tracing.set_trace_processors] 可以用自己的追踪处理器**替换**默认处理器。要将追踪发送到OpenAI后端，需要包含执行该操作的 `TracingProcessor`。
 
-## 非 OpenAI モデルでのトレーシング
+## 非OpenAI模型的追踪
 
-OpenAI の API キーを非 OpenAI モデルで使用すると、トレーシングを無効化することなく OpenAI Traces ダッシュボードで無料のトレーシングを有効化できます。
+使用OpenAI的API密钥配合非OpenAI模型时，可以在不禁用追踪的情况下启用OpenAI追踪仪表板中的免费追踪。
 
 ```python
 import os
@@ -124,10 +124,10 @@ agent = Agent(
 )
 ```
 
-## 注意事項
-- 無料のトレースは OpenAI Traces ダッシュボードで表示できます。
+## 注意事项
+- 免费追踪可以在OpenAI追踪仪表板中查看。
 
-## 外部トレーシング プロセッサー一覧
+## 外部追踪处理器列表
 
 -   [Weights & Biases](https://weave-docs.wandb.ai/guides/integrations/openai_agents)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
