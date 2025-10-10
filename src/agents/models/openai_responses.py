@@ -4,7 +4,7 @@ import json
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Union, cast, overload
 
 from openai import APIStatusError, AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
@@ -328,7 +328,7 @@ class OpenAIResponsesModel(Model):
             metadata=self._non_null_or_omit(model_settings.metadata),
             **extra_args,
         )
-        return cast(Response | AsyncStream[ResponseStreamEvent], response)
+        return cast(Union[Response, AsyncStream[ResponseStreamEvent]], response)
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
