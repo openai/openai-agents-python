@@ -306,7 +306,7 @@ class OpenAIResponsesModel(Model):
             previous_response_id=self._non_null_or_not_given(previous_response_id),
             conversation=self._non_null_or_not_given(conversation_id),
             instructions=self._non_null_or_not_given(system_instructions),
-            model=self.model,
+            model=self.model if prompt is None else NOT_GIVEN,
             input=list_input,
             include=include,
             tools=converted_tools_payload,
