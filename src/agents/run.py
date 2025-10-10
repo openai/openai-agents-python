@@ -13,6 +13,7 @@ from openai.types.responses import (
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from typing_extensions import NotRequired, TypedDict, Unpack
 
 from ._run_impl import (
@@ -48,6 +49,7 @@ from .items import (
     HandoffCallItem,
     ItemHelpers,
     ModelResponse,
+    ReasoningItem,
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
@@ -1097,6 +1099,7 @@ class AgentRunner:
         server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
         emitted_tool_call_ids: set[str] = set()
+        emitted_reasoning_item_ids: set[str] = set()
 
         if should_run_agent_start_hooks:
             await asyncio.gather(
@@ -1178,6 +1181,9 @@ class AgentRunner:
             conversation_id=conversation_id,
             prompt=prompt_config,
         ):
+            # Emit the raw event ASAP
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
                     Usage(
@@ -1217,7 +1223,16 @@ class AgentRunner:
                             RunItemStreamEvent(item=tool_item, name="tool_called")
                         )
 
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+                elif isinstance(output_item, ResponseReasoningItem):
+                    reasoning_id: str | None = getattr(output_item, "id", None)
+
+                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                        emitted_reasoning_item_ids.add(reasoning_id)
+
+                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                        )
 
         # Call hook just after the model response is finalized.
         if final_response is not None:
@@ -1268,6 +1283,18 @@ class AgentRunner:
                         )
                     )
                     and call_id in emitted_tool_call_ids
+                )
+            ]
+
+        if emitted_reasoning_item_ids:
+            # Filter out reasoning items that were already emitted during streaming
+            items_to_filter = [
+                item
+                for item in items_to_filter
+                if not (
+                    isinstance(item, ReasoningItem)
+                    and (reasoning_id := getattr(item.raw_item, "id", None))
+                    and reasoning_id in emitted_reasoning_item_ids
                 )
             ]
 
