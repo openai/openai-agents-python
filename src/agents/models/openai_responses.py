@@ -4,9 +4,9 @@ import json
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Union, cast, overload
 
-from openai import NOT_GIVEN, APIStatusError, AsyncOpenAI, AsyncStream, NotGiven
+from openai import APIStatusError, AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     Response,
@@ -69,8 +69,8 @@ class OpenAIResponsesModel(Model):
         self.model = model
         self._client = openai_client
 
-    def _non_null_or_not_given(self, value: Any) -> Any:
-        return value if value is not None else NOT_GIVEN
+    def _non_null_or_omit(self, value: Any) -> Any:
+        return value if value is not None else omit
 
     async def get_response(
         self,
@@ -249,13 +249,12 @@ class OpenAIResponsesModel(Model):
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
 
-        parallel_tool_calls = (
-            True
-            if model_settings.parallel_tool_calls and tools and len(tools) > 0
-            else False
-            if model_settings.parallel_tool_calls is False
-            else NOT_GIVEN
-        )
+        if model_settings.parallel_tool_calls and tools:
+            parallel_tool_calls: bool | Omit = True
+        elif model_settings.parallel_tool_calls is False:
+            parallel_tool_calls = False
+        else:
+            parallel_tool_calls = omit
 
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         converted_tools = Converter.convert_tools(tools, handoffs)
@@ -297,36 +296,39 @@ class OpenAIResponsesModel(Model):
         if model_settings.top_logprobs is not None:
             extra_args["top_logprobs"] = model_settings.top_logprobs
         if model_settings.verbosity is not None:
-            if response_format != NOT_GIVEN:
+            if response_format is not omit:
                 response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
             else:
                 response_format = {"verbosity": model_settings.verbosity}
 
-        return await self._client.responses.create(
-            previous_response_id=self._non_null_or_not_given(previous_response_id),
-            conversation=self._non_null_or_not_given(conversation_id),
-            instructions=self._non_null_or_not_given(system_instructions),
+        stream_param: Literal[True] | Omit = True if stream else omit
+
+        response = await self._client.responses.create(
+            previous_response_id=self._non_null_or_omit(previous_response_id),
+            conversation=self._non_null_or_omit(conversation_id),
+            instructions=self._non_null_or_omit(system_instructions),
             model=self.model,
             input=list_input,
             include=include,
             tools=converted_tools_payload,
-            prompt=self._non_null_or_not_given(prompt),
-            temperature=self._non_null_or_not_given(model_settings.temperature),
-            top_p=self._non_null_or_not_given(model_settings.top_p),
-            truncation=self._non_null_or_not_given(model_settings.truncation),
-            max_output_tokens=self._non_null_or_not_given(model_settings.max_tokens),
+            prompt=self._non_null_or_omit(prompt),
+            temperature=self._non_null_or_omit(model_settings.temperature),
+            top_p=self._non_null_or_omit(model_settings.top_p),
+            truncation=self._non_null_or_omit(model_settings.truncation),
+            max_output_tokens=self._non_null_or_omit(model_settings.max_tokens),
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
-            stream=stream,
+            stream=cast(Any, stream_param),
             extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
             text=response_format,
-            store=self._non_null_or_not_given(model_settings.store),
-            reasoning=self._non_null_or_not_given(model_settings.reasoning),
-            metadata=self._non_null_or_not_given(model_settings.metadata),
+            store=self._non_null_or_omit(model_settings.store),
+            reasoning=self._non_null_or_omit(model_settings.reasoning),
+            metadata=self._non_null_or_omit(model_settings.metadata),
             **extra_args,
         )
+        return cast(Union[Response, AsyncStream[ResponseStreamEvent]], response)
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -351,9 +353,9 @@ class Converter:
     @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
-    ) -> response_create_params.ToolChoice | NotGiven:
+    ) -> response_create_params.ToolChoice | Omit:
         if tool_choice is None:
-            return NOT_GIVEN
+            return omit
         elif isinstance(tool_choice, MCPToolChoice):
             return {
                 "server_label": tool_choice.server_label,
@@ -404,9 +406,9 @@ class Converter:
     @classmethod
     def get_response_format(
         cls, output_schema: AgentOutputSchemaBase | None
-    ) -> ResponseTextConfigParam | NotGiven:
+    ) -> ResponseTextConfigParam | Omit:
         if output_schema is None or output_schema.is_plain_text():
-            return NOT_GIVEN
+            return omit
         else:
             return {
                 "format": {
