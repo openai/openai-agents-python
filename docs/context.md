@@ -76,22 +76,29 @@ In some cases, you might want to access extra metadata about the tool being exec
 For this, you can use the [`ToolContext`][agents.tool_context.ToolContext] class, which extends `RunContextWrapper`.
 
 ```python
-from dataclasses import dataclass
-from agents import function_tool
+from typing import Annotated
+from pydantic import BaseModel, Field
+from agents import Agent, Runner, function_tool
 from agents.tool_context import ToolContext
 
-@dataclass
-class UserInfo:
-    name: str
-    uid: int
+class WeatherContext(BaseModel):
+    user_id: str
+
+class Weather(BaseModel):
+    city: str = Field(description="The city name")
+    temperature_range: str = Field(description="The temperature range in Celsius")
+    conditions: str = Field(description="The weather conditions")
 
 @function_tool
-async def fetch_user_age(ctx: ToolContext[UserInfo]) -> str:
-    """Fetch the age of the user, with access to tool metadata."""
-    print(ctx.tool_name)        # e.g. "fetch_user_age"
-    print(ctx.tool_call_id)     # unique ID for this invocation
-    print(ctx.tool_arguments)   # raw arguments as string
-    return f"The user {ctx.context.name} is 47 years old."
+def get_weather(ctx: ToolContext[WeatherContext], city: Annotated[str, "The city to get the weather for"]) -> Weather:
+    print(f"[debug] Tool context: (name: {ctx.tool_name}, call_id: {ctx.tool_call_id}, args: {ctx.tool_arguments})")
+    return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="You are a helpful agent that can tell the weather of a given city.",
+    tools=[get_weather],
+)
 ```
 
 `ToolContext` provides the same `.context` property as `RunContextWrapper`,  
