@@ -13,10 +13,10 @@ from ..strict_schema import ensure_strict_json_schema
 from ..tracing.spans import SpanError
 from ..util import _error_tracing, _json
 from ..util._types import MaybeAwaitable
+from . import RealtimeAgent
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
-    from . import RealtimeAgent
 
 
 # The handoff input type is the type of data passed when the agent is called via a handoff.
