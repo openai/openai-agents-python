@@ -217,7 +217,7 @@ plugins:
                 - 실시간 에이전트:
                     - realtime/quickstart.md
                     - realtime/guide.md
-        - locale: cn
+        - locale: zh
           name: 简体中文
           build: true
           nav:
@@ -267,8 +267,8 @@ extra:
       link: /openai-agents-python/ko/
       lang: ko
     - name: 简体中文
-      link: /openai-agents-python/cn/
-      lang: cn
+      link: /openai-agents-python/zh/
+      lang: zh
 
 markdown_extensions:
   - pymdownx.superfences:

@@ -115,7 +115,7 @@ eng_to_non_eng_mapping = {
         "Build your first agent in minutes.": "단 몇 분 만에 첫 에이전트를 만들 수 있습니다",
         "Let's build": "시작하기",
     },
-    "cn": {
+    "zh": {
         "agents": "智能体",
         "computer use": "计算机操作",
         "OAI hosted tools": "由OpenAI托管的工具",
@@ -161,7 +161,7 @@ eng_to_non_eng_instructions = {
         "* 'instructions', 'tools' 같은 API 매개변수와 temperature, top_p, max_tokens, presence_penalty, frequency_penalty 등은 영문 그대로 유지하세요.",
         "* 문장이 아닌 불릿 항목 끝에는 마침표를 찍지 마세요.",
     ],
-    "cn": [
+    "zh": [
         "* The term 'examples' must be code examples when the page mentions the code examples in the repo, it can be translated as either 'code examples' or 'sample code'.",
         "* The term 'primitives' can be translated as basic components.",
         "* When the terms 'instructions' and 'tools' are mentioned as API parameter names, they must be kept as is.",

@@ -19,7 +19,7 @@ on:
       - mkdocs.yml
       - '!docs/ja/**'
       - '!docs/ko/**'
-      - '!docs/cn/**'
+      - '!docs/zh/**'
 
 permissions:
   contents: write

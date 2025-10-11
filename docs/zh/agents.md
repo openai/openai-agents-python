@@ -220,7 +220,7 @@ agent = Agent(
 )
 ```
 
-- `StopAtTools(stop_at_tool_names=[...])`: 指定したツールのいずれかが呼び出された場合に停止し、その出力を最終応答として使用します。
+- `StopAtTools(stop_at_tool_names=[...])`: 当指定的工具中的任何一个被调用时停止，并将其输出用作最终响应。
 
 ```python
 from agents import Agent, Runner, function_tool
@@ -244,7 +244,7 @@ agent = Agent(
 )
 ```
 
-- `ToolsToFinalOutputFunction`: ツール結果を処理し、停止するか LLM を継続するかを判断するカスタム関数です。
+- `ToolsToFinalOutputFunction`: 处理工具结果并决定是停止还是继续LLM的自定义函数。
 
 ```python
 from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
