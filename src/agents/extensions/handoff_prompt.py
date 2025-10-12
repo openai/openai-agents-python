@@ -15,5 +15,17 @@ RECOMMENDED_PROMPT_PREFIX = (
 def prompt_with_handoff_instructions(prompt: str) -> str:
     """
     Add recommended instructions to the prompt for agents that use handoffs.
+    
+    Args:
+        prompt: A string containing the prompt to which handoff instructions will be added
+        
+    Returns:
+        A string with the recommended handoff instructions prepended to the provided prompt
+        
+    Raises:
+        TypeError: If the prompt is not a string
     """
+    if not isinstance(prompt, str):
+        raise TypeError(f"prompt must be a string, got {type(prompt).__name__}")
+    
     return f"{RECOMMENDED_PROMPT_PREFIX}\n\n{prompt}"
