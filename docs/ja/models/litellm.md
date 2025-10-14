@@ -2,13 +2,13 @@
 search:
   exclude: true
 ---
-# LiteLLM を介した任意のモデルの利用
+# LiteLLM を使った任意のモデルの利用
 
 !!! note
 
-    LiteLLM 連携はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題があれば [GitHub issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に対応します。
+    LiteLLM 連携はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題があれば [GitHub Issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に修正します。
 
-[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ のモデルを利用できるライブラリです。Agents SDK で任意の AI モデルを使えるように、LiteLLM 連携を追加しました。
+[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ のモデルを利用できるライブラリです。Agents SDK に LiteLLM 連携を追加し、任意の AI モデルを使用できるようにしました。
 
 ## セットアップ
 
@@ -22,13 +22,13 @@ pip install "openai-agents[litellm]"
 
 ## 例
 
-これは完全に動作する例です。実行すると、モデル名と API キーの入力を求められます。例えば次のように入力できます。
+これは完全に動作する例です。実行すると、モデル名と API キーの入力を求められます。例えば、次を入力できます。
 
-- `openai/gpt-4.1`（モデル）と OpenAI API キー
-- `anthropic/claude-3-5-sonnet-20240620`（モデル）と Anthropic API キー
+- `openai/gpt-4.1`（モデル）と、あなたの OpenAI API キー
+- `anthropic/claude-3-5-sonnet-20240620`（モデル）と、あなたの Anthropic API キー
 - など
 
-LiteLLM でサポートされるモデルの全一覧は、[litellm プロバイダーのドキュメント](https://docs.litellm.ai/docs/providers)をご覧ください。
+LiteLLM でサポートされているモデルの一覧は、[LiteLLM のプロバイダー ドキュメント](https://docs.litellm.ai/docs/providers) を参照してください。
 
 ```python
 from __future__ import annotations
@@ -76,9 +76,9 @@ if __name__ == "__main__":
     asyncio.run(main(model, api_key))
 ```
 
-## 使用状況データのトラッキング
+## 使用状況データの追跡
 
-LiteLLM のレスポンスで Agents SDK の使用状況メトリクスを反映したい場合は、エージェント作成時に `ModelSettings(include_usage=True)` を渡してください。
+LiteLLM の応答を Agents SDK の使用状況メトリクスに反映させたい場合は、エージェント作成時に `ModelSettings(include_usage=True)` を渡してください。
 
 ```python
 from agents import Agent, ModelSettings
@@ -91,4 +91,4 @@ agent = Agent(
 )
 ```
 
-`include_usage=True` を指定すると、LiteLLM のリクエストは、組み込みの OpenAI モデルと同様に、`result.context_wrapper.usage` を通じてトークン数とリクエスト数を報告します。
+`include_usage=True` の場合、LiteLLM のリクエストは、組み込みの OpenAI モデルと同様に、`result.context_wrapper.usage` を通じてトークン数とリクエスト数を報告します。

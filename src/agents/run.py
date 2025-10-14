@@ -13,6 +13,7 @@ from openai.types.responses import (
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from typing_extensions import NotRequired, TypedDict, Unpack
 
 from ._run_impl import (
@@ -48,6 +49,7 @@ from .items import (
     HandoffCallItem,
     ItemHelpers,
     ModelResponse,
+    ReasoningItem,
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
@@ -120,6 +122,51 @@ class CallModelData(Generic[TContext]):
     model_data: ModelInputData
     agent: Agent[TContext]
     context: TContext | None
+
+
+@dataclass
+class _ServerConversationTracker:
+    """Tracks server-side conversation state for either conversation_id or
+    previous_response_id modes."""
+
+    conversation_id: str | None = None
+    previous_response_id: str | None = None
+    sent_items: set[int] = field(default_factory=set)
+    server_items: set[int] = field(default_factory=set)
+
+    def track_server_items(self, model_response: ModelResponse) -> None:
+        for output_item in model_response.output:
+            self.server_items.add(id(output_item))
+
+        # Update previous_response_id only when using previous_response_id
+        if (
+            self.conversation_id is None
+            and self.previous_response_id is not None
+            and model_response.response_id is not None
+        ):
+            self.previous_response_id = model_response.response_id
+
+    def prepare_input(
+        self,
+        original_input: str | list[TResponseInputItem],
+        generated_items: list[RunItem],
+    ) -> list[TResponseInputItem]:
+        input_items: list[TResponseInputItem] = []
+
+        # On first call (when there are no generated items yet), include the original input
+        if not generated_items:
+            input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
+
+        # Process generated_items, skip items already sent or from server
+        for item in generated_items:
+            raw_item_id = id(item.raw_item)
+
+            if raw_item_id in self.sent_items or raw_item_id in self.server_items:
+                continue
+            input_items.append(item.to_input_item())
+            self.sent_items.add(raw_item_id)
+
+        return input_items
 
 
 # Type alias for the optional input filter callback
@@ -470,6 +517,13 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
+        if conversation_id is not None or previous_response_id is not None:
+            server_conversation_tracker = _ServerConversationTracker(
+                conversation_id=conversation_id, previous_response_id=previous_response_id
+            )
+        else:
+            server_conversation_tracker = None
+
         # Keep original user input separate from session-prepared input
         original_user_input = input
         prepared_input = await self._prepare_input_with_session(
@@ -563,8 +617,7 @@ class AgentRunner:
                                 run_config=run_config,
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
-                                previous_response_id=previous_response_id,
-                                conversation_id=conversation_id,
+                                server_conversation_tracker=server_conversation_tracker,
                             ),
                         )
                     else:
@@ -578,14 +631,16 @@ class AgentRunner:
                             run_config=run_config,
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
-                            previous_response_id=previous_response_id,
-                            conversation_id=conversation_id,
+                            server_conversation_tracker=server_conversation_tracker,
                         )
                     should_run_agent_start_hooks = False
 
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
+
+                    if server_conversation_tracker is not None:
+                        server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     # Collect tool guardrail results from this turn
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
@@ -610,7 +665,13 @@ class AgentRunner:
                             tool_output_guardrail_results=tool_output_guardrail_results,
                             context_wrapper=context_wrapper,
                         )
-                        await self._save_result_to_session(session, [], turn_result.new_step_items)
+                        if not any(
+                            guardrail_result.output.tripwire_triggered
+                            for guardrail_result in input_guardrail_results
+                        ):
+                            await self._save_result_to_session(
+                                session, [], turn_result.new_step_items
+                            )
 
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -619,7 +680,13 @@ class AgentRunner:
                         current_span = None
                         should_run_agent_start_hooks = True
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        await self._save_result_to_session(session, [], turn_result.new_step_items)
+                        if not any(
+                            guardrail_result.output.tripwire_triggered
+                            for guardrail_result in input_guardrail_results
+                        ):
+                            await self._save_result_to_session(
+                                session, [], turn_result.new_step_items
+                            )
                     else:
                         raise AgentsException(
                             f"Unknown next step type: {type(turn_result.next_step)}"
@@ -863,6 +930,13 @@ class AgentRunner:
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
 
+        if conversation_id is not None or previous_response_id is not None:
+            server_conversation_tracker = _ServerConversationTracker(
+                conversation_id=conversation_id, previous_response_id=previous_response_id
+            )
+        else:
+            server_conversation_tracker = None
+
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
@@ -938,8 +1012,7 @@ class AgentRunner:
                         should_run_agent_start_hooks,
                         tool_use_tracker,
                         all_tools,
-                        previous_response_id,
-                        conversation_id,
+                        server_conversation_tracker,
                     )
                     should_run_agent_start_hooks = False
 
@@ -948,6 +1021,9 @@ class AgentRunner:
                     ]
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
+
+                    if server_conversation_tracker is not None:
+                        server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = turn_result.next_step.new_agent
@@ -979,15 +1055,29 @@ class AgentRunner:
                         streamed_result.is_complete = True
 
                         # Save the conversation to session if enabled
-                        await AgentRunner._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        await AgentRunner._save_result_to_session(
-                            session, [], turn_result.new_step_items
-                        )
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1032,10 +1122,10 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
-        previous_response_id: str | None,
-        conversation_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
         emitted_tool_call_ids: set[str] = set()
+        emitted_reasoning_item_ids: set[str] = set()
 
         if should_run_agent_start_hooks:
             await asyncio.gather(
@@ -1064,8 +1154,13 @@ class AgentRunner:
 
         final_response: ModelResponse | None = None
 
-        input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        input.extend([item.to_input_item() for item in streamed_result.new_items])
+        if server_conversation_tracker is not None:
+            input = server_conversation_tracker.prepare_input(
+                streamed_result.input, streamed_result.new_items
+            )
+        else:
+            input = ItemHelpers.input_to_new_input_list(streamed_result.input)
+            input.extend([item.to_input_item() for item in streamed_result.new_items])
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1088,6 +1183,15 @@ class AgentRunner:
             ),
         )
 
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        )
+
         # 1. Stream the output events
         async for event in model.stream_response(
             filtered.instructions,
@@ -1103,6 +1207,9 @@ class AgentRunner:
             conversation_id=conversation_id,
             prompt=prompt_config,
         ):
+            # Emit the raw event ASAP
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
                     Usage(
@@ -1142,7 +1249,16 @@ class AgentRunner:
                             RunItemStreamEvent(item=tool_item, name="tool_called")
                         )
 
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+                elif isinstance(output_item, ResponseReasoningItem):
+                    reasoning_id: str | None = getattr(output_item, "id", None)
+
+                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                        emitted_reasoning_item_ids.add(reasoning_id)
+
+                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                        )
 
         # Call hook just after the model response is finalized.
         if final_response is not None:
@@ -1196,6 +1312,18 @@ class AgentRunner:
                 )
             ]
 
+        if emitted_reasoning_item_ids:
+            # Filter out reasoning items that were already emitted during streaming
+            items_to_filter = [
+                item
+                for item in items_to_filter
+                if not (
+                    isinstance(item, ReasoningItem)
+                    and (reasoning_id := getattr(item.raw_item, "id", None))
+                    and reasoning_id in emitted_reasoning_item_ids
+                )
+            ]
+
         # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
         items_to_filter = [
             item for item in items_to_filter if not isinstance(item, HandoffCallItem)
@@ -1219,8 +1347,7 @@ class AgentRunner:
         run_config: RunConfig,
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
-        previous_response_id: str | None,
-        conversation_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -1240,8 +1367,11 @@ class AgentRunner:
 
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
-        input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+        if server_conversation_tracker is not None:
+            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+        else:
+            input = ItemHelpers.input_to_new_input_list(original_input)
+            input.extend([generated_item.to_input_item() for generated_item in generated_items])
 
         new_response = await cls._get_new_response(
             agent,
@@ -1254,8 +1384,7 @@ class AgentRunner:
             context_wrapper,
             run_config,
             tool_use_tracker,
-            previous_response_id,
-            conversation_id,
+            server_conversation_tracker,
             prompt_config,
         )
 
@@ -1459,8 +1588,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
-        previous_response_id: str | None,
-        conversation_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None,
         prompt_config: ResponsePromptParam | None,
     ) -> ModelResponse:
         # Allow user to modify model input right before the call, if configured
@@ -1489,6 +1617,15 @@ class AgentRunner:
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
+        )
+
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
         )
 
         new_response = await model.get_response(
@@ -1634,6 +1771,24 @@ class AgentRunner:
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
         await session.add_items(items_to_save)
+
+    @staticmethod
+    async def _input_guardrail_tripwire_triggered_for_stream(
+        streamed_result: RunResultStreaming,
+    ) -> bool:
+        """Return True if any input guardrail triggered during a streamed run."""
+
+        task = streamed_result._input_guardrails_task
+        if task is None:
+            return False
+
+        if not task.done():
+            await task
+
+        return any(
+            guardrail_result.output.tripwire_triggered
+            for guardrail_result in streamed_result.input_guardrail_results
+        )
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()

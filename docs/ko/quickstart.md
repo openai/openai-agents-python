@@ -6,7 +6,7 @@ search:
 
 ## 프로젝트 및 가상 환경 생성
 
-이 작업은 한 번만 수행하면 됩니다.
+한 번만 수행하면 됩니다.
 
 ```bash
 mkdir my_project
@@ -30,15 +30,15 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API 키 설정
 
-키가 없다면 OpenAI API 키를 생성하려면 [이 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따르세요.
+없다면 OpenAI API 키를 만들기 위해 [이 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따르세요.
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 첫 에이전트 만들기
+## 첫 에이전트 생성
 
-에이전트는 instructions, 이름, 그리고 선택적 구성(예: `model_config`)으로 정의됩니다
+에이전트는 instructions, 이름, 그리고 선택적 구성(예: `model_config`)으로 정의합니다
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## 에이전트 몇 개 더 추가
+## 추가 에이전트
 
-추가 에이전트도 같은 방식으로 정의할 수 있습니다. `handoff_descriptions` 는 핸드오프 라우팅을 결정하는 데 도움이 되는 추가 컨텍스트를 제공합니다
+추가 에이전트도 같은 방식으로 정의할 수 있습니다. `handoff_descriptions`는 핸드오프 라우팅을 결정하는 데 추가 컨텍스트를 제공합니다
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## 핸드오프 정의
 
-각 에이전트에서, 작업을 어떻게 진행할지 결정하기 위해 선택할 수 있는 아웃바운드 핸드오프 옵션 목록을 정의할 수 있습니다.
+각 에이전트에서 작업을 진행하는 방법을 결정하기 위해 선택할 수 있는 발신 핸드오프 옵션의 인벤토리를 정의할 수 있습니다.
 
 ```python
 triage_agent = Agent(
@@ -95,7 +95,7 @@ async def main():
 
 ## 가드레일 추가
 
-입력 또는 출력에 대해 커스텀 가드레일을 정의할 수 있습니다.
+입력 또는 출력에 대해 실행될 사용자 지정 가드레일을 정의할 수 있습니다.
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 모두 합치기
+## 전체 워크플로 통합
 
-모든 것을 합쳐 핸드오프와 입력 가드레일을 사용해 전체 워크플로를 실행해 봅시다.
+모두 통합하여 핸드오프와 입력 가드레일을 사용해 전체 워크플로를 실행해 봅시다.
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## 트레이스 보기
 
-에이전트 실행 중에 어떤 일이 있었는지 검토하려면 OpenAI 대시보드의 [Trace viewer](https://platform.openai.com/traces)로 이동해 에이전트 실행의 트레이스를 확인하세요.
+에이전트 실행 중에 무슨 일이 있었는지 검토하려면 [OpenAI Dashboard의 Trace viewer](https://platform.openai.com/traces)로 이동해 실행 트레이스를 확인하세요.
 
 ## 다음 단계
 
-더 복잡한 에이전트 기반 플로우를 만드는 방법을 알아보세요:
+더 복잡한 에이전트 플로우를 만드는 방법을 알아보세요:
 
 - Learn about how to configure [에이전트](agents.md).
 - Learn about [에이전트 실행](running_agents.md).
-- Learn about [도구](tools.md), [가드레일](guardrails.md) and [모델](models/index.md).
+- Learn about [도구](tools.md), [가드레일](guardrails.md) 및 [모델](models/index.md).
