@@ -378,6 +378,65 @@ async def test_soft_cancel_does_not_clear_queues_immediately():
 
 
 @pytest.mark.asyncio
+async def test_soft_cancel_with_handoff():
+    """Verify soft cancel after handoff saves the handoff turn."""
+    from agents import Handoff
+
+    model = FakeModel()
+
+    # Create two agents with handoff
+    agent2 = Agent(name="Agent2", model=model)
+
+    async def on_invoke_handoff(context, data):
+        return agent2
+
+    agent1 = Agent(
+        name="Agent1",
+        model=model,
+        handoffs=[
+            Handoff(
+                tool_name=Handoff.default_tool_name(agent2),
+                tool_description=Handoff.default_tool_description(agent2),
+                input_json_schema={},
+                on_invoke_handoff=on_invoke_handoff,
+                agent_name=agent2.name,
+            )
+        ],
+    )
+
+    # Setup: Agent1 does handoff, Agent2 responds
+    model.add_multiple_turn_outputs(
+        [
+            # Agent1's turn - triggers handoff
+            [get_function_tool_call(Handoff.default_tool_name(agent2), "{}")],
+            # Agent2's turn after handoff
+            [get_text_message("Agent2 response")],
+        ]
+    )
+
+    session = SQLiteSession("test_soft_cancel_handoff")
+    await session.clear_session()
+
+    result = Runner.run_streamed(agent1, input="Hello", session=session)
+
+    handoff_seen = False
+    async for event in result.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "handoff_occured":
+            handoff_seen = True
+            # Cancel right after handoff
+            result.cancel(mode="after_turn")
+
+    assert handoff_seen, "Handoff should have occurred"
+
+    # Verify session has items from the handoff turn
+    items = await session.get_items()
+    assert len(items) > 0, "Session should have saved the handoff turn"
+
+    # Cleanup
+    await session.clear_session()
+
+
+@pytest.mark.asyncio
 async def test_soft_cancel_with_session_and_multiple_turns():
     """Verify soft cancel with session across multiple turns."""
     model = FakeModel()
