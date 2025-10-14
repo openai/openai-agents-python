@@ -4,20 +4,20 @@ search:
 ---
 # クイックスタート
 
-リアルタイム エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声対話を可能にします。このガイドでは、最初のリアルタイム音声エージェントを作成する手順を説明します。
+リアルタイム エージェントは、OpenAI の Realtime API を使って AI エージェントとの音声会話を可能にします。本ガイドでは、最初のリアルタイム音声エージェントの作成手順を説明します。
 
 !!! warning "ベータ機能"
-Realtime agents はベータ版です。実装の改善に伴い、破壊的な変更が発生する可能性があります。
+リアルタイム エージェントはベータ版です。実装の改善に伴い、破壊的な変更が入る可能性があります。
 
 ## 前提条件
 
 - Python 3.9 以上
 - OpenAI API キー
-- OpenAI Agents SDK の基礎的な理解
+- OpenAI Agents SDK の基本的な知識
 
 ## インストール
 
-まだであれば、OpenAI Agents SDK をインストールしてください:
+まだの場合は、OpenAI Agents SDK をインストールします:
 
 ```bash
 pip install openai-agents
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. ランナーのセットアップ
+### 3. runner の設定
 
 ```python
 runner = RealtimeRunner(
@@ -192,14 +192,14 @@ if __name__ == "__main__":
 
 ### モデル設定
 
-- `model_name`: 利用可能なリアルタイムモデルから選択します (例: `gpt-realtime`)
+- `model_name`: 利用可能なリアルタイム モデルから選択 (例: `gpt-realtime`)
 - `voice`: 音声の選択 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 - `modalities`: テキストまたは音声を有効化 (`["text"]` または `["audio"]`)
 
-### 音声設定
+### オーディオ設定
 
-- `input_audio_format`: 入力音声の形式 (`pcm16`, `g711_ulaw`, `g711_alaw`)
-- `output_audio_format`: 出力音声の形式
+- `input_audio_format`: 入力音声のフォーマット (`pcm16`, `g711_ulaw`, `g711_alaw`)
+- `output_audio_format`: 出力音声のフォーマット
 - `input_audio_transcription`: 文字起こしの設定
 
 ### ターン検出
@@ -212,20 +212,20 @@ if __name__ == "__main__":
 ## 次のステップ
 
 - [リアルタイム エージェントの詳細を見る](guide.md)
-- [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダ内の動作するサンプルコードを確認
+- 動作するサンプルは [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダを参照
 - エージェントにツールを追加
 - エージェント間のハンドオフを実装
-- 安全性のためのガードレールを設定
+- 安全のためにガードレールを設定
 
 ## 認証
 
-環境に OpenAI API キーが設定されていることを確認してください:
+環境に OpenAI API キーが設定されていることを確認します:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-または、セッション作成時に直接渡します:
+またはセッション作成時に直接渡します:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
