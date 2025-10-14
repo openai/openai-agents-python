@@ -18,7 +18,7 @@ except ImportError as _e:
         "dependency group: `pip install 'openai-agents[litellm]'`."
     ) from _e
 
-from openai import NOT_GIVEN, AsyncStream, NotGiven
+from openai import AsyncStream, NotGiven, omit
 from openai.types.chat import (
     ChatCompletionChunk,
     ChatCompletionMessageCustomToolCall,
@@ -374,7 +374,7 @@ class LitellmModel(Model):
             object="response",
             output=[],
             tool_choice=cast(Literal["auto", "required", "none"], tool_choice)
-            if tool_choice != NOT_GIVEN
+            if tool_choice is not omit
             else "auto",
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
@@ -500,7 +500,7 @@ class LitellmModel(Model):
         return fixed_messages
 
     def _remove_not_given(self, value: Any) -> Any:
-        if isinstance(value, NotGiven):
+        if value is omit or isinstance(value, NotGiven):
             return None
         return value
 

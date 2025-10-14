@@ -253,6 +253,7 @@ class FakeModel(Model):
                         item_id=output_item.call_id,
                         output_index=output_index,
                         arguments=output_item.arguments,
+                        name=output_item.name,
                         sequence_number=sequence_number,
                     )
                     sequence_number += 1
