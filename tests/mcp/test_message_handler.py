@@ -21,11 +21,7 @@ from agents.mcp.server import (
     _MCPServerWithClientSession,
 )
 
-HandlerMessage = (
-    RequestResponder[ServerRequest, ClientResult]
-    | ServerNotification
-    | Exception
-)
+HandlerMessage = RequestResponder[ServerRequest, ClientResult] | ServerNotification | Exception
 
 
 class _StubClientSession:
@@ -69,8 +65,9 @@ class _MessageHandlerTestServer(_MCPServerWithClientSession):
     def create_streams(self):
         @contextlib.asynccontextmanager
         async def _streams():
-            send_stream, recv_stream = (
-                anyio.create_memory_object_stream[SessionMessage | Exception](1))
+            send_stream, recv_stream = anyio.create_memory_object_stream[
+                SessionMessage | Exception
+            ](1)
             try:
                 yield recv_stream, send_stream, None
             finally:

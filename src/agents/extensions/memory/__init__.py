@@ -58,8 +58,6 @@ def __getattr__(name: str) -> Any:
 
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
-            raise ImportError(
-                f"Failed to import AdvancedSQLiteSession: {e}"
-            ) from e
+            raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
