@@ -161,7 +161,7 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
-                - Sessions:
+                - セッション:
                     - sessions/index.md
                     - sessions/sqlalchemy_session.md
                     - sessions/advanced_sqlite_session.md
