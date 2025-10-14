@@ -500,7 +500,7 @@ class LitellmModel(Model):
         return fixed_messages
 
     def _remove_not_given(self, value: Any) -> Any:
-        if isinstance(value, NotGiven):
+        if isinstance(value, (NotGiven, type(omit))):
             return None
         return value
 
