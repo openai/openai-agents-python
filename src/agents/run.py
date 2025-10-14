@@ -951,6 +951,12 @@ class AgentRunner:
             await AgentRunner._save_result_to_session(session, starting_input, [])
 
             while True:
+                # Check for soft cancel before starting new turn
+                if streamed_result._cancel_mode == "after_turn":
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
+
                 if streamed_result.is_complete:
                     break
 
@@ -1033,6 +1039,12 @@ class AgentRunner:
                         streamed_result._event_queue.put_nowait(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
+
+                        # Check for soft cancel after handoff
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                     elif isinstance(turn_result.next_step, NextStepFinalOutput):
                         streamed_result._output_guardrails_task = asyncio.create_task(
                             cls._run_output_guardrails(
@@ -1078,6 +1090,12 @@ class AgentRunner:
                                 await AgentRunner._save_result_to_session(
                                     session, [], turn_result.new_step_items
                                 )
+
+                        # Check for soft cancel after turn completion
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
