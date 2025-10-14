@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-まだない場合は、[これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+お持ちでない場合は、OpenAI API キーを作成するために [これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従ってください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェントは instructions、名前、オプションの設定（`model_config` など）で定義します。
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## さらにいくつかのエージェントの追加
+## 追加のエージェントの作成
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` はハンドオフのルーティングを決定するための追加コンテキストを提供します。
+追加のエージェントも同様に定義できます。`handoff_descriptions` はハンドオフのルーティングを判断するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントで、タスクを進める方法を決めるために選択できる送出側のハンドオフ候補の一覧を定義できます。
+各エージェントで、タスクを前進させる方法を決定するために選択可能な、送信側ハンドオフの在庫を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェントオーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間で正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -95,7 +95,7 @@ async def main():
 
 ## ガードレールの追加
 
-入力または出力に対して実行するカスタム ガードレールを定義できます。
+入力または出力に対して実行されるカスタム ガードレールを定義できます。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 全体の統合
+## 統合
 
-ハンドオフと入力ガードレールを使って、すべてをまとめてワークフロー全体を実行しましょう。
+すべてをまとめて、ハンドオフと入力ガードレールを使ってワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -190,14 +190,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの表示
+## トレーシングの表示
 
-エージェントの実行で何が起きたかを確認するには、OpenAI Dashboard の Trace viewer に移動して、エージェント実行のトレースを表示します。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace ビューアー](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示します。
 
 ## 次のステップ
 
-より複雑なエージェント フローの構築方法:
+より複雑なエージェント フローの構築方法を学びましょう。
 
-- Learn about how to configure [エージェント](agents.md).
-- Learn about [エージェントの実行](running_agents.md).
-- Learn about [ツール](tools.md)、[ガードレール](guardrails.md) および [モデル](models/index.md).
+- [エージェント](agents.md) の設定について学ぶ。
+- [エージェントの実行](running_agents.md) について学ぶ。
+- [ツール](tools.md)、[ガードレール](guardrails.md)、および [モデル](models/index.md) について学ぶ。

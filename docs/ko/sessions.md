@@ -4,9 +4,9 @@ search:
 ---
 # 세션
 
-Agents SDK 는 여러 에이전트 실행(run) 간에 대화 기록을 자동으로 유지하는 내장 세션 메모리를 제공하여, 턴 사이에 `.to_input_list()` 를 수동으로 처리할 필요를 없애줍니다.
+Agents SDK 는 여러 에이전트 실행에 걸쳐 대화 기록을 자동으로 유지하는 내장 세션 메모리를 제공하여, 턴 사이에 `.to_input_list()` 를 수동으로 처리할 필요를 없앱니다.
 
-세션은 특정 세션에 대한 대화 기록을 저장하여, 명시적인 수동 메모리 관리 없이도 에이전트가 컨텍스트를 유지할 수 있도록 합니다. 특히 에이전트가 이전 상호작용을 기억하길 원하는 채팅 애플리케이션이나 멀티턴 대화에 유용합니다.
+세션은 특정 세션의 대화 기록을 저장하여, 명시적인 수동 메모리 관리 없이도 에이전트가 컨텍스트를 유지할 수 있도록 합니다. 이는 에이전트가 이전 상호작용을 기억하길 원하는 채팅 애플리케이션이나 멀티 턴 대화를 구축할 때 특히 유용합니다.
 
 ## 빠른 시작
 
@@ -51,17 +51,17 @@ print(result.final_output)  # "Approximately 39 million"
 
 세션 메모리가 활성화되면:
 
-1. **각 실행 전**: 러너가 세션의 대화 기록을 자동으로 가져와 입력 항목 앞에 추가합니다
-2. **각 실행 후**: 실행 중에 생성된 모든 새 항목(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 세션에 자동으로 저장됩니다
-3. **컨텍스트 유지**: 동일한 세션으로 후속 실행을 수행할 때 전체 대화 기록이 포함되어 에이전트가 컨텍스트를 유지합니다
+1. **각 실행 전**: 러너가 세션의 대화 기록을 자동으로 가져와 입력 아이템 앞에 추가합니다
+2. **각 실행 후**: 실행 중 생성된 모든 새 아이템(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 자동으로 세션에 저장됩니다
+3. **컨텍스트 유지**: 동일한 세션으로 수행되는 이후 실행에는 전체 대화 기록이 포함되어 에이전트가 컨텍스트를 유지할 수 있습니다
 
-이는 `.to_input_list()` 를 수동으로 호출하고 실행 간 대화 상태를 관리해야 하는 필요를 제거합니다.
+이로써 `.to_input_list()` 를 수동으로 호출하고 실행 간 대화 상태를 관리할 필요가 없어집니다.
 
 ## 메모리 작업
 
 ### 기본 작업
 
-세션은 대화 기록 관리를 위한 여러 작업을 지원합니다:
+세션은 대화 기록을 관리하기 위한 여러 작업을 지원합니다:
 
 ```python
 from agents import SQLiteSession
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### 수정 시 pop_item 사용
+### 수정을 위한 pop_item 사용
 
-`pop_item` 메서드는 대화에서 마지막 항목을 되돌리거나 수정하려는 경우에 특히 유용합니다:
+`pop_item` 메서드는 대화에서 마지막 아이템을 되돌리거나 수정하고 싶을 때 특히 유용합니다:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -119,7 +119,7 @@ print(f"Agent: {result.final_output}")
 
 ## 메모리 옵션
 
-### 메모리 없음(기본값)
+### 메모리 사용 안 함(기본값)
 
 ```python
 # Default behavior - no session memory
@@ -128,8 +128,8 @@ result = await Runner.run(agent, "Hello")
 
 ### OpenAI Conversations API 메모리
 
-[OpenAI Conversations API](https://platform.openai.com/docs/api-reference/conversations/create)를 사용하여 자체 데이터베이스를 관리하지 않고도
-[conversation state](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#using-the-conversations-api)를 지속할 수 있습니다. 이는 대화 기록 저장에 OpenAI 호스트하는 인프라에 이미 의존하고 있을 때 유용합니다.
+[OpenAI Conversations API](https://platform.openai.com/docs/api-reference/conversations/create)를 사용하여 자체 데이터베이스를 관리하지 않고
+[conversation state](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#using-the-conversations-api)를 지속하세요. 이는 대화 기록 저장을 위해 OpenAI 호스팅 인프라에 이미 의존하고 있을 때 유용합니다.
 
 ```python
 from agents import OpenAIConversationsSession
@@ -192,9 +192,9 @@ result2 = await Runner.run(
 
 더 고급 사용 사례의 경우, SQLAlchemy 기반 세션 백엔드를 사용할 수 있습니다. 이를 통해 SQLAlchemy 가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 세션 저장소로 사용할 수 있습니다.
 
-**예시 1: 인메모리 SQLite 와 `from_url` 사용**
+**예시 1: `from_url` 을 사용한 인메모리 SQLite**
 
-개발 및 테스트에 적합한 가장 간단한 시작 방법입니다.
+가장 간단한 시작 방법으로, 개발 및 테스트에 적합합니다.
 
 ```python
 import asyncio
@@ -217,7 +217,7 @@ if __name__ == "__main__":
 
 **예시 2: 기존 SQLAlchemy 엔진 사용**
 
-프로덕션 애플리케이션에서는 SQLAlchemy `AsyncEngine` 인스턴스를 이미 보유하고 있을 가능성이 큽니다. 이를 세션에 직접 전달할 수 있습니다.
+프로덕션 애플리케이션에서는 이미 SQLAlchemy `AsyncEngine` 인스턴스를 보유하고 있을 가능성이 큽니다. 이를 세션에 직접 전달할 수 있습니다.
 
 ```python
 import asyncio
@@ -247,9 +247,9 @@ if __name__ == "__main__":
 
 ### 암호화된 세션
 
-보관 중인 대화 데이터의 암호화가 필요한 애플리케이션의 경우, `EncryptedSession` 을 사용하여 투명한 암호화와 자동 TTL 기반 만료로 어떤 세션 백엔드든 감쌀 수 있습니다. 이를 위해서는 `encrypt` extra 가 필요합니다: `pip install openai-agents[encrypt]`.
+대화 데이터의 저장 시 암호화가 필요한 애플리케이션의 경우, `EncryptedSession` 을 사용하여 투명한 암호화와 자동 TTL 기반 만료를 갖춘 어떤 세션 백엔드라도 래핑할 수 있습니다. 이를 위해서는 `encrypt` 엑스트라가 필요합니다: `pip install openai-agents[encrypt]`.
 
-`EncryptedSession` 은 세션별 키 파생(HKDF)이 적용된 Fernet 암호화를 사용하며, 오래된 메시지의 자동 만료를 지원합니다. 항목이 TTL을 초과하면 조회 시 조용히 건너뜁니다.
+`EncryptedSession` 은 세션별 키 파생(HKDF)을 사용한 Fernet 암호화를 사용하며 오래된 메시지의 자동 만료를 지원합니다. 아이템이 TTL을 초과하면 검색 시 조용히 건너뜁니다.
 
 **예시: SQLAlchemy 세션 데이터 암호화**
 
@@ -282,19 +282,19 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-**주요 기능:**
+**핵심 기능:**
 
--   **투명한 암호화**: 저장 전 모든 세션 항목을 자동으로 암호화하고 조회 시 복호화
--   **세션별 키 파생**: 세션 ID 를 salt 로 사용하는 HKDF 로 고유한 암호화 키 파생
+-   **투명한 암호화**: 저장 전에 모든 세션 아이템을 자동으로 암호화하고 검색 시 복호화
+-   **세션별 키 파생**: 세션 ID 를 솔트로 사용하는 HKDF 로 고유한 암호화 키 파생
 -   **TTL 기반 만료**: 구성 가능한 time-to-live(기본값: 10분)에 따라 오래된 메시지를 자동 만료
 -   **유연한 키 입력**: Fernet 키 또는 원문 문자열을 암호화 키로 허용
--   **어떤 세션이든 래핑**: SQLite, SQLAlchemy, 또는 사용자 정의 세션 구현과 동작
+-   **어떤 세션이든 래핑**: SQLite, SQLAlchemy 또는 커스텀 세션 구현과 함께 동작
 
 !!! warning "중요한 보안 참고 사항"
 
-    -   암호화 키는 안전하게 저장하세요(예: 환경 변수, 시크릿 매니저)
+    -   암호화 키를 안전하게 저장하세요(예: 환경 변수, 시크릿 매니저)
     -   만료된 토큰은 애플리케이션 서버의 시스템 시계를 기준으로 거부됩니다 - 유효한 토큰이 시계 드리프트로 인해 거부되지 않도록 모든 서버가 NTP 로 시간 동기화되어 있는지 확인하세요
-    -   기본 세션은 여전히 암호화된 데이터를 저장하므로 데이터베이스 인프라에 대한 제어권을 유지합니다
+    -   기본 세션은 여전히 암호화된 데이터를 저장하므로 데이터베이스 인프라에 대한 제어권을 유지할 수 있습니다
 
 
 ## 사용자 정의 메모리 구현
@@ -344,9 +344,9 @@ result = await Runner.run(
 
 ## 세션 관리
 
-### 세션 ID 네이밍
+### 세션 ID 명명
 
-대화를 체계적으로 정리할 수 있도록 의미 있는 세션 ID 를 사용하세요:
+대화를 체계적으로 구성하는 데 도움이 되는 의미 있는 세션 ID 를 사용하세요:
 
 -   사용자 기반: `"user_12345"`
 -   스레드 기반: `"thread_abc123"`
@@ -354,12 +354,12 @@ result = await Runner.run(
 
 ### 메모리 지속성
 
--   일시적 대화에는 인메모리 SQLite(`SQLiteSession("session_id")`) 사용
--   지속적 대화에는 파일 기반 SQLite(`SQLiteSession("session_id", "path/to/db.sqlite")`) 사용
--   SQLAlchemy 가 지원하는 기존 데이터베이스가 있는 프로덕션 시스템에는 SQLAlchemy 기반 세션(`SQLAlchemySession("session_id", engine=engine, create_tables=True")`) 사용
--   기록을 OpenAI Conversations API 에 저장하길 원할 때는 OpenAI 호스트하는 스토리지(`OpenAIConversationsSession()`) 사용
--   투명한 암호화와 TTL 기반 만료로 어떤 세션이든 감싸려면 암호화된 세션(`EncryptedSession(session_id, underlying_session, encryption_key")`) 사용
--   더 고급 사용 사례를 위해 다른 프로덕션 시스템(Redis, Django 등)에 대한 사용자 정의 세션 백엔드 구현을 고려
+-   임시 대화에는 인메모리 SQLite (`SQLiteSession("session_id")`) 사용
+-   지속적 대화에는 파일 기반 SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) 사용
+-   SQLAlchemy 가 지원하는 기존 데이터베이스가 있는 프로덕션 시스템에는 SQLAlchemy 기반 세션 (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) 사용
+-   OpenAI Conversations API 에 기록을 저장하길 선호한다면 OpenAI 호스팅 저장소 (`OpenAIConversationsSession()`) 사용
+-   투명한 암호화와 TTL 기반 만료를 위해 어떤 세션이든 래핑하는 암호화 세션 (`EncryptedSession(session_id, underlying_session, encryption_key)`) 사용
+-   더 고급 사용 사례를 위해 다른 프로덕션 시스템(Redis, Django 등)에 대한 커스텀 세션 백엔드 구현을 고려
 
 ### 세션 관리
 
@@ -385,9 +385,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 전체 예시
+## 전체 예제
 
-다음은 세션 메모리가 실제로 동작하는 전체 예시입니다:
+세션 메모리가 실제로 동작하는 전체 예제는 다음과 같습니다:
 
 ```python
 import asyncio
@@ -457,4 +457,4 @@ if __name__ == "__main__":
 -   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 구현
 -   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 구현
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 기반 구현
--   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - TTL 이 포함된 암호화된 세션 래퍼
+-   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - TTL 을 포함한 암호화 세션 래퍼

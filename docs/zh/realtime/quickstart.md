@@ -2,28 +2,28 @@
 search:
   exclude: true
 ---
-# 快速入门
+# 快速开始
 
-实时智能体通过 OpenAI 的 Realtime API 实现与 AI 智能体的语音对话。本指南将逐步介绍如何创建您的第一个实时语音智能体。
+实时智能体通过 OpenAI 的 Realtime API 实现与你的 AI 智能体进行语音对话。本指南将带你创建第一个实时语音智能体。
 
-!!! warning "测试版功能"
-实时智能体处于测试阶段。随着我们改进实现，可能会出现重大更改。
+!!! warning "测试功能"
+Realtime agents 处于测试阶段。随着我们改进实现，可能会出现不兼容的变更。
 
-## 前提条件
+## 前置条件
 
--   Python 3.9 或更高版本
--   OpenAI API 密钥
--   对 OpenAI Agents SDK 的基本了解
+- Python 3.9 或更高版本
+- OpenAI API key
+- 对 OpenAI Agents SDK 的基本了解
 
 ## 安装
 
-如果尚未安装，请安装 OpenAI Agents SDK:
+如果尚未安装，请安装 OpenAI Agents SDK：
 
 ```bash
 pip install openai-agents
 ```
 
-## 创建您的第一个实时智能体
+## 创建你的第一个实时智能体
 
 ### 1. 导入所需组件
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. 创建实时智能体
+### 2. 创建一个实时智能体
 
 ```python
 agent = RealtimeAgent(
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 完整示例
 
-这是一个完整的工作示例:
+以下是可运行的完整示例：
 
 ```python
 import asyncio
@@ -192,40 +192,40 @@ if __name__ == "__main__":
 
 ### 模型设置
 
--   `model_name`: 从可用的实时模型中选择 (例如: `gpt-realtime`)
--   `voice`: 选择语音 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: 启用文本或音频 (`["text"]` 或 `["audio"]`)
+- `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
+- `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+- `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
 
--   `input_audio_format`: 输入音频格式 (`pcm16`, `g711_ulaw`, `g711_alaw`)
--   `output_audio_format`: 输出音频格式
--   `input_audio_transcription`: 转录配置
+- `input_audio_format`: 输入音频格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
+- `output_audio_format`: 输出音频格式
+- `input_audio_transcription`: 转写配置
 
 ### 轮次检测
 
--   `type`: 检测方法 (`server_vad`, `semantic_vad`)
--   `threshold`: 语音活动阈值 (0.0-1.0)
--   `silence_duration_ms`: 检测轮次结束的静音时长
--   `prefix_padding_ms`: 语音前的音频填充
+- `type`: 检测方法（`server_vad`、`semantic_vad`）
+- `threshold`: 语音活动阈值（0.0-1.0）
+- `silence_duration_ms`: 用于检测轮次结束的静音时长
+- `prefix_padding_ms`: 语音开始前的音频填充
 
 ## 后续步骤
 
--   [详细了解实时智能体](guide.md)
--   查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的工作示例
--   向智能体添加工具
--   实现智能体间的交接
--   设置安全护栏
+- [了解更多关于实时智能体](guide.md)
+- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可运行示例
+- 为你的智能体添加工具
+- 在智能体之间实现任务转移
+- 设置安全防护措施以确保安全
 
 ## 身份验证
 
-请确保您的 OpenAI API 密钥已设置在环境中:
+确保在环境中设置了你的 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传递:
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

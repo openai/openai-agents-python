@@ -1,15 +1,19 @@
+---
+search:
+  exclude: true
+---
 # 智能体
 
-智能体是应用程序中的核心构建块。一个智能体是一个大型语言模型（LLM），配置了指令和工具。
+智能体是你应用中的核心构建块。一个智能体是一个大语言模型（LLM），通过 instructions 和 tools 进行配置。
 
 ## 基本配置
 
-智能体最常用到的配置属性包括：
+你最常需要为智能体配置的属性包括：
 
--   `name`: 一个必需的字符串，用于标识你的智能体。
--   `instructions`: 也称为开发者消息或系统提示。
--   `model`: 使用哪个LLM，以及可选的 `model_settings` 来配置模型调优参数如temperature、top_p等。
--   `tools`: 智能体可以用来完成任务的工具。
+- `name`: 标识你的智能体的必填字符串。
+- `instructions`: 也称为开发者消息或系统提示词。
+- `model`: 要使用的 LLM，以及可选的 `model_settings` 用于配置如 temperature、top_p 等模型调优参数。
+- `tools`: 智能体可用于完成任务的工具。
 
 ```python
 from agents import Agent, ModelSettings, function_tool
@@ -29,7 +33,7 @@ agent = Agent(
 
 ## 上下文
 
-智能体对于其 `context` 类型是通用的。上下文是一种依赖注入工具：它是你创建并传递给 `Runner.run()` 的对象，会传递给每个智能体、工具、交接等，作为智能体运行的依赖项和状态的容器。你可以提供任何Python对象作为上下文。
+智能体在其 `context` 类型上是泛型的。上下文是一个依赖注入工具：它是你创建并传递给 `Runner.run()` 的对象，会传递给每个智能体、工具、任务转移等，作为本次智能体运行的依赖与状态的集合。你可以提供任意 Python 对象作为上下文。
 
 ```python
 @dataclass
@@ -48,7 +52,7 @@ agent = Agent[UserContext](
 
 ## 输出类型
 
-默认情况下，智能体会产生纯文本（即 `str`）输出。如果你想让智能体产生特定类型的输出，可以使用 `output_type` 参数。一个常见的选择是使用 [Pydantic](https://docs.pydantic.dev/) 对象，但我们支持任何可以包装在 Pydantic [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/) 中的类型 - 数据类、列表、TypedDict等。
+默认情况下，智能体生成纯文本（即 `str`）输出。如果你希望智能体生成特定类型的输出，可以使用 `output_type` 参数。一个常见选择是使用 [Pydantic](https://docs.pydantic.dev/) 对象，但我们支持任何可以由 Pydantic [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/) 包装的类型——如 dataclasses、lists、TypedDict 等。
 
 ```python
 from pydantic import BaseModel
@@ -69,20 +73,20 @@ agent = Agent(
 
 !!! note
 
-    当你传递一个 `output_type` 时，这告诉模型使用 [结构化输出](https://platform.openai.com/docs/guides/structured-outputs) 而不是常规的纯文本响应。
+    当你传入 `output_type` 时，这会告诉模型使用 [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) 而不是常规的纯文本响应。
 
 ## 多智能体系统设计模式
 
-设计多智能体系统有很多方法，但我们通常看到两种广泛适用的模式：
+设计多智能体系统的方法很多，但我们常见到两种广泛适用的模式：
 
-1. 管理器（智能体作为工具）：一个中央管理器/编排器调用作为工具公开的专门子智能体，并保持对对话的控制。
-2. 交接：对等智能体将控制权委托给一个专门的智能体，该智能体接管对话。这是分散式的。
+1. 管理器（智能体作为工具）：一个中心管理器/编排器将专业子智能体作为工具调用，并保留对对话的控制权。
+2. 任务转移：对等智能体将控制权移交给一个专业智能体，由其接管对话。这是去中心化的。
 
-更多详细信息请参见[我们的智能体构建实用指南](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf)。
+更多详情参见[我们的智能体构建实用指南](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf)。
 
 ### 管理器（智能体作为工具）
 
-`customer_facing_agent` 处理所有用户交互，并调用作为工具公开的专门子智能体。更多详细信息请参见 [tools](tools.md#agents-as-tools) 文档。
+`customer_facing_agent` 处理所有用户交互，并调用作为工具暴露的专业子智能体。阅读[工具](tools.md#agents-as-tools)文档了解更多。
 
 ```python
 from agents import Agent
@@ -109,9 +113,9 @@ customer_facing_agent = Agent(
 )
 ```
 
-### 交接
+### 任务转移
 
-交接是智能体可以委托的子智能体。当发生交接时，被委托的智能体接收对话历史并接管对话。这种模式使得在单一任务上表现出色的模块化专门智能体成为可能。更多详细信息请参见 [handoffs](handoffs.md) 文档。
+任务转移是指智能体可以委派给的子智能体。当发生任务转移时，被委派的智能体将接收对话历史并接管对话。此模式使得模块化的、在单一任务上表现出色的专业智能体成为可能。阅读[任务转移](handoffs.md)文档了解更多。
 
 ```python
 from agents import Agent
@@ -130,9 +134,9 @@ triage_agent = Agent(
 )
 ```
 
-## 动态指令
+## 动态 instructions
 
-在大多数情况下，你可以在创建智能体时提供指令。然而，你也可以通过函数提供动态指令。该函数将接收智能体和上下文，并必须返回提示。既可以使用普通函数，也可以使用 `async` 函数。
+在大多数情况下，你可以在创建智能体时提供 instructions。不过，你也可以通过函数提供动态 instructions。该函数将接收智能体与上下文，并且必须返回提示词。常规与 `async` 函数均可接受。
 
 ```python
 def dynamic_instructions(
@@ -147,17 +151,17 @@ agent = Agent[UserContext](
 )
 ```
 
-## 生命周期事件（钩子）
+## 生命周期事件（hooks）
 
-有时候，你可能想要观察智能体的生命周期。例如，你可能想要记录事件，或者在某些事件发生时预取数据。你可以通过 `hooks` 属性在智能体的生命周期中设置钩子。子类化 [`AgentHooks`][agents.lifecycle.AgentHooks] 类，并覆盖你感兴趣的方法。
+有时，你希望观测智能体的生命周期。例如，你可能希望记录事件，或在特定事件发生时预取数据。你可以通过 `hooks` 属性挂接到智能体的生命周期。子类化 [`AgentHooks`][agents.lifecycle.AgentHooks] 类，并重写你感兴趣的方法。
 
-## 护栏
+## 安全防护措施
 
-护栏允许你在智能体运行的同时并行运行对用户输入的检查/验证，并在智能体输出产生后对其进行检查/验证。例如，你可以根据相关性筛选用户输入和智能体输出。更多详细信息请参见 [guardrails](guardrails.md) 文档。
+安全防护措施允许你在智能体运行的同时对用户输入进行检查/验证，并在智能体产出结果后对其输出进行检查。例如，你可以筛查用户输入和智能体输出的相关性。阅读[安全防护措施](guardrails.md)文档了解更多。
 
 ## 克隆/复制智能体
 
-通过使用智能体上的 `clone()` 方法，你可以复制智能体，并选择性地更改任何属性。
+通过在智能体上使用 `clone()` 方法，你可以复制一个智能体，并可选地更改任何你想修改的属性。
 
 ```python
 pirate_agent = Agent(
@@ -172,14 +176,14 @@ robot_agent = pirate_agent.clone(
 )
 ```
 
-## 强制工具使用
+## 强制使用工具
 
-提供工具列表并不总是意味着LLM会使用工具。你可以通过设置 [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice] 来强制工具使用。有效值包括：
+提供工具列表并不总能让 LLM 使用工具。你可以通过设置 [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice] 来强制使用工具。有效取值包括：
 
-1. `auto`，允许LLM决定是否使用工具。
-2. `required`，要求LLM使用工具（但它可以智能地决定使用哪个工具）。
-3. `none`，要求LLM _不_ 使用工具。
-4. 设置特定字符串，例如 `my_tool`，要求LLM使用该特定工具。
+1. `auto`，允许 LLM 决定是否使用工具。
+2. `required`，要求 LLM 使用工具（但它可以智能选择具体的工具）。
+3. `none`，要求 LLM 不使用工具。
+4. 设置一个特定字符串，例如 `my_tool`，要求 LLM 使用该特定工具。
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -201,8 +205,8 @@ agent = Agent(
 
 `Agent` 配置中的 `tool_use_behavior` 参数控制如何处理工具输出：
 
-- `"run_llm_again"`: 默认。工具运行后，LLM处理结果以产生最终响应。
-- `"stop_on_first_tool"`: 第一个工具调用的输出用作最终响应，无需进一步的LLM处理。
+- `"run_llm_again"`：默认值。运行工具后，由 LLM 处理结果以生成最终响应。
+- `"stop_on_first_tool"`：第一次工具调用的输出直接作为最终响应，不再进行 LLM 处理。
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -220,7 +224,7 @@ agent = Agent(
 )
 ```
 
-- `StopAtTools(stop_at_tool_names=[...])`: 当指定的工具中的任何一个被调用时停止，并将其输出用作最终响应。
+- `StopAtTools(stop_at_tool_names=[...])`: 如果调用了任一指定工具则停止，使用其输出作为最终响应。
 
 ```python
 from agents import Agent, Runner, function_tool
@@ -244,7 +248,7 @@ agent = Agent(
 )
 ```
 
-- `ToolsToFinalOutputFunction`: 处理工具结果并决定是停止还是继续LLM的自定义函数。
+- `ToolsToFinalOutputFunction`: 一个自定义函数，用于处理工具结果，并决定是停止还是继续让 LLM 处理。
 
 ```python
 from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
@@ -282,4 +286,4 @@ agent = Agent(
 
 !!! note
 
-    为了防止无限循环，框架会在工具调用后自动将 `tool_choice` 重置为 "auto"。此行为可通过 [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice] 进行配置。无限循环的发生是因为工具结果被发送给LLM，然后由于 `tool_choice` 导致LLM再次生成工具调用，如此循环往复。
+    为防止无限循环，框架会在一次工具调用后自动将 `tool_choice` 重置为 "auto"。可通过 [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice] 配置此行为。出现无限循环的原因是工具结果会被发送给 LLM，而由于 `tool_choice` 的设置，LLM 会再次生成工具调用，如此往复。
