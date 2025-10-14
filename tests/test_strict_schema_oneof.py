@@ -14,13 +14,16 @@ def test_oneof_converted_to_anyof():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "oneOf" not in str(result)
-    assert "anyOf" in result["properties"]["value"]
-    assert len(result["properties"]["value"]["anyOf"]) == 2
+    expected = {
+        "type": "object",
+        "properties": {"value": {"anyOf": [{"type": "string"}, {"type": "integer"}]}},
+        "additionalProperties": False,
+        "required": ["value"],
+    }
+    assert result == expected
 
 
 def test_nested_oneof_in_array_items():
-    # Test the issue #1091 scenario: oneOf in array items with discriminator
     schema = {
         "type": "object",
         "properties": {
@@ -59,15 +62,49 @@ def test_nested_oneof_in_array_items():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "oneOf" not in str(result)
-    items_schema = result["properties"]["steps"]["items"]
-    assert "anyOf" in items_schema
-    assert "discriminator" in items_schema
-    assert items_schema["discriminator"]["propertyName"] == "action"
+    expected = {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "const": "buy_fruit"},
+                                "color": {"type": "string"},
+                            },
+                            "required": ["action", "color"],
+                            "additionalProperties": False,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "const": "buy_food"},
+                                "price": {"type": "integer"},
+                            },
+                            "required": ["action", "price"],
+                            "additionalProperties": False,
+                        },
+                    ],
+                    "discriminator": {
+                        "propertyName": "action",
+                        "mapping": {
+                            "buy_fruit": "#/components/schemas/BuyFruitStep",
+                            "buy_food": "#/components/schemas/BuyFoodStep",
+                        },
+                    },
+                },
+            }
+        },
+        "additionalProperties": False,
+        "required": ["steps"],
+    }
+    assert result == expected
 
 
 def test_discriminated_union_with_pydantic():
-    # Test with actual Pydantic models from issue #1091
     class FruitArgs(BaseModel):
         color: str
 
@@ -90,12 +127,14 @@ def test_discriminated_union_with_pydantic():
     output_schema = AgentOutputSchema(Actions)
     schema = output_schema.json_schema()
 
-    assert "oneOf" not in str(schema)
-    assert "anyOf" in str(schema)
+    items_schema = schema["properties"]["steps"]["items"]
+    assert "oneOf" not in items_schema
+    assert "anyOf" in items_schema
+    assert len(items_schema["anyOf"]) == 2
+    assert "discriminator" in items_schema
 
 
 def test_oneof_merged_with_existing_anyof():
-    # When both anyOf and oneOf exist, they should be merged
     schema = {
         "type": "object",
         "anyOf": [{"type": "string"}],
@@ -104,9 +143,12 @@ def test_oneof_merged_with_existing_anyof():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "oneOf" not in result
-    assert "anyOf" in result
-    assert len(result["anyOf"]) == 3
+    expected = {
+        "type": "object",
+        "anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}],
+        "additionalProperties": False,
+    }
+    assert result == expected
 
 
 def test_discriminator_preserved():
@@ -130,10 +172,28 @@ def test_discriminator_preserved():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "discriminator" in result
-    assert result["discriminator"]["propertyName"] == "type"
-    assert "oneOf" not in result
-    assert "anyOf" in result
+    expected = {
+        "anyOf": [{"$ref": "#/$defs/TypeA"}, {"$ref": "#/$defs/TypeB"}],
+        "discriminator": {
+            "propertyName": "type",
+            "mapping": {"a": "#/$defs/TypeA", "b": "#/$defs/TypeB"},
+        },
+        "$defs": {
+            "TypeA": {
+                "type": "object",
+                "properties": {"type": {"const": "a"}, "value_a": {"type": "string"}},
+                "additionalProperties": False,
+                "required": ["type", "value_a"],
+            },
+            "TypeB": {
+                "type": "object",
+                "properties": {"type": {"const": "b"}, "value_b": {"type": "integer"}},
+                "additionalProperties": False,
+                "required": ["type", "value_b"],
+            },
+        },
+    }
+    assert result == expected
 
 
 def test_deeply_nested_oneof():
@@ -154,9 +214,25 @@ def test_deeply_nested_oneof():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "oneOf" not in str(result)
-    items = result["properties"]["level1"]["properties"]["level2"]["items"]
-    assert "anyOf" in items
+    expected = {
+        "type": "object",
+        "properties": {
+            "level1": {
+                "type": "object",
+                "properties": {
+                    "level2": {
+                        "type": "array",
+                        "items": {"anyOf": [{"type": "string"}, {"type": "number"}]},
+                    }
+                },
+                "additionalProperties": False,
+                "required": ["level2"],
+            }
+        },
+        "additionalProperties": False,
+        "required": ["level1"],
+    }
+    assert result == expected
 
 
 def test_oneof_with_refs():
@@ -175,5 +251,18 @@ def test_oneof_with_refs():
 
     result = ensure_strict_json_schema(schema)
 
-    assert "oneOf" not in str(result)
-    assert "anyOf" in result["properties"]["value"]
+    expected = {
+        "type": "object",
+        "properties": {
+            "value": {
+                "anyOf": [{"$ref": "#/$defs/StringType"}, {"$ref": "#/$defs/IntType"}]
+            }
+        },
+        "$defs": {
+            "StringType": {"type": "string"},
+            "IntType": {"type": "integer"},
+        },
+        "additionalProperties": False,
+        "required": ["value"],
+    }
+    assert result == expected
