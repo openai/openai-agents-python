@@ -137,7 +137,7 @@ eng_to_non_eng_mapping = {
         "streaming": "流式传输",
         "system prompt": "系统提示词",
         "Python first": "Python 优先",
-        # Add more Japanese mappings here
+        # Add more mappings here
     },
     # Add more languages here
 }
