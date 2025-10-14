@@ -200,7 +200,7 @@ plugins:
             - 문서:
                 - agents.md
                 - running_agents.md
-                - Sessions:
+                - 세션:
                     - sessions/index.md
                     - sessions/sqlalchemy_session.md
                     - sessions/advanced_sqlite_session.md
