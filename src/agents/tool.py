@@ -15,14 +15,13 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
-from pydantic import ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from .computer import AsyncComputer, Computer
 from .exceptions import ModelBehaviorError
 from .function_schema import DocstringStyle, function_schema
-from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
@@ -34,6 +33,8 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent, AgentBase
+    from .items import RunItem
+
 
 ToolParams = ParamSpec("ToolParams")
 
@@ -46,6 +47,72 @@ ToolFunction = Union[
     ToolFunctionWithContext[ToolParams],
     ToolFunctionWithToolContext[ToolParams],
 ]
+
+
+class ToolOutputText(BaseModel):
+    """Represents a tool output that should be sent to the model as text."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ToolOutputTextDict(TypedDict, total=False):
+    """TypedDict variant for text tool outputs."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ToolOutputImage(BaseModel):
+    """Represents a tool output that should be sent to the model as an image.
+
+    You can provide either an `image_url` (URL or data URL) or a `file_id` for previously uploaded
+    content. The optional `detail` can control vision detail.
+    """
+
+    type: Literal["image"] = "image"
+    image_url: str | None = None
+    file_id: str | None = None
+    detail: Literal["low", "high", "auto"] | None = None
+
+
+class ToolOutputImageDict(TypedDict, total=False):
+    """TypedDict variant for image tool outputs."""
+
+    type: Literal["image"]
+    image_url: NotRequired[str]
+    file_id: NotRequired[str]
+    detail: NotRequired[Literal["low", "high", "auto"]]
+
+
+class ToolOutputFileContent(BaseModel):
+    """Represents a tool output that should be sent to the model as a file.
+
+    Provide one of `file_data` (base64), `file_url`, or `file_id`. You may also
+    provide an optional `filename` when using `file_data` to hint file name.
+    """
+
+    type: Literal["file"] = "file"
+    file_data: str | None = None
+    file_url: str | None = None
+    file_id: str | None = None
+    filename: str | None = None
+
+
+class ToolOutputFileContentDict(TypedDict, total=False):
+    """TypedDict variant for file content tool outputs."""
+
+    type: Literal["file"]
+    file_data: NotRequired[str]
+    file_url: NotRequired[str]
+    file_id: NotRequired[str]
+    filename: NotRequired[str]
+
+
+ValidToolOutputPydanticModels = Union[ToolOutputText, ToolOutputImage, ToolOutputFileContent]
+ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
+    ValidToolOutputPydanticModels
+)
 
 
 @dataclass
@@ -81,7 +148,9 @@ class FunctionTool:
     1. The tool run context.
     2. The arguments from the LLM, as a JSON string.
 
-    You must return a string representation of the tool output, or something we can call `str()` on.
+    You must return a one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
+    ToolOutputFileContent) or a string representation of the tool output, or a list of them,
+    or something we can call `str()` on.
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
     return a string error message (which will be sent back to the LLM).
     """
