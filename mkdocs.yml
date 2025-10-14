@@ -217,6 +217,40 @@ plugins:
                 - 실시간 에이전트:
                     - realtime/quickstart.md
                     - realtime/guide.md
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav:
+            - 介绍: index.md
+            - 快速开始: quickstart.md
+            - 示例: examples.md
+            - 文档:
+                - agents.md
+                - running_agents.md
+                - sessions.md
+                - results.md
+                - streaming.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - 模型:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - 语音智能体:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - 实时智能体:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
 
 extra:
   # Remove material generation message in footer
@@ -232,6 +266,9 @@ extra:
     - name: 한국어
       link: /openai-agents-python/ko/
       lang: ko
+    - name: 简体中文
+      link: /openai-agents-python/zh/
+      lang: zh
 
 markdown_extensions:
   - pymdownx.superfences:

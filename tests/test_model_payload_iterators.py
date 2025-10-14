@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import NOT_GIVEN
+from openai import omit
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.responses import ToolParam
 
@@ -82,7 +82,7 @@ async def test_chat_completions_materializes_iterator_payload(
         async def create(self, **kwargs):
             captured_kwargs.update(kwargs)
             _force_materialization(kwargs["messages"])
-            if kwargs["tools"] is not NOT_GIVEN:
+            if kwargs["tools"] is not omit:
                 _force_materialization(kwargs["tools"])
             return ChatCompletion(
                 id="dummy-id",

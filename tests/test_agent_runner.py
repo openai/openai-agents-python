@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,7 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+from .utils.simple_session import SimpleListSession
 
 
 @pytest.mark.asyncio
@@ -540,6 +542,40 @@ async def test_input_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_session():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        # Delay to ensure the agent has time to produce output before the guardrail finishes.
+        await asyncio.sleep(0.01)
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert "role" in first_item
+    assert first_item["role"] == "user"
 
 
 @pytest.mark.asyncio
