@@ -239,7 +239,11 @@ plugins:
             - 文档:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - 会话:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
                 - results.md
                 - streaming.md
                 - repl.md
