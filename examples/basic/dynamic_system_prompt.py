@@ -28,6 +28,7 @@ agent = Agent(
     instructions=custom_instructions,
 )
 
+
 async def main():
     context = CustomContext(style=random.choice(["haiku", "pirate", "robot"]))
     print(f"Using style: {context.style}\n")

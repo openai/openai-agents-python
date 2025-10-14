@@ -21,6 +21,12 @@ from openai.types.responses import (
 from openai.types.responses.response_code_interpreter_tool_call import (
     ResponseCodeInterpreterToolCall,
 )
+from openai.types.responses.response_function_call_output_item_list_param import (
+    ResponseFunctionCallOutputItemListParam,
+    ResponseFunctionCallOutputItemParam,
+)
+from openai.types.responses.response_input_file_content_param import ResponseInputFileContentParam
+from openai.types.responses.response_input_image_content_param import ResponseInputImageContentParam
 from openai.types.responses.response_input_item_param import (
     ComputerCallOutput,
     FunctionCallOutput,
@@ -36,9 +42,17 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from pydantic import BaseModel
-from typing_extensions import TypeAlias
+from typing_extensions import TypeAlias, assert_never
 
 from .exceptions import AgentsException, ModelBehaviorError
+from .logger import logger
+from .tool import (
+    ToolOutputFileContent,
+    ToolOutputImage,
+    ToolOutputText,
+    ValidToolOutputPydanticModels,
+    ValidToolOutputPydanticModelsTypeAdapter,
+)
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -298,11 +312,93 @@ class ItemHelpers:
 
     @classmethod
     def tool_call_output_item(
-        cls, tool_call: ResponseFunctionToolCall, output: str
+        cls, tool_call: ResponseFunctionToolCall, output: Any
     ) -> FunctionCallOutput:
-        """Creates a tool call output item from a tool call and its output."""
+        """Creates a tool call output item from a tool call and its output.
+
+        Accepts either plain values (stringified) or structured outputs using
+        input_text/input_image/input_file shapes. Structured outputs may be
+        provided as Pydantic models or dicts, or an iterable of such items.
+        """
+
+        converted_output = cls._convert_tool_output(output)
+
         return {
             "call_id": tool_call.call_id,
-            "output": output,
+            "output": converted_output,
             "type": "function_call_output",
         }
+
+    @classmethod
+    def _convert_tool_output(cls, output: Any) -> str | ResponseFunctionCallOutputItemListParam:
+        """Converts a tool return value into an output acceptable by the Responses API."""
+
+        # If the output is either a single or list of the known structured output types, convert to
+        # ResponseFunctionCallOutputItemListParam. Else, just stringify.
+        if isinstance(output, (list, tuple)):
+            maybe_converted_output_list = [
+                cls._maybe_get_output_as_structured_function_output(item) for item in output
+            ]
+            if all(maybe_converted_output_list):
+                return [
+                    cls._convert_single_tool_output_pydantic_model(item)
+                    for item in maybe_converted_output_list
+                    if item is not None
+                ]
+            else:
+                return str(output)
+        else:
+            maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
+            if maybe_converted_output:
+                return [cls._convert_single_tool_output_pydantic_model(maybe_converted_output)]
+            else:
+                return str(output)
+
+    @classmethod
+    def _maybe_get_output_as_structured_function_output(
+        cls, output: Any
+    ) -> ValidToolOutputPydanticModels | None:
+        if isinstance(output, (ToolOutputText, ToolOutputImage, ToolOutputFileContent)):
+            return output
+        elif isinstance(output, dict):
+            try:
+                return ValidToolOutputPydanticModelsTypeAdapter.validate_python(output)
+            except pydantic.ValidationError:
+                logger.debug("dict was not a valid tool output pydantic model")
+                return None
+
+        return None
+
+    @classmethod
+    def _convert_single_tool_output_pydantic_model(
+        cls, output: ValidToolOutputPydanticModels
+    ) -> ResponseFunctionCallOutputItemParam:
+        if isinstance(output, ToolOutputText):
+            return {"type": "input_text", "text": output.text}
+        elif isinstance(output, ToolOutputImage):
+            # Forward all provided optional fields so the Responses API receives
+            # the correct identifiers and settings for the image resource.
+            result: ResponseInputImageContentParam = {"type": "input_image"}
+            if output.image_url is not None:
+                result["image_url"] = output.image_url
+            if output.file_id is not None:
+                result["file_id"] = output.file_id
+            if output.detail is not None:
+                result["detail"] = output.detail
+            return result
+        elif isinstance(output, ToolOutputFileContent):
+            # Forward all provided optional fields so the Responses API receives
+            # the correct identifiers and metadata for the file resource.
+            result_file: ResponseInputFileContentParam = {"type": "input_file"}
+            if output.file_data is not None:
+                result_file["file_data"] = output.file_data
+            if output.file_url is not None:
+                result_file["file_url"] = output.file_url
+            if output.file_id is not None:
+                result_file["file_id"] = output.file_id
+            if output.filename is not None:
+                result_file["filename"] = output.filename
+            return result_file
+        else:
+            assert_never(output)
+            raise ValueError(f"Unexpected tool output type: {output}")
