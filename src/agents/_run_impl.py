@@ -823,7 +823,7 @@ class RunImpl:
                 output=result,
                 run_item=ToolCallOutputItem(
                     output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, str(result)),
+                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=agent,
                 ),
             )
