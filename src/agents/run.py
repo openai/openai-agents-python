@@ -1032,6 +1032,20 @@ class AgentRunner:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        # Save the conversation to session if enabled (before handoff)
+                        # Note: Non-streaming path doesn't save handoff turns immediately,
+                        # but streaming needs to for graceful cancellation support
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+
                         current_agent = turn_result.next_step.new_agent
                         current_span.finish(reset_current=True)
                         current_span = None
