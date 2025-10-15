@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
@@ -12,8 +14,9 @@ async def start_openai_conversations_session(openai_client: AsyncOpenAI | None =
     _maybe_openai_client = openai_client
     if openai_client is None:
         _maybe_openai_client = get_default_openai_client() or AsyncOpenAI()
-    # this never be None here
-    _openai_client: AsyncOpenAI = _maybe_openai_client  # type: ignore [assignment]
+    # ensure non-None for type checkers and readers
+    assert _maybe_openai_client is not None
+    _openai_client: AsyncOpenAI = _maybe_openai_client
 
     response = await _openai_client.conversations.create(items=[])
     return response.id
@@ -43,14 +46,14 @@ class OpenAIConversationsSession(SessionABC):
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
-        all_items = []
+        all_items: list[TResponseInputItem] = []
         if limit is None:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 order="asc",
             ):
                 # calling model_dump() to make this serializable
-                all_items.append(item.model_dump(exclude_unset=True))
+                all_items.append(cast(TResponseInputItem, item.model_dump(exclude_unset=True)))
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
@@ -58,12 +61,12 @@ class OpenAIConversationsSession(SessionABC):
                 order="desc",
             ):
                 # calling model_dump() to make this serializable
-                all_items.append(item.model_dump(exclude_unset=True))
+                all_items.append(cast(TResponseInputItem, item.model_dump(exclude_unset=True)))
                 if limit is not None and len(all_items) >= limit:
                     break
             all_items.reverse()
 
-        return all_items  # type: ignore
+        return all_items
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         session_id = await self._get_session_id()
@@ -77,7 +80,7 @@ class OpenAIConversationsSession(SessionABC):
         items = await self.get_items(limit=1)
         if not items:
             return None
-        item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
+        item_id: str = str(items[0]["id"])
         await self._openai_client.conversations.items.delete(
             conversation_id=session_id, item_id=item_id
         )
