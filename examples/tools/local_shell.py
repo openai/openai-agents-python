@@ -15,7 +15,7 @@ def shell_executor(request: LocalShellCommandRequest) -> str:
             env={**os.environ, **args.env} if args.env else os.environ,
             capture_output=True,
             text=True,
-            timeout=(args.timeout_ms / 1000) if args.timeout_ms else None,
+            timeout=(args.timeout_ms / 1000) if args.timeout_ms is not None else None,
         )
         return completed.stdout + completed.stderr
 
