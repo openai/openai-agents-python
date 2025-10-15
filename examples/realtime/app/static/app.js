@@ -483,7 +483,7 @@ class RealtimeDemo {
 
         const contentDiv = document.createElement('div');
         contentDiv.className = 'event-content collapsed';
-        contentDiv.textContent = JSON.stringify(event, null, 2);
+        contentDiv.textContent = this.formatEventForDisplay(event);
 
         headerDiv.addEventListener('click', () => {
             const isCollapsed = contentDiv.classList.contains('collapsed');
@@ -495,8 +495,34 @@ class RealtimeDemo {
         eventDiv.appendChild(contentDiv);
         this.eventsContent.appendChild(eventDiv);
 
+        // Discard the oldest raw event entries to prevent unbounded memory growth.
+        const maxRawEvents = 200;
+        while (this.eventsContent.children.length > maxRawEvents) {
+            this.eventsContent.removeChild(this.eventsContent.firstChild);
+        }
+
         // Auto-scroll events pane
         this.eventsContent.scrollTop = this.eventsContent.scrollHeight;
+    }
+
+    formatEventForDisplay(event) {
+        // Replace large payloads before rendering so the debug panel stays responsive.
+        return JSON.stringify(
+            event,
+            (key, value) => {
+                if (key === 'audio' && typeof value === 'string') {
+                    return `[${value.length} chars of audio data omitted]`;
+                }
+                if (typeof value === 'string' && value.length > 2048) {
+                    const head = value.slice(0, 512);
+                    const tail = value.slice(-128);
+                    const skipped = value.length - (head.length + tail.length);
+                    return `${head}…[${skipped} chars omitted]…${tail}`;
+                }
+                return value;
+            },
+            2
+        );
     }
 
     addToolEvent(event) {
