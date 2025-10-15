@@ -80,7 +80,7 @@ class OpenAIConversationsSession(SessionABC):
         items = await self.get_items(limit=1)
         if not items:
             return None
-        item_id: str = str(items[0]["id"])
+        item_id: str = str(items[0]["id"])  # type: ignore[typeddict-item]
         await self._openai_client.conversations.items.delete(
             conversation_id=session_id, item_id=item_id
         )
