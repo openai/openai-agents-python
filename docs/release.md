@@ -25,7 +25,7 @@ In this version, [openai](https://pypi.org/project/openai/) package v1.x version
 
 ### 0.3.0
 
-In this version, there are no breaking changes.
+In this version, the Realtime API support migrates to gpt-realtime model and its API interface (GA version).
 
 ### 0.2.0
 
