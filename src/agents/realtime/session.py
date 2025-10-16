@@ -774,10 +774,6 @@ class RealtimeSession(RealtimeModelListener):
         # Start with the merged base settings from run and model configuration.
         updated_settings = self._base_model_settings.copy()
 
-        # Use agent-specific model if specified
-        if agent.model is not None:
-            updated_settings["model_name"] = agent.model
-
         if agent.prompt is not None:
             updated_settings["prompt"] = agent.prompt
 
@@ -793,6 +789,11 @@ class RealtimeSession(RealtimeModelListener):
         # Apply starting settings (from model config) next
         if starting_settings:
             updated_settings.update(starting_settings)
+
+        # Use agent-specific model if specified (applied last to ensure proper precedence)
+        # This ensures agent model > starting_settings > run config > defaults
+        if agent.model is not None:
+            updated_settings["model_name"] = agent.model
 
         disable_tracing = self._run_config.get("tracing_disabled", False)
         if disable_tracing:

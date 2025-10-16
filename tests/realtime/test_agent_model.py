@@ -107,3 +107,27 @@ async def test_update_agent_with_different_model():
 
     # Verify the new model is in the session settings
     assert last_event.session_settings.get("model_name") == "gpt-4o-realtime-preview"
+
+
+@pytest.mark.asyncio
+async def test_agent_model_not_overridden_by_starting_settings():
+    """Test that agent's model is not overridden by starting_settings (fixes P1 bug)."""
+    from agents.realtime.config import RealtimeSessionModelSettings
+
+    model = _DummyModel()
+
+    # Agent with specific model
+    agent = RealtimeAgent(name="test_agent", instructions="Hello", model="gpt-4o-realtime-preview")
+
+    # Starting settings with different model (simulates model config)
+    starting_settings: RealtimeSessionModelSettings = {"model_name": "gpt-realtime"}
+
+    session = RealtimeSession(model, agent, None)
+
+    # Get model settings with starting_settings (this simulates initial session start)
+    model_settings = await session._get_updated_model_settings_from_agent(starting_settings, agent)
+
+    # Verify that agent's model takes precedence over starting_settings
+    assert model_settings["model_name"] == "gpt-4o-realtime-preview"
+    # Ensure it's not using the default from starting_settings
+    assert model_settings["model_name"] != "gpt-realtime"
