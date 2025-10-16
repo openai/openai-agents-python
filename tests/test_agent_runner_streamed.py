@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typing_extensions import TypedDict
@@ -35,6 +35,7 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+from .utils.simple_session import SimpleListSession
 
 
 @pytest.mark.asyncio
@@ -525,6 +526,38 @@ async def test_input_guardrail_tripwire_triggered_causes_exception_streamed():
 
 
 @pytest.mark.asyncio
+async def test_input_guardrail_streamed_does_not_save_assistant_message_to_session():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.01)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message", session=session)
+        async for _ in result.stream_events():
+            pass
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert "role" in first_item
+    assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_slow_input_guardrail_still_raises_exception_streamed():
     async def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], input: Any
@@ -695,11 +728,16 @@ async def test_streaming_events():
     # Now lets check the events
 
     expected_item_type_map = {
-        "tool_call": 2,
+        # 3 tool_call_item events:
+        #   1. get_function_tool_call("foo", ...)
+        #   2. get_handoff_tool_call(agent_1) because handoffs are implemented via tool calls too
+        #   3. get_function_tool_call("bar", ...)
+        "tool_call": 3,
+        # Only 2 outputs, handoff tool call doesn't have corresponding tool_call_output event
         "tool_call_output": 2,
-        "message": 2,
-        "handoff": 1,
-        "handoff_output": 1,
+        "message": 2,  # get_text_message("a_message") + get_final_output_message(...)
+        "handoff": 1,  # get_handoff_tool_call(agent_1)
+        "handoff_output": 1,  # handoff_output_item
     }
 
     total_expected_item_count = sum(expected_item_type_map.values())

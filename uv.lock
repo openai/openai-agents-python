@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.11'",
@@ -656,6 +656,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/91/50/a9d80c47ff289c611ff12e63f7c5d13942c65d68125160cefd768c73e6e4/executing-2.2.0.tar.gz", hash = "sha256:5d108c028108fe2551d1a7b2e8b713341e2cb4fc0aa7dcf966fa4327a5226755", size = 978693, upload-time = "2025-01-22T15:41:29.403Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/8f/c4d9bafc34ad7ad5d8dc16dd1347ee0e507a52c3adb6bfa8887e1c6a26ba/executing-2.2.0-py2.py3-none-any.whl", hash = "sha256:11387150cad388d62750327a53d3339fad4888b39a6fe233c3afbb54ecffd3aa", size = 26702, upload-time = "2025-01-22T15:41:25.929Z" },
+]
+
+[[package]]
+name = "fakeredis"
+version = "2.31.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "redis" },
+    { name = "sortedcontainers" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/96/1e/27170815a9768d2eaf72e66dfad38047b55ea278df84b539ad0045ca1538/fakeredis-2.31.3.tar.gz", hash = "sha256:76dfb92855f0787a4936a5b4fdb1905c5909ec790e62dff2b8896b412905deb0", size = 170984, upload-time = "2025-09-22T12:24:54.471Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/d6/7cad31e16b7d8343ed7abf5ddb039a063b32a300def1aa487d91b4a5c831/fakeredis-2.31.3-py3-none-any.whl", hash = "sha256:12aa54a3fb00984c18b28956addb91683aaf55b2dc2ef4b09d49bd481032e57a", size = 118398, upload-time = "2025-09-22T12:24:52.751Z" },
 ]
 
 [[package]]
@@ -1844,7 +1858,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "1.107.1"
+version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1856,14 +1870,14 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/e0/a62daa7ff769df969cc1b782852cace79615039630b297005356f5fb46fb/openai-1.107.1.tar.gz", hash = "sha256:7c51b6b8adadfcf5cada08a613423575258b180af5ad4bc2954b36ebc0d3ad48", size = 563671, upload-time = "2025-09-10T15:04:40.288Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/b1/8201e321a7d64a25c6f5a560320272d8be70547add40311fceb916518632/openai-2.2.0.tar.gz", hash = "sha256:bc49d077a8bf0e370eec4d038bc05e232c20855a19df0b58e5b3e5a8da7d33e0", size = 588512, upload-time = "2025-10-06T18:08:13.665Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/12/32c19999a58eec4a695e8ce334442b6135df949f0bb61b2ceaa4fa60d3a9/openai-1.107.1-py3-none-any.whl", hash = "sha256:168f9885b1b70d13ada0868a0d0adfd538c16a02f7fd9fe063851a2c9a025e72", size = 945177, upload-time = "2025-09-10T15:04:37.782Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/92/6aeef1836e66dfec7f7f160a4f06d7041be7f6ccfc47a2f0f5738b332245/openai-2.2.0-py3-none-any.whl", hash = "sha256:d222e63436e33f3134a3d7ce490dc2d2f146fa98036eb65cc225df3ce163916f", size = 998972, upload-time = "2025-10-06T18:08:11.775Z" },
 ]
 
 [[package]]
 name = "openai-agents"
-version = "0.3.1"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
@@ -1885,6 +1899,9 @@ litellm = [
 realtime = [
     { name = "websockets" },
 ]
+redis = [
+    { name = "redis" },
+]
 sqlalchemy = [
     { name = "asyncpg" },
     { name = "sqlalchemy" },
@@ -1904,6 +1921,7 @@ dev = [
     { name = "coverage" },
     { name = "cryptography" },
     { name = "eval-type-backport" },
+    { name = "fakeredis" },
     { name = "fastapi" },
     { name = "graphviz" },
     { name = "inline-snapshot" },
@@ -1934,8 +1952,9 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.67.4.post1,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.11.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
-    { name = "openai", specifier = ">=1.107.1,<2" },
+    { name = "openai", specifier = ">=2.2,<3" },
     { name = "pydantic", specifier = ">=2.10,<3" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=6.4.0" },
     { name = "requests", specifier = ">=2.0,<3" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "types-requests", specifier = ">=2.0,<3" },
@@ -1943,7 +1962,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "realtime", "sqlalchemy", "encrypt"]
+provides-extras = ["voice", "viz", "litellm", "realtime", "sqlalchemy", "encrypt", "redis"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1951,6 +1970,7 @@ dev = [
     { name = "coverage", specifier = ">=7.6.12" },
     { name = "cryptography", specifier = ">=45.0,<46" },
     { name = "eval-type-backport", specifier = ">=0.2.2" },
+    { name = "fakeredis", specifier = ">=2.31.3" },
     { name = "fastapi", specifier = ">=0.110.0,<1" },
     { name = "graphviz" },
     { name = "inline-snapshot", specifier = ">=0.20.7" },
@@ -2613,6 +2633,18 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "6.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "async-timeout", marker = "python_full_version < '3.11.3'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/d6/e8b92798a5bd67d659d51a18170e91c16ac3b59738d91894651ee255ed49/redis-6.4.0.tar.gz", hash = "sha256:b01bc7282b8444e28ec36b261df5375183bb47a07eb9c603f284e89cbc5ef010", size = 4647399, upload-time = "2025-08-07T08:10:11.441Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/02/89e2ed7e85db6c93dfa9e8f691c5087df4e3551ab39081a4d7c6d1f90e05/redis-6.4.0-py3-none-any.whl", hash = "sha256:f0544fa9604264e9464cdf4814e7d4830f74b165d52f2a330a760a88dd248b7f", size = 279847, upload-time = "2025-08-07T08:10:09.84Z" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.36.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2953,6 +2985,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
 ]
 
 [[package]]

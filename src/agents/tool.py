@@ -27,6 +27,7 @@ from .logger import logger
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
+from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
 from .util import _error_tracing
 from .util._types import MaybeAwaitable
@@ -93,6 +94,13 @@ class FunctionTool:
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
+
+    # Tool-specific guardrails
+    tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
+    """Optional list of input guardrails to run before invoking this tool."""
+
+    tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
+    """Optional list of output guardrails to run after invoking this tool."""
 
     def __post_init__(self):
         if self.strict_json_schema:

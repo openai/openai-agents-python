@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
-from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream
+from openai import AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
@@ -25,7 +25,7 @@ from ..tracing.spans import Span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from .chatcmpl_converter import Converter
-from .chatcmpl_helpers import HEADERS, USER_AGENT_OVERRIDE, ChatCmplHelpers
+from .chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from .chatcmpl_stream_handler import ChatCmplStreamHandler
 from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
@@ -44,8 +44,8 @@ class OpenAIChatCompletionsModel(Model):
         self.model = model
         self._client = openai_client
 
-    def _non_null_or_not_given(self, value: Any) -> Any:
-        return value if value is not None else NOT_GIVEN
+    def _non_null_or_omit(self, value: Any) -> Any:
+        return value if value is not None else omit
 
     async def get_response(
         self,
@@ -243,13 +243,12 @@ class OpenAIChatCompletionsModel(Model):
         if tracing.include_data():
             span.span_data.input = converted_messages
 
-        parallel_tool_calls = (
-            True
-            if model_settings.parallel_tool_calls and tools and len(tools) > 0
-            else False
-            if model_settings.parallel_tool_calls is False
-            else NOT_GIVEN
-        )
+        if model_settings.parallel_tool_calls and tools:
+            parallel_tool_calls: bool | Omit = True
+        elif model_settings.parallel_tool_calls is False:
+            parallel_tool_calls = False
+        else:
+            parallel_tool_calls = omit
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
         response_format = Converter.convert_response_format(output_schema)
 
@@ -259,6 +258,7 @@ class OpenAIChatCompletionsModel(Model):
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
         converted_tools = _to_dump_compatible(converted_tools)
+        tools_param = converted_tools if converted_tools else omit
 
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
@@ -288,28 +288,30 @@ class OpenAIChatCompletionsModel(Model):
             self._get_client(), model_settings, stream=stream
         )
 
+        stream_param: Literal[True] | Omit = True if stream else omit
+
         ret = await self._get_client().chat.completions.create(
             model=self.model,
             messages=converted_messages,
-            tools=converted_tools or NOT_GIVEN,
-            temperature=self._non_null_or_not_given(model_settings.temperature),
-            top_p=self._non_null_or_not_given(model_settings.top_p),
-            frequency_penalty=self._non_null_or_not_given(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_not_given(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_not_given(model_settings.max_tokens),
+            tools=tools_param,
+            temperature=self._non_null_or_omit(model_settings.temperature),
+            top_p=self._non_null_or_omit(model_settings.top_p),
+            frequency_penalty=self._non_null_or_omit(model_settings.frequency_penalty),
+            presence_penalty=self._non_null_or_omit(model_settings.presence_penalty),
+            max_tokens=self._non_null_or_omit(model_settings.max_tokens),
             tool_choice=tool_choice,
             response_format=response_format,
             parallel_tool_calls=parallel_tool_calls,
-            stream=stream,
-            stream_options=self._non_null_or_not_given(stream_options),
-            store=self._non_null_or_not_given(store),
-            reasoning_effort=self._non_null_or_not_given(reasoning_effort),
-            verbosity=self._non_null_or_not_given(model_settings.verbosity),
-            top_logprobs=self._non_null_or_not_given(model_settings.top_logprobs),
+            stream=cast(Any, stream_param),
+            stream_options=self._non_null_or_omit(stream_options),
+            store=self._non_null_or_omit(store),
+            reasoning_effort=self._non_null_or_omit(reasoning_effort),
+            verbosity=self._non_null_or_omit(model_settings.verbosity),
+            top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
             extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_not_given(model_settings.metadata),
+            metadata=self._non_null_or_omit(model_settings.metadata),
             **(model_settings.extra_args or {}),
         )
 
@@ -319,14 +321,13 @@ class OpenAIChatCompletionsModel(Model):
         responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
             model_settings.tool_choice
         )
-        if responses_tool_choice is None or responses_tool_choice == NOT_GIVEN:
+        if responses_tool_choice is None or responses_tool_choice is omit:
             # For Responses API data compatibility with Chat Completions patterns,
             # we need to set "none" if tool_choice is absent.
             # Without this fix, you'll get the following error:
             # pydantic_core._pydantic_core.ValidationError: 4 validation errors for Response
             # tool_choice.literal['none','auto','required']
             #   Input should be 'none', 'auto' or 'required'
-            #   [type=literal_error, input_value=NOT_GIVEN, input_type=NotGiven]
             # see also: https://github.com/openai/openai-agents-python/issues/980
             responses_tool_choice = "auto"
 
@@ -351,8 +352,8 @@ class OpenAIChatCompletionsModel(Model):
         return self._client
 
     def _merge_headers(self, model_settings: ModelSettings):
-        merged = {**HEADERS, **(model_settings.extra_headers or {})}
-        ua_ctx = USER_AGENT_OVERRIDE.get()
-        if ua_ctx is not None:
-            merged["User-Agent"] = ua_ctx
-        return merged
+        return {
+            **HEADERS,
+            **(model_settings.extra_headers or {}),
+            **(HEADERS_OVERRIDE.get() or {}),
+        }

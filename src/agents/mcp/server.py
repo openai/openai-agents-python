@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
+from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
@@ -20,7 +21,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
-from .util import ToolFilter, ToolFilterContext, ToolFilterStatic
+from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
 
 T = TypeVar("T")
 
@@ -103,6 +104,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """
         Args:
@@ -124,6 +126,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, used for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(use_structured_content=use_structured_content)
         self.session: ClientSession | None = None
@@ -135,6 +139,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.client_session_timeout_seconds = client_session_timeout_seconds
         self.max_retry_attempts = max_retry_attempts
         self.retry_backoff_seconds_base = retry_backoff_seconds_base
+        self.message_handler = message_handler
 
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
@@ -272,6 +277,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     timedelta(seconds=self.client_session_timeout_seconds)
                     if self.client_session_timeout_seconds
                     else None,
+                    message_handler=self.message_handler,
                 )
             )
             server_result = await session.initialize()
@@ -394,6 +400,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -421,6 +428,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -429,6 +438,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = StdioServerParameters(
@@ -492,6 +502,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -521,6 +532,8 @@ class MCPServerSse(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -529,6 +542,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = params
@@ -575,6 +589,9 @@ class MCPServerStreamableHttpParams(TypedDict):
     terminate_on_close: NotRequired[bool]
     """Terminate on close"""
 
+    httpx_client_factory: NotRequired[HttpClientFactory]
+    """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
     """MCP server implementation that uses the Streamable HTTP transport. See the [spec]
@@ -592,14 +609,15 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         use_structured_content: bool = False,
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
+        message_handler: MessageHandlerFnT | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
         Args:
             params: The params that configure the server. This includes the URL of the server,
-                the headers to send to the server, the timeout for the HTTP request, and the
-                timeout for the Streamable HTTP connection and whether we need to
-                terminate on close.
+                the headers to send to the server, the timeout for the HTTP request, the
+                timeout for the Streamable HTTP connection, whether we need to
+                terminate on close, and an optional custom HTTP client factory.
 
             cache_tools_list: Whether to cache the tools list. If `True`, the tools list will be
                 cached and only fetched from the server once. If `False`, the tools list will be
@@ -622,6 +640,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 Defaults to no retries.
             retry_backoff_seconds_base: The base delay, in seconds, for exponential
                 backoff between retries.
+            message_handler: Optional handler invoked for session messages as delivered by the
+                ClientSession.
         """
         super().__init__(
             cache_tools_list,
@@ -630,6 +650,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             use_structured_content,
             max_retry_attempts,
             retry_backoff_seconds_base,
+            message_handler=message_handler,
         )
 
         self.params = params
@@ -645,13 +666,24 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         ]
     ]:
         """Create the streams for the server."""
-        return streamablehttp_client(
-            url=self.params["url"],
-            headers=self.params.get("headers", None),
-            timeout=self.params.get("timeout", 5),
-            sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
-            terminate_on_close=self.params.get("terminate_on_close", True),
-        )
+        # Only pass httpx_client_factory if it's provided
+        if "httpx_client_factory" in self.params:
+            return streamablehttp_client(
+                url=self.params["url"],
+                headers=self.params.get("headers", None),
+                timeout=self.params.get("timeout", 5),
+                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+                terminate_on_close=self.params.get("terminate_on_close", True),
+                httpx_client_factory=self.params["httpx_client_factory"],
+            )
+        else:
+            return streamablehttp_client(
+                url=self.params["url"],
+                headers=self.params.get("headers", None),
+                timeout=self.params.get("timeout", 5),
+                sse_read_timeout=self.params.get("sse_read_timeout", 60 * 5),
+                terminate_on_close=self.params.get("terminate_on_close", True),
+            )
 
     @property
     def name(self) -> str:

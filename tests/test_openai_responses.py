@@ -6,7 +6,7 @@ import pytest
 from openai.types.responses import ResponseCompletedEvent
 
 from agents import ModelSettings, ModelTracing, __version__
-from agents.models.openai_responses import _USER_AGENT_OVERRIDE as RESP_UA, OpenAIResponsesModel
+from agents.models.openai_responses import _HEADERS_OVERRIDE as RESP_HEADERS, OpenAIResponsesModel
 from tests.fake_model import get_response_obj
 
 
@@ -41,7 +41,7 @@ async def test_user_agent_header_responses(override_ua: str | None):
     model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore
 
     if override_ua is not None:
-        token = RESP_UA.set(override_ua)
+        token = RESP_HEADERS.set({"User-Agent": override_ua})
     else:
         token = None
 
@@ -59,7 +59,7 @@ async def test_user_agent_header_responses(override_ua: str | None):
             pass
     finally:
         if token is not None:
-            RESP_UA.reset(token)
+            RESP_HEADERS.reset(token)
 
     assert "extra_headers" in called_kwargs
     assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua

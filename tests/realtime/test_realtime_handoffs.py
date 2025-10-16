@@ -139,14 +139,6 @@ async def test_realtime_handoff_is_enabled_async(monkeypatch):
 
     h = realtime_handoff(rt, is_enabled=is_enabled)
 
-    # Patch missing symbol in module to satisfy isinstance in closure
-    import agents.realtime.handoffs as rh
-
-    if not hasattr(rh, "RealtimeAgent"):
-        from agents.realtime import RealtimeAgent as _RT
-
-        rh.RealtimeAgent = _RT  # type: ignore[attr-defined]
-
     from collections.abc import Awaitable
     from typing import cast as _cast
 
