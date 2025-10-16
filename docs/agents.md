@@ -27,6 +27,40 @@ agent = Agent(
 )
 ```
 
+### Agent naming best practices
+
+Agent names are used throughout the SDK in handoffs, tracing, and debugging. To ensure your agent names work reliably, they are validated with the following rules:
+
+-   **Cannot be empty** or contain only whitespace
+-   **No leading or trailing whitespace** (e.g., `" Agent"` or `"Agent "` will be rejected)
+-   **Must start with a letter**, not a number (e.g., `"1Agent"` will be rejected)
+-   **Limited to 100 characters** to keep names concise and manageable
+-   **Allowed characters**: letters, numbers, spaces, hyphens (`-`), and underscores (`_`)
+-   **Disallowed characters**: special characters like `@`, `#`, `$`, `%`, `&`, `*`, `/`, etc.
+
+These validations help prevent issues with handoff tool naming and ensure consistent behavior across different parts of the system.
+
+#### Valid agent names
+
+```python
+Agent(name="Customer Service Agent")  # ✓ Spaces are fine
+Agent(name="data_analyst")  # ✓ Underscores work
+Agent(name="Research-Bot")  # ✓ Hyphens are allowed
+Agent(name="Agent123")  # ✓ Numbers are fine (but not at the start)
+```
+
+#### Invalid agent names
+
+```python
+Agent(name="")  # ✗ Empty names are rejected
+Agent(name=" Agent ")  # ✗ Leading/trailing whitespace
+Agent(name="1stAgent")  # ✗ Cannot start with a number
+Agent(name="Agent@Home")  # ✗ Special characters not allowed
+Agent(name="A" * 101)  # ✗ Too long (>100 characters)
+```
+
+When validation fails, you'll receive a helpful error message explaining the issue and suggesting how to fix it.
+
 ## Context
 
 Agents are generic on their `context` type. Context is a dependency-injection tool: it's an object you create and pass to `Runner.run()`, that is passed to every agent, tool, handoff etc, and it serves as a grab bag of dependencies and state for the agent run. You can provide any Python object as the context.
