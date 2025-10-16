@@ -774,6 +774,10 @@ class RealtimeSession(RealtimeModelListener):
         # Start with the merged base settings from run and model configuration.
         updated_settings = self._base_model_settings.copy()
 
+        # Use agent-specific model if specified
+        if agent.model is not None:
+            updated_settings["model_name"] = agent.model
+
         if agent.prompt is not None:
             updated_settings["prompt"] = agent.prompt
 

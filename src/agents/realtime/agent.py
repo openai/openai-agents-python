@@ -28,8 +28,6 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     """A specialized agent instance that is meant to be used within a `RealtimeSession` to build
     voice agents. Due to the nature of this agent, some configuration options are not supported
     that are supported by regular `Agent` instances. For example:
-    - `model` choice is not supported, as all RealtimeAgents will be handled by the same model
-      within a `RealtimeSession`.
     - `modelSettings` is not supported, as all RealtimeAgents will be handled by the same model
       within a `RealtimeSession`.
     - `outputType` is not supported, as RealtimeAgents do not support structured outputs.
@@ -55,6 +53,14 @@ class RealtimeAgent(AgentBase, Generic[TContext]):
     Can either be a string, or a function that dynamically generates instructions for the agent. If
     you provide a function, it will be called with the context and the agent instance. It must
     return a string.
+    """
+
+    model: str | None = None
+    """The name of the realtime model to use for this agent. If not specified, will use the default
+    model configured in the RealtimeRunner. This allows different agents to use different models
+    with varying capabilities (e.g., a smarter model for complex tasks).
+
+    Examples: "gpt-realtime", "gpt-4o-realtime-preview"
     """
 
     prompt: Prompt | None = None
