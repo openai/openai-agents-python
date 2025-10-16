@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 from openai import AsyncOpenAI
 
@@ -46,27 +46,28 @@ class OpenAIConversationsSession(SessionABC):
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
-        all_items: list[TResponseInputItem] = []
+        all_items: list[dict[str, Any]] = []
         if limit is None:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 order="asc",
             ):
-                # calling model_dump() to make this serializable
-                all_items.append(cast(TResponseInputItem, item.model_dump(exclude_unset=True)))
+                # model_dump for serialization; shape matches TResponseInputItem at runtime
+                all_items.append(item.model_dump(exclude_unset=True))
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 limit=limit,
                 order="desc",
             ):
-                # calling model_dump() to make this serializable
-                all_items.append(cast(TResponseInputItem, item.model_dump(exclude_unset=True)))
+                # model_dump for serialization; shape matches TResponseInputItem at runtime
+                all_items.append(item.model_dump(exclude_unset=True))
                 if limit is not None and len(all_items) >= limit:
                     break
             all_items.reverse()
 
-        return all_items
+        # The Conversations API guarantees this shape; narrow once for type checkers
+        return cast(list[TResponseInputItem], all_items)
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         session_id = await self._get_session_id()
