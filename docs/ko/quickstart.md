@@ -30,15 +30,15 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API 키 설정
 
-없다면 OpenAI API 키를 만들기 위해 [이 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따르세요.
+키가 없다면 OpenAI API 키를 만들기 위해 [이 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따르세요.
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-## 첫 에이전트 생성
+## 첫 번째 에이전트 만들기
 
-에이전트는 instructions, 이름, 그리고 선택적 구성(예: `model_config`)으로 정의합니다
+에이전트는 instructions, 이름, 선택적 구성(예: `model_config`)으로 정의됩니다
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## 추가 에이전트
+## 에이전트 추가
 
-추가 에이전트도 같은 방식으로 정의할 수 있습니다. `handoff_descriptions`는 핸드오프 라우팅을 결정하는 데 추가 컨텍스트를 제공합니다
+추가 에이전트도 동일한 방식으로 정의할 수 있습니다. `handoff_descriptions`는 핸드오프 라우팅을 결정하는 데 추가 컨텍스트를 제공합니다
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## 핸드오프 정의
 
-각 에이전트에서 작업을 진행하는 방법을 결정하기 위해 선택할 수 있는 발신 핸드오프 옵션의 인벤토리를 정의할 수 있습니다.
+각 에이전트에서, 작업을 진행하는 방법을 결정하기 위해 선택할 수 있는 나가는 핸드오프 옵션의 인벤토리를 정의할 수 있습니다.
 
 ```python
 triage_agent = Agent(
@@ -95,7 +95,7 @@ async def main():
 
 ## 가드레일 추가
 
-입력 또는 출력에 대해 실행될 사용자 지정 가드레일을 정의할 수 있습니다.
+입력 또는 출력에 대해 실행할 사용자 정의 가드레일을 정의할 수 있습니다.
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 전체 워크플로 통합
+## 전체 통합
 
-모두 통합하여 핸드오프와 입력 가드레일을 사용해 전체 워크플로를 실행해 봅시다.
+모든 것을 합쳐 핸드오프와 입력 가드레일을 사용해 전체 워크플로를 실행해 봅시다.
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,7 +192,7 @@ if __name__ == "__main__":
 
 ## 트레이스 보기
 
-에이전트 실행 중에 무슨 일이 있었는지 검토하려면 [OpenAI Dashboard의 Trace viewer](https://platform.openai.com/traces)로 이동해 실행 트레이스를 확인하세요.
+에이전트 실행 중 발생한 내용을 검토하려면 [OpenAI 대시보드의 Trace viewer](https://platform.openai.com/traces)로 이동해 실행 트레이스를 확인하세요.
 
 ## 다음 단계
 
@@ -200,4 +200,4 @@ if __name__ == "__main__":
 
 - Learn about how to configure [에이전트](agents.md).
 - Learn about [에이전트 실행](running_agents.md).
-- Learn about [도구](tools.md), [가드레일](guardrails.md) 및 [모델](models/index.md).
+- Learn about [tools](tools.md), [가드레일](guardrails.md) and [모델](models/index.md).

@@ -4,9 +4,9 @@ search:
 ---
 # 会话
 
-Agents SDK 提供了内置的会话记忆，用于在多个智能体运行之间自动维护对话历史，从而无需在轮次之间手动处理 `.to_input_list()`。
+Agents SDK 提供内置的会话内存，可在多个智能体运行之间自动维护对话历史，无需在回合之间手动处理 `.to_input_list()`。
 
-会话为特定会话存储对话历史，使智能体无需显式的手动内存管理即可保持上下文。这对于构建聊天应用或多轮对话（希望智能体记住先前交互）尤其有用。
+会话为特定会话存储对话历史，使智能体无需显式的手动内存管理即可保持上下文。这对于构建聊天应用或多轮对话尤为有用，你可以让智能体记住之前的交互。
 
 ## 快速开始
 
@@ -49,17 +49,17 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 工作原理
 
-当启用会话记忆时：
+当启用会话内存时：
 
-1. **每次运行前**：运行器会自动检索该会话的对话历史，并将其添加到输入项之前。
-2. **每次运行后**：运行期间生成的所有新项目（用户输入、助手响应、工具调用等）都会自动存储到会话中。
-3. **上下文保留**：后续使用相同会话的每次运行都会包含完整的对话历史，从而使智能体保持上下文。
+1. **每次运行前**：运行器会自动检索该会话的对话历史，并将其预置到输入项之前。
+2. **每次运行后**：在运行期间生成的所有新条目（用户输入、助手响应、工具调用等）都会自动存储到会话中。
+3. **上下文保留**：使用相同会话的后续运行将包含完整对话历史，使智能体能够保持上下文。
 
 这消除了在运行之间手动调用 `.to_input_list()` 并管理对话状态的需要。
 
-## 记忆操作
+## 内存操作
 
-### 基本操作
+### 基础操作
 
 会话支持多种用于管理对话历史的操作：
 
@@ -88,7 +88,7 @@ await session.clear_session()
 
 ### 使用 pop_item 进行更正
 
-当你希望撤销或修改对话中的最后一项时，`pop_item` 方法尤其有用：
+当你想要撤销或修改对话中的最后一个条目时，`pop_item` 方法特别有用：
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -117,19 +117,19 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## 记忆选项
+## 内存选项
 
-### 无记忆（默认）
+### 无内存（默认）
 
 ```python
 # Default behavior - no session memory
 result = await Runner.run(agent, "Hello")
 ```
 
-### OpenAI Conversations API 记忆
+### OpenAI Conversations API 内存
 
-使用 [OpenAI Conversations API](https://platform.openai.com/docs/api-reference/conversations/create) 持久化
-[conversation state](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#using-the-conversations-api)，而无需管理你自己的数据库。当你已经依赖由 OpenAI 托管的基础设施来存储对话历史时，这将非常有用。
+使用 [OpenAI Conversations API](https://platform.openai.com/docs/api-reference/conversations/create) 来持久化
+[conversation state](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#using-the-conversations-api)，无需管理你自己的数据库。当你已经依赖由 OpenAI 托管的基础设施来存储对话历史时，这将很有帮助。
 
 ```python
 from agents import OpenAIConversationsSession
@@ -146,7 +146,7 @@ result = await Runner.run(
 )
 ```
 
-### SQLite 记忆
+### SQLite 内存
 
 ```python
 from agents import SQLiteSession
@@ -165,7 +165,7 @@ result = await Runner.run(
 )
 ```
 
-### 多个会话
+### 多会话
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -190,9 +190,9 @@ result2 = await Runner.run(
 
 ### 由 SQLAlchemy 驱动的会话
 
-对于更高级的用例，你可以使用由 SQLAlchemy 驱动的会话后端。这允许你使用 SQLAlchemy 支持的任意数据库（PostgreSQL、MySQL、SQLite 等）进行会话存储。
+对于更高级的用例，你可以使用由 SQLAlchemy 驱动的会话后端。这样就可以使用任何 SQLAlchemy 支持的数据库（PostgreSQL、MySQL、SQLite 等）来进行会话存储。
 
-**示例 1: 使用 `from_url` 配合内存型 SQLite**
+**示例 1：使用 `from_url` 搭配内存型 SQLite**
 
 这是最简单的入门方式，适合开发和测试。
 
@@ -215,9 +215,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-**示例 2: 使用现有的 SQLAlchemy 引擎**
+**示例 2：使用现有的 SQLAlchemy 引擎**
 
-在生产应用中，你很可能已经有一个 SQLAlchemy `AsyncEngine` 实例。你可以将其直接传入会话。
+在生产应用中，你很可能已经拥有一个 SQLAlchemy 的 `AsyncEngine` 实例。你可以将其直接传递给会话。
 
 ```python
 import asyncio
@@ -247,11 +247,11 @@ if __name__ == "__main__":
 
 ### 加密会话
 
-对于需要对静态对话数据进行加密的应用，你可以使用 `EncryptedSession` 来包装任意会话后端，实现透明加密与基于 TTL 的自动过期。这需要 `encrypt` 可选依赖：`pip install openai-agents[encrypt]`。
+对于需要对静态对话数据进行加密的应用，你可以使用 `EncryptedSession` 来包装任意会话后端，实现透明加密和基于 TTL 的自动过期。这需要 `encrypt` 可选依赖：`pip install openai-agents[encrypt]`。
 
-`EncryptedSession` 使用基于会话的密钥派生（HKDF）的 Fernet 加密，并支持旧消息的自动过期。当项目超过 TTL 时，在检索过程中会被静默跳过。
+`EncryptedSession` 使用基于每个会话的密钥派生（HKDF）的 Fernet 加密，并支持旧消息的自动过期。当条目超过 TTL 时，它们在检索期间会被静默跳过。
 
-**示例：加密 SQLAlchemy 会话数据**
+**示例：为 SQLAlchemy 会话数据加密**
 
 ```python
 import asyncio
@@ -284,22 +284,22 @@ if __name__ == "__main__":
 
 **关键特性：**
 
-- **透明加密**：在存储前自动加密所有会话项目，并在检索时解密
-- **每会话密钥派生**：使用会话 ID 作为盐配合 HKDF 推导唯一加密密钥
-- **基于 TTL 的过期**：根据可配置的存活时间（默认：10 分钟）自动使旧消息过期
-- **灵活的密钥输入**：接受 Fernet 密钥或原始字符串作为加密密钥
-- **可包装任意会话**：适用于 SQLite、SQLAlchemy 或自定义会话实现
+-   **透明加密**：在存储前自动加密所有会话条目，并在检索时解密
+-   **按会话派生密钥**：使用会话 ID 作为盐的 HKDF 来派生唯一加密密钥
+-   **基于 TTL 的过期**：根据可配置的生存时间（默认：10 分钟）自动使旧消息过期
+-   **灵活的密钥输入**：接受 Fernet 密钥或原始字符串作为加密密钥
+-   **可包装任意会话**：适用于 SQLite、SQLAlchemy 或自定义会话实现
 
 !!! warning "重要的安全注意事项"
 
-    - 将加密密钥安全存储（例如，环境变量、密钥管理服务）
-    - 过期令牌基于应用服务的系统时钟进行校验——请确保所有服务通过 NTP 同步时间，以避免因时钟漂移导致的误拒
-    - 底层会话仍存储加密数据，因此你仍可掌控你的数据库基础设施
+    -   安全存储你的加密密钥（如环境变量、密钥管理服务）
+    -   过期令牌根据应用服务的系统时钟被拒绝——请确保所有服务均通过 NTP 同步时间，以避免因时钟漂移导致的误拒
+    -   底层会话仍存储加密数据，因此你依然可以掌控你的数据库基础设施
 
 
-## 自定义记忆实现
+## 自定义内存实现
 
-你可以通过创建一个遵循 [`Session`][agents.memory.session.Session] 协议的类来实现你自己的会话记忆：
+你可以通过创建遵循 [`Session`][agents.memory.session.Session] 协议的类来实现你自己的会话内存：
 
 ```python
 from agents.memory.session import SessionABC
@@ -346,20 +346,20 @@ result = await Runner.run(
 
 ### 会话 ID 命名
 
-使用有意义的会话 ID，以帮助组织对话：
+使用有意义的会话 ID 来帮助组织对话：
 
-- 用户维度："user_12345"
-- 线程维度："thread_abc123"
-- 场景维度："support_ticket_456"
+-   基于用户：`"user_12345"`
+-   基于线程：`"thread_abc123"`
+-   基于上下文：`"support_ticket_456"`
 
-### 记忆持久化
+### 内存持久化
 
-- 使用内存型 SQLite（`SQLiteSession("session_id")`）用于临时会话
-- 使用基于文件的 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）用于持久会话
-- 使用由 SQLAlchemy 驱动的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True")`）用于基于 SQLAlchemy 支持的现有数据库的生产系统
-- 当你倾向于将历史存储在 OpenAI Conversations API 中时，使用由 OpenAI 托管的存储（`OpenAIConversationsSession()`）
-- 使用加密会话（`EncryptedSession(session_id, underlying_session, encryption_key)`）为任意会话添加透明加密与基于 TTL 的过期
-- 针对其他生产系统（Redis、Django 等）考虑实现自定义会话后端以满足更高级用例
+-   临时会话使用内存型 SQLite（`SQLiteSession("session_id")`）
+-   持久化会话使用基于文件的 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）
+-   生产系统且已有数据库时，使用由 SQLAlchemy 驱动的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`），支持 SQLAlchemy 支持的数据库
+-   当你希望将历史存储在 OpenAI Conversations API 中时，使用 OpenAI 托管的存储（`OpenAIConversationsSession()`）
+-   使用加密会话（`EncryptedSession(session_id, underlying_session, encryption_key)`）为任意会话提供透明加密与基于 TTL 的过期
+-   针对其他生产系统（Redis、Django 等）考虑实现自定义会话后端，以满足更高级的用例
 
 ### 会话管理
 
@@ -387,7 +387,7 @@ result2 = await Runner.run(
 
 ## 完整示例
 
-下面是一个展示会话记忆实际效果的完整示例：
+以下是展示会话内存实际效果的完整示例：
 
 ```python
 import asyncio
@@ -451,10 +451,10 @@ if __name__ == "__main__":
 
 ## API 参考
 
-有关详细的 API 文档，请参阅：
+详细的 API 文档请参阅：
 
-- [`Session`][agents.memory.Session] - 协议接口
-- [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 实现
-- [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 实现
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 由 SQLAlchemy 驱动的实现
-- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 带 TTL 的加密会话包装器
+-   [`Session`][agents.memory.Session] - 协议接口
+-   [`SQLiteSession`][agents.memory.SQLiteSession] - SQLite 实现
+-   [`OpenAIConversationsSession`](ref/memory/openai_conversations_session.md) - OpenAI Conversations API 实现
+-   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 由 SQLAlchemy 驱动的实现
+-   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 具有 TTL 的加密会话封装器
