@@ -13,6 +13,7 @@ from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
 from agents.realtime.config import RealtimeUserInputMessage
+from agents.realtime.items import RealtimeItem
 from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_inputs import RealtimeModelSendRawMessage
 
@@ -118,9 +119,9 @@ class RealtimeWebSocketManager:
             print(e)
             logger.error(f"Error processing events for session {session_id}: {e}")
 
-    def _sanitize_history_item(self, item: Any) -> dict[str, Any]:
+    def _sanitize_history_item(self, item: RealtimeItem) -> dict[str, Any]:
         """Remove large binary payloads from history items while keeping transcripts."""
-        item_dict = item.model_dump(mode="json")
+        item_dict = item.model_dump()
         content = item_dict.get("content")
         if isinstance(content, list):
             sanitized_content: list[Any] = []
