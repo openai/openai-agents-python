@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-import json
 
 import pytest
 from sqlalchemy import select, text, update
