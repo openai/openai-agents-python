@@ -7,8 +7,8 @@ from typing import Any, Literal, Union, cast
 from openai import Omit, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
-    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
@@ -28,10 +28,10 @@ from openai.types.responses import (
     ResponseFileSearchToolCallParam,
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseInputAudioParam,
     ResponseInputContentParam,
     ResponseInputFileParam,
     ResponseInputImageParam,
-    ResponseInputAudioParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
     ResponseOutputMessageParam,
