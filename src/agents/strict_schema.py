@@ -57,7 +57,7 @@ def _ensure_strict_json_schema(
         and json_schema["additionalProperties"]
     ):
         raise UserError(
-            "additionalProperties should not be set for object types. This could be because "
+            "additionalProperties should be set to False for object types. This could be because "
             "you're using an older version of Pydantic, or because you configured additional "
             "properties to be allowed. If you really need this, update the function or output tool "
             "to not use a strict schema."
@@ -154,9 +154,8 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     resolved = root
     for key in path:
         value = resolved[key]
-        assert is_dict(value), (
-            f"encountered non-dictionary entry while resolving {ref} - {resolved}"
-        )
+        if not is_dict(value):
+            raise ValueError(f"encountered non-dictionary entry while resolving {ref} - {resolved}")
         resolved = value
 
     return resolved
