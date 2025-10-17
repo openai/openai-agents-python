@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+import json
+
 import pytest
+from sqlalchemy import select, text, update
+from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 
@@ -151,3 +157,213 @@ async def test_add_empty_items_list():
 
     items_after_add = await session.get_items()
     assert len(items_after_add) == 0
+
+
+async def test_get_items_same_timestamp_consistent_order():
+    """Test that items with identical timestamps keep insertion order."""
+    session_id = "same_timestamp_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    older_item: TResponseInputItem = {
+        "id": "older_same_ts",
+        "type": "message",
+        "content": [{"type": "output_text", "text": "old"}],
+    }
+    reasoning_item: TResponseInputItem = {
+        "id": "rs_same_ts",
+        "type": "reasoning",
+        "summary": "...",
+    }
+    message_item: TResponseInputItem = {
+        "id": "msg_same_ts",
+        "type": "message",
+        "content": [{"type": "output_text", "text": "..."}],
+    }
+    await session.add_items([older_item])
+    await session.add_items([reasoning_item, message_item])
+
+    async with session._session_factory() as sess:
+        rows = await sess.execute(
+            select(session._messages.c.id, session._messages.c.message_data).where(
+                session._messages.c.session_id == session.session_id
+            )
+        )
+        id_map = {
+            json.loads(message_json)["id"]: row_id
+            for row_id, message_json in rows.fetchall()
+        }
+        shared = datetime(2025, 10, 15, 17, 26, 39, 132483)
+        older = shared - timedelta(milliseconds=1)
+        await sess.execute(
+            update(session._messages)
+            .where(session._messages.c.id.in_(
+                [
+                    id_map["rs_same_ts"],
+                    id_map["msg_same_ts"],
+                ]
+            ))
+            .values(created_at=shared)
+        )
+        await sess.execute(
+            update(session._messages)
+            .where(session._messages.c.id == id_map["older_same_ts"])
+            .values(created_at=older)
+        )
+        await sess.commit()
+
+    real_factory = session._session_factory
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return list(self._rows)
+
+    def needs_shuffle(statement: Select) -> bool:
+        if not isinstance(statement, Select):
+            return False
+        orderings = list(statement._order_by_clause)
+        if not orderings:
+            return False
+        id_asc = session._messages.c.id.asc()
+        id_desc = session._messages.c.id.desc()
+
+        def references_id(clause) -> bool:
+            try:
+                return clause.compare(id_asc) or clause.compare(id_desc)
+            except AttributeError:
+                return False
+
+        if any(references_id(clause) for clause in orderings):
+            return False
+        # Only shuffle queries that target the messages table.
+        target_tables = {from_clause.name for from_clause in statement.get_final_froms()}
+        return session._messages.name in target_tables
+
+    @asynccontextmanager
+    async def shuffled_session():
+        async with real_factory() as inner:
+            original_execute = inner.execute
+
+            async def execute_with_shuffle(statement, *args, **kwargs):
+                result = await original_execute(statement, *args, **kwargs)
+                if needs_shuffle(statement):
+                    rows = result.all()
+                    shuffled = list(rows)
+                    shuffled.reverse()
+                    return FakeResult(shuffled)
+                return result
+
+            inner.execute = execute_with_shuffle  # type: ignore[assignment]
+            try:
+                yield inner
+            finally:
+                inner.execute = original_execute  # type: ignore[assignment]
+
+    session._session_factory = shuffled_session  # type: ignore[assignment]
+    try:
+        retrieved = await session.get_items()
+        assert [item["id"] for item in retrieved] == [
+            "older_same_ts",
+            "rs_same_ts",
+            "msg_same_ts",
+        ]
+
+        latest_two = await session.get_items(limit=2)
+        assert [item["id"] for item in latest_two] == ["rs_same_ts", "msg_same_ts"]
+    finally:
+        session._session_factory = real_factory  # type: ignore[assignment]
+
+
+async def test_pop_item_same_timestamp_returns_latest():
+    """Test that pop_item returns the newest item when timestamps tie."""
+    session_id = "same_timestamp_pop_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    reasoning_item: TResponseInputItem = {
+        "id": "rs_pop_same_ts",
+        "type": "reasoning",
+        "summary": "...",
+    }
+    message_item: TResponseInputItem = {
+        "id": "msg_pop_same_ts",
+        "type": "message",
+        "content": [{"type": "output_text", "text": "..."}],
+    }
+    await session.add_items([reasoning_item, message_item])
+
+    async with session._session_factory() as sess:
+        await sess.execute(
+            text(
+                "UPDATE agent_messages "
+                "SET created_at = :created_at "
+                "WHERE session_id = :session_id"
+            ),
+            {
+                "created_at": "2025-10-15 17:26:39.132483",
+                "session_id": session.session_id,
+            },
+        )
+        await sess.commit()
+
+    popped = await session.pop_item()
+    assert popped is not None
+    assert popped["id"] == "msg_pop_same_ts"
+
+    remaining = await session.get_items()
+    assert [item["id"] for item in remaining] == ["rs_pop_same_ts"]
+
+
+async def test_get_items_orders_by_id_for_ties():
+    """Test that get_items adds id ordering to break timestamp ties."""
+    session_id = "order_by_id_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    await session.add_items(
+        [
+            {"id": "rs_first", "type": "reasoning"},
+            {"id": "msg_second", "type": "message"},
+        ]
+    )
+
+    real_factory = session._session_factory
+    recorded: list = []
+
+    @asynccontextmanager
+    async def wrapped_session():
+        async with real_factory() as inner:
+            original_execute = inner.execute
+
+            async def recording_execute(statement, *args, **kwargs):
+                recorded.append(statement)
+                return await original_execute(statement, *args, **kwargs)
+
+            inner.execute = recording_execute  # type: ignore[assignment]
+            try:
+                yield inner
+            finally:
+                inner.execute = original_execute  # type: ignore[assignment]
+
+    session._session_factory = wrapped_session  # type: ignore[assignment]
+    try:
+        retrieved_full = await session.get_items()
+        retrieved_limited = await session.get_items(limit=2)
+    finally:
+        session._session_factory = real_factory  # type: ignore[assignment]
+
+    assert len(recorded) >= 2
+    orderings_full = [str(clause) for clause in recorded[0]._order_by_clause]
+    assert orderings_full == [
+        "agent_messages.created_at ASC",
+        "agent_messages.id ASC",
+    ]
+
+    orderings_limited = [str(clause) for clause in recorded[1]._order_by_clause]
+    assert orderings_limited == [
+        "agent_messages.created_at DESC",
+        "agent_messages.id DESC",
+    ]
+
+    assert [item["id"] for item in retrieved_full] == ["rs_first", "msg_second"]
+    assert [item["id"] for item in retrieved_limited] == ["rs_first", "msg_second"]
