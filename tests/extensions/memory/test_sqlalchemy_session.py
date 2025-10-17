@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from typing import Any, Dict, Iterable, Sequence, cast
 
 import pytest
 from sqlalchemy import select, text, update
@@ -14,12 +15,52 @@ from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
+from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
+from openai.types.responses.response_output_text_param import ResponseOutputTextParam
+from openai.types.responses.response_reasoning_item_param import (
+    ResponseReasoningItemParam,
+    Summary,
+)
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
 
 # Use in-memory SQLite for tests
 DB_URL = "sqlite+aiosqlite:///:memory:"
+
+
+def _make_message_item(item_id: str, text_value: str) -> TResponseInputItem:
+    content: ResponseOutputTextParam = {
+        "type": "output_text",
+        "text": text_value,
+        "annotations": [],
+    }
+    message: ResponseOutputMessageParam = {
+        "id": item_id,
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [content],
+    }
+    return cast(TResponseInputItem, message)
+
+
+def _make_reasoning_item(item_id: str, summary_text: str) -> TResponseInputItem:
+    summary: Summary = {"type": "summary_text", "text": summary_text}
+    reasoning: ResponseReasoningItemParam = {
+        "id": item_id,
+        "type": "reasoning",
+        "summary": [summary],
+    }
+    return cast(TResponseInputItem, reasoning)
+
+
+def _item_ids(items: Sequence[TResponseInputItem]) -> list[str]:
+    result: list[str] = []
+    for item in items:
+        item_dict = cast(Dict[str, Any], item)
+        result.append(cast(str, item_dict["id"]))
+    return result
 
 
 @pytest.fixture
@@ -164,21 +205,9 @@ async def test_get_items_same_timestamp_consistent_order():
     session_id = "same_timestamp_test"
     session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
-    older_item: TResponseInputItem = {
-        "id": "older_same_ts",
-        "type": "message",
-        "content": [{"type": "output_text", "text": "old"}],
-    }
-    reasoning_item: TResponseInputItem = {
-        "id": "rs_same_ts",
-        "type": "reasoning",
-        "summary": "...",
-    }
-    message_item: TResponseInputItem = {
-        "id": "msg_same_ts",
-        "type": "message",
-        "content": [{"type": "output_text", "text": "..."}],
-    }
+    older_item = _make_message_item("older_same_ts", "old")
+    reasoning_item = _make_reasoning_item("rs_same_ts", "...")
+    message_item = _make_message_item("msg_same_ts", "...")
     await session.add_items([older_item])
     await session.add_items([reasoning_item, message_item])
 
@@ -214,13 +243,13 @@ async def test_get_items_same_timestamp_consistent_order():
     real_factory = session._session_factory
 
     class FakeResult:
-        def __init__(self, rows):
-            self._rows = rows
+        def __init__(self, rows: Iterable[Any]):
+            self._rows = list(rows)
 
-        def all(self):
+        def all(self) -> list[Any]:
             return list(self._rows)
 
-    def needs_shuffle(statement: Select) -> bool:
+    def needs_shuffle(statement: Any) -> bool:
         if not isinstance(statement, Select):
             return False
         orderings = list(statement._order_by_clause)
@@ -231,22 +260,28 @@ async def test_get_items_same_timestamp_consistent_order():
 
         def references_id(clause) -> bool:
             try:
-                return clause.compare(id_asc) or clause.compare(id_desc)
+                return bool(clause.compare(id_asc) or clause.compare(id_desc))
             except AttributeError:
                 return False
 
         if any(references_id(clause) for clause in orderings):
             return False
         # Only shuffle queries that target the messages table.
-        target_tables = {from_clause.name for from_clause in statement.get_final_froms()}
-        return session._messages.name in target_tables
+        target_tables: set[str] = set()
+        for from_clause in statement.get_final_froms():
+            name_attr = getattr(from_clause, "name", None)
+            if isinstance(name_attr, str):
+                target_tables.add(name_attr)
+        table_name_obj = getattr(session._messages, "name", "")
+        table_name = table_name_obj if isinstance(table_name_obj, str) else ""
+        return bool(table_name in target_tables)
 
     @asynccontextmanager
     async def shuffled_session():
         async with real_factory() as inner:
             original_execute = inner.execute
 
-            async def execute_with_shuffle(statement, *args, **kwargs):
+            async def execute_with_shuffle(statement: Any, *args: Any, **kwargs: Any) -> Any:
                 result = await original_execute(statement, *args, **kwargs)
                 if needs_shuffle(statement):
                     rows = result.all()
@@ -255,25 +290,21 @@ async def test_get_items_same_timestamp_consistent_order():
                     return FakeResult(shuffled)
                 return result
 
-            inner.execute = execute_with_shuffle  # type: ignore[assignment]
+            cast(Any, inner).execute = execute_with_shuffle
             try:
                 yield inner
             finally:
-                inner.execute = original_execute  # type: ignore[assignment]
+                cast(Any, inner).execute = original_execute
 
-    session._session_factory = shuffled_session  # type: ignore[assignment]
+    session._session_factory = cast(Any, shuffled_session)
     try:
         retrieved = await session.get_items()
-        assert [item["id"] for item in retrieved] == [
-            "older_same_ts",
-            "rs_same_ts",
-            "msg_same_ts",
-        ]
+        assert _item_ids(retrieved) == ["older_same_ts", "rs_same_ts", "msg_same_ts"]
 
         latest_two = await session.get_items(limit=2)
-        assert [item["id"] for item in latest_two] == ["rs_same_ts", "msg_same_ts"]
+        assert _item_ids(latest_two) == ["rs_same_ts", "msg_same_ts"]
     finally:
-        session._session_factory = real_factory  # type: ignore[assignment]
+        session._session_factory = real_factory
 
 
 async def test_pop_item_same_timestamp_returns_latest():
@@ -281,16 +312,8 @@ async def test_pop_item_same_timestamp_returns_latest():
     session_id = "same_timestamp_pop_test"
     session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
 
-    reasoning_item: TResponseInputItem = {
-        "id": "rs_pop_same_ts",
-        "type": "reasoning",
-        "summary": "...",
-    }
-    message_item: TResponseInputItem = {
-        "id": "msg_pop_same_ts",
-        "type": "message",
-        "content": [{"type": "output_text", "text": "..."}],
-    }
+    reasoning_item = _make_reasoning_item("rs_pop_same_ts", "...")
+    message_item = _make_message_item("msg_pop_same_ts", "...")
     await session.add_items([reasoning_item, message_item])
 
     async with session._session_factory() as sess:
@@ -309,10 +332,10 @@ async def test_pop_item_same_timestamp_returns_latest():
 
     popped = await session.pop_item()
     assert popped is not None
-    assert popped["id"] == "msg_pop_same_ts"
+    assert cast(Dict[str, Any], popped)["id"] == "msg_pop_same_ts"
 
     remaining = await session.get_items()
-    assert [item["id"] for item in remaining] == ["rs_pop_same_ts"]
+    assert _item_ids(remaining) == ["rs_pop_same_ts"]
 
 
 async def test_get_items_orders_by_id_for_ties():
@@ -322,35 +345,35 @@ async def test_get_items_orders_by_id_for_ties():
 
     await session.add_items(
         [
-            {"id": "rs_first", "type": "reasoning"},
-            {"id": "msg_second", "type": "message"},
+            _make_reasoning_item("rs_first", "..."),
+            _make_message_item("msg_second", "..."),
         ]
     )
 
     real_factory = session._session_factory
-    recorded: list = []
+    recorded: list[Any] = []
 
     @asynccontextmanager
     async def wrapped_session():
         async with real_factory() as inner:
             original_execute = inner.execute
 
-            async def recording_execute(statement, *args, **kwargs):
+            async def recording_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
                 recorded.append(statement)
                 return await original_execute(statement, *args, **kwargs)
 
-            inner.execute = recording_execute  # type: ignore[assignment]
+            cast(Any, inner).execute = recording_execute
             try:
                 yield inner
             finally:
-                inner.execute = original_execute  # type: ignore[assignment]
+                cast(Any, inner).execute = original_execute
 
-    session._session_factory = wrapped_session  # type: ignore[assignment]
+    session._session_factory = cast(Any, wrapped_session)
     try:
         retrieved_full = await session.get_items()
         retrieved_limited = await session.get_items(limit=2)
     finally:
-        session._session_factory = real_factory  # type: ignore[assignment]
+        session._session_factory = real_factory
 
     assert len(recorded) >= 2
     orderings_full = [str(clause) for clause in recorded[0]._order_by_clause]
@@ -365,5 +388,5 @@ async def test_get_items_orders_by_id_for_ties():
         "agent_messages.id DESC",
     ]
 
-    assert [item["id"] for item in retrieved_full] == ["rs_first", "msg_second"]
-    assert [item["id"] for item in retrieved_limited] == ["rs_first", "msg_second"]
+    assert _item_ids(retrieved_full) == ["rs_first", "msg_second"]
+    assert _item_ids(retrieved_limited) == ["rs_first", "msg_second"]
