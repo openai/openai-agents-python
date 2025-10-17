@@ -4,7 +4,7 @@ import abc
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from typing_extensions import TypeVar
 
@@ -164,6 +164,9 @@ class RunResultStreaming(RunResultBase):
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
 
+    # Soft cancel state
+    _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
+
     @property
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run. Updates as the agent run progresses, so the true last agent
@@ -171,17 +174,51 @@ class RunResultStreaming(RunResultBase):
         """
         return self.current_agent
 
-    def cancel(self) -> None:
-        """Cancels the streaming run, stopping all background tasks and marking the run as
-        complete."""
-        self._cleanup_tasks()  # Cancel all running tasks
-        self.is_complete = True  # Mark the run as complete to stop event streaming
+    def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
+        """Cancel the streaming run.
 
-        # Optionally, clear the event queue to prevent processing stale events
-        while not self._event_queue.empty():
-            self._event_queue.get_nowait()
-        while not self._input_guardrail_queue.empty():
-            self._input_guardrail_queue.get_nowait()
+        Args:
+            mode: Cancellation strategy:
+                - "immediate": Stop immediately, cancel all tasks, clear queues (default)
+                - "after_turn": Complete current turn gracefully before stopping
+                    * Allows LLM response to finish
+                    * Executes pending tool calls
+                    * Saves session state properly
+                    * Tracks usage accurately
+                    * Stops before next turn begins
+
+        Example:
+            ```python
+            result = Runner.run_streamed(agent, "Task", session=session)
+
+            async for event in result.stream_events():
+                if user_interrupted():
+                    result.cancel(mode="after_turn")  # Graceful
+                    # result.cancel()  # Immediate (default)
+            ```
+
+        Note: After calling cancel(), you should continue consuming stream_events()
+        to allow the cancellation to complete properly.
+        """
+        # Store the cancel mode for the background task to check
+        self._cancel_mode = mode
+
+        if mode == "immediate":
+            # Existing behavior - immediate shutdown
+            self._cleanup_tasks()  # Cancel all running tasks
+            self.is_complete = True  # Mark the run as complete to stop event streaming
+
+            # Optionally, clear the event queue to prevent processing stale events
+            while not self._event_queue.empty():
+                self._event_queue.get_nowait()
+            while not self._input_guardrail_queue.empty():
+                self._input_guardrail_queue.get_nowait()
+
+        elif mode == "after_turn":
+            # Soft cancel - just set the flag
+            # The streaming loop will check this and stop gracefully
+            # Don't call _cleanup_tasks() or clear queues yet
+            pass
 
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """Stream deltas for new items as they are generated. We're using the types from the

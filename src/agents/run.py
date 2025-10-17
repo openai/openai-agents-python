@@ -958,6 +958,12 @@ class AgentRunner:
             await AgentRunner._save_result_to_session(session, starting_input, [])
 
             while True:
+                # Check for soft cancel before starting new turn
+                if streamed_result._cancel_mode == "after_turn":
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
+
                 if streamed_result.is_complete:
                     break
 
@@ -1033,6 +1039,20 @@ class AgentRunner:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        # Save the conversation to session if enabled (before handoff)
+                        # Note: Non-streaming path doesn't save handoff turns immediately,
+                        # but streaming needs to for graceful cancellation support
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+
                         current_agent = turn_result.next_step.new_agent
                         current_span.finish(reset_current=True)
                         current_span = None
@@ -1040,6 +1060,12 @@ class AgentRunner:
                         streamed_result._event_queue.put_nowait(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
+
+                        # Check for soft cancel after handoff
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                     elif isinstance(turn_result.next_step, NextStepFinalOutput):
                         streamed_result._output_guardrails_task = asyncio.create_task(
                             cls._run_output_guardrails(
@@ -1085,6 +1111,12 @@ class AgentRunner:
                                 await AgentRunner._save_result_to_session(
                                     session, [], turn_result.new_step_items
                                 )
+
+                        # Check for soft cancel after turn completion
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
