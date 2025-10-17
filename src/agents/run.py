@@ -1150,6 +1150,7 @@ class AgentRunner:
                     logger.debug(
                         f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
                     )
+                    raise e
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
