@@ -1138,6 +1138,8 @@ class AgentRunner:
 
             streamed_result.is_complete = True
         finally:
+            if streamed_result._input_guardrails_task:
+                await streamed_result._input_guardrails_task
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
