@@ -4,18 +4,18 @@ search:
 ---
 # 암호화된 세션
 
-`EncryptedSession`은 모든 세션 구현에 대해 투명한 암호화를 제공하며, 대화 데이터를 보호하고 오래된 항목을 자동으로 만료합니다.
+`EncryptedSession`은 모든 세션 구현에 대해 투명한 암호화를 제공하여, 자동 만료와 함께 대화 데이터를 보호합니다.
 
 ## 기능
 
-- **투명한 암호화**: 모든 세션을 Fernet 암호화로 래핑
-- **세션별 키**: 세션마다 고유한 암호화를 위해 HKDF 키 파생 사용
-- **자동 만료**: TTL이 만료되면 오래된 항목을 조용히 건너뜀
-- **대체 가능**: 기존 세션 구현과 함께 작동
+- **투명한 암호화**: 모든 세션을 Fernet 암호화로 감쌉니다
+- **세션별 키**: 세션마다 고유한 암호화를 위해 HKDF 키 유도를 사용합니다
+- **자동 만료**: TTL이 만료된 오래된 항목은 조용히 건너뜁니다
+- **대체 가능**: 기존 세션 구현과 함께 작동합니다
 
 ## 설치
 
-암호화된 세션을 사용하려면 `encrypt` extra가 필요합니다:
+암호화된 세션에는 `encrypt` 익스트라가 필요합니다:
 
 ```bash
 pip install openai-agents[encrypt]
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 ### 암호화 키
 
-암호화 키는 Fernet 키 또는 임의의 문자열일 수 있습니다:
+암호화 키는 Fernet 키이거나 임의의 문자열일 수 있습니다:
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -81,7 +81,7 @@ session = EncryptedSession(
 
 ### TTL (Time To Live)
 
-암호화된 항목이 유효한 기간을 설정합니다:
+암호화된 항목이 유효하게 유지되는 기간을 설정합니다:
 
 ```python
 # Items expire after 1 hour
@@ -101,9 +101,9 @@ session = EncryptedSession(
 )
 ```
 
-## 다양한 세션 유형과의 사용
+## 다양한 세션 유형에서의 사용
 
-### SQLite 세션 사용
+### SQLite 세션과 함께
 
 ```python
 from agents import SQLiteSession
@@ -119,7 +119,7 @@ session = EncryptedSession(
 )
 ```
 
-### SQLAlchemy 세션 사용
+### SQLAlchemy 세션과 함께
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -140,30 +140,30 @@ session = EncryptedSession(
 
 !!! warning "고급 세션 기능"
 
-    `EncryptedSession`을 `AdvancedSQLiteSession` 같은 고급 세션 구현과 함께 사용할 때는 다음을 유의하세요:
+    `AdvancedSQLiteSession` 같은 고급 세션 구현과 함께 `EncryptedSession`을 사용할 때 유의하세요:
 
-    - 메시지 콘텐츠가 암호화되므로 `find_turns_by_content()` 같은 메서드는 효과적으로 동작하지 않음
-    - 콘텐츠 기반 검색은 암호화된 데이터에서 수행되므로 효율이 제한됨
+    - 메시지 콘텐츠가 암호화되므로 `find_turns_by_content()` 같은 메서드는 효과적으로 동작하지 않습니다
+    - 콘텐츠 기반 검색은 암호화된 데이터에서 수행되어 효과가 제한됩니다
 
 
 
-## 키 파생
+## 키 유도
 
-EncryptedSession은 세션마다 고유한 암호화 키를 파생하기 위해 HKDF (HMAC 기반 키 파생 함수)를 사용합니다:
+EncryptedSession은 세션별 고유 암호화 키를 유도하기 위해 HKDF (HMAC-based Key Derivation Function)를 사용합니다:
 
 - **마스터 키**: 사용자가 제공한 암호화 키
 - **세션 솔트**: 세션 ID
-- **정보 문자열**: `"agents.session-store.hkdf.v1"`
+- **Info 문자열**: `"agents.session-store.hkdf.v1"`
 - **출력**: 32바이트 Fernet 키
 
 이는 다음을 보장합니다:
-- 각 세션은 고유한 암호화 키를 가짐
-- 마스터 키 없이는 키를 파생할 수 없음
-- 서로 다른 세션 간에는 세션 데이터를 복호화할 수 없음
+- 각 세션은 고유한 암호화 키를 가집니다
+- 마스터 키 없이는 키를 유도할 수 없습니다
+- 서로 다른 세션 간에는 세션 데이터를 복호화할 수 없습니다
 
 ## 자동 만료
 
-항목이 TTL을 초과하면 검색 중 자동으로 건너뜁니다:
+항목이 TTL을 초과하면, 조회 시 자동으로 건너뜁니다:
 
 ```python
 # Items older than TTL are silently ignored
@@ -173,7 +173,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API 참조
+## API 레퍼런스
 
-- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 기본 클래스
+- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 메인 클래스
 - [`Session`][agents.memory.session.Session] - 기본 세션 프로토콜

@@ -4,52 +4,52 @@ search:
 ---
 # 트레이싱
 
-Agents SDK에는 내장 트레이싱이 포함되어 있어 에이전트 실행 중 발생하는 이벤트의 포괄적인 기록을 수집합니다: LLM 생성, 도구 호출, 핸드오프, 가드레일, 그리고 발생하는 사용자 정의 이벤트까지 모두 포함합니다. [Traces 대시보드](https://platform.openai.com/traces)를 사용해 개발 중과 프로덕션에서 워크플로를 디버그하고, 시각화하며, 모니터링할 수 있습니다.
+Agents SDK 는 에이전트 실행 중 발생하는 이벤트의 포괄적인 기록을 수집하는 내장 트레이싱을 포함합니다: LLM 생성, 도구 호출, 핸드오프, 가드레일, 그리고 사용자 정의 이벤트까지. [Traces 대시보드](https://platform.openai.com/traces)를 사용하여 개발 및 운영 환경에서 워크플로를 디버그하고, 시각화하며, 모니터링할 수 있습니다.
 
 !!!note
 
     트레이싱은 기본적으로 활성화되어 있습니다. 트레이싱을 비활성화하는 방법은 두 가지입니다:
 
-    1. 환경 변수 `OPENAI_AGENTS_DISABLE_TRACING=1` 를 설정하여 전역으로 비활성화
-    2. 단일 실행에 대해 [`agents.run.RunConfig.tracing_disabled`][] 를 `True` 로 설정하여 비활성화
+    1. 환경 변수 `OPENAI_AGENTS_DISABLE_TRACING=1` 을 설정하여 전역적으로 비활성화할 수 있습니다
+    2. 단일 실행에서 [`agents.run.RunConfig.tracing_disabled`][] 를 `True` 로 설정하여 비활성화할 수 있습니다
 
-***OpenAI의 API를 사용하는 Zero Data Retention (ZDR) 정책 하에서 운영되는 조직의 경우, 트레이싱은 사용할 수 없습니다.***
+***OpenAI 의 API 를 사용하는 Zero Data Retention (ZDR) 정책 하의 조직에서는 트레이싱을 사용할 수 없습니다.***
 
 ## 트레이스와 스팬
 
--   **Traces** 는 "워크플로"의 단일 엔드 투 엔드 작업을 나타냅니다. 스팬으로 구성됩니다. 트레이스에는 다음 속성이 있습니다:
+-   **트레이스(Traces)** 는 "워크플로"의 단일 엔드 투 엔드 작업을 나타냅니다. 스팬으로 구성됩니다. 트레이스에는 다음 속성이 있습니다:
     -   `workflow_name`: 논리적 워크플로 또는 앱입니다. 예: "Code generation" 또는 "Customer service"
-    -   `trace_id`: 트레이스의 고유 ID입니다. 전달하지 않으면 자동 생성됩니다. 형식은 `trace_<32_alphanumeric>` 이어야 합니다
-    -   `group_id`: 선택적 그룹 ID로, 동일한 대화에서 나온 여러 트레이스를 연결합니다. 예를 들어 채팅 스레드 ID를 사용할 수 있습니다
-    -   `disabled`: True이면 트레이스가 기록되지 않습니다
+    -   `trace_id`: 트레이스의 고유 ID 입니다. 전달하지 않으면 자동 생성됩니다. 형식은 `trace_<32_alphanumeric>` 이어야 합니다
+    -   `group_id`: 동일한 대화에서 여러 트레이스를 연결하기 위한 선택적 그룹 ID 입니다. 예를 들어 채팅 스레드 ID 를 사용할 수 있습니다
+    -   `disabled`: True 인 경우 트레이스가 기록되지 않습니다
     -   `metadata`: 트레이스에 대한 선택적 메타데이터
--   **Spans** 는 시작 시간과 종료 시간이 있는 작업을 나타냅니다. 스팬에는 다음이 있습니다:
+-   **스팬(Spans)** 은 시작 및 종료 시간이 있는 작업을 나타냅니다. 스팬에는 다음이 포함됩니다:
     -   `started_at` 및 `ended_at` 타임스탬프
     -   속한 트레이스를 나타내는 `trace_id`
-    -   이 스팬의 상위 스팬(있을 경우)을 가리키는 `parent_id`
-    -   스팬에 대한 정보인 `span_data`. 예를 들어 `AgentSpanData`는 에이전트에 대한 정보를, `GenerationSpanData`는 LLM 생성에 대한 정보를 포함합니다
+    -   (있다면) 이 스팬의 상위 스팬을 가리키는 `parent_id`
+    -   스팬에 대한 정보인 `span_data`. 예를 들어 `AgentSpanData` 는 에이전트 정보를, `GenerationSpanData` 는 LLM 생성 정보를 포함합니다
 
 ## 기본 트레이싱
 
-기본적으로, SDK는 다음을 트레이싱합니다:
+기본적으로 SDK 는 다음을 트레이싱합니다:
 
--   전체 `Runner.{run, run_sync, run_streamed}()` 가 `trace()` 로 래핑됩니다
--   에이전트가 실행될 때마다 `agent_span()` 으로 래핑됩니다
--   LLM 생성은 `generation_span()` 으로 래핑됩니다
--   함수 도구 호출은 각각 `function_span()` 으로 래핑됩니다
--   가드레일은 `guardrail_span()` 으로 래핑됩니다
--   핸드오프는 `handoff_span()` 으로 래핑됩니다
--   오디오 입력(음성-텍스트)은 `transcription_span()` 으로 래핑됩니다
--   오디오 출력(텍스트-음성)은 `speech_span()` 으로 래핑됩니다
--   관련 오디오 스팬은 `speech_group_span()` 하위로 배치될 수 있습니다
+-   전체 `Runner.{run, run_sync, run_streamed}()` 가 `trace()` 로 래핑됨
+-   에이전트가 실행될 때마다 `agent_span()` 으로 래핑됨
+-   LLM 생성은 `generation_span()` 으로 래핑됨
+-   함수 도구 호출은 각각 `function_span()` 으로 래핑됨
+-   가드레일은 `guardrail_span()` 으로 래핑됨
+-   핸드오프는 `handoff_span()` 으로 래핑됨
+-   오디오 입력(음성-텍스트)은 `transcription_span()` 으로 래핑됨
+-   오디오 출력(텍스트-음성)은 `speech_span()` 으로 래핑됨
+-   관련 오디오 스팬은 `speech_group_span()` 아래에 상위로 배치될 수 있음
 
-기본적으로 트레이스 이름은 "Agent workflow"입니다. `trace` 를 사용하면 이 이름을 설정할 수 있으며, 또는 [`RunConfig`][agents.run.RunConfig] 로 이름과 기타 속성을 구성할 수 있습니다.
+기본적으로 트레이스 이름은 "Agent workflow" 입니다. `trace` 를 사용하면 이 이름을 설정할 수 있으며, 또는 [`RunConfig`][agents.run.RunConfig] 로 이름과 기타 속성을 구성할 수 있습니다.
 
-또한 [custom trace processors](#custom-tracing-processors) 를 설정하여 트레이스를 다른 대상으로 전송(대체 또는 보조 대상으로)할 수 있습니다.
+또한, [사용자 정의 트레이스 프로세서](#custom-tracing-processors)를 설정하여 다른 대상지로 트레이스를 전송할 수 있습니다(대체 또는 보조 목적).
 
 ## 상위 수준 트레이스
 
-때로는 여러 번의 `run()` 호출을 하나의 트레이스에 포함하고 싶을 수 있습니다. 전체 코드를 `trace()` 로 래핑하면 됩니다.
+때로는 여러 번의 `run()` 호출이 하나의 트레이스의 일부가 되길 원할 수 있습니다. 전체 코드를 `trace()` 로 래핑하면 가능합니다.
 
 ```python
 from agents import Agent, Runner, trace
@@ -64,46 +64,46 @@ async def main():
         print(f"Rating: {second_result.final_output}")
 ```
 
-1. `Runner.run` 의 두 호출이 `with trace()` 로 래핑되어 있기 때문에, 개별 실행은 두 개의 트레이스를 생성하는 대신 전체 트레이스의 일부가 됩니다.
+1. `Runner.run` 에 대한 두 호출이 `with trace()` 로 래핑되어 있으므로, 개별 실행이 두 개의 트레이스를 생성하는 대신 전체 트레이스의 일부가 됩니다.
 
 ## 트레이스 생성
 
-[`trace()`][agents.tracing.trace] 함수를 사용해 트레이스를 생성할 수 있습니다. 트레이스는 시작과 종료가 필요합니다. 다음 두 가지 방법이 있습니다:
+[`trace()`][agents.tracing.trace] 함수를 사용해 트레이스를 생성할 수 있습니다. 트레이스는 시작과 종료가 필요합니다. 이를 위한 두 가지 방법이 있습니다:
 
-1. **권장**: 컨텍스트 매니저로 사용합니다. 예: `with trace(...) as my_trace`. 적절한 시점에 트레이스를 자동으로 시작하고 종료합니다
-2. 수동으로 [`trace.start()`][agents.tracing.Trace.start] 와 [`trace.finish()`][agents.tracing.Trace.finish] 를 호출할 수도 있습니다
+1. 권장: 컨텍스트 매니저로 사용합니다. 예: `with trace(...) as my_trace`. 적절한 시점에 트레이스가 자동으로 시작되고 종료됩니다
+2. 수동으로 [`trace.start()`][agents.tracing.Trace.start] 및 [`trace.finish()`][agents.tracing.Trace.finish] 를 호출할 수도 있습니다
 
-현재 트레이스는 Python [`contextvar`](https://docs.python.org/3/library/contextvars.html) 를 통해 추적됩니다. 즉, 자동으로 동시성을 지원합니다. 트레이스를 수동으로 시작/종료하는 경우, 현재 트레이스를 업데이트하려면 `start()`/`finish()` 에 `mark_as_current` 및 `reset_current` 를 전달해야 합니다.
+현재 트레이스는 Python 의 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 를 통해 추적됩니다. 즉, 동시성에서도 자동으로 동작합니다. 트레이스를 수동으로 시작/종료하는 경우, 현재 트레이스를 업데이트하기 위해 `start()`/`finish()` 에 `mark_as_current` 및 `reset_current` 를 전달해야 합니다.
 
 ## 스팬 생성
 
-여러 [`*_span()`][agents.tracing.create] 메서드를 사용해 스팬을 생성할 수 있습니다. 일반적으로 스팬을 수동으로 생성할 필요는 없습니다. 사용자 정의 스팬 정보를 추적하기 위한 [`custom_span()`][agents.tracing.custom_span] 함수가 제공됩니다.
+여러 [`*_span()`][agents.tracing.create] 메서드를 사용하여 스팬을 생성할 수 있습니다. 일반적으로 스팬을 수동으로 생성할 필요는 없습니다. 사용자 정의 스팬 정보를 추적하기 위한 [`custom_span()`][agents.tracing.custom_span] 함수가 제공됩니다.
 
-스팬은 자동으로 현재 트레이스의 일부가 되며, Python [`contextvar`](https://docs.python.org/3/library/contextvars.html) 를 통해 추적되는 가장 가까운 현재 스팬 하위로 중첩됩니다.
+스팬은 자동으로 현재 트레이스의 일부가 되며, Python 의 [`contextvar`](https://docs.python.org/3/library/contextvars.html) 를 통해 추적되는 가장 가까운 현재 스팬 아래에 중첩됩니다.
 
-## 민감 데이터
+## 민감한 데이터
 
-일부 스팬은 잠재적으로 민감한 데이터를 캡처할 수 있습니다.
+특정 스팬은 잠재적으로 민감한 데이터를 캡처할 수 있습니다.
 
-`generation_span()` 은 LLM 생성의 입력/출력을 저장하고, `function_span()` 은 함수 호출의 입력/출력을 저장합니다. 민감한 데이터를 포함할 수 있으므로 [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] 를 통해 해당 데이터 캡처를 비활성화할 수 있습니다.
+`generation_span()` 은 LLM 생성의 입력/출력을 저장하고, `function_span()` 은 함수 호출의 입력/출력을 저장합니다. 여기에 민감한 데이터가 포함될 수 있으므로 [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data] 를 통해 해당 데이터 캡처를 비활성화할 수 있습니다.
 
-마찬가지로, 오디오 스팬은 기본적으로 입력 및 출력 오디오에 대해 base64로 인코딩된 PCM 데이터를 포함합니다. [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data] 를 구성하여 이 오디오 데이터 캡처를 비활성화할 수 있습니다.
+마찬가지로, 오디오 스팬은 기본적으로 입력 및 출력 오디오에 대해 base64 로 인코딩된 PCM 데이터를 포함합니다. [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data] 를 구성하여 이 오디오 데이터 캡처를 비활성화할 수 있습니다.
 
-## 맞춤 트레이싱 프로세서
+## 사용자 정의 트레이싱 프로세서
 
 트레이싱의 상위 수준 아키텍처는 다음과 같습니다:
 
--   초기화 시, 트레이스를 생성하는 역할을 하는 전역 [`TraceProvider`][agents.tracing.setup.TraceProvider] 를 생성합니다
--   [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] 가 트레이스/스팬을 배치로 [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter] 에 전달하도록 `TraceProvider` 를 구성합니다. Exporter 는 스팬과 트레이스를 OpenAI 백엔드로 배치 전송합니다
+-   초기화 시, 트레이스를 생성하는 역할의 전역 [`TraceProvider`][agents.tracing.setup.TraceProvider] 를 생성합니다
+-   트레이스/스팬을 배치로 [`BackendSpanExporter`][agents.tracing.processors.BackendSpanExporter] 에 전달하는 [`BatchTraceProcessor`][agents.tracing.processors.BatchTraceProcessor] 로 `TraceProvider` 를 구성합니다. 이는 스팬과 트레이스를 배치로 OpenAI 백엔드로 내보냅니다
 
-기본 설정을 사용자 정의하여 다른 백엔드로 전송하거나 추가 백엔드로 전송하거나, exporter 동작을 수정하려면 다음 두 가지 옵션이 있습니다:
+기본 설정을 사용자 정의하여, 대체 또는 추가 백엔드로 트레이스를 전송하거나 익스포터 동작을 수정하려면 두 가지 옵션이 있습니다:
 
-1. [`add_trace_processor()`][agents.tracing.add_trace_processor] 는 트레이스와 스팬이 준비될 때 이를 수신하는 **추가** 트레이스 프로세서를 추가할 수 있게 해줍니다. 이를 통해 OpenAI 백엔드로 트레이스를 전송하는 것에 더해 자체 처리를 수행할 수 있습니다
-2. [`set_trace_processors()`][agents.tracing.set_trace_processors] 는 기본 프로세서를 사용자의 트레이스 프로세서로 **교체** 할 수 있게 해줍니다. 이 경우 OpenAI 백엔드로 트레이스가 전송되지 않으며, 이를 수행하는 `TracingProcessor` 를 포함한 경우에만 전송됩니다
+1. [`add_trace_processor()`][agents.tracing.add_trace_processor] 는 트레이스와 스팬이 준비되는 즉시 수신하는 **추가** 트레이스 프로세서를 추가할 수 있게 합니다. 이를 통해 OpenAI 백엔드로 트레이스를 전송하는 것에 더해 자체 처리를 수행할 수 있습니다
+2. [`set_trace_processors()`][agents.tracing.set_trace_processors] 는 기본 프로세서를 사용자 정의 트레이스 프로세서로 **교체**할 수 있게 합니다. 이 경우 OpenAI 백엔드로 트레이스가 전송되지 않으며, 그렇게 하는 `TracingProcessor` 를 포함시켜야 합니다
 
-## 비 OpenAI 모델과 트레이싱
+## 비 OpenAI 모델과의 트레이싱
 
-트레이싱을 비활성화할 필요 없이 OpenAI API 키를 비 OpenAI 모델과 함께 사용하여 OpenAI Traces 대시보드에서 무료 트레이싱을 활성화할 수 있습니다.
+OpenAI 의 API 키를 비 OpenAI 모델과 함께 사용하여, 트레이싱을 비활성화할 필요 없이 OpenAI Traces 대시보드에서 무료 트레이싱을 활성화할 수 있습니다.
 
 ```python
 import os
