@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterable, Sequence, cast
+from typing import Any, cast
 
 import pytest
+from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
+from openai.types.responses.response_output_text_param import ResponseOutputTextParam
+from openai.types.responses.response_reasoning_item_param import (
+    ResponseReasoningItemParam,
+    Summary,
+)
 from sqlalchemy import select, text, update
 from sqlalchemy.sql import Select
 
@@ -15,12 +22,6 @@ from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
-from openai.types.responses.response_output_message_param import ResponseOutputMessageParam
-from openai.types.responses.response_output_text_param import ResponseOutputTextParam
-from openai.types.responses.response_reasoning_item_param import (
-    ResponseReasoningItemParam,
-    Summary,
-)
 
 # Mark all tests in this file as asyncio
 pytestmark = pytest.mark.asyncio
@@ -58,7 +59,7 @@ def _make_reasoning_item(item_id: str, summary_text: str) -> TResponseInputItem:
 def _item_ids(items: Sequence[TResponseInputItem]) -> list[str]:
     result: list[str] = []
     for item in items:
-        item_dict = cast(Dict[str, Any], item)
+        item_dict = cast(dict[str, Any], item)
         result.append(cast(str, item_dict["id"]))
     return result
 
@@ -332,7 +333,7 @@ async def test_pop_item_same_timestamp_returns_latest():
 
     popped = await session.pop_item()
     assert popped is not None
-    assert cast(Dict[str, Any], popped)["id"] == "msg_pop_same_ts"
+    assert cast(dict[str, Any], popped)["id"] == "msg_pop_same_ts"
 
     remaining = await session.get_items()
     assert _item_ids(remaining) == ["rs_pop_same_ts"]
