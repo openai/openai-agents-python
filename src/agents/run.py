@@ -1139,7 +1139,11 @@ class AgentRunner:
             streamed_result.is_complete = True
         finally:
             if streamed_result._input_guardrails_task:
-                await streamed_result._input_guardrails_task
+                try:
+                    streamed_result.input_guardrail_results = await streamed_result._input_guardrails_task
+                except Exception:
+                    # Exceptions will be checked in the stream_events loop
+                    output_guardrail_results = []
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
