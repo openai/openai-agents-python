@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import pytest
 
 from agents import Agent, RunContextWrapper
+from agents.exceptions import UserError
 
 
 class TestInstructionsSignatureValidation:
@@ -111,8 +112,8 @@ class TestInstructionsSignatureValidation:
 
     @pytest.mark.asyncio
     async def test_non_callable_instructions_raises_error(self, mock_run_context):
-        """Test that non-callable instructions raise a TypeError during initialization"""
-        with pytest.raises(TypeError) as exc_info:
+        """Test that non-callable instructions raise a UserError during initialization"""
+        with pytest.raises(UserError) as exc_info:
             Agent(name="test_agent", instructions=123)  # type: ignore[arg-type]
 
         assert "Agent instructions must be a string, callable, or None" in str(exc_info.value)
