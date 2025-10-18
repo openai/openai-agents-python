@@ -377,16 +377,20 @@ class LitellmModel(Model):
             # Already a ToolChoiceFunction, use directly
             response_tool_choice = tool_choice
         elif isinstance(tool_choice, dict):
-            # Convert from Responses format dict to ToolChoiceFunction
-            # The Responses Converter returns: {"type": "function", "name": "tool_name"}
-            tool_name = tool_choice.get("name")
+            # Convert from ChatCompletions format dict to ToolChoiceFunction
+            # ChatCompletions Converter returns: {"type": "function", "function": {"name": "..."}}
+            func_data = tool_choice.get("function")
             if (
                 tool_choice.get("type") == "function"
-                and tool_name is not None
-                and isinstance(tool_name, str)
-                and tool_name  # Ensure non-empty string
+                and func_data is not None
+                and isinstance(func_data, dict)
             ):
-                response_tool_choice = ToolChoiceFunction(type="function", name=tool_name)
+                tool_name = func_data.get("name")
+                if isinstance(tool_name, str) and tool_name:  # Ensure non-empty string
+                    response_tool_choice = ToolChoiceFunction(type="function", name=tool_name)
+                else:
+                    # Fallback to auto if name is missing or invalid
+                    response_tool_choice = "auto"
             else:
                 # Fallback to auto if unexpected format
                 response_tool_choice = "auto"
