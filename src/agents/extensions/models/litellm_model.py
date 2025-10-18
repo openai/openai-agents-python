@@ -369,7 +369,7 @@ class LitellmModel(Model):
             return ret
 
         # Convert tool_choice to the correct type for Response
-        # tool_choice can be a Literal, ToolChoiceFunction, dict from Responses Converter, or omit
+        # tool_choice can be a Literal, ToolChoiceFunction, dict from ChatCompletions Converter, or omit
         response_tool_choice: Literal["auto", "required", "none"] | ToolChoiceFunction
         if tool_choice is omit:
             response_tool_choice = "auto"
