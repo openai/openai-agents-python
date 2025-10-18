@@ -57,7 +57,7 @@ class TwilioHandler:
         self._audio_buffer: bytearray = bytearray()
         self._last_buffer_send_time = time.time()
 
-        # Outgoing audio buffer (from OpenAI to Twilio) - NEW
+        # Outgoing audio buffer (from OpenAI to Twilio)
         self._outgoing_audio_buffer: bytearray = bytearray()
         self._last_outgoing_send_time = time.time()
 
@@ -66,6 +66,8 @@ class TwilioHandler:
         self._mark_data: dict[
             str, tuple[str, int, int]
         ] = {}  # mark_id -> (item_id, content_index, byte_count)
+        # Track marks for buffered audio chunks
+        self._buffered_marks: list[str] = []  # mark_ids for chunks in current buffer
 
     async def start(self) -> None:
         """Start the session."""
@@ -132,32 +134,28 @@ class TwilioHandler:
             self._outgoing_audio_buffer.extend(event.audio.data)
 
             # Store metadata for this audio chunk
-            self._mark_counter += 1
-            mark_id = str(self._mark_counter)
-            self._mark_data[mark_id] = (
-                event.audio.item_id,
-                event.audio.content_index,
-                len(event.audio.data),
+            mark_id = self._create_mark(
+                event.audio.item_id, event.audio.content_index, len(event.audio.data)
             )
+            self._buffered_marks.append(mark_id)
 
             # Send buffered audio if we have enough data (reduces jittering)
             if len(self._outgoing_audio_buffer) >= self.BUFFER_SIZE_BYTES:
-                await self._flush_outgoing_audio_buffer(mark_id)
+                await self._flush_outgoing_audio_buffer()
 
         elif event.type == "audio_interrupted":
             print("Sending audio interrupted to Twilio")
             # Flush any remaining buffered audio before clearing
-            if self._outgoing_audio_buffer:
-                await self._flush_outgoing_audio_buffer(None)
+            await self._flush_outgoing_audio_buffer()
             await self.twilio_websocket.send_text(
                 json.dumps({"event": "clear", "streamSid": self._stream_sid})
             )
             self._outgoing_audio_buffer.clear()
+            self._buffered_marks.clear()
         elif event.type == "audio_end":
             print("Audio end - flushing remaining buffered audio")
             # Flush remaining audio at the end
-            if self._outgoing_audio_buffer:
-                await self._flush_outgoing_audio_buffer(None)
+            await self._flush_outgoing_audio_buffer()
         elif event.type == "raw_model_event":
             pass
         else:
@@ -245,7 +243,14 @@ class TwilioHandler:
         except Exception as e:
             print(f"Error sending buffered audio to OpenAI: {e}")
 
-    async def _flush_outgoing_audio_buffer(self, mark_id: str | None) -> None:
+    def _create_mark(self, item_id: str, content_index: int, byte_count: int) -> str:
+        """Create a new mark for tracking audio playback."""
+        self._mark_counter += 1
+        mark_id = str(self._mark_counter)
+        self._mark_data[mark_id] = (item_id, content_index, byte_count)
+        return mark_id
+
+    async def _flush_outgoing_audio_buffer(self) -> None:
         """Send buffered audio to Twilio to reduce jittering."""
         if not self._outgoing_audio_buffer:
             return
@@ -263,8 +268,8 @@ class TwilioHandler:
                 )
             )
 
-            # Send mark event for playback tracking (if provided)
-            if mark_id is not None:
+            # Send mark events for all buffered chunks (for playback tracking)
+            for mark_id in self._buffered_marks:
                 await self.twilio_websocket.send_text(
                     json.dumps(
                         {
@@ -275,8 +280,9 @@ class TwilioHandler:
                     )
                 )
 
-            # Clear the buffer
+            # Clear the buffer and marks
             self._outgoing_audio_buffer.clear()
+            self._buffered_marks.clear()
             self._last_outgoing_send_time = time.time()
 
         except Exception as e:
@@ -302,7 +308,7 @@ class TwilioHandler:
                     self._outgoing_audio_buffer
                     and current_time - self._last_outgoing_send_time > self.CHUNK_LENGTH_S * 2
                 ):
-                    await self._flush_outgoing_audio_buffer(None)
+                    await self._flush_outgoing_audio_buffer()
 
         except Exception as e:
             print(f"Error in buffer flush loop: {e}")
