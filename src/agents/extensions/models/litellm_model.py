@@ -24,7 +24,6 @@ from openai.types.chat import (
     ChatCompletionMessageCustomToolCall,
     ChatCompletionMessageFunctionToolCall,
     ChatCompletionMessageParam,
-    ChatCompletionNamedToolChoiceParam,
 )
 from openai.types.chat.chat_completion_message import (
     Annotation,
@@ -370,27 +369,31 @@ class LitellmModel(Model):
             return ret
 
         # Convert tool_choice to the correct type for Response
-        # tool_choice can be a Literal, a ChatCompletionNamedToolChoiceParam, or omit
+        # tool_choice can be a Literal, ToolChoiceFunction, dict from Responses Converter, or omit
         response_tool_choice: Literal["auto", "required", "none"] | ToolChoiceFunction
         if tool_choice is omit:
             response_tool_choice = "auto"
+        elif isinstance(tool_choice, ToolChoiceFunction):
+            # Already a ToolChoiceFunction, use directly
+            response_tool_choice = tool_choice
         elif isinstance(tool_choice, dict):
-            # Convert from ChatCompletionNamedToolChoiceParam to ToolChoiceFunction
-            # The dict has structure: {"type": "function", "function": {"name": "tool_name"}}
-            func_data = tool_choice.get("function")
+            # Convert from Responses format dict to ToolChoiceFunction
+            # The Responses Converter returns: {"type": "function", "name": "tool_name"}
+            tool_name = tool_choice.get("name")
             if (
                 tool_choice.get("type") == "function"
-                and func_data is not None
-                and isinstance(func_data, dict)
+                and tool_name is not None
+                and isinstance(tool_name, str)
+                and tool_name  # Ensure non-empty string
             ):
-                response_tool_choice = ToolChoiceFunction(
-                    type="function", name=func_data["name"]
-                )
+                response_tool_choice = ToolChoiceFunction(type="function", name=tool_name)
             else:
                 # Fallback to auto if unexpected format
                 response_tool_choice = "auto"
         elif tool_choice in ("auto", "required", "none"):
-            response_tool_choice = tool_choice  # type: ignore
+            from typing import cast
+
+            response_tool_choice = cast(Literal["auto", "required", "none"], tool_choice)
         else:
             # Fallback to auto for any other case
             response_tool_choice = "auto"
