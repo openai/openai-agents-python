@@ -234,25 +234,27 @@ class Agent(AgentBase, Generic[TContext]):
     def __post_init__(self):
         from typing import get_origin
 
+        from .exceptions import UserError
+
         if not isinstance(self.name, str):
-            raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
+            raise UserError(f"Agent name must be a string, got {type(self.name).__name__}")
 
         if self.handoff_description is not None and not isinstance(self.handoff_description, str):
-            raise TypeError(
+            raise UserError(
                 f"Agent handoff_description must be a string or None, "
                 f"got {type(self.handoff_description).__name__}"
             )
 
         if not isinstance(self.tools, list):
-            raise TypeError(f"Agent tools must be a list, got {type(self.tools).__name__}")
+            raise UserError(f"Agent tools must be a list, got {type(self.tools).__name__}")
 
         if not isinstance(self.mcp_servers, list):
-            raise TypeError(
+            raise UserError(
                 f"Agent mcp_servers must be a list, got {type(self.mcp_servers).__name__}"
             )
 
         if not isinstance(self.mcp_config, dict):
-            raise TypeError(
+            raise UserError(
                 f"Agent mcp_config must be a dict, got {type(self.mcp_config).__name__}"
             )
 
@@ -261,7 +263,7 @@ class Agent(AgentBase, Generic[TContext]):
             and not isinstance(self.instructions, str)
             and not callable(self.instructions)
         ):
-            raise TypeError(
+            raise UserError(
                 f"Agent instructions must be a string, callable, or None, "
                 f"got {type(self.instructions).__name__}"
             )
@@ -271,24 +273,24 @@ class Agent(AgentBase, Generic[TContext]):
             and not callable(self.prompt)
             and not hasattr(self.prompt, "get")
         ):
-            raise TypeError(
+            raise UserError(
                 f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
                 f"got {type(self.prompt).__name__}"
             )
 
         if not isinstance(self.handoffs, list):
-            raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
+            raise UserError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
 
         if self.model is not None and not isinstance(self.model, str):
             from .models.interface import Model
 
             if not isinstance(self.model, Model):
-                raise TypeError(
+                raise UserError(
                     f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
                 )
 
         if not isinstance(self.model_settings, ModelSettings):
-            raise TypeError(
+            raise UserError(
                 f"Agent model_settings must be a ModelSettings instance, "
                 f"got {type(self.model_settings).__name__}"
             )
@@ -314,12 +316,12 @@ class Agent(AgentBase, Generic[TContext]):
             self.model_settings = ModelSettings()
 
         if not isinstance(self.input_guardrails, list):
-            raise TypeError(
+            raise UserError(
                 f"Agent input_guardrails must be a list, got {type(self.input_guardrails).__name__}"
             )
 
         if not isinstance(self.output_guardrails, list):
-            raise TypeError(
+            raise UserError(
                 f"Agent output_guardrails must be a list, "
                 f"got {type(self.output_guardrails).__name__}"
             )
@@ -331,7 +333,7 @@ class Agent(AgentBase, Generic[TContext]):
                 isinstance(self.output_type, (type, AgentOutputSchemaBase))
                 or get_origin(self.output_type) is not None
             ):
-                raise TypeError(
+                raise UserError(
                     f"Agent output_type must be a type, AgentOutputSchemaBase, or None, "
                     f"got {type(self.output_type).__name__}"
                 )
@@ -340,7 +342,7 @@ class Agent(AgentBase, Generic[TContext]):
             from .lifecycle import AgentHooksBase
 
             if not isinstance(self.hooks, AgentHooksBase):
-                raise TypeError(
+                raise UserError(
                     f"Agent hooks must be an AgentHooks instance or None, "
                     f"got {type(self.hooks).__name__}"
                 )
@@ -353,13 +355,13 @@ class Agent(AgentBase, Generic[TContext]):
             and not isinstance(self.tool_use_behavior, dict)
             and not callable(self.tool_use_behavior)
         ):
-            raise TypeError(
+            raise UserError(
                 f"Agent tool_use_behavior must be 'run_llm_again', 'stop_on_first_tool', "
                 f"StopAtTools dict, or callable, got {type(self.tool_use_behavior).__name__}"
             )
 
         if not isinstance(self.reset_tool_choice, bool):
-            raise TypeError(
+            raise UserError(
                 f"Agent reset_tool_choice must be a boolean, "
                 f"got {type(self.reset_tool_choice).__name__}"
             )
