@@ -57,6 +57,7 @@ def test_all_fields_serialization() -> None:
         metadata={"foo": "bar"},
         store=False,
         include_usage=False,
+        track_cost=False,
         response_include=["reasoning.encrypted_content"],
         top_logprobs=1,
         verbosity="low",

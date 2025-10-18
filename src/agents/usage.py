@@ -1,4 +1,5 @@
 from dataclasses import field
+from typing import Optional
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic.dataclasses import dataclass
@@ -27,6 +28,10 @@ class Usage:
     total_tokens: int = 0
     """Total tokens sent and received, across all requests."""
 
+    cost: Optional[float] = None
+    """Total cost in USD for the requests. Only available for certain model providers
+    (e.g., LiteLLM). Will be None for models that don't provide cost information."""
+
     def add(self, other: "Usage") -> None:
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
@@ -41,3 +46,7 @@ class Usage:
             reasoning_tokens=self.output_tokens_details.reasoning_tokens
             + other.output_tokens_details.reasoning_tokens
         )
+
+        # Aggregate cost if either has a value.
+        if self.cost is not None or other.cost is not None:
+            self.cost = (self.cost or 0.0) + (other.cost or 0.0)

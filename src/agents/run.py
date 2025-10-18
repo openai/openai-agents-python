@@ -1243,6 +1243,9 @@ class AgentRunner:
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
             if isinstance(event, ResponseCompletedEvent):
+                # Extract cost if it was attached by LiteLLM model.
+                cost = getattr(event.response, "_litellm_cost", None)
+
                 usage = (
                     Usage(
                         requests=1,
@@ -1251,6 +1254,7 @@ class AgentRunner:
                         total_tokens=event.response.usage.total_tokens,
                         input_tokens_details=event.response.usage.input_tokens_details,
                         output_tokens_details=event.response.usage.output_tokens_details,
+                        cost=cost,
                     )
                     if event.response.usage
                     else Usage()
