@@ -70,6 +70,7 @@ This example demonstrates how to connect the OpenAI Realtime API to a phone call
 
 -   **WebSocket connection issues**: Ensure your ngrok URL is correct and publicly accessible
 -   **Audio quality**: Twilio streams audio in mulaw format at 8kHz, which may affect quality
+-   **Audio jittering/skipping**: The implementation includes audio buffering (50ms chunks) to reduce jittering at word boundaries. This buffers both incoming (Twilio → OpenAI) and outgoing (OpenAI → Twilio) audio for smoother playback.
 -   **Latency**: Network latency between Twilio, your server, and OpenAI affects response time
 -   **Logs**: Check the console output for detailed connection and error logs
 
