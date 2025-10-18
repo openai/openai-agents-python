@@ -52,8 +52,14 @@ class TwilioHandler:
         self.BUFFER_SIZE_BYTES = int(self.SAMPLE_RATE * self.CHUNK_LENGTH_S)  # 50ms worth of audio
 
         self._stream_sid: str | None = None
+
+        # Incoming audio buffer (from Twilio to OpenAI)
         self._audio_buffer: bytearray = bytearray()
         self._last_buffer_send_time = time.time()
+
+        # Outgoing audio buffer (from OpenAI to Twilio) - NEW
+        self._outgoing_audio_buffer: bytearray = bytearray()
+        self._last_outgoing_send_time = time.time()
 
         # Mark event tracking for playback
         self._mark_counter = 0
@@ -122,18 +128,10 @@ class TwilioHandler:
     async def _handle_realtime_event(self, event: RealtimeSessionEvent) -> None:
         """Handle events from the realtime session."""
         if event.type == "audio":
-            base64_audio = base64.b64encode(event.audio.data).decode("utf-8")
-            await self.twilio_websocket.send_text(
-                json.dumps(
-                    {
-                        "event": "media",
-                        "streamSid": self._stream_sid,
-                        "media": {"payload": base64_audio},
-                    }
-                )
-            )
+            # Buffer outgoing audio to reduce jittering
+            self._outgoing_audio_buffer.extend(event.audio.data)
 
-            # Send mark event for playback tracking
+            # Store metadata for this audio chunk
             self._mark_counter += 1
             mark_id = str(self._mark_counter)
             self._mark_data[mark_id] = (
@@ -142,23 +140,24 @@ class TwilioHandler:
                 len(event.audio.data),
             )
 
-            await self.twilio_websocket.send_text(
-                json.dumps(
-                    {
-                        "event": "mark",
-                        "streamSid": self._stream_sid,
-                        "mark": {"name": mark_id},
-                    }
-                )
-            )
+            # Send buffered audio if we have enough data (reduces jittering)
+            if len(self._outgoing_audio_buffer) >= self.BUFFER_SIZE_BYTES:
+                await self._flush_outgoing_audio_buffer(mark_id)
 
         elif event.type == "audio_interrupted":
             print("Sending audio interrupted to Twilio")
+            # Flush any remaining buffered audio before clearing
+            if self._outgoing_audio_buffer:
+                await self._flush_outgoing_audio_buffer(None)
             await self.twilio_websocket.send_text(
                 json.dumps({"event": "clear", "streamSid": self._stream_sid})
             )
+            self._outgoing_audio_buffer.clear()
         elif event.type == "audio_end":
-            print("Audio end")
+            print("Audio end - flushing remaining buffered audio")
+            # Flush remaining audio at the end
+            if self._outgoing_audio_buffer:
+                await self._flush_outgoing_audio_buffer(None)
         elif event.type == "raw_model_event":
             pass
         else:
@@ -246,19 +245,64 @@ class TwilioHandler:
         except Exception as e:
             print(f"Error sending buffered audio to OpenAI: {e}")
 
+    async def _flush_outgoing_audio_buffer(self, mark_id: str | None) -> None:
+        """Send buffered audio to Twilio to reduce jittering."""
+        if not self._outgoing_audio_buffer:
+            return
+
+        try:
+            # Encode and send the buffered audio to Twilio
+            base64_audio = base64.b64encode(bytes(self._outgoing_audio_buffer)).decode("utf-8")
+            await self.twilio_websocket.send_text(
+                json.dumps(
+                    {
+                        "event": "media",
+                        "streamSid": self._stream_sid,
+                        "media": {"payload": base64_audio},
+                    }
+                )
+            )
+
+            # Send mark event for playback tracking (if provided)
+            if mark_id is not None:
+                await self.twilio_websocket.send_text(
+                    json.dumps(
+                        {
+                            "event": "mark",
+                            "streamSid": self._stream_sid,
+                            "mark": {"name": mark_id},
+                        }
+                    )
+                )
+
+            # Clear the buffer
+            self._outgoing_audio_buffer.clear()
+            self._last_outgoing_send_time = time.time()
+
+        except Exception as e:
+            print(f"Error sending buffered audio to Twilio: {e}")
+
     async def _buffer_flush_loop(self) -> None:
-        """Periodically flush audio buffer to prevent stale data."""
+        """Periodically flush audio buffers to prevent stale data."""
         try:
             while True:
                 await asyncio.sleep(self.CHUNK_LENGTH_S)  # Check every 50ms
 
-                # If buffer has data and it's been too long since last send, flush it
                 current_time = time.time()
+
+                # Flush incoming audio buffer (from Twilio to OpenAI) if stale
                 if (
                     self._audio_buffer
                     and current_time - self._last_buffer_send_time > self.CHUNK_LENGTH_S * 2
                 ):
                     await self._flush_audio_buffer()
+
+                # Flush outgoing audio buffer (from OpenAI to Twilio) if stale
+                if (
+                    self._outgoing_audio_buffer
+                    and current_time - self._last_outgoing_send_time > self.CHUNK_LENGTH_S * 2
+                ):
+                    await self._flush_outgoing_audio_buffer(None)
 
         except Exception as e:
             print(f"Error in buffer flush loop: {e}")
