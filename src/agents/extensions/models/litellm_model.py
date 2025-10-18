@@ -24,6 +24,7 @@ from openai.types.chat import (
     ChatCompletionMessageCustomToolCall,
     ChatCompletionMessageFunctionToolCall,
     ChatCompletionMessageParam,
+    ChatCompletionNamedToolChoiceParam,
 )
 from openai.types.chat.chat_completion_message import (
     Annotation,
@@ -32,6 +33,7 @@ from openai.types.chat.chat_completion_message import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.responses import Response
+from openai.types.responses.tool_choice_function import ToolChoiceFunction
 
 from ... import _debug
 from ...agent_output import AgentOutputSchemaBase
@@ -367,15 +369,39 @@ class LitellmModel(Model):
         if isinstance(ret, litellm.types.utils.ModelResponse):
             return ret
 
+        # Convert tool_choice to the correct type for Response
+        # tool_choice can be a Literal, a ChatCompletionNamedToolChoiceParam, or omit
+        response_tool_choice: Literal["auto", "required", "none"] | ToolChoiceFunction
+        if tool_choice is omit:
+            response_tool_choice = "auto"
+        elif isinstance(tool_choice, dict):
+            # Convert from ChatCompletionNamedToolChoiceParam to ToolChoiceFunction
+            # The dict has structure: {"type": "function", "function": {"name": "tool_name"}}
+            func_data = tool_choice.get("function")
+            if (
+                tool_choice.get("type") == "function"
+                and func_data is not None
+                and isinstance(func_data, dict)
+            ):
+                response_tool_choice = ToolChoiceFunction(
+                    type="function", name=func_data["name"]
+                )
+            else:
+                # Fallback to auto if unexpected format
+                response_tool_choice = "auto"
+        elif tool_choice in ("auto", "required", "none"):
+            response_tool_choice = tool_choice  # type: ignore
+        else:
+            # Fallback to auto for any other case
+            response_tool_choice = "auto"
+
         response = Response(
             id=FAKE_RESPONSES_ID,
             created_at=time.time(),
             model=self.model,
             object="response",
             output=[],
-            tool_choice=cast(Literal["auto", "required", "none"], tool_choice)
-            if tool_choice is not omit
-            else "auto",
+            tool_choice=response_tool_choice,
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
             tools=[],
