@@ -11,6 +11,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from .agent_output import AgentOutputSchemaBase
+from .exceptions import UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
@@ -233,8 +234,6 @@ class Agent(AgentBase, Generic[TContext]):
 
     def __post_init__(self):
         from typing import get_origin
-
-        from .exceptions import UserError
 
         if not isinstance(self.name, str):
             raise UserError(f"Agent name must be a string, got {type(self.name).__name__}")

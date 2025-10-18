@@ -217,7 +217,7 @@ class TestAgentValidation:
 
     def test_tools_type_validation_issue_1443(self):
         """Test that UserError is raised when invalid tool type is passed (Issue #1443)"""
-        # Original bug: passing a string instead of a list should raise UserError, not AttributeError
+        # Original bug: passing a string instead of a list should raise UserError, not TypeError
         with pytest.raises(UserError, match="Agent tools must be a list, got str"):
             Agent(
                 name="TestAgent",
