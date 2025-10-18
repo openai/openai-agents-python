@@ -905,7 +905,10 @@ class AgentRunner:
                 t.cancel()
             raise
 
+        # Store the full set of input guardrail results on the streamed result
+        # and return them so callers awaiting this task can receive the list.
         streamed_result.input_guardrail_results = guardrail_results
+        return guardrail_results
 
     @classmethod
     async def _start_streaming(
@@ -1138,6 +1141,16 @@ class AgentRunner:
 
             streamed_result.is_complete = True
         finally:
+            if streamed_result._input_guardrails_task:
+                try:
+                    await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                        streamed_result
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
+                    )
+                    raise e
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
