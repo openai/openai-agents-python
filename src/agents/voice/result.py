@@ -88,7 +88,16 @@ class StreamedAudioResult:
     def _transform_audio_buffer(
         self, buffer: list[bytes], output_dtype: npt.DTypeLike
     ) -> npt.NDArray[np.int16 | np.float32]:
-        np_array = np.frombuffer(b"".join(buffer), dtype=np.int16)
+        # Combine all chunks
+        combined_buffer = b"".join(buffer)
+
+        # Pad with a zero byte if the buffer length is odd
+        # This is needed because np.frombuffer with dtype=np.int16 requires
+        # the buffer size to be a multiple of 2 bytes
+        if len(combined_buffer) % 2 != 0:
+            combined_buffer += b"\x00"
+
+        np_array = np.frombuffer(combined_buffer, dtype=np.int16)
 
         if output_dtype == np.int16:
             return np_array
