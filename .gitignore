@@ -148,3 +148,11 @@ cython_debug/
 
 # Redis database files
 dump.rdb
+# Claude Code
+CLAUDE.md
+CLAUDE_DECISIONS.md
+.claude/
+STOP_AUTORUN
+ALLOW_NET
+ALLOW_INSTALL
+ALLOW_DESTRUCTIVE
