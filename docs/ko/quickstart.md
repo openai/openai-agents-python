@@ -4,9 +4,9 @@ search:
 ---
 # 빠른 시작
 
-## 프로젝트 및 가상 환경 생성
+## 프로젝트와 가상 환경 생성
 
-한 번만 설정하면 됩니다.
+한 번만 하면 됩니다.
 
 ```bash
 mkdir my_project
@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 가상 환경 활성화
 
-새 터미널 세션을 시작할 때마다 수행하세요.
+새 터미널 세션을 시작할 때마다 실행하세요.
 
 ```bash
 source .venv/bin/activate
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API 키 설정
 
-없다면 OpenAI API 키를 만들기 위해 [다음 안내](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)를 따라주세요.
+없다면 OpenAI API 키를 만들기 위해 [이 지침](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)을 따르세요.
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 첫 에이전트 생성
 
-에이전트는 instructions, 이름, 그리고 선택적 구성(예: `model_config`)으로 정의합니다
+에이전트는 instructions, 이름, 그리고 선택적 구성(예: `model_config`)으로 정의됩니다
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## 핸드오프 정의
 
-각 에이전트에서, 작업을 진행하는 방법을 결정하기 위해 에이전트가 선택할 수 있는 아웃바운드 핸드오프 옵션 목록을 정의할 수 있습니다.
+각 에이전트에서, 작업을 진행하는 방법을 결정할 때 선택할 수 있는 아웃바운드 핸드오프 옵션 목록을 정의할 수 있습니다.
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## 에이전트 오케스트레이션 실행
 
-워크플로가 실행되고 선별 에이전트(triage agent)가 두 전문 에이전트 사이를 올바르게 라우팅하는지 확인해 봅시다.
+워크플로가 실행되고 트리아지 에이전트가 두 전문 에이전트 간에 올바르게 라우팅하는지 확인해 봅시다.
 
 ```python
 from agents import Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 모두 결합
+## 전체 통합
 
-핸드오프와 입력 가드레일을 사용하여 전체 워크플로를 모두 결합해 실행해 봅시다.
+핸드오프와 입력 가드레일을 사용해 전체 워크플로를 통합해 실행해 봅시다.
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## 트레이스 보기
 
-에이전트 실행 중에 어떤 일이 일어났는지 검토하려면 [OpenAI 대시보드의 Trace 뷰어](https://platform.openai.com/traces)로 이동해 실행 트레이스를 확인하세요.
+에이전트 실행 중에 어떤 일이 있었는지 검토하려면 [OpenAI 대시보드의 Trace 뷰어](https://platform.openai.com/traces)에서 실행 트레이스를 확인하세요.
 
 ## 다음 단계
 
-더 복잡한 에이전트 흐름을 만드는 방법을 알아보세요:
+더 복잡한 에이전트 플로우를 만드는 방법을 알아보세요:
 
-- Learn about how to configure [에이전트](agents.md).
-- Learn about [에이전트 실행](running_agents.md).
-- Learn about [도구](tools.md), [가드레일](guardrails.md) and [모델](models/index.md).
+- [Agents](agents.md) 구성 방법 알아보기
+- [에이전트 실행](running_agents.md) 알아보기
+- [tools](tools.md), [guardrails](guardrails.md), [models](models/index.md) 알아보기
