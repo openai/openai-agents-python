@@ -207,16 +207,18 @@ from agents.extensions.memory import DaprSession
 session = DaprSession.from_address(
     "user_123",
     state_store_name="statestore",
-    dapr_address="localhost:50001",
+    dapr_address="localhost:50001",  # The default Dapr gRPC port is 50001 and can be omitted.
 )
 
 # Optional: configure TTL and consistency
+from agents.extensions.memory import CONSISTENCY_STRONG
+
 session = DaprSession.from_address(
     "user_123",
     state_store_name="statestore",
-    dapr_address="localhost:50001",
+    dapr_address="localhost:50001",  # The default Dapr gRPC port is 50001 and can be omitted.
     ttl=3600,  # 1 hour
-    consistency="strong",  # or "eventual"
+    consistency=CONSISTENCY_STRONG,  # or CONSISTENCY_EVENTUAL
 )
 ```
 
