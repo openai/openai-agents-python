@@ -11,10 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 __all__: list[str] = [
+    "AdvancedSQLiteSession",
+    "DaprSession",
     "EncryptedSession",
     "RedisSession",
     "SQLAlchemySession",
-    "AdvancedSQLiteSession",
 ]
 
 
@@ -59,5 +60,16 @@ def __getattr__(name: str) -> Any:
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
             raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
+
+    if name == "DaprSession":
+        try:
+            from .dapr_session import DaprSession  # noqa: F401
+
+            return DaprSession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "DaprSession requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")

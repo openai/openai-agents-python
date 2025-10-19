@@ -4,8 +4,46 @@ Before running any tests, make sure you have `uv` installed (and ideally run `ma
 
 ## Running tests
 
-```
+### Unit tests (default)
+
+Runs all tests except integration tests (which require Docker):
+
+```bash
 make tests
+# or explicitly
+make tests-unit
+```
+
+### Integration tests
+
+Runs integration tests that require Docker (e.g., Dapr, Redis containers):
+
+```bash
+make tests-integration
+```
+
+**Note**: Integration tests use `testcontainers` to automatically manage Docker containers. Ensure Docker is running before executing integration tests.
+
+### All tests
+
+Runs all tests including integration tests:
+
+```bash
+make tests-all
+```
+
+### Running specific tests
+
+To run a single test by name:
+
+```bash
+uv run pytest -s -k <test_name>
+```
+
+To run integration tests for a specific module:
+
+```bash
+uv run pytest -m integration tests/extensions/memory/
 ```
 
 ## Snapshots

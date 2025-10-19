@@ -196,6 +196,32 @@ session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 
 See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
+### Dapr state store sessions
+
+Production-ready sessions using Dapr state stores (Redis, PostgreSQL, MongoDB, Cosmos DB, and 30+ other backends):
+
+```python
+from agents.extensions.memory import DaprSession
+
+# Connect to Dapr sidecar
+session = DaprSession.from_address(
+    "user_123",
+    state_store_name="statestore",
+    dapr_address="localhost:50001",
+)
+
+# Optional: configure TTL and consistency
+session = DaprSession.from_address(
+    "user_123",
+    state_store_name="statestore",
+    dapr_address="localhost:50001",
+    ttl=3600,  # 1 hour
+    consistency="strong",  # or "eventual"
+)
+```
+
+See [Dapr Sessions](dapr_session.md) for detailed documentation.
+
 ### Advanced SQLite sessions
 
 Enhanced SQLite sessions with conversation branching, usage analytics, and structured queries:
@@ -262,9 +288,10 @@ Use meaningful session IDs that help you organize conversations:
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
+-   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for cloud-native deployments with support for 30+ backends
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
--   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
+-   Consider implementing custom session backends for other production systems for more advanced use cases
 
 ### Multiple sessions
 
@@ -427,5 +454,6 @@ For detailed API documentation, see:
 -   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API implementation
 -   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
+-   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr state store implementation
 -   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics
 -   [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - Encrypted wrapper for any session

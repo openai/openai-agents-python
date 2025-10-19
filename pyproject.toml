@@ -41,6 +41,7 @@ realtime = ["websockets>=15.0, <16"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=6.4.0"]
+dapr = ["dapr>=1.14.0", "grpcio>=1.60.0"]
 
 [dependency-groups]
 dev = [
@@ -69,6 +70,9 @@ dev = [
     "aiosqlite>=0.21.0",
     "cryptography>=45.0, <46",
     "fakeredis>=2.31.3",
+    "dapr>=1.14.0",
+    "grpcio>=1.60.0",
+    "testcontainers[redis]>=4.0.0",
 ]
 
 [tool.uv.workspace]
@@ -140,6 +144,7 @@ filterwarnings = [
 ]
 markers = [
     "allow_call_model_methods: mark test as allowing calls to real model implementations",
+    "integration: mark test as integration test requiring external services (deselect with '-m \"not integration\"')",
 ]
 
 [tool.inline-snapshot]
