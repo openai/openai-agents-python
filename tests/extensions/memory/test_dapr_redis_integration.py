@@ -20,9 +20,9 @@ import pytest
 pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
 
-from testcontainers.core.container import DockerContainer
-from testcontainers.core.network import Network
-from testcontainers.redis import RedisContainer
+from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
+from testcontainers.core.network import Network  # type: ignore[import-untyped]
+from testcontainers.redis import RedisContainer  # type: ignore[import-untyped]
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory.dapr_session import DaprSession

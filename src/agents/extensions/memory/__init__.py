@@ -12,6 +12,8 @@ from typing import Any
 
 __all__: list[str] = [
     "AdvancedSQLiteSession",
+    "CONSISTENCY_EVENTUAL",
+    "CONSISTENCY_STRONG",
     "DaprSession",
     "EncryptedSession",
     "RedisSession",
@@ -69,6 +71,28 @@ def __getattr__(name: str) -> Any:
         except ModuleNotFoundError as e:
             raise ImportError(
                 "DaprSession requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
+
+    if name == "CONSISTENCY_EVENTUAL":
+        try:
+            from .dapr_session import CONSISTENCY_EVENTUAL  # noqa: F401
+
+            return CONSISTENCY_EVENTUAL
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "CONSISTENCY_EVENTUAL requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
+
+    if name == "CONSISTENCY_STRONG":
+        try:
+            from .dapr_session import CONSISTENCY_STRONG  # noqa: F401
+
+            return CONSISTENCY_STRONG
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "CONSISTENCY_STRONG requires the 'dapr' extra. "
                 "Install it with: pip install openai-agents[dapr]"
             ) from e
 

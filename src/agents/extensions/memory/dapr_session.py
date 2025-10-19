@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import Any, Literal
 
 try:
     from dapr.aio.clients import DaprClient
@@ -39,6 +39,13 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
 
+# Type alias for consistency levels
+ConsistencyLevel = Literal["eventual", "strong"]
+
+# Consistency level constants
+CONSISTENCY_EVENTUAL: ConsistencyLevel = "eventual"
+CONSISTENCY_STRONG: ConsistencyLevel = "strong"
+
 
 class DaprSession(SessionABC):
     """Dapr State Store implementation of :pyclass:`agents.memory.session.Session`."""
@@ -50,7 +57,7 @@ class DaprSession(SessionABC):
         state_store_name: str,
         dapr_client: DaprClient,
         ttl: int | None = None,
-        consistency: str = "eventual",
+        consistency: ConsistencyLevel = CONSISTENCY_EVENTUAL,
     ):
         """Initializes a new DaprSession.
 
@@ -61,8 +68,9 @@ class DaprSession(SessionABC):
             ttl (int | None, optional): Time-to-live in seconds for session data.
                 If None, data persists indefinitely. Note that TTL support depends on
                 the underlying state store implementation. Defaults to None.
-            consistency (str, optional): Consistency level for state operations.
-                Options: "eventual" or "strong". Defaults to "eventual".
+            consistency (ConsistencyLevel, optional): Consistency level for state operations.
+                Use CONSISTENCY_EVENTUAL or CONSISTENCY_STRONG constants.
+                Defaults to CONSISTENCY_EVENTUAL.
         """
         self.session_id = session_id
         self._dapr_client = dapr_client
@@ -104,11 +112,22 @@ class DaprSession(SessionABC):
         session._owns_client = True  # We created the client, so we own it
         return session
 
+    def _get_read_metadata(self) -> dict[str, str]:
+        """Get metadata for read operations including consistency.
+
+        The consistency level is passed through state_metadata as per Dapr's state API.
+        """
+        metadata: dict[str, str] = {}
+        # Add consistency level to metadata for read operations
+        if self._consistency:
+            metadata["consistency"] = self._consistency
+        return metadata
+
     def _get_state_options(self) -> StateOptions | None:
-        """Get StateOptions for consistency level."""
-        if self._consistency == "strong":
+        """Get StateOptions for write/delete consistency level."""
+        if self._consistency == CONSISTENCY_STRONG:
             return StateOptions(consistency=Consistency.strong)
-        elif self._consistency == "eventual":
+        elif self._consistency == CONSISTENCY_EVENTUAL:
             return StateOptions(consistency=Consistency.eventual)
         return None
 
@@ -142,10 +161,11 @@ class DaprSession(SessionABC):
             List of input items representing the conversation history
         """
         async with self._lock:
-            # Get messages from state store
+            # Get messages from state store with consistency level
             response = await self._dapr_client.get_state(
                 store_name=self._state_store_name,
                 key=self._messages_key,
+                state_metadata=self._get_read_metadata(),
             )
 
             if not response.data:
@@ -194,10 +214,11 @@ class DaprSession(SessionABC):
             return
 
         async with self._lock:
-            # Get existing messages
+            # Get existing messages with consistency level
             response = await self._dapr_client.get_state(
                 store_name=self._state_store_name,
                 key=self._messages_key,
+                state_metadata=self._get_read_metadata(),
             )
 
             # Parse existing messages
@@ -247,10 +268,11 @@ class DaprSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
-            # Get messages from state store
+            # Get messages from state store with consistency level
             response = await self._dapr_client.get_state(
                 store_name=self._state_store_name,
                 key=self._messages_key,
+                state_metadata=self._get_read_metadata(),
             )
 
             if not response.data:

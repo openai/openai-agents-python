@@ -182,25 +182,33 @@ TTL support varies by state store. Check your store's [documentation](https://do
 
 ### Consistency levels
 
-Control read/write consistency for state operations:
+Control read/write consistency for state operations. Use the provided constants to avoid typos:
 
 ```python
+from agents.extensions.memory import (
+    DaprSession,
+    CONSISTENCY_EVENTUAL,
+    CONSISTENCY_STRONG,
+)
+
 # Eventual consistency (default, better performance)
 session = DaprSession.from_address(
     session_id="user-123",
     state_store_name="statestore",
     dapr_address="localhost:50001",
-    consistency="eventual",
+    consistency=CONSISTENCY_EVENTUAL,  # or "eventual"
 )
 
-# Strong consistency (guarantees read-after-write)
+# Strong consistency (guarantees read-after-write consistency)
 session = DaprSession.from_address(
     session_id="user-123",
     state_store_name="statestore",
     dapr_address="localhost:50001",
-    consistency="strong",
+    consistency=CONSISTENCY_STRONG,  # or "strong"
 )
 ```
+
+**Important**: Consistency levels apply to both read and write operations. When using `CONSISTENCY_STRONG`, the session ensures that reads always reflect the most recent writes, preventing stale data after updates.
 
 Support varies by state store. See [Dapr consistency documentation](https://docs.dapr.io/developing-applications/building-blocks/state-management/state-management-overview/#consistency).
 

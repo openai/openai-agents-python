@@ -18,7 +18,11 @@ In production, you may want to preserve existing conversation history.
 import asyncio
 
 from agents import Agent, Runner
-from agents.extensions.memory import DaprSession
+from agents.extensions.memory import (
+    CONSISTENCY_EVENTUAL,
+    CONSISTENCY_STRONG,
+    DaprSession,
+)
 
 
 async def main():
@@ -179,7 +183,7 @@ async def demonstrate_advanced_features():
             "eventual_session",
             state_store_name="statestore",
             dapr_address="localhost:50001",
-            consistency="eventual",
+            consistency=CONSISTENCY_EVENTUAL,
         )
 
         # Strong consistency (guaranteed read-after-write)
@@ -187,7 +191,7 @@ async def demonstrate_advanced_features():
             "strong_session",
             state_store_name="statestore",
             dapr_address="localhost:50001",
-            consistency="strong",
+            consistency=CONSISTENCY_STRONG,
         )
 
         if await eventual_session.ping():
