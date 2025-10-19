@@ -291,7 +291,7 @@ Use meaningful session IDs that help you organize conversations:
 -   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for cloud-native deployments with support for 30+ backends
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
--   Consider implementing custom session backends for other production systems for more advanced use cases
+-   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
 
 ### Multiple sessions
 
