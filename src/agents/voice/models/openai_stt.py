@@ -122,7 +122,8 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             return
 
         if self._tracing_span:
-            if self._trace_include_sensitive_audio_data:
+            # Only encode audio if tracing is enabled AND buffer is not empty
+            if self._trace_include_sensitive_audio_data and self._turn_audio_buffer:
                 self._tracing_span.span_data.input = _audio_to_base64(self._turn_audio_buffer)
 
             self._tracing_span.span_data.input_format = "pcm"
