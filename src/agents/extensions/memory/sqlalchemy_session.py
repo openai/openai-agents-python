@@ -449,13 +449,21 @@ class SQLAlchemySession(SessionABC):
                     )
 
                     # Use dialect-specific UPSERT
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["session_id", "key"],
-                        set_={
-                            "value": stmt.excluded.value,
-                            "updated_at": sql_text("CURRENT_TIMESTAMP"),
-                        },
-                    )
+                    if dialect_name == "mysql":
+                        # MySQL uses ON DUPLICATE KEY UPDATE
+                        stmt = stmt.on_duplicate_key_update(
+                            value=stmt.inserted.value,
+                            updated_at=sql_text("CURRENT_TIMESTAMP"),
+                        )
+                    else:
+                        # PostgreSQL and SQLite use ON CONFLICT DO UPDATE
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=["session_id", "key"],
+                            set_={
+                                "value": stmt.excluded.value,
+                                "updated_at": sql_text("CURRENT_TIMESTAMP"),
+                            },
+                        )
 
                     await sess.execute(stmt)
 
