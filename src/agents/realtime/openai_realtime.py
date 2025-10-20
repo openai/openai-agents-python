@@ -11,6 +11,7 @@ from typing import Annotated, Any, Callable, Literal, Union, cast
 
 import pydantic
 import websockets
+from openai import AsyncOpenAI
 from openai.types.realtime import realtime_audio_config as _rt_audio_config
 from openai.types.realtime.conversation_item import (
     ConversationItem,
@@ -81,6 +82,7 @@ from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
 from typing_extensions import assert_never
 from websockets.asyncio.client import ClientConnection
+from websockets.typing import Subprotocol
 
 from agents.handoffs import Handoff
 from agents.prompts import Prompt
@@ -138,6 +140,7 @@ OpenAIRealtimeAudioOutput = _rt_audio_config.RealtimeAudioConfigOutput  # type: 
 
 
 _USER_AGENT = f"Agents/Python {__version__}"
+_SDK_CLIENT_META = f"openai-agents-sdk.python.{__version__}"
 
 DEFAULT_MODEL_SETTINGS: RealtimeSessionModelSettings = {
     "voice": "ash",
@@ -210,7 +213,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         self.model = model_settings.get("model_name", self.model)
         api_key = await get_api_key(options.get("api_key"))
-
         if "tracing" in model_settings:
             self._tracing_config = model_settings["tracing"]
         else:
@@ -219,23 +221,70 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
 
         headers: dict[str, str] = {}
-        if options.get("headers") is not None:
+        subprotocols: list[Subprotocol] = [
+            Subprotocol("realtime"),
+            Subprotocol(_SDK_CLIENT_META),
+        ]
+
+        custom_headers = options.get("headers")
+        if custom_headers is not None:
             # For customizing request headers
-            headers.update(options["headers"])
+            headers.update(custom_headers)
         else:
             # OpenAI's Realtime API
             if not api_key:
                 raise UserError("API key is required but was not provided.")
 
-            headers.update({"Authorization": f"Bearer {api_key}"})
+            ephemeral_key: str | None
+            if api_key.startswith("ek_"):
+                ephemeral_key = api_key
+            else:
+                ephemeral_key = await self._maybe_create_client_secret(api_key, self.model)
+
+            if ephemeral_key:
+                subprotocols = [
+                    Subprotocol("realtime"),
+                    Subprotocol(f"openai-insecure-api-key.{ephemeral_key}"),
+                    Subprotocol(_SDK_CLIENT_META),
+                ]
+            else:
+                headers["Authorization"] = f"Bearer {api_key}"
+
         self._websocket = await websockets.connect(
             url,
             user_agent_header=_USER_AGENT,
             additional_headers=headers,
+            subprotocols=tuple(subprotocols),
             max_size=None,  # Allow any size of message
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
+
+    async def _maybe_create_client_secret(self, api_key: str, model_name: str) -> str | None:
+        try:
+            return await self._create_client_secret(api_key, model_name)
+        except Exception as exc:
+            logger.warning(
+                "Failed to create realtime client secret; using API key directly: %s",
+                exc,
+            )
+            return None
+
+    async def _create_client_secret(self, api_key: str, model_name: str) -> str:
+        client = AsyncOpenAI(api_key=api_key)
+        try:
+            secret = await client.realtime.client_secrets.create(
+                session={"type": "realtime", "model": model_name}
+            )
+        finally:
+            await client.close()
+
+        value = secret.value if isinstance(getattr(secret, "value", None), str) else None
+
+        if value is None:
+            raise UserError("Realtime client secret response did not include a value.")
+
+        return value
 
     async def _send_tracing_config(
         self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None

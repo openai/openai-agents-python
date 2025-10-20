@@ -1,4 +1,5 @@
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -8,9 +9,38 @@ from openai.types.realtime.realtime_session_create_request import (
 from openai.types.realtime.realtime_tracing_config import TracingConfiguration
 
 from agents.realtime.agent import RealtimeAgent
-from agents.realtime.model import RealtimeModel
+from agents.realtime.model import RealtimeModel, RealtimeModelConfig
 from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
 from agents.realtime.session import RealtimeSession
+
+
+@pytest.fixture(autouse=True)
+def mock_client_secret_request(monkeypatch):
+    records: dict[str, list[dict[str, Any]]] = {"init_kwargs": [], "sessions": []}
+
+    class DummySecrets:
+        async def create(self, *, session: dict[str, Any]) -> SimpleNamespace:
+            records["sessions"].append(session)
+            return SimpleNamespace(value="ek_test")
+
+    class DummyRealtime:
+        def __init__(self):
+            self.client_secrets = DummySecrets()
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            records["init_kwargs"].append(kwargs)
+            self.realtime = DummyRealtime()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "agents.realtime.openai_realtime.AsyncOpenAI",
+        DummyClient,
+    )
+
+    return records
 
 
 class TestRealtimeTracingIntegration:
@@ -61,6 +91,7 @@ class TestRealtimeTracingIntegration:
                     "group_id": "group_123",
                     "metadata": {"version": "1.0"},
                 }
+
 
         # Test without tracing config - should default to "auto"
         model2 = OpenAIRealtimeWebSocketModel()
@@ -251,3 +282,77 @@ class TestRealtimeTracingIntegration:
 
         # When tracing is disabled, model settings should have tracing=None
         assert model_settings["tracing"] is None
+
+    @pytest.mark.asyncio
+    async def test_connect_sets_sdk_headers_and_subprotocols(
+        self,
+        mock_websocket,
+        mock_client_secret_request,
+    ):
+        """Ensure websocket handshake mirrors Agents JS with client secrets."""
+        model = OpenAIRealtimeWebSocketModel()
+        config: RealtimeModelConfig = {
+            "api_key": "sk-test",
+            "initial_model_settings": {},
+        }
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def async_websocket(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+                mock_create_task.return_value = mock_task
+                mock_create_task.side_effect = lambda coro: (coro.close(), mock_task)[1]
+
+                await model.connect(config)
+
+        headers = captured_kwargs["additional_headers"]
+        assert "Authorization" not in headers
+
+        subprotocols = captured_kwargs["subprotocols"]
+        assert subprotocols[0] == "realtime"
+        assert subprotocols[1].startswith("openai-insecure-api-key.ek_test")
+        assert subprotocols[2].startswith("openai-agents-sdk.python.")
+        # Ensure client secret API was called once
+        assert mock_client_secret_request["init_kwargs"] == [{"api_key": "sk-test"}]
+        assert mock_client_secret_request["sessions"] == [
+            {"type": "realtime", "model": "gpt-realtime"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_connect_with_ephemeral_key_skips_client_secret(
+        self,
+        mock_websocket,
+        mock_client_secret_request,
+    ):
+        """Ensure pre-generated ek_ keys are used directly without calling the API."""
+        model = OpenAIRealtimeWebSocketModel()
+        config: RealtimeModelConfig = {
+            "api_key": "ek_existing",
+            "initial_model_settings": {},
+        }
+
+        captured_kwargs: dict[str, Any] = {}
+
+        async def async_websocket(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+                mock_create_task.return_value = mock_task
+                mock_create_task.side_effect = lambda coro: (coro.close(), mock_task)[1]
+
+                await model.connect(config)
+
+        # No client secret API calls should have been made
+        assert mock_client_secret_request["init_kwargs"] == []
+        assert mock_client_secret_request["sessions"] == []
+
+        subprotocols = captured_kwargs["subprotocols"]
+        assert subprotocols[1] == "openai-insecure-api-key.ek_existing"
