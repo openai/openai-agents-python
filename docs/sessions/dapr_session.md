@@ -17,18 +17,34 @@ The `DaprSession` class integrates the OpenAI Agents SDK with Dapr's state manag
 
 ## When to use DaprSession
 
-Choose `DaprSession` when you need:
+### Ideal use cases
 
-- **Multi-instance deployment**: Your agents run across multiple servers and need shared state
-- **Backend flexibility**: You want to switch between Redis, PostgreSQL, MongoDB, etc. without code changes
-- **Enterprise features**: TTL, encryption, consistency guarantees, and automatic retries are critical
-- **Platform standardization**: Your team already uses Dapr for other services
-- **Microservices architecture**: Your agents are part of a larger Dapr-enabled ecosystem
+Choose `DaprSession` when you have:
 
-**Not recommended for**:
-- Single-instance applications (use `SQLiteSession` instead)
-- Simple prototypes (use `Session` instead)
-- Applications without Dapr infrastructure
+- **Horizontally scaled deployments**: Multiple agent instances behind a load balancer need to share conversation state
+  - *Example*: A customer service chatbot deployed across 10+ Kubernetes pods
+- **Multi-region requirements**: Your agents run in different geographic regions and need consistent state
+  - *Example*: Global support system where users can be served from any region
+- **Existing Dapr adoption**: Your team already uses Dapr for other microservices
+  - *Example*: Your organization has standardized on Dapr for service mesh, pub/sub, and state management
+- **Backend flexibility requirements**: You need to switch state stores without redeploying code
+  - *Example*: Starting with Redis in dev, moving to Cosmos DB in production
+- **Enterprise governance**: Platform teams need centralized control over state management policies
+  - *Example*: Security requires encryption, TTL, and audit logging configured at the infrastructure level
+
+### When to consider alternatives
+
+**Use `SQLiteSession` instead if**:
+- Your agent runs as a single instance (desktop app, CLI tool, personal assistant)
+- You want zero external dependencies
+
+**Use `Session` (in-memory) instead if**:
+- You're building a quick prototype or demo
+- Sessions are short-lived and losing state on restart is acceptable
+
+### The trade-off
+
+`DaprSession` adds operational complexity (running Dapr sidecars, managing components) in exchange for production-grade features, flexibility and governance. Choose it when that trade-off makes sense for your deployment scale and requirements.
 
 ## Installation
 
