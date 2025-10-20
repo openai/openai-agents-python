@@ -185,10 +185,10 @@ TTL support varies by state store. Check your store's [documentation](https://do
 Control read/write consistency for state operations. Use the provided constants to avoid typos:
 
 ```python
-from agents.extensions.memory import (
-    DaprSession,
+from agents.extensions.memory.dapr_session import (
     CONSISTENCY_EVENTUAL,
     CONSISTENCY_STRONG,
+    DaprSession,
 )
 
 # Eventual consistency (default, better performance)
@@ -367,7 +367,11 @@ session = DaprSession.from_address(
 
 ### Multi-tenancy
 
-Use session ID prefixes to isolate tenants:
+Dapr provides multiple strategies for multi-tenant architectures. You can choose the approach that best fits your needs:
+
+#### Application-level tenant isolation
+
+One approach is to use session ID prefixes to isolate tenants at the application level:
 
 ```python
 def get_session(tenant_id: str, user_id: str) -> DaprSession:
@@ -381,9 +385,20 @@ def get_session(tenant_id: str, user_id: str) -> DaprSession:
 # Tenant A
 tenant_a_session = get_session("tenant-a", "user-123")
 
-# Tenant B
+# Tenant B (isolated from Tenant A)
 tenant_b_session = get_session("tenant-b", "user-123")
 ```
+
+#### Dapr state sharing strategies
+
+Dapr also supports different key prefix strategies at the state store level through the `keyPrefix` metadata option:
+
+- **`appid` (default)**: State is scoped to each application ID
+- **`namespace`**: State is scoped by Kubernetes namespace, allowing multiple apps in different namespaces to use the same state store
+- **`name`**: State is scoped by state store name, allowing sharing across applications
+- **`none`**: No prefixing, enabling full state sharing
+
+For more details on these strategies, see [Dapr's state sharing documentation](https://docs.dapr.io/developing-applications/building-blocks/state-management/howto-share-state/).
 
 ### Error handling
 

@@ -25,10 +25,12 @@ from testcontainers.core.network import Network  # type: ignore[import-untyped]
 from testcontainers.redis import RedisContainer  # type: ignore[import-untyped]
 
 from agents import Agent, Runner, TResponseInputItem
+from agents.extensions.memory import (
+    DaprSession,
+)
 from agents.extensions.memory.dapr_session import (
     CONSISTENCY_EVENTUAL,
     CONSISTENCY_STRONG,
-    DaprSession,
 )
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
