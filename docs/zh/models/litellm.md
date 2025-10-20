@@ -6,29 +6,29 @@ search:
 
 !!! note
 
-    LiteLLM 集成处于测试阶段。您可能会在某些模型提供商（尤其是较小的提供商）上遇到问题。请通过 [Github issues](https://github.com/openai/openai-agents-python/issues) 报告，我们会尽快修复。
+    LiteLLM 集成目前为测试版。你可能会在使用某些模型提供商时遇到问题，特别是较小的提供商。请通过 [GitHub 问题](https://github.com/openai/openai-agents-python/issues)反馈，我们会尽快修复。
 
-[LiteLLM](https://docs.litellm.ai/docs/) 是一个库，允许您通过统一接口使用 100 多个模型。我们在 Agents SDK 中加入了 LiteLLM 集成，以便您使用任意 AI 模型。
+[LiteLLM](https://docs.litellm.ai/docs/) 是一个库，允许你通过统一接口使用 100+ 个模型。我们已添加对 LiteLLM 的集成，以便你在 Agents SDK 中使用任意 AI 模型。
 
 ## 设置
 
-您需要确保可用 `litellm`。可以通过安装可选的 `litellm` 依赖组来实现：
+你需要确保可用 `litellm`。你可以通过安装可选的 `litellm` 依赖组来实现：
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-完成后，您可以在任意智能体中使用 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel]。
+完成后，你可以在任意智能体中使用 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel]。
 
 ## 示例
 
-下面是一个可直接运行的示例。运行后，它会提示您输入模型名称和 API key。例如，您可以输入：
+这是一个可直接运行的示例。运行后会提示输入模型名称和 API key。例如，你可以输入：
 
-- `openai/gpt-4.1` 作为模型，并使用您的 OpenAI API key
-- `anthropic/claude-3-5-sonnet-20240620` 作为模型，并使用您的 Anthropic API key
-- 等等
+-   模型使用 `openai/gpt-4.1`，并提供你的 OpenAI API key
+-   模型使用 `anthropic/claude-3-5-sonnet-20240620`，并提供你的 Anthropic API key
+-   等等
 
-有关 LiteLLM 支持的完整模型列表，请参见 [litellm providers docs](https://docs.litellm.ai/docs/providers)。
+关于 LiteLLM 支持的完整模型列表，请参见 [litellm providers 文档](https://docs.litellm.ai/docs/providers)。
 
 ```python
 from __future__ import annotations
@@ -76,9 +76,9 @@ if __name__ == "__main__":
     asyncio.run(main(model, api_key))
 ```
 
-## 追踪用量数据
+## 使用数据追踪
 
-如果希望将 LiteLLM 的响应计入 Agents SDK 的使用指标，在创建智能体时传入 `ModelSettings(include_usage=True)`。
+如果你希望 LiteLLM 的响应填充到 Agents SDK 的使用指标中，请在创建智能体时传入 `ModelSettings(include_usage=True)`。
 
 ```python
 from agents import Agent, ModelSettings
@@ -91,4 +91,4 @@ agent = Agent(
 )
 ```
 
-使用 `include_usage=True` 时，LiteLLM 请求会通过 `result.context_wrapper.usage` 报告 token 和请求计数，就像内置的 OpenAI 模型一样。
+启用 `include_usage=True` 后，LiteLLM 请求将通过 `result.context_wrapper.usage` 报告 token 和请求计数，与内置的 OpenAI 模型一致。

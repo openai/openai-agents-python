@@ -4,18 +4,18 @@ search:
 ---
 # 加密会话
 
-`EncryptedSession` 为任意会话实现提供透明加密，通过自动过期机制保护会话数据并在超期后跳过旧项。
+`EncryptedSession` 为任意会话实现提供透明加密，通过自动过期机制在 TTL 到期时跳过旧的会话项，从而保护会话数据。
 
 ## 功能
 
 - **透明加密**: 使用 Fernet 加密包装任意会话
-- **按会话密钥**: 使用 HKDF 密钥派生为每个会话生成唯一加密密钥
-- **自动过期**: 当 TTL 到期时静默跳过旧项
-- **即插即用替换**: 可用于任何现有会话实现
+- **每会话密钥**: 使用 HKDF 密钥派生为每个会话生成唯一加密密钥
+- **自动过期**: 当 TTL 到期时，旧项会被静默跳过
+- **可直接替换**: 可与任何现有会话实现一起使用
 
 ## 安装
 
-加密会话需要 `encrypt` 扩展：
+加密会话需要 `encrypt` 额外依赖：
 
 ```bash
 pip install openai-agents[encrypt]
@@ -103,7 +103,7 @@ session = EncryptedSession(
 
 ## 在不同会话类型中的用法
 
-### 与 SQLite 会话
+### 使用 SQLite 会话
 
 ```python
 from agents import SQLiteSession
@@ -119,7 +119,7 @@ session = EncryptedSession(
 )
 ```
 
-### 与 SQLAlchemy 会话
+### 使用 SQLAlchemy 会话
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -140,10 +140,10 @@ session = EncryptedSession(
 
 !!! warning "高级会话功能"
 
-    当将 `EncryptedSession` 用于如 `AdvancedSQLiteSession` 等高级会话实现时，请注意：
+    当将 `EncryptedSession` 与诸如 `AdvancedSQLiteSession` 等高级会话实现一起使用时，请注意：
 
-    - 由于消息内容已加密，`find_turns_by_content()` 之类的方法将难以有效工作
-    - 基于内容的搜索作用于加密数据，因而效果受限
+    - 由于消息内容被加密，类似 `find_turns_by_content()` 的方法将难以有效工作
+    - 基于内容的搜索会在密文上运行，效果受限
 
 
 
@@ -158,12 +158,12 @@ EncryptedSession 使用 HKDF（基于 HMAC 的密钥派生函数）为每个会�
 
 这确保：
 - 每个会话都有唯一的加密密钥
-- 未持有主密钥无法派生密钥
-- 不同会话之间无法相互解密会话数据
+- 没有主密钥无法推导出各会话密钥
+- 不同会话之间的会话数据无法相互解密
 
 ## 自动过期
 
-当条目超过 TTL 时，检索时会被自动跳过：
+当项超过 TTL 时，在检索时会被自动跳过：
 
 ```python
 # Items older than TTL are silently ignored
