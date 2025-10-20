@@ -8,9 +8,10 @@ from agents import Agent, GuardrailFunctionOutput, InputGuardrail, Runner, RunCo
 from agents.items import TResponseInputItem
 from agents.exceptions import InputGuardrailTripwireTriggered
 
-from .fake_model import FakeModel
 from openai.types.responses import ResponseCompletedEvent
-from .test_responses import get_text_message
+from tests.fake_model import FakeModel
+from tests.test_responses import get_text_message
+from tests.testing_processor import fetch_ordered_spans, fetch_events
 
 
 def make_input_guardrail(delay_seconds: float, *, trip: bool) -> InputGuardrail[Any]:
@@ -177,8 +178,6 @@ async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
     async for _ in result.stream_events():
         pass
 
-    from .testing_processor import fetch_ordered_spans
-
     spans = fetch_ordered_spans()
     agent_span = _get_span_by_type(spans, "agent")
     guardrail_span = _get_span_by_type(spans, "guardrail")
@@ -193,8 +192,6 @@ async def test_parent_span_and_trace_finish_after_slow_input_guardrail():
     assert _iso(agent_span.ended_at) >= _iso(generation_span.ended_at)
 
     # Trace should end after all spans end
-    from .testing_processor import fetch_events
-
     events = fetch_events()
     assert events[-1] == "trace_end"
 
@@ -215,8 +212,6 @@ async def test_parent_span_and_trace_finish_after_slow_model():
     async for _ in result.stream_events():
         pass
 
-    from .testing_processor import fetch_ordered_spans
-
     spans = fetch_ordered_spans()
     agent_span = _get_span_by_type(spans, "agent")
     guardrail_span = _get_span_by_type(spans, "guardrail")
@@ -229,8 +224,6 @@ async def test_parent_span_and_trace_finish_after_slow_model():
     # Agent span must finish last
     assert _iso(agent_span.ended_at) >= _iso(guardrail_span.ended_at)
     assert _iso(agent_span.ended_at) >= _iso(generation_span.ended_at)
-
-    from .testing_processor import fetch_events
 
     events = fetch_events()
     assert events[-1] == "trace_end"
