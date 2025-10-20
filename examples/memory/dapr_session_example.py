@@ -16,6 +16,11 @@ In production, you may want to preserve existing conversation history.
 """
 
 import asyncio
+import os
+
+os.environ["GRPC_VERBOSITY"] = (
+    "ERROR"  # Suppress gRPC warnings caused by the Dapr Python SDK gRPC connection.
+)
 
 from agents import Agent, Runner
 from agents.extensions.memory import (
@@ -23,6 +28,8 @@ from agents.extensions.memory import (
     DAPR_CONSISTENCY_STRONG,
     DaprSession,
 )
+
+grpc_port = os.environ.get("DAPR_GRPC_PORT", "50001")
 
 
 async def main():
@@ -35,7 +42,7 @@ async def main():
     print("=== Dapr Session Example ===")
     print("This example requires Dapr sidecar to be running")
     print(
-        "Start Dapr with: dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components"
+        "Start Dapr with: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
     )  # noqa: E501
     print()
 
@@ -45,7 +52,7 @@ async def main():
         session = DaprSession.from_address(
             session_id,
             state_store_name="statestore",
-            dapr_address="localhost:50001",
+            dapr_address=f"localhost:{grpc_port}",
         )
 
         # Test Dapr connectivity
@@ -53,7 +60,7 @@ async def main():
             print("Dapr sidecar is not available!")
             print("Please start Dapr sidecar and try again.")
             print(
-                "Command: dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components"
+                "Command: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
             )  # noqa: E501
             return
 
@@ -118,7 +125,7 @@ async def main():
         new_session = DaprSession.from_address(
             "different_conversation_456",
             state_store_name="statestore",
-            dapr_address="localhost:50001",
+            dapr_address=f"localhost:{grpc_port}",
         )
 
         print("Creating a new session with different ID...")
@@ -146,7 +153,7 @@ async def main():
     except Exception as e:
         print(f"Error: {e}")
         print(
-            "Make sure Dapr sidecar is running with: dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components"
+            "Make sure Dapr sidecar is running with: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
         )  # noqa: E501
 
 
@@ -160,7 +167,7 @@ async def demonstrate_advanced_features():
         ttl_session = DaprSession.from_address(
             "ttl_demo_session",
             state_store_name="statestore",
-            dapr_address="localhost:50001",
+            dapr_address=f"localhost:{grpc_port}",
             ttl=3600,  # 1 hour TTL
         )
 
@@ -182,7 +189,7 @@ async def demonstrate_advanced_features():
         eventual_session = DaprSession.from_address(
             "eventual_session",
             state_store_name="statestore",
-            dapr_address="localhost:50001",
+            dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_EVENTUAL,
         )
 
@@ -190,7 +197,7 @@ async def demonstrate_advanced_features():
         strong_session = DaprSession.from_address(
             "strong_session",
             state_store_name="statestore",
-            dapr_address="localhost:50001",
+            dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_STRONG,
         )
 
@@ -213,7 +220,7 @@ async def demonstrate_advanced_features():
             return DaprSession.from_address(
                 session_id,
                 state_store_name="statestore",
-                dapr_address="localhost:50001",
+                dapr_address=f"localhost:{grpc_port}",
             )
 
         tenant_a_session = get_tenant_session("tenant-a", "user-123")
@@ -254,7 +261,9 @@ spec:
     print("\n3. Start Redis:")
     print("   docker run -d -p 6379:6379 redis:7-alpine")
     print("\n4. Start Dapr sidecar:")
-    print("   dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components")
+    print(
+        "   dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
+    )
     print("\n5. Run this example:")
     print("   python examples/memory/dapr_session_example.py")
     print("\nAlternatively, you can use other state stores supported by Dapr:")

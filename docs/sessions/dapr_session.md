@@ -78,9 +78,6 @@ First, start the Dapr sidecar with a state store. The simplest way is using Redi
 ```bash
 # Start Redis (if not already running)
 docker run -d -p 6379:6379 redis:7-alpine
-
-# Start Dapr sidecar with Redis state store
-dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components
 ```
 
 Create a component configuration file at `./components/statestore.yaml`:
@@ -100,43 +97,75 @@ spec:
     value: ""
 ```
 
-Now use DaprSession in your code:
+Create your Python application (save as `example.py`):
 
 ```python
+import asyncio
+import os
+
 from agents import Agent, Runner
 from agents.extensions.memory import DaprSession
 
-# Create agent
-agent = Agent(
-    name="Assistant",
-    instructions="Reply very concisely.",
-)
+grpc_port = os.environ.get("DAPR_GRPC_PORT", "50001")
 
-# Connect to Dapr sidecar (using default gRPC port 50001)
-session = DaprSession.from_address(
-    session_id="user-123",
-    state_store_name="statestore",
-    dapr_address="localhost:50001",  # Default Dapr gRPC port
-)
 
-# First turn
-result = await Runner.run(
-    agent,
-    "What city is the Golden Gate Bridge in?",
-    session=session
-)
-print(result.final_output)  # "San Francisco"
+async def main():
+    # Create agent
+    agent = Agent(
+        name="Assistant",
+        instructions="Reply very concisely.",
+    )
 
-# Second turn - agent remembers context
-result = await Runner.run(
-    agent,
-    "What state is it in?",
-    session=session
-)
-print(result.final_output)  # "California"
+    # Connect to Dapr sidecar (using default gRPC port 50001)
+    session = DaprSession.from_address(
+        session_id="user-123",
+        state_store_name="statestore",
+        dapr_address=f"localhost:{grpc_port}",
+    )
 
-# Clean up
-await session.close()
+    try:
+        # First turn
+        result = await Runner.run(
+            agent,
+            "What city is the Golden Gate Bridge in?",
+            session=session
+        )
+        print(f"Agent: {result.final_output}")  # "San Francisco"
+
+        # Second turn - agent remembers context
+        result = await Runner.run(
+            agent,
+            "What state is it in?",
+            session=session
+        )
+        print(f"Agent: {result.final_output}")  # "California"
+
+    finally:
+        # Always clean up
+        await session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Now run your application **with the Dapr sidecar**:
+
+**Option 1: Run with Dapr (recommended)**
+
+```bash
+# Dapr starts the sidecar AND runs your application
+dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components -- python example.py
+```
+
+**Option 2: Run separately (for development)**
+
+```bash
+# Terminal 1: Start Dapr sidecar
+dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components
+
+# Terminal 2: Run your application (in a separate terminal)
+python example.py
 ```
 
 **What's happening here?**
@@ -144,6 +173,12 @@ await session.close()
 2. `DaprSession` stores conversation history in the state store (identified by `session_id`)
 3. The agent can retrieve previous messages across multiple turns
 4. When you scale to multiple instances, all instances share the same session state
+
+**Want a more complete example?** See [`examples/memory/dapr_session_example.py`](https://github.com/openai/openai-agents-python/blob/main/examples/memory/dapr_session_example.py) which demonstrates:
+- Multi-turn conversations with context
+- Session isolation and multi-tenancy
+- TTL and consistency levels
+- All with detailed output and comments
 
 ## Usage patterns
 
@@ -155,17 +190,20 @@ The `DaprSession` communicates with the Dapr sidecar using network ports. Dapr e
 - **HTTP port: 3500** - For REST API and health checks
 - **Metrics port: 9090** - For Prometheus metrics (monitoring)
 
-When starting the Dapr sidecar, you can specify custom ports if needed:
+When starting the Dapr sidecar, explicitly specify both ports to avoid connection issues:
 
 ```bash
 # Using default ports (recommended)
-dapr run --app-id myapp --components-path ./components
-
-# Using custom ports
 dapr run --app-id myapp \
-  --dapr-grpc-port 50002 \
+  --dapr-http-port 3500 \
+  --dapr-grpc-port 50001 \
+  --resources-path ./components
+
+# Using custom ports (in case of conflicts with other services)
+dapr run --app-id myapp \
   --dapr-http-port 3501 \
-  --components-path ./components
+  --dapr-grpc-port 50002 \
+  --resources-path ./components
 ```
 
 If using custom ports, specify them in your session connection:
@@ -556,9 +594,27 @@ else:
 ```
 
 Common issues:
+
+**Health check connection refused (port 3500)**:
+- **Cause**: The `--dapr-http-port` was not specified, so Dapr used a random port
+- **Solution 1**: Always explicitly set `--dapr-http-port 3500` when starting Dapr (recommended)
+- **Solution 2**: Set the HTTP endpoint via environment variable before creating the session:
+  ```python
+  import os
+  # Option A: Set full endpoint
+  os.environ["DAPR_HTTP_ENDPOINT"] = "http://localhost:3500"
+  
+  # Option B: Set just the port (SDK will construct http://localhost:PORT)
+  os.environ["DAPR_HTTP_PORT"] = "3500"
+  
+  # Then create your session
+  session = DaprSession.from_address(...)
+  ```
+
+**Other issues**:
 - Check that `dapr run` is active (use `dapr list` to see running sidecars)
 - Verify the gRPC port matches (default: 50001)
-- Ensure no firewall blocking the port
+- Ensure no firewall blocking the ports
 - Check that the Dapr sidecar finished initializing (check logs with `dapr logs --app-id myapp`)
 
 ### Configuration error: State store not found
@@ -570,12 +626,37 @@ Common issues:
 **Solution**: Ensure your component YAML file is in the components directory specified when starting Dapr:
 
 ```bash
-dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components
+dapr run --app-id myapp \
+  --dapr-http-port 3500 \
+  --dapr-grpc-port 50001 \
+  --resources-path ./components
 ```
 
 ### TTL not working
 
 Verify your state store [supports TTL](https://docs.dapr.io/reference/components-reference/supported-state-stores/) and is properly configured.
+
+### gRPC fork warnings on first API call
+
+**Symptom**: You see informational messages like `This process is fork-safe due to gRPC...` on the first OpenAI API call.
+
+**Cause**: When `DaprSession` initializes, it creates gRPC background threads. The first OpenAI API call then initializes HTTP worker threads, and gRPC detects this concurrent thread creation and logs safety information.
+
+**Impact**: These are informational messages, not errors. They only appear once and don't affect functionality.
+
+**Solution** (optional): If you want to suppress these messages, set the gRPC verbosity level before creating the session:
+
+```python
+import os
+
+# Suppress gRPC informational messages
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+
+# Now create your session
+session = DaprSession.from_address(...)
+```
+
+**Note**: These warnings are expected when using gRPC-based libraries (like Dapr) alongside other async HTTP libraries. They indicate that gRPC's fork handlers are working correctly to ensure thread safety.
 
 ## API reference
 

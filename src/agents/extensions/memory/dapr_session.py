@@ -104,6 +104,12 @@ class DaprSession(SessionABC):
 
         Returns:
             DaprSession: An instance of DaprSession connected to the specified Dapr sidecar.
+
+        Note:
+            The Dapr Python SDK performs health checks on the HTTP endpoint (default: http://localhost:3500).
+            Ensure the Dapr sidecar is started with --dapr-http-port 3500. Alternatively, set one of
+            these environment variables: DAPR_HTTP_ENDPOINT (e.g., "http://localhost:3500") or
+            DAPR_HTTP_PORT (e.g., "3500") to avoid connection errors.
         """
         dapr_client = DaprClient(address=dapr_address)
         session = cls(
