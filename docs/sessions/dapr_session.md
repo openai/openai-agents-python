@@ -315,6 +315,44 @@ spec:
 
 [View all 30+ supported state stores →](https://docs.dapr.io/reference/components-reference/supported-state-stores/)
 
+### State encryption
+
+Dapr provides built-in automatic encryption at the state store level using AES-GCM (128, 192, or 256-bit keys). This enables encryption at rest without application code changes:
+
+```yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: localhost:6379
+  - name: primaryEncryptionKey
+    secretKeyRef:
+      name: mysecret
+      key: mykey
+  # Optional: for key rotation
+  - name: secondaryEncryptionKey
+    secretKeyRef:
+      name: mysecret2
+      key: mykey2
+```
+
+**Key features:**
+- Automatic encryption/decryption handled by Dapr
+- Support for key rotation with primary/secondary keys
+- Works with all Dapr state stores
+- Encryption keys are fetched from secrets (never plaintext)
+
+For detailed information on encryption configuration and key rotation strategies, see [Dapr's state encryption documentation](https://docs.dapr.io/developing-applications/building-blocks/state-management/howto-encrypt-state/).
+
+**Note**: Dapr's state-level encryption is complementary to the SDK's `EncryptedSession` wrapper, which provides application-level encryption. Choose the approach that best fits your security requirements:
+- **Dapr encryption**: Infrastructure-level, transparent to application code
+- **`EncryptedSession`**: Application-level, works with any session backend (Redis, SQLite, etc.)
+
 ## Production deployment
 
 ### Kubernetes deployment
