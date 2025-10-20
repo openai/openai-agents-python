@@ -1,15 +1,34 @@
 # Dapr State Store Sessions
 
-The `DaprSession` class provides production-grade, distributed session memory using Dapr state stores. This enables your agents to scale horizontally across multiple application instances while maintaining conversation context in various backends like Redis, PostgreSQL, MongoDB, Cassandra, and many others as shown in the [Dapr state store documentation](https://docs.dapr.io/reference/components-reference/supported-state-stores/).
+The `DaprSession` class provides distributed session memory for production agents.
+
+It enables horizontal scaling across multiple instances while maintaining conversation context. Choose from [30+ backends](https://docs.dapr.io/reference/components-reference/supported-state-stores/): Redis, PostgreSQL, MongoDB, Cosmos DB, and more.
 
 ## Overview
 
-[Dapr](https://dapr.io) is a portable, event-driven runtime that simplifies building resilient applications. The `DaprSession` class integrates the OpenAI Agents SDK with Dapr's state management, giving you:
+[Dapr](https://dapr.io) is a portable, event-driven runtime that simplifies building resilient applications. 
 
-- **Backend flexibility**: Use any of 30+ state stores (Redis, PostgreSQL, MongoDB, Cosmos DB, etc.) without code changes
+The `DaprSession` class integrates the OpenAI Agents SDK with Dapr's state management, giving you:
+
+- **Backend flexibility**: Use any of 30+ state stores without code changes
 - **Production features**: TTL, consistency levels, and automatic retries via Dapr
-- **Separation of concerns**: Developers focus on agents while platform teams manage infrastructure and policies
-- **Cloud-native deployment**: Seamless Kubernetes integration with sidecar pattern
+- **Separation of concerns**: Developers focus on agents while platform teams manage infrastructure
+- **Cloud-native deployment**: Seamless Kubernetes integration (Dapr runs as a sidecar container alongside your app)
+
+## When to use DaprSession
+
+Choose `DaprSession` when you need:
+
+- **Multi-instance deployment**: Your agents run across multiple servers and need shared state
+- **Backend flexibility**: You want to switch between Redis, PostgreSQL, MongoDB, etc. without code changes
+- **Enterprise features**: TTL, encryption, consistency guarantees, and automatic retries are critical
+- **Platform standardization**: Your team already uses Dapr for other services
+- **Microservices architecture**: Your agents are part of a larger Dapr-enabled ecosystem
+
+**Not recommended for**:
+- Single-instance applications (use `SQLiteSession` instead)
+- Simple prototypes (use `Session` instead)
+- Applications without Dapr infrastructure
 
 ## Installation
 
@@ -21,9 +40,20 @@ pip install openai-agents[dapr]
 
 This installs the required dependencies:
 - `dapr>=1.14.0` - Official Dapr Python SDK
-- `grpcio>=1.60.0` - gRPC communication with Dapr sidecar
+- `grpcio>=1.60.0` - gRPC (a high-performance RPC framework) for communication with Dapr sidecar
 
 ## Quick start
+
+### Prerequisites
+
+Before starting, ensure you have:
+
+- **Docker** installed and running ([install guide](https://docs.docker.com/get-docker/))
+- **Dapr CLI** installed ([install guide](https://docs.dapr.io/getting-started/install-dapr-cli/))
+- **Python 3.10+** with pip
+- Basic familiarity with your chosen state store (Redis recommended for getting started)
+
+**Note**: The Dapr CLI initializes Dapr in your local environment. Run `dapr init` after installing the CLI.
 
 ### Running locally
 
@@ -93,15 +123,21 @@ print(result.final_output)  # "California"
 await session.close()
 ```
 
+**What's happening here?**
+1. The Dapr sidecar connects to Redis and provides a state management API
+2. `DaprSession` stores conversation history in the state store (identified by `session_id`)
+3. The agent can retrieve previous messages across multiple turns
+4. When you scale to multiple instances, all instances share the same session state
+
 ## Usage patterns
 
 ### Dapr ports
 
-The DaprSession connects to the Dapr sidecar via gRPC. Dapr uses these default ports:
+The `DaprSession` communicates with the Dapr sidecar using network ports. Dapr exposes these default ports:
 
-- **gRPC port: 50001** (used by DaprSession) - For programmatic API access
+- **gRPC port: 50001** (used by `DaprSession`) - For programmatic API access from your application
 - **HTTP port: 3500** - For REST API and health checks
-- **Metrics port: 9090** - For Prometheus metrics
+- **Metrics port: 9090** - For Prometheus metrics (monitoring)
 
 When starting the Dapr sidecar, you can specify custom ports if needed:
 
@@ -167,6 +203,8 @@ dapr_client.close()
 
 ### Time-to-live (TTL)
 
+TTL (Time-To-Live) automatically expires session data after a specified duration. This is useful for limiting storage costs and ensuring stale sessions are cleaned up.
+
 Configure automatic session expiration:
 
 ```python
@@ -182,7 +220,12 @@ TTL support varies by state store. Check your store's [documentation](https://do
 
 ### Consistency levels
 
-Control read/write consistency for state operations. Use the provided constants to avoid typos:
+Consistency levels control how Dapr handles read/write operations across distributed systems:
+
+- **Eventual consistency**: Faster performance, but reads might temporarily return stale data
+- **Strong consistency**: Guarantees reads always return the latest data, with slightly higher latency
+
+Use the provided constants to avoid typos:
 
 ```python
 from agents.extensions.memory.dapr_session import (
@@ -479,9 +522,9 @@ finally:
 
 ## Troubleshooting
 
-### Dapr sidecar not reachable
+### Connection issues: Dapr sidecar not reachable
 
-Ensure the Dapr sidecar is running and accessible:
+If your application can't connect to Dapr, verify the sidecar is running and accessible:
 
 ```python
 session = DaprSession.from_address(
@@ -502,11 +545,13 @@ Common issues:
 - Ensure no firewall blocking the port
 - Check that the Dapr sidecar finished initializing (check logs with `dapr logs --app-id myapp`)
 
-### State store not configured
+### Configuration error: State store not found
 
-Error: `state store statestore is not found`
+**Error message**: `state store statestore is not found`
 
-Solution: Ensure your component configuration is in the components path specified when starting Dapr:
+**Cause**: Dapr can't find the state store component configuration.
+
+**Solution**: Ensure your component YAML file is in the components directory specified when starting Dapr:
 
 ```bash
 dapr run --app-id myapp --dapr-grpc-port 50001 --components-path ./components
