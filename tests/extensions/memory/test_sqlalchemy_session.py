@@ -130,11 +130,16 @@ async def test_runner_integration(agent: Agent):
 
 async def test_session_isolation(agent: Agent):
     """Test that different session IDs result in isolated conversation histories."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Create ONE shared engine
+    engine = create_async_engine(DB_URL)
+
     session_id_1 = "session_1"
-    session1 = SQLAlchemySession.from_url(session_id_1, url=DB_URL, create_tables=True)
+    session1 = SQLAlchemySession(session_id_1, engine=engine, create_tables=True)
 
     session_id_2 = "session_2"
-    session2 = SQLAlchemySession.from_url(session_id_2, url=DB_URL, create_tables=True)
+    session2 = SQLAlchemySession(session_id_2, engine=engine, create_tables=True)
 
     # Interact with session 1
     assert isinstance(agent.model, FakeModel)
@@ -219,19 +224,20 @@ async def test_get_items_same_timestamp_consistent_order():
             )
         )
         id_map = {
-            json.loads(message_json)["id"]: row_id
-            for row_id, message_json in rows.fetchall()
+            json.loads(message_json)["id"]: row_id for row_id, message_json in rows.fetchall()
         }
         shared = datetime(2025, 10, 15, 17, 26, 39, 132483)
         older = shared - timedelta(milliseconds=1)
         await sess.execute(
             update(session._messages)
-            .where(session._messages.c.id.in_(
-                [
-                    id_map["rs_same_ts"],
-                    id_map["msg_same_ts"],
-                ]
-            ))
+            .where(
+                session._messages.c.id.in_(
+                    [
+                        id_map["rs_same_ts"],
+                        id_map["msg_same_ts"],
+                    ]
+                )
+            )
             .values(created_at=shared)
         )
         await sess.execute(
@@ -320,9 +326,7 @@ async def test_pop_item_same_timestamp_returns_latest():
     async with session._session_factory() as sess:
         await sess.execute(
             text(
-                "UPDATE agent_messages "
-                "SET created_at = :created_at "
-                "WHERE session_id = :session_id"
+                "UPDATE agent_messages SET created_at = :created_at WHERE session_id = :session_id"
             ),
             {
                 "created_at": "2025-10-15 17:26:39.132483",
@@ -391,3 +395,222 @@ async def test_get_items_orders_by_id_for_ties():
 
     assert _item_ids(retrieved_full) == ["rs_first", "msg_second"]
     assert _item_ids(retrieved_limited) == ["rs_first", "msg_second"]
+
+
+# ------------------------------------------------------------------
+# Session metadata tests
+# ------------------------------------------------------------------
+async def test_set_and_get_metadata():
+    """Test basic metadata set and get operations."""
+    session = SQLAlchemySession.from_url("metadata_test", url=DB_URL, create_tables=True)
+
+    # Set metadata
+    await session.set_metadata({"owner_id": "user_123", "title": "Test Chat"})
+
+    # Get all metadata
+    metadata = await session.get_metadata()
+    assert metadata["owner_id"] == "user_123"
+    assert metadata["title"] == "Test Chat"
+
+
+async def test_get_metadata_with_keys():
+    """Test getting specific metadata keys including missing keys."""
+    session = SQLAlchemySession.from_url("metadata_keys_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123", "title": "Chat"})
+
+    # Get specific keys
+    metadata = await session.get_metadata(keys=["owner_id", "nonexistent"])
+    assert metadata["owner_id"] == "user_123"
+    assert metadata["nonexistent"] is None
+
+
+async def test_get_metadata_all():
+    """Test getting all metadata for a session."""
+    session = SQLAlchemySession.from_url("metadata_all_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123", "title": "Chat", "tags": ["work"]})
+
+    all_meta = await session.get_metadata()
+    assert len(all_meta) == 3
+    assert all_meta["owner_id"] == "user_123"
+    assert all_meta["title"] == "Chat"
+    assert all_meta["tags"] == ["work"]
+
+
+async def test_metadata_json_serialization():
+    """Test that dicts and lists are automatically serialized to JSON."""
+    session = SQLAlchemySession.from_url("json_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata(
+        {
+            "tags": ["work", "important"],
+            "config": {"theme": "dark", "lang": "en"},
+            "nested": {
+                "level1": {
+                    "level2": {"items": ["a", "b", "c"], "count": 3},
+                    "tags": ["nested", "deep"],
+                }
+            },
+        }
+    )
+
+    metadata = await session.get_metadata()
+    assert metadata["tags"] == ["work", "important"]
+    assert metadata["config"] == {"theme": "dark", "lang": "en"}
+    assert metadata["nested"]["level1"]["level2"]["items"] == ["a", "b", "c"]
+    assert metadata["nested"]["level1"]["level2"]["count"] == 3
+    assert metadata["nested"]["level1"]["tags"] == ["nested", "deep"]
+
+
+async def test_metadata_auto_create_session():
+    """Test that setting metadata auto-creates session row."""
+    session = SQLAlchemySession.from_url("auto_create_test", url=DB_URL, create_tables=True)
+
+    # Set metadata before adding any messages
+    await session.set_metadata({"owner_id": "user_123"})
+
+    # Verify metadata was set
+    metadata = await session.get_metadata()
+    assert metadata["owner_id"] == "user_123"
+
+
+async def test_metadata_upsert():
+    """Test that setting metadata updates existing keys."""
+    session = SQLAlchemySession.from_url("upsert_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"title": "Original Title"})
+    await session.set_metadata({"title": "Updated Title", "new_key": "value"})
+
+    metadata = await session.get_metadata()
+    assert metadata["title"] == "Updated Title"
+    assert metadata["new_key"] == "value"
+
+
+async def test_delete_metadata_specific_keys():
+    """Test deleting specific metadata keys."""
+    session = SQLAlchemySession.from_url("delete_keys_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123", "title": "Chat", "tags": ["work"]})
+    await session.delete_metadata(keys=["title", "tags"])
+
+    metadata = await session.get_metadata()
+    assert "owner_id" in metadata
+    assert "title" not in metadata
+    assert "tags" not in metadata
+
+
+async def test_delete_metadata_all():
+    """Test deleting all metadata for a session."""
+    session = SQLAlchemySession.from_url("delete_all_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123", "title": "Chat"})
+    await session.delete_metadata()
+
+    metadata = await session.get_metadata()
+    assert len(metadata) == 0
+
+
+async def test_find_sessions_by_metadata():
+    """Test finding sessions by metadata (cross-session query)."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Create ONE shared engine for all sessions
+    engine = create_async_engine(DB_URL)
+
+    session1 = SQLAlchemySession("find_test_1", engine=engine, create_tables=True)
+    session2 = SQLAlchemySession("find_test_2", engine=engine, create_tables=True)
+    session3 = SQLAlchemySession("find_test_3", engine=engine, create_tables=True)
+    session4 = SQLAlchemySession("find_test_4", engine=engine, create_tables=True)
+
+    await session1.set_metadata({"owner_id": "user_123"})
+    await session2.set_metadata({"owner_id": "user_123"})
+    await session3.set_metadata({"owner_id": "user_456"})
+    await session4.set_metadata({"owner_id": "user_123"})
+
+    # Find sessions for user_123
+    matching = await session1.find_sessions_by_metadata("owner_id", "user_123")
+    assert "find_test_1" in matching
+    assert "find_test_2" in matching
+    assert "find_test_3" not in matching
+    assert "find_test_4" in matching
+
+
+async def test_find_sessions_by_metadata_no_matches():
+    """Test finding sessions when there are no matches."""
+    session = SQLAlchemySession.from_url("no_match_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123"})
+
+    matching = await session.find_sessions_by_metadata("owner_id", "nonexistent_user")
+    assert len(matching) == 0
+
+
+async def test_find_sessions_by_metadata_unlimited():
+    """Test finding sessions without limit."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Create ONE shared engine
+    engine = create_async_engine(DB_URL)
+
+    # Create 105 sessions with same metadata - all using shared engine
+    for i in range(105):
+        session = SQLAlchemySession(f"session_{i}", engine=engine, create_tables=True)
+        await session.set_metadata({"owner_id": "user_123"})
+
+    # Query with default limit (100) - using same shared engine
+    query_session = SQLAlchemySession("query_session", engine=engine, create_tables=False)
+    limited = await query_session.find_sessions_by_metadata("owner_id", "user_123")
+    assert len(limited) == 100
+
+    # Query with no limit
+    unlimited = await query_session.find_sessions_by_metadata("owner_id", "user_123", limit=None)
+    assert len(unlimited) == 105
+
+
+async def test_clear_session_deletes_metadata():
+    """Test that clear_session() removes metadata."""
+    session = SQLAlchemySession.from_url("clear_meta_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({"owner_id": "user_123"})
+    await session.add_items([{"role": "user", "content": "Hello"}])
+
+    await session.clear_session()
+
+    metadata = await session.get_metadata()
+    assert len(metadata) == 0
+
+    items = await session.get_items()
+    assert len(items) == 0
+
+
+async def test_metadata_isolation_between_sessions():
+    """Test that metadata is isolated between different sessions."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Create ONE shared engine (same database)
+    engine = create_async_engine(DB_URL)
+
+    # Two sessions with different session_ids, but same database
+    session1 = SQLAlchemySession("iso_test_1", engine=engine, create_tables=True)
+    session2 = SQLAlchemySession("iso_test_2", engine=engine, create_tables=True)
+
+    await session1.set_metadata({"owner_id": "user_123"})
+    await session2.set_metadata({"owner_id": "user_456"})
+
+    meta1 = await session1.get_metadata()
+    meta2 = await session2.get_metadata()
+
+    # Verify isolation within same database
+    assert meta1["owner_id"] == "user_123"
+    assert meta2["owner_id"] == "user_456"
+
+
+async def test_metadata_empty_dict():
+    """Test that setting empty metadata dict is a no-op."""
+    session = SQLAlchemySession.from_url("empty_dict_test", url=DB_URL, create_tables=True)
+
+    await session.set_metadata({})
+
+    metadata = await session.get_metadata()
+    assert len(metadata) == 0
