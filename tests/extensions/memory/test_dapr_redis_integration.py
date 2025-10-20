@@ -26,11 +26,9 @@ from testcontainers.redis import RedisContainer  # type: ignore[import-untyped]
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import (
+    DAPR_CONSISTENCY_EVENTUAL,
+    DAPR_CONSISTENCY_STRONG,
     DaprSession,
-)
-from agents.extensions.memory.dapr_session import (
-    CONSISTENCY_EVENTUAL,
-    CONSISTENCY_STRONG,
 )
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
@@ -386,7 +384,7 @@ async def test_dapr_consistency_levels(dapr_container, monkeypatch):
         session_id="eventual_consistency_test",
         state_store_name="statestore",
         dapr_address=dapr_address,
-        consistency=CONSISTENCY_EVENTUAL,
+        consistency=DAPR_CONSISTENCY_EVENTUAL,
     )
 
     # Test strong consistency
@@ -394,7 +392,7 @@ async def test_dapr_consistency_levels(dapr_container, monkeypatch):
         session_id="strong_consistency_test",
         state_store_name="statestore",
         dapr_address=dapr_address,
-        consistency=CONSISTENCY_STRONG,
+        consistency=DAPR_CONSISTENCY_STRONG,
     )
 
     try:

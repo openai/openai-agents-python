@@ -43,8 +43,8 @@ from ...memory.session import SessionABC
 ConsistencyLevel = Literal["eventual", "strong"]
 
 # Consistency level constants
-CONSISTENCY_EVENTUAL: ConsistencyLevel = "eventual"
-CONSISTENCY_STRONG: ConsistencyLevel = "strong"
+DAPR_CONSISTENCY_EVENTUAL: ConsistencyLevel = "eventual"
+DAPR_CONSISTENCY_STRONG: ConsistencyLevel = "strong"
 
 
 class DaprSession(SessionABC):
@@ -57,7 +57,7 @@ class DaprSession(SessionABC):
         state_store_name: str,
         dapr_client: DaprClient,
         ttl: int | None = None,
-        consistency: ConsistencyLevel = CONSISTENCY_EVENTUAL,
+        consistency: ConsistencyLevel = DAPR_CONSISTENCY_EVENTUAL,
     ):
         """Initializes a new DaprSession.
 
@@ -125,9 +125,9 @@ class DaprSession(SessionABC):
 
     def _get_state_options(self) -> StateOptions | None:
         """Get StateOptions for write/delete consistency level."""
-        if self._consistency == CONSISTENCY_STRONG:
+        if self._consistency == DAPR_CONSISTENCY_STRONG:
             return StateOptions(consistency=Consistency.strong)
-        elif self._consistency == CONSISTENCY_EVENTUAL:
+        elif self._consistency == DAPR_CONSISTENCY_EVENTUAL:
             return StateOptions(consistency=Consistency.eventual)
         return None
 

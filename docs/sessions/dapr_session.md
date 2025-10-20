@@ -244,9 +244,9 @@ Consistency levels control how Dapr handles read/write operations across distrib
 Use the provided constants to avoid typos:
 
 ```python
-from agents.extensions.memory.dapr_session import (
-    CONSISTENCY_EVENTUAL,
-    CONSISTENCY_STRONG,
+from agents.extensions.memory import (
+    DAPR_CONSISTENCY_EVENTUAL,
+    DAPR_CONSISTENCY_STRONG,
     DaprSession,
 )
 
@@ -255,7 +255,7 @@ session = DaprSession.from_address(
     session_id="user-123",
     state_store_name="statestore",
     dapr_address="localhost:50001",
-    consistency=CONSISTENCY_EVENTUAL,  # or "eventual"
+    consistency=DAPR_CONSISTENCY_EVENTUAL,  # or "eventual"
 )
 
 # Strong consistency (guarantees read-after-write consistency)
@@ -263,11 +263,11 @@ session = DaprSession.from_address(
     session_id="user-123",
     state_store_name="statestore",
     dapr_address="localhost:50001",
-    consistency=CONSISTENCY_STRONG,  # or "strong"
+    consistency=DAPR_CONSISTENCY_STRONG,  # or "strong"
 )
 ```
 
-**Important**: Consistency levels apply to both read and write operations. When using `CONSISTENCY_STRONG`, the session ensures that reads always reflect the most recent writes, preventing stale data after updates.
+**Important**: Consistency levels apply to both read and write operations. When using `DAPR_CONSISTENCY_STRONG`, the session ensures that reads always reflect the most recent writes, preventing stale data after updates.
 
 Support varies by state store. See [Dapr consistency documentation](https://docs.dapr.io/developing-applications/building-blocks/state-management/state-management-overview/#consistency).
 

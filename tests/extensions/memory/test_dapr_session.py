@@ -10,11 +10,9 @@ pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import (
+    DAPR_CONSISTENCY_EVENTUAL,
+    DAPR_CONSISTENCY_STRONG,
     DaprSession,
-)
-from agents.extensions.memory.dapr_session import (
-    CONSISTENCY_EVENTUAL,
-    CONSISTENCY_STRONG,
 )
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
@@ -455,7 +453,7 @@ async def test_consistency_levels(fake_dapr_client: FakeDaprClient):
         session_id="eventual_test",
         state_store_name="statestore",
         dapr_client=fake_dapr_client,
-        consistency=CONSISTENCY_EVENTUAL,
+        consistency=DAPR_CONSISTENCY_EVENTUAL,
     )
 
     # Test strong consistency
@@ -463,7 +461,7 @@ async def test_consistency_levels(fake_dapr_client: FakeDaprClient):
         session_id="strong_test",
         state_store_name="statestore",
         dapr_client=fake_dapr_client,
-        consistency=CONSISTENCY_STRONG,
+        consistency=DAPR_CONSISTENCY_STRONG,
     )
 
     try:

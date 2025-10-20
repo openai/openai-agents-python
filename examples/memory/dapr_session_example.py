@@ -19,8 +19,8 @@ import asyncio
 
 from agents import Agent, Runner
 from agents.extensions.memory import (
-    CONSISTENCY_EVENTUAL,
-    CONSISTENCY_STRONG,
+    DAPR_CONSISTENCY_EVENTUAL,
+    DAPR_CONSISTENCY_STRONG,
     DaprSession,
 )
 
@@ -183,7 +183,7 @@ async def demonstrate_advanced_features():
             "eventual_session",
             state_store_name="statestore",
             dapr_address="localhost:50001",
-            consistency=CONSISTENCY_EVENTUAL,
+            consistency=DAPR_CONSISTENCY_EVENTUAL,
         )
 
         # Strong consistency (guaranteed read-after-write)
@@ -191,7 +191,7 @@ async def demonstrate_advanced_features():
             "strong_session",
             state_store_name="statestore",
             dapr_address="localhost:50001",
-            consistency=CONSISTENCY_STRONG,
+            consistency=DAPR_CONSISTENCY_STRONG,
         )
 
         if await eventual_session.ping():
