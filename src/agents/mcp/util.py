@@ -15,6 +15,14 @@ from ..tool import FunctionTool, Tool
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
+# Import McpError if available (requires Python >= 3.10)
+# This allows us to distinguish MCP HTTP errors from programming errors.
+# See: https://github.com/openai/openai-agents-python/issues/879
+try:
+    from mcp.shared.exceptions import McpError
+except ImportError:
+    McpError = None  # type: ignore
+
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
 
@@ -206,19 +214,13 @@ class MCPUtil:
             # by returning a structured error response instead of crashing the run.
             # This allows the agent to handle the error and decide how to respond.
             # See: https://github.com/openai/openai-agents-python/issues/879
-            try:
-                from mcp.shared.exceptions import McpError
-
-                if isinstance(e, McpError):
-                    # This is an HTTP error from upstream service - return structured error
-                    logger.warning(f"MCP tool {tool.name} encountered upstream error: {e}")
-                    error_response = {
-                        "error": {"message": str(e), "tool": tool.name, "type": "upstream_error"}
-                    }
-                    return json.dumps(error_response)
-            except ImportError:
-                # MCP not available (Python < 3.10), fall through to original behavior
-                pass
+            if McpError is not None and isinstance(e, McpError):
+                # This is an HTTP error from upstream service - return structured error
+                logger.warning(f"MCP tool {tool.name} encountered upstream error: {e}")
+                error_response = {
+                    "error": {"message": str(e), "tool": tool.name, "type": "upstream_error"}
+                }
+                return json.dumps(error_response)
 
             # For other exceptions (programming errors, etc.), raise as before
             logger.error(f"Error invoking MCP tool {tool.name}: {e}")
