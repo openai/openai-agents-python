@@ -78,6 +78,68 @@ class LitellmModel(Model):
         self.base_url = base_url
         self.api_key = api_key
 
+    @staticmethod
+    def _convert_tool_choice_for_response(
+        tool_choice: Any,
+    ) -> Literal["auto", "required", "none"] | ToolChoiceFunction:
+        """
+        Convert various tool_choice formats to the format expected by Response.
+
+        Args:
+            tool_choice: Can be:
+                - omit/NotGiven: Defaults to "auto"
+                - Literal["auto", "required", "none"]: Used directly
+                - ToolChoiceFunction: Used directly
+                - dict (from ChatCompletions Converter): Converted to ToolChoiceFunction
+                    Format: {"type": "function", "function": {"name": "tool_name"}}
+
+        Returns:
+            Literal["auto", "required", "none"] | ToolChoiceFunction
+
+        Examples:
+            >>> LitellmModel._convert_tool_choice_for_response(omit)
+            "auto"
+            >>> LitellmModel._convert_tool_choice_for_response("required")
+            "required"
+            >>> LitellmModel._convert_tool_choice_for_response(
+            ...     {"type": "function", "function": {"name": "my_tool"}}
+            ... )
+            ToolChoiceFunction(type="function", name="my_tool")
+        """
+        # Handle omit/NotGiven
+        if tool_choice is omit or isinstance(tool_choice, NotGiven):
+            return "auto"
+
+        # Already a ToolChoiceFunction, use directly
+        if isinstance(tool_choice, ToolChoiceFunction):
+            return tool_choice
+
+        # Convert from ChatCompletions format dict to ToolChoiceFunction
+        # ChatCompletions Converter returns: {"type": "function", "function": {"name": "..."}}
+        if isinstance(tool_choice, dict):
+            func_data = tool_choice.get("function")
+            if (
+                tool_choice.get("type") == "function"
+                and func_data is not None
+                and isinstance(func_data, dict)
+            ):
+                tool_name = func_data.get("name")
+                if isinstance(tool_name, str) and tool_name:  # Ensure non-empty string
+                    return ToolChoiceFunction(type="function", name=tool_name)
+                else:
+                    # Fallback to auto if name is missing or invalid
+                    return "auto"
+            else:
+                # Fallback to auto if unexpected format
+                return "auto"
+
+        # Handle literal strings
+        if tool_choice in ("auto", "required", "none"):
+            return cast(Literal["auto", "required", "none"], tool_choice)
+
+        # Fallback to auto for any other case
+        return "auto"
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -369,39 +431,7 @@ class LitellmModel(Model):
             return ret
 
         # Convert tool_choice to the correct type for Response
-        # tool_choice can be a Literal, ToolChoiceFunction, 
-        # dict from ChatCompletions Converter, or omit
-        response_tool_choice: Literal["auto", "required", "none"] | ToolChoiceFunction
-        if tool_choice is omit:
-            response_tool_choice = "auto"
-        elif isinstance(tool_choice, ToolChoiceFunction):
-            # Already a ToolChoiceFunction, use directly
-            response_tool_choice = tool_choice
-        elif isinstance(tool_choice, dict):
-            # Convert from ChatCompletions format dict to ToolChoiceFunction
-            # ChatCompletions Converter returns: {"type": "function", "function": {"name": "..."}}
-            func_data = tool_choice.get("function")
-            if (
-                tool_choice.get("type") == "function"
-                and func_data is not None
-                and isinstance(func_data, dict)
-            ):
-                tool_name = func_data.get("name")
-                if isinstance(tool_name, str) and tool_name:  # Ensure non-empty string
-                    response_tool_choice = ToolChoiceFunction(type="function", name=tool_name)
-                else:
-                    # Fallback to auto if name is missing or invalid
-                    response_tool_choice = "auto"
-            else:
-                # Fallback to auto if unexpected format
-                response_tool_choice = "auto"
-        elif tool_choice in ("auto", "required", "none"):
-            from typing import cast
-
-            response_tool_choice = cast(Literal["auto", "required", "none"], tool_choice)
-        else:
-            # Fallback to auto for any other case
-            response_tool_choice = "auto"
+        response_tool_choice = self._convert_tool_choice_for_response(tool_choice)
 
         response = Response(
             id=FAKE_RESPONSES_ID,
