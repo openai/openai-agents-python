@@ -325,20 +325,20 @@ def test_tool_call_output_item_image_dict_variant_with_location_not_converted() 
 
     assert payload["type"] == "function_call_output"
     assert payload["call_id"] == call.call_id
-    # Should be converted to string since it lacks 'type' field
+    # Should be converted to string since it lacks required fields (image_url or file_id)
     assert isinstance(payload["output"], str)
     assert payload["output"] == "{'type': 'image', 'location': '/path/to/img.png'}"
 
 
-def test_tool_call_output_item_text_without_type_not_converted() -> None:
-    """Dict with text but no 'type' field should NOT be treated as structured output."""
+def test_tool_call_output_item_file_dict_variant_with_path_not_converted() -> None:
+    """Dict with type='file' and path field should NOT be treated as structured output."""
     call = _make_tool_call()
     out = {"type": "file", "path": "/path/to/file.txt"}
     payload = ItemHelpers.tool_call_output_item(call, out)
 
     assert payload["type"] == "function_call_output"
     assert payload["call_id"] == call.call_id
-    # Should be converted to string since it lacks 'type' field
+    # Should be converted to string since it lacks required fields (file_data, file_url, or file_id)
     assert isinstance(payload["output"], str)
     assert payload["output"] == "{'type': 'file', 'path': '/path/to/file.txt'}"
 
