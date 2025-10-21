@@ -5,11 +5,43 @@ This example shows how to use Dapr-backed session memory to maintain conversatio
 history across multiple agent runs with support for various backend stores
 (Redis, PostgreSQL, MongoDB, etc.).
 
-Prerequisites:
+WHAT IS DAPR?
+Dapr (https://dapr.io) is a portable, event-driven runtime that simplifies building
+resilient applications. Its state management building block provides a unified API
+for storing data across 30+ databases with built-in telemetry, tracing, and data
+isolation. See: https://docs.dapr.io/developing-applications/building-blocks/state-management/
+
+WHEN TO USE DaprSession:
+- Horizontally scaled deployments (multiple agent instances behind a load balancer)
+- Multi-region requirements (agents run in different geographic regions)
+- Existing Dapr adoption (your team already uses Dapr for other services)
+- Backend flexibility (switch state stores without code changes)
+- Enterprise governance (centralized control over state management policies)
+
+WHEN TO CONSIDER ALTERNATIVES:
+- Use SQLiteSession for single-instance agents (desktop app, CLI tool)
+- Use Session (in-memory) for quick prototypes or short-lived sessions
+
+PRODUCTION FEATURES (provided by Dapr):
+- Backend flexibility: 30+ state stores (Redis, PostgreSQL, MongoDB, Cosmos DB, etc.)
+- Built-in observability: Distributed tracing, metrics, telemetry (zero code)
+- Data isolation: App-level or namespace-level state scoping for multi-tenancy
+- TTL support: Automatic session expiration (store-dependent)
+- Consistency levels: Eventual (faster) or strong (read-after-write guarantee)
+- State encryption: AES-GCM encryption at the Dapr component level
+- Cloud-native: Seamless Kubernetes integration (Dapr runs as sidecar)
+
+PREREQUISITES:
 1. Install Dapr CLI: https://docs.dapr.io/getting-started/install-dapr-cli/
 2. Initialize Dapr: dapr init
 3. Start Redis: docker run -d -p 6379:6379 redis:7-alpine
 4. Create components directory with statestore.yaml configuration
+
+COMMON ISSUES:
+- "Health check connection refused (port 3500)": Always use --dapr-http-port 3500
+  when starting Dapr, or set DAPR_HTTP_ENDPOINT="http://localhost:3500"
+- "State store not found": Ensure component YAML is in --resources-path directory
+- "Dapr sidecar not reachable": Check with `dapr list` and verify gRPC port 50001
 
 Note: This example clears the session at the start to ensure a clean demonstration.
 In production, you may want to preserve existing conversation history.
@@ -243,7 +275,8 @@ async def setup_instructions():
     print("\n=== Setup Instructions ===")
     print("\n1. Create a components directory:")
     print("   mkdir -p components")
-    print("\n2. Create statestore.yaml with Redis configuration:")
+    print("\n2. Create statestore.yaml with your chosen state store:")
+    print("\n   OPTION A - Redis (recommended for getting started):")
     print("""
 apiVersion: dapr.io/v1alpha1
 kind: Component
@@ -258,20 +291,87 @@ spec:
   - name: redisPassword
     value: ""
 """)
-    print("\n3. Start Redis:")
-    print("   docker run -d -p 6379:6379 redis:7-alpine")
-    print("\n4. Start Dapr sidecar:")
+    print("   Start Redis: docker run -d -p 6379:6379 redis:7-alpine")
+
+    print("\n   OPTION B - PostgreSQL (v2 recommended):")
+    print("""
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.postgresql
+  version: v2
+  metadata:
+  - name: connectionString
+    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
+""")
+    print(
+        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-postgresql-v2/"
+    )
+
+    print("\n   OPTION C - MongoDB:")
+    print("""
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.mongodb
+  version: v1
+  metadata:
+  - name: host
+    value: "localhost:27017"
+""")
+    print(
+        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-mongodb/"
+    )
+
+    print("\n   OPTION D - Azure Cosmos DB:")
+    print("""
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.azure.cosmosdb
+  version: v1
+  metadata:
+  - name: url
+    value: "https://<your-account>.documents.azure.com:443/"
+  - name: masterKey
+    value: "<your-master-key>"
+  - name: database
+    value: "dapr"
+""")
+    print(
+        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-azure-cosmosdb/"
+    )
+
+    print("\n   NOTE: Always use secret references for passwords/keys in production!")
+    print("   See: https://docs.dapr.io/operations/components/component-secrets/")
+
+    print("\n3. Start Dapr sidecar:")
     print(
         "   dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
     )
-    print("\n5. Run this example:")
+    print("\n   IMPORTANT: Always specify --dapr-http-port 3500 to avoid connection errors!")
+
+    print("\n4. Run this example:")
     print("   python examples/memory/dapr_session_example.py")
-    print("\nAlternatively, you can use other state stores supported by Dapr:")
-    print("- PostgreSQL: state.postgresql")
-    print("- MongoDB: state.mongodb")
-    print("- Azure Cosmos DB: state.azure.cosmosdb")
-    print("- AWS DynamoDB: state.aws.dynamodb")
-    print("See: https://docs.dapr.io/reference/components-reference/supported-state-stores/")
+
+    print("\n   TIP: If you get 'connection refused' errors, set the HTTP endpoint:")
+    print("   export DAPR_HTTP_ENDPOINT='http://localhost:3500'")
+    print("   python examples/memory/dapr_session_example.py")
+
+    print("\n5. For Kubernetes deployment:")
+    print("   Add these annotations to your pod spec:")
+    print("   dapr.io/enabled: 'true'")
+    print("   dapr.io/app-id: 'agents-app'")
+    print("   Then use: dapr_address='localhost:50001' in your code")
+
+    print("\nFull list of 30+ supported state stores:")
+    print("https://docs.dapr.io/reference/components-reference/supported-state-stores/")
 
 
 if __name__ == "__main__":

@@ -21,26 +21,14 @@ mypy:
 
 .PHONY: tests
 tests: 
-	uv run pytest -m "not integration"
-
-.PHONY: tests-unit
-tests-unit:
-	uv run pytest -m "not integration"
-
-.PHONY: tests-integration
-tests-integration:
-	uv run pytest -m integration
+	uv run pytest 
 
 .PHONY: coverage
 coverage:
 	
-	uv run coverage run -m pytest -m "not integration"
+	uv run coverage run -m pytest
 	uv run coverage xml -o coverage.xml
 	uv run coverage report -m --fail-under=95
-
-.PHONY: tests-all
-tests-all:
-	uv run pytest
 
 .PHONY: snapshots-fix
 snapshots-fix: 

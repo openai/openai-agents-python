@@ -2,14 +2,15 @@
 Integration tests for DaprSession with real Dapr sidecar and Redis using testcontainers.
 
 These tests use Docker containers for both Redis and Dapr, with proper networking.
-Docker must be running to execute these tests.
+Tests are automatically skipped if dependencies (dapr, testcontainers, docker) are not available.
 
-Run with: pytest tests/extensions/memory/test_dapr_redis_integration.py -v -m integration
+Run with: pytest tests/extensions/memory/test_dapr_redis_integration.py -v
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 import urllib.request
@@ -17,8 +18,21 @@ from urllib.error import URLError
 
 import pytest
 
+# Skip tests if dependencies are not available
 pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
+
+# Check if Docker is available
+try:
+    subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=5,
+    )
+except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+    pytest.skip("Docker is not available", allow_module_level=True)
 
 from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
 from testcontainers.core.network import Network  # type: ignore[import-untyped]
@@ -33,8 +47,8 @@ from agents.extensions.memory import (
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 
-# Mark all tests as integration tests
-pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+# Mark all tests as async
+pytestmark = pytest.mark.asyncio
 
 
 def wait_for_dapr_health(host: str, port: int, timeout: int = 60) -> bool:

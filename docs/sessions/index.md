@@ -196,33 +196,7 @@ session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 
 See [SQLAlchemy Sessions](sqlalchemy_session.md) for detailed documentation.
 
-### Dapr state store sessions
 
-Production-ready sessions using Dapr state stores (Redis, PostgreSQL, MongoDB, Cosmos DB, and 30+ other backends):
-
-```python
-from agents.extensions.memory import DaprSession
-
-# Connect to Dapr sidecar
-session = DaprSession.from_address(
-    "user_123",
-    state_store_name="statestore",
-    dapr_address="localhost:50001",  # The default Dapr gRPC port is 50001 and can be omitted.
-)
-
-# Optional: configure TTL and consistency
-from agents.extensions.memory import DAPR_CONSISTENCY_STRONG
-
-session = DaprSession.from_address(
-    "user_123",
-    state_store_name="statestore",
-    dapr_address="localhost:50001",  # The default Dapr gRPC port is 50001 and can be omitted.
-    ttl=3600,  # 1 hour
-    consistency=DAPR_CONSISTENCY_STRONG,  # or DAPR_CONSISTENCY_EVENTUAL
-)
-```
-
-See [Dapr Sessions](dapr_session.md) for detailed documentation.
 
 ### Advanced SQLite sessions
 
@@ -275,6 +249,10 @@ result = await Runner.run(agent, "Hello", session=session)
 
 See [Encrypted Sessions](encrypted_session.md) for detailed documentation.
 
+### Other session types
+
+There are a few more built-in options. Please refer to `examples/memory/` and source code under `extensions/memory/`.
+
 ## Session management
 
 ### Session ID naming
@@ -290,7 +268,8 @@ Use meaningful session IDs that help you organize conversations:
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
--   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for cloud-native deployments with support for 30+ backends
+-   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for productioncloud-native deployments with support for 
+30+ database backends with built-in telemetry, tracing, and data isolation
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
 -   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
