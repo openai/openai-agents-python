@@ -105,6 +105,9 @@ Create your Python application (save as `example.py`):
 import asyncio
 import os
 
+os.environ["GRPC_VERBOSITY"] = (
+    "ERROR"  # Suppress gRPC warnings caused by the Dapr Python SDK gRPC connection.
+)
 from agents import Agent, Runner
 from agents.extensions.memory import DaprSession
 
@@ -127,19 +130,11 @@ async def main():
 
     try:
         # First turn
-        result = await Runner.run(
-            agent,
-            "What city is the Golden Gate Bridge in?",
-            session=session
-        )
+        result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
         print(f"Agent: {result.final_output}")  # "San Francisco"
 
         # Second turn - agent remembers context
-        result = await Runner.run(
-            agent,
-            "What state is it in?",
-            session=session
-        )
+        result = await Runner.run(agent, "What state is it in?", session=session)
         print(f"Agent: {result.final_output}")  # "California"
 
     finally:
