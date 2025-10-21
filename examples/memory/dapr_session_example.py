@@ -8,8 +8,8 @@ history across multiple agent runs with support for various backend stores
 WHAT IS DAPR?
 Dapr (https://dapr.io) is a portable, event-driven runtime that simplifies building
 resilient applications. Its state management building block provides a unified API
-for storing data across 30+ databases with built-in telemetry, tracing, and data
-isolation. See: https://docs.dapr.io/developing-applications/building-blocks/state-management/
+for storing data across 30+ databases with built-in telemetry, tracing, encryption, data
+isolation and lifecycle management via time-to-live (TTL). See: https://docs.dapr.io/developing-applications/building-blocks/state-management/
 
 WHEN TO USE DaprSession:
 - Horizontally scaled deployments (multiple agent instances behind a load balancer)
@@ -30,12 +30,24 @@ PRODUCTION FEATURES (provided by Dapr):
 - Consistency levels: Eventual (faster) or strong (read-after-write guarantee)
 - State encryption: AES-GCM encryption at the Dapr component level
 - Cloud-native: Seamless Kubernetes integration (Dapr runs as sidecar)
+- Cloud Service Provider (CSP) native authentication and authorization support.
 
 PREREQUISITES:
 1. Install Dapr CLI: https://docs.dapr.io/getting-started/install-dapr-cli/
-2. Initialize Dapr: dapr init
-3. Start Redis: docker run -d -p 6379:6379 redis:7-alpine
-4. Create components directory with statestore.yaml configuration
+2. Install Docker (for running Redis and optionally Dapr containers)
+3. Choose one of the following setups:
+
+   Option A - Full Dapr environment (recommended if you plan to use other Dapr features):
+     - Run: dapr init
+     - This installs Redis, Zipkin, and Placement service locally
+     - Useful for workflows, actors, pub/sub, and other Dapr building blocks
+
+   Option B - Minimal setup (just for DaprSession):
+     - Start Redis only: docker run -d -p 6379:6379 redis:7-alpine
+     - Requires only Dapr CLI (no dapr init needed)
+
+4. Create components directory with statestore.yaml configuration (see setup_instructions())
+5. As always, ensure that the OPENAI_API_KEY environment variable is set.
 
 COMMON ISSUES:
 - "Health check connection refused (port 3500)": Always use --dapr-http-port 3500
@@ -78,109 +90,108 @@ async def main():
     )  # noqa: E501
     print()
 
-    # Create a Dapr session instance
+    # Create a Dapr session instance with context manager for automatic cleanup
     session_id = "dapr_conversation_123"
     try:
-        session = DaprSession.from_address(
+        # Use async with to automatically close the session on exit
+        async with DaprSession.from_address(
             session_id,
             state_store_name="statestore",
             dapr_address=f"localhost:{grpc_port}",
-        )
+        ) as session:
+            # Test Dapr connectivity
+            if not await session.ping():
+                print("Dapr sidecar is not available!")
+                print("Please start Dapr sidecar and try again.")
+                print(
+                    "Command: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
+                )  # noqa: E501
+                return
 
-        # Test Dapr connectivity
-        if not await session.ping():
-            print("Dapr sidecar is not available!")
-            print("Please start Dapr sidecar and try again.")
+            print("Connected to Dapr successfully!")
+            print(f"Session ID: {session_id}")
+            print("State Store: statestore")
+
+            # Clear any existing session data for a clean start
+            await session.clear_session()
+            print("Session cleared for clean demonstration.")
+            print("The agent will remember previous messages automatically.\n")
+
+            # First turn
+            print("First turn:")
+            print("User: What city is the Golden Gate Bridge in?")
+            result = await Runner.run(
+                agent,
+                "What city is the Golden Gate Bridge in?",
+                session=session,
+            )
+            print(f"Assistant: {result.final_output}")
+            print()
+
+            # Second turn - the agent will remember the previous conversation
+            print("Second turn:")
+            print("User: What state is it in?")
+            result = await Runner.run(agent, "What state is it in?", session=session)
+            print(f"Assistant: {result.final_output}")
+            print()
+
+            # Third turn - continuing the conversation
+            print("Third turn:")
+            print("User: What's the population of that state?")
+            result = await Runner.run(
+                agent,
+                "What's the population of that state?",
+                session=session,
+            )
+            print(f"Assistant: {result.final_output}")
+            print()
+
+            print("=== Conversation Complete ===")
+            print("Notice how the agent remembered the context from previous turns!")
             print(
-                "Command: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
-            )  # noqa: E501
-            return
+                "Dapr session automatically handles conversation history with backend flexibility."
+            )
 
-        print("Connected to Dapr successfully!")
-        print(f"Session ID: {session_id}")
-        print("State Store: statestore")
+            # Demonstrate session persistence
+            print("\n=== Session Persistence Demo ===")
+            all_items = await session.get_items()
+            print(f"Total messages stored in Dapr: {len(all_items)}")
 
-        # Clear any existing session data for a clean start
-        await session.clear_session()
-        print("Session cleared for clean demonstration.")
-        print("The agent will remember previous messages automatically.\n")
+            # Demonstrate the limit parameter
+            print("\n=== Latest Items Demo ===")
+            latest_items = await session.get_items(limit=2)
+            print("Latest 2 items:")
+            for i, msg in enumerate(latest_items, 1):
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                print(f"  {i}. {role}: {content}")
 
-        # First turn
-        print("First turn:")
-        print("User: What city is the Golden Gate Bridge in?")
-        result = await Runner.run(
-            agent,
-            "What city is the Golden Gate Bridge in?",
-            session=session,
-        )
-        print(f"Assistant: {result.final_output}")
-        print()
+            # Demonstrate session isolation with a new session
+            print("\n=== Session Isolation Demo ===")
+            # Use context manager for the new session too
+            async with DaprSession.from_address(
+                "different_conversation_456",
+                state_store_name="statestore",
+                dapr_address=f"localhost:{grpc_port}",
+            ) as new_session:
+                print("Creating a new session with different ID...")
+                result = await Runner.run(
+                    agent,
+                    "Hello, this is a new conversation!",
+                    session=new_session,
+                )
+                print(f"New session response: {result.final_output}")
 
-        # Second turn - the agent will remember the previous conversation
-        print("Second turn:")
-        print("User: What state is it in?")
-        result = await Runner.run(agent, "What state is it in?", session=session)
-        print(f"Assistant: {result.final_output}")
-        print()
+                # Show that sessions are isolated
+                original_items = await session.get_items()
+                new_items = await new_session.get_items()
+                print(f"Original session has {len(original_items)} items")
+                print(f"New session has {len(new_items)} items")
+                print("Sessions are completely isolated!")
 
-        # Third turn - continuing the conversation
-        print("Third turn:")
-        print("User: What's the population of that state?")
-        result = await Runner.run(
-            agent,
-            "What's the population of that state?",
-            session=session,
-        )
-        print(f"Assistant: {result.final_output}")
-        print()
-
-        print("=== Conversation Complete ===")
-        print("Notice how the agent remembered the context from previous turns!")
-        print("Dapr session automatically handles conversation history with backend flexibility.")
-
-        # Demonstrate session persistence
-        print("\n=== Session Persistence Demo ===")
-        all_items = await session.get_items()
-        print(f"Total messages stored in Dapr: {len(all_items)}")
-
-        # Demonstrate the limit parameter
-        print("\n=== Latest Items Demo ===")
-        latest_items = await session.get_items(limit=2)
-        print("Latest 2 items:")
-        for i, msg in enumerate(latest_items, 1):
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            print(f"  {i}. {role}: {content}")
-
-        # Demonstrate session isolation with a new session
-        print("\n=== Session Isolation Demo ===")
-        new_session = DaprSession.from_address(
-            "different_conversation_456",
-            state_store_name="statestore",
-            dapr_address=f"localhost:{grpc_port}",
-        )
-
-        print("Creating a new session with different ID...")
-        result = await Runner.run(
-            agent,
-            "Hello, this is a new conversation!",
-            session=new_session,
-        )
-        print(f"New session response: {result.final_output}")
-
-        # Show that sessions are isolated
-        original_items = await session.get_items()
-        new_items = await new_session.get_items()
-        print(f"Original session has {len(original_items)} items")
-        print(f"New session has {len(new_items)} items")
-        print("Sessions are completely isolated!")
-
-        # Clean up the new session
-        await new_session.clear_session()
-        await new_session.close()
-
-        # Close the main session
-        await session.close()
+                # Clean up the new session
+                await new_session.clear_session()
+                # No need to call close() - context manager handles it automatically!
 
     except Exception as e:
         print(f"Error: {e}")
@@ -196,53 +207,45 @@ async def demonstrate_advanced_features():
     try:
         # TTL (time-to-live) configuration
         print("\n1. TTL Configuration:")
-        ttl_session = DaprSession.from_address(
+        async with DaprSession.from_address(
             "ttl_demo_session",
             state_store_name="statestore",
             dapr_address=f"localhost:{grpc_port}",
             ttl=3600,  # 1 hour TTL
-        )
-
-        if await ttl_session.ping():
-            await Runner.run(
-                Agent(name="Assistant", instructions="Be helpful"),
-                "This message will expire in 1 hour",
-                session=ttl_session,
-            )
-            print("Created session with 1-hour TTL - messages will auto-expire")
-            print("(TTL support depends on the underlying state store)")
-
-        await ttl_session.close()
+        ) as ttl_session:
+            if await ttl_session.ping():
+                await Runner.run(
+                    Agent(name="Assistant", instructions="Be helpful"),
+                    "This message will expire in 1 hour",
+                    session=ttl_session,
+                )
+                print("Created session with 1-hour TTL - messages will auto-expire")
+                print("(TTL support depends on the underlying state store)")
 
         # Consistency levels
         print("\n2. Consistency Levels:")
 
         # Eventual consistency (better performance)
-        eventual_session = DaprSession.from_address(
+        async with DaprSession.from_address(
             "eventual_session",
             state_store_name="statestore",
             dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_EVENTUAL,
-        )
+        ) as eventual_session:
+            if await eventual_session.ping():
+                print("Eventual consistency: Better performance, may have slight delays")
+                await eventual_session.add_items([{"role": "user", "content": "Test eventual"}])
 
         # Strong consistency (guaranteed read-after-write)
-        strong_session = DaprSession.from_address(
+        async with DaprSession.from_address(
             "strong_session",
             state_store_name="statestore",
             dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_STRONG,
-        )
-
-        if await eventual_session.ping():
-            print("Eventual consistency: Better performance, may have slight delays")
-            await eventual_session.add_items([{"role": "user", "content": "Test eventual"}])
-
-        if await strong_session.ping():
-            print("Strong consistency: Guaranteed immediate consistency")
-            await strong_session.add_items([{"role": "user", "content": "Test strong"}])
-
-        await eventual_session.close()
-        await strong_session.close()
+        ) as strong_session:
+            if await strong_session.ping():
+                print("Strong consistency: Guaranteed immediate consistency")
+                await strong_session.add_items([{"role": "user", "content": "Test strong"}])
 
         # Multi-tenancy example
         print("\n3. Multi-tenancy with Session Prefixes:")
@@ -255,16 +258,12 @@ async def demonstrate_advanced_features():
                 dapr_address=f"localhost:{grpc_port}",
             )
 
-        tenant_a_session = get_tenant_session("tenant-a", "user-123")
-        tenant_b_session = get_tenant_session("tenant-b", "user-123")
-
-        if await tenant_a_session.ping() and await tenant_b_session.ping():
-            await tenant_a_session.add_items([{"role": "user", "content": "Tenant A data"}])
-            await tenant_b_session.add_items([{"role": "user", "content": "Tenant B data"}])
-            print("Multi-tenant sessions created with isolated data")
-
-        await tenant_a_session.close()
-        await tenant_b_session.close()
+        async with get_tenant_session("tenant-a", "user-123") as tenant_a_session:
+            async with get_tenant_session("tenant-b", "user-123") as tenant_b_session:
+                if await tenant_a_session.ping() and await tenant_b_session.ping():
+                    await tenant_a_session.add_items([{"role": "user", "content": "Tenant A data"}])
+                    await tenant_b_session.add_items([{"role": "user", "content": "Tenant B data"}])
+                    print("Multi-tenant sessions created with isolated data")
 
     except Exception as e:
         print(f"Advanced features error: {e}")
@@ -292,6 +291,7 @@ spec:
     value: ""
 """)
     print("   Start Redis: docker run -d -p 6379:6379 redis:7-alpine")
+    print("   (Skip if you already ran 'dapr init' - it installs Redis locally)")
 
     print("\n   OPTION B - PostgreSQL (v2 recommended):")
     print("""

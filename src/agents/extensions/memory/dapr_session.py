@@ -341,6 +341,14 @@ class DaprSession(SessionABC):
         if self._owns_client:
             await self._dapr_client.close()
 
+    async def __aenter__(self) -> DaprSession:
+        """Enter async context manager."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit async context manager and close the connection."""
+        await self.close()
+
     async def ping(self) -> bool:
         """Test Dapr connectivity by checking metadata.
 

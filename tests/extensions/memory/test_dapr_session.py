@@ -658,3 +658,44 @@ async def test_already_deserialized_messages(fake_dapr_client: FakeDaprClient):
     assert items[1]["content"] == "Second message"
 
     await session.close()
+
+
+async def test_context_manager(fake_dapr_client: FakeDaprClient):
+    """Test that DaprSession works as an async context manager."""
+    # Test that the context manager enters and exits properly
+    async with DaprSession(
+        "test_cm_session",
+        state_store_name="statestore",
+        dapr_client=fake_dapr_client,
+    ) as session:
+        # Verify we got the session object back
+        assert session.session_id == "test_cm_session"
+
+        # Add some data
+        await session.add_items([{"role": "user", "content": "Test message"}])
+        items = await session.get_items()
+        assert len(items) == 1
+        assert items[0]["content"] == "Test message"
+
+    # After exiting context manager, close should have been called
+    # Verify we can still check the state (fake client doesn't truly disconnect)
+    assert fake_dapr_client._closed is False  # External client not closed
+
+    # Test with owned client (from_address)
+    mock_address = "localhost:50001"
+    session = DaprSession.from_address(
+        "test_cm_owned",
+        state_store_name="statestore",
+        dapr_address=mock_address,
+    )
+
+    # Replace the internal client with our fake for testing
+    session._dapr_client = fake_dapr_client
+    session._owns_client = True
+
+    async with session:
+        await session.add_items([{"role": "user", "content": "Owned client test"}])
+        items = await session.get_items()
+        assert len(items) == 1
+
+    # Close should have been called automatically
