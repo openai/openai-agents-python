@@ -1172,6 +1172,8 @@ class RunImpl:
                 event = RunItemStreamEvent(item=item, name="reasoning_item_created")
             elif isinstance(item, MCPApprovalRequestItem):
                 event = RunItemStreamEvent(item=item, name="mcp_approval_requested")
+            elif isinstance(item, MCPApprovalResponseItem):
+                event = RunItemStreamEvent(item=item, name="mcp_approval_response")
             elif isinstance(item, MCPListToolsItem):
                 event = RunItemStreamEvent(item=item, name="mcp_list_tools")
 
