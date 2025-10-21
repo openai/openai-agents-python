@@ -516,6 +516,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._websocket = None
         if self._websocket_task:
             self._websocket_task.cancel()
+            try:
+                await self._websocket_task
+            except asyncio.CancelledError:
+                pass
             self._websocket_task = None
 
     async def _cancel_response(self) -> None:
