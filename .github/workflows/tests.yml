@@ -41,6 +41,16 @@ jobs:
 
   tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          # TODO: enable this https://github.com/openai/openai-agents-python/pull/1961/
+          # - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:
@@ -50,6 +60,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: make sync
       - name: Run tests with coverage
@@ -71,7 +82,7 @@ jobs:
       - name: Build docs
         run: make build-docs
 
-  old_versions:
+  old_version_tests:
     runs-on: ubuntu-latest
     env:
       OPENAI_API_KEY: fake-for-tests
