@@ -69,8 +69,8 @@ class DaprSession(SessionABC):
                 If None, data persists indefinitely. Note that TTL support depends on
                 the underlying state store implementation. Defaults to None.
             consistency (ConsistencyLevel, optional): Consistency level for state operations.
-                Use CONSISTENCY_EVENTUAL or CONSISTENCY_STRONG constants.
-                Defaults to CONSISTENCY_EVENTUAL.
+                Use DAPR_CONSISTENCY_EVENTUAL or DAPR_CONSISTENCY_STRONG constants.
+                Defaults to DAPR_CONSISTENCY_EVENTUAL.
         """
         self.session_id = session_id
         self._dapr_client = dapr_client
