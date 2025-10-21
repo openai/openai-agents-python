@@ -6,12 +6,14 @@ It enables horizontal scaling across multiple instances while maintaining conver
 
 ## Overview
 
-[Dapr](https://dapr.io) is a portable, event-driven runtime that simplifies building resilient applications. 
+[Dapr](https://dapr.io) is a portable, event-driven runtime that simplifies building resilient applications. Its [state management building block](https://docs.dapr.io/developing-applications/building-blocks/state-management/state-management-overview/) provides a unified API for storing data across 30+ databases with built-in telemetry, tracing, and data isolation.
 
 The `DaprSession` class integrates the OpenAI Agents SDK with Dapr's state management, giving you:
 
 - **Backend flexibility**: Use any of 30+ state stores without code changes
-- **Production features**: TTL, consistency levels, and automatic retries via Dapr
+- **Production features**: TTL, consistency levels, and automatic retries
+- **Built-in observability**: Distributed tracing, metrics, and telemetry with zero instrumentation code
+- **Data isolation**: App-level or namespace-level state scoping for multi-tenant architectures
 - **Separation of concerns**: Developers focus on agents while platform teams manage infrastructure
 - **Cloud-native deployment**: Seamless Kubernetes integration (Dapr runs as a sidecar container alongside your app)
 
