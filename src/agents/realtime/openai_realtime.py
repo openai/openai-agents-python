@@ -266,7 +266,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _emit_event(self, event: RealtimeModelEvent) -> None:
         """Emit an event to the listeners."""
-        for listener in self._listeners:
+        # Copy list to avoid modification during iteration
+        for listener in list(self._listeners):
             await listener.on_event(event)
 
     async def _listen_for_messages(self):
