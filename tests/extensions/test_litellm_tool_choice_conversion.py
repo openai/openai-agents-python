@@ -7,7 +7,6 @@ to the format expected by the Response type.
 Related to Issue #1846: Support tool_choice with specific tool names in LiteLLM streaming
 """
 
-import pytest
 from openai import NotGiven, omit
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
 
