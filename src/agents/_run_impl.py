@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import secrets
+import string
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -242,6 +244,17 @@ def get_model_tracing_impl(
         return ModelTracing.ENABLED
     else:
         return ModelTracing.ENABLED_WITHOUT_DATA
+
+
+def add_function_tool_call_id_if_missing(
+        item: ResponseFunctionToolCall,
+) -> ResponseFunctionToolCall:
+    """Add call_id to function_call item if it doesn't have one."""
+    if not item.call_id:
+        alphabet = string.ascii_letters + string.digits
+        random_part = ''.join(secrets.choice(alphabet) for _ in range(22))
+        item.call_id = "call_" + random_part
+    return item
 
 
 class RunImpl:
@@ -530,6 +543,10 @@ class RunImpl:
             # At this point we know it's a function tool call
             if not isinstance(output, ResponseFunctionToolCall):
                 continue
+
+            # Add call_id to function tool call if it doesn't have one
+            output = add_function_tool_call_id_if_missing(output)
+            tools_used.append(output.name)
 
             tools_used.append(output.name)
 
