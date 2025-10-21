@@ -332,7 +332,7 @@ class LitellmModel(Model):
         )
 
         # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
-        if preserve_thinking_blocks:
+        if "anthropic" in self.model.lower() or "claude" in self.model.lower():
             converted_messages = self._fix_tool_message_ordering(converted_messages)
 
         if system_instructions:
