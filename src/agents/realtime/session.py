@@ -187,14 +187,20 @@ class RealtimeSession(RealtimeModelListener):
 
     async def send_message(self, message: RealtimeUserInput) -> None:
         """Send a message to the model."""
+        if self._closed:
+            raise UserError("Cannot send message: session is closed")
         await self._model.send_event(RealtimeModelSendUserInput(user_input=message))
 
     async def send_audio(self, audio: bytes, *, commit: bool = False) -> None:
         """Send a raw audio chunk to the model."""
+        if self._closed:
+            raise UserError("Cannot send audio: session is closed")
         await self._model.send_event(RealtimeModelSendAudio(audio=audio, commit=commit))
 
     async def interrupt(self) -> None:
         """Interrupt the model."""
+        if self._closed:
+            raise UserError("Cannot interrupt: session is closed")
         await self._model.send_event(RealtimeModelSendInterrupt())
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
