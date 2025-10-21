@@ -120,7 +120,7 @@ class SQLiteSession(SessionABC):
 
         def _get_items_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 if limit is None:
                     # Fetch all items in chronological order
                     cursor = conn.execute(
@@ -174,7 +174,7 @@ class SQLiteSession(SessionABC):
         def _add_items_sync():
             conn = self._get_connection()
 
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 # Ensure session exists
                 conn.execute(
                     f"""
@@ -215,7 +215,7 @@ class SQLiteSession(SessionABC):
 
         def _pop_item_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 # Use DELETE with RETURNING to atomically delete and return the most recent item
                 cursor = conn.execute(
                     f"""
@@ -252,7 +252,7 @@ class SQLiteSession(SessionABC):
 
         def _clear_session_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                     (self.session_id,),
