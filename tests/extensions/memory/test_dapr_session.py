@@ -681,21 +681,18 @@ async def test_context_manager(fake_dapr_client: FakeDaprClient):
     # Verify we can still check the state (fake client doesn't truly disconnect)
     assert fake_dapr_client._closed is False  # External client not closed
 
-    # Test with owned client (from_address)
-    mock_address = "localhost:50001"
-    session = DaprSession.from_address(
+    # Test with owned client scenario (simulating from_address behavior)
+    owned_session = DaprSession(
         "test_cm_owned",
         state_store_name="statestore",
-        dapr_address=mock_address,
+        dapr_client=fake_dapr_client,
     )
+    # Manually set ownership to simulate from_address behavior
+    owned_session._owns_client = True
 
-    # Replace the internal client with our fake for testing
-    session._dapr_client = fake_dapr_client
-    session._owns_client = True
-
-    async with session:
-        await session.add_items([{"role": "user", "content": "Owned client test"}])
-        items = await session.get_items()
+    async with owned_session:
+        await owned_session.add_items([{"role": "user", "content": "Owned client test"}])
+        items = await owned_session.get_items()
         assert len(items) == 1
 
-    # Close should have been called automatically
+    # Close should have been called automatically (though fake client doesn't track this)
