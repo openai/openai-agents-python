@@ -905,10 +905,7 @@ class AgentRunner:
                 t.cancel()
             raise
 
-        # Store the full set of input guardrail results on the streamed result
-        # and return them so callers awaiting this task can receive the list.
         streamed_result.input_guardrail_results = guardrail_results
-        return guardrail_results
 
     @classmethod
     async def _start_streaming(
