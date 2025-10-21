@@ -202,6 +202,25 @@ class MCPUtil:
         try:
             result = await server.call_tool(tool.name, json_data)
         except Exception as e:
+            # Handle MCP errors (HTTP errors from upstream services) gracefully
+            # by returning a structured error response instead of crashing the run.
+            # This allows the agent to handle the error and decide how to respond.
+            # See: https://github.com/openai/openai-agents-python/issues/879
+            try:
+                from mcp.shared.exceptions import McpError
+
+                if isinstance(e, McpError):
+                    # This is an HTTP error from upstream service - return structured error
+                    logger.warning(f"MCP tool {tool.name} encountered upstream error: {e}")
+                    error_response = {
+                        "error": {"message": str(e), "tool": tool.name, "type": "upstream_error"}
+                    }
+                    return json.dumps(error_response)
+            except ImportError:
+                # MCP not available (Python < 3.10), fall through to original behavior
+                pass
+
+            # For other exceptions (programming errors, etc.), raise as before
             logger.error(f"Error invoking MCP tool {tool.name}: {e}")
             raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
 
