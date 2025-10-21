@@ -433,7 +433,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             and session.audio.input.turn_detection is not None
             and session.audio.input.turn_detection.interrupt_response is True,
         )
-        if not automatic_response_cancellation_enabled:
+        # Always cancel for force_cancel=True (e.g., guardrail interrupts)
+        # For user voice interrupts (force_cancel=False), only cancel if automatic
+        # cancellation is disabled
+        if event.force_cancel or not automatic_response_cancellation_enabled:
             await self._cancel_response()
 
         self._audio_state_tracker.on_interrupted()

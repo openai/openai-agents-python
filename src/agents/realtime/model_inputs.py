@@ -93,7 +93,17 @@ class RealtimeModelSendToolOutput:
 
 @dataclass
 class RealtimeModelSendInterrupt:
-    """Send an interrupt to the model."""
+    """Send an interrupt to the model.
+
+    Args:
+        force_cancel: If True, always send response.cancel regardless of
+            interrupt_response setting. This should be True for SDK-side interrupts
+            (e.g., guardrails) where the API doesn't know about the interrupt.
+            For user voice interrupts, this should be False (default) to allow
+            the API's automatic response cancellation when interrupt_response=True.
+    """
+
+    force_cancel: bool = False
 
 
 @dataclass

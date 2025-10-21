@@ -704,7 +704,9 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Interrupt the model
-            await self._model.send_event(RealtimeModelSendInterrupt())
+            # Use force_cancel=True for guardrail interrupts because they are SDK-side logic
+            # and the API doesn't know about them (unlike user voice interrupts)
+            await self._model.send_event(RealtimeModelSendInterrupt(force_cancel=True))
 
             # Send guardrail triggered message
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
