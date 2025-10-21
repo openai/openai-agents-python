@@ -546,7 +546,6 @@ class RunImpl:
 
             # Add call_id to function tool call if it doesn't have one
             output = add_function_tool_call_id_if_missing(output)
-            tools_used.append(output.name)
 
             tools_used.append(output.name)
 
