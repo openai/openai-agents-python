@@ -303,10 +303,13 @@ def test_extract_all_content_rejects_invalid_input_audio():
     """
     input_audio requires both data and format fields to be present.
     """
-    audio_missing_data = cast(ResponseInputAudioParam, {
-        "type": "input_audio",
-        "input_audio": {"format": "wav"},
-    })
+    audio_missing_data = cast(
+        ResponseInputAudioParam,
+        {
+            "type": "input_audio",
+            "input_audio": {"format": "wav"},
+        },
+    )
     with pytest.raises(UserError):
         Converter.extract_all_content([audio_missing_data])
 

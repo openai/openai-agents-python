@@ -239,9 +239,7 @@ def test_oneof_with_refs():
     schema = {
         "type": "object",
         "properties": {
-            "value": {
-                "oneOf": [{"$ref": "#/$defs/StringType"}, {"$ref": "#/$defs/IntType"}]
-            }
+            "value": {"oneOf": [{"$ref": "#/$defs/StringType"}, {"$ref": "#/$defs/IntType"}]}
         },
         "$defs": {
             "StringType": {"type": "string"},
@@ -254,9 +252,7 @@ def test_oneof_with_refs():
     expected = {
         "type": "object",
         "properties": {
-            "value": {
-                "anyOf": [{"$ref": "#/$defs/StringType"}, {"$ref": "#/$defs/IntType"}]
-            }
+            "value": {"anyOf": [{"$ref": "#/$defs/StringType"}, {"$ref": "#/$defs/IntType"}]}
         },
         "$defs": {
             "StringType": {"type": "string"},

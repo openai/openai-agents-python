@@ -219,19 +219,20 @@ async def test_get_items_same_timestamp_consistent_order():
             )
         )
         id_map = {
-            json.loads(message_json)["id"]: row_id
-            for row_id, message_json in rows.fetchall()
+            json.loads(message_json)["id"]: row_id for row_id, message_json in rows.fetchall()
         }
         shared = datetime(2025, 10, 15, 17, 26, 39, 132483)
         older = shared - timedelta(milliseconds=1)
         await sess.execute(
             update(session._messages)
-            .where(session._messages.c.id.in_(
-                [
-                    id_map["rs_same_ts"],
-                    id_map["msg_same_ts"],
-                ]
-            ))
+            .where(
+                session._messages.c.id.in_(
+                    [
+                        id_map["rs_same_ts"],
+                        id_map["msg_same_ts"],
+                    ]
+                )
+            )
             .values(created_at=shared)
         )
         await sess.execute(
@@ -320,9 +321,7 @@ async def test_pop_item_same_timestamp_returns_latest():
     async with session._session_factory() as sess:
         await sess.execute(
             text(
-                "UPDATE agent_messages "
-                "SET created_at = :created_at "
-                "WHERE session_id = :session_id"
+                "UPDATE agent_messages SET created_at = :created_at WHERE session_id = :session_id"
             ),
             {
                 "created_at": "2025-10-15 17:26:39.132483",
