@@ -431,7 +431,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             and session.audio is not None
             and session.audio.input is not None
             and session.audio.input.turn_detection is not None
-            and session.audio.input.turn_detection.interrupt_response is True,
+            and session.audio.input.turn_detection.interrupt_response is True
         )
         if not automatic_response_cancellation_enabled:
             await self._cancel_response()
@@ -616,7 +616,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     and session.audio is not None
                     and session.audio.input is not None
                     and session.audio.input.turn_detection is not None
-                    and session.audio.input.turn_detection.interrupt_response is True,
+                    and session.audio.input.turn_detection.interrupt_response is True
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
