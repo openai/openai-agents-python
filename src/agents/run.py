@@ -1138,6 +1138,15 @@ class AgentRunner:
 
             streamed_result.is_complete = True
         finally:
+            if streamed_result._input_guardrails_task:
+                try:
+                    await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                        streamed_result
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
+                    )
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:

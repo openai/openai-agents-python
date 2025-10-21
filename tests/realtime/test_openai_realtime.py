@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -508,6 +509,59 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         # interrupt -> 1
         # session update -> 1
         assert send_raw.await_count == 8
+
+    @pytest.mark.asyncio
+    async def test_interrupt_force_cancel_overrides_auto_cancellation(self, model, monkeypatch):
+        """Interrupt should send response.cancel even when auto cancel is enabled."""
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        model._ongoing_response = True
+        model._created_session = SimpleNamespace(
+            audio=SimpleNamespace(
+                input=SimpleNamespace(
+                    turn_detection=SimpleNamespace(interrupt_response=True)
+                )
+            )
+        )
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+
+        assert send_raw.await_count == 2
+        payload_types = {call.args[0].type for call in send_raw.call_args_list}
+        assert payload_types == {"conversation.item.truncate", "response.cancel"}
+        assert model._ongoing_response is False
+        assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_interrupt_respects_auto_cancellation_when_not_forced(self, model, monkeypatch):
+        """Interrupt should avoid sending response.cancel when relying on automatic cancellation."""
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        model._ongoing_response = True
+        model._created_session = SimpleNamespace(
+            audio=SimpleNamespace(
+                input=SimpleNamespace(
+                    turn_detection=SimpleNamespace(interrupt_response=True)
+                )
+            )
+        )
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        assert send_raw.await_count == 1
+        assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
+        assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
+        assert model._ongoing_response is True
 
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()

@@ -319,3 +319,16 @@ class SQLAlchemySession(SessionABC):
                 await sess.execute(
                     delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
                 )
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """Access the underlying SQLAlchemy AsyncEngine.
+
+        This property provides direct access to the engine for advanced use cases,
+        such as checking connection pool status, configuring engine settings,
+        or manually disposing the engine when needed.
+
+        Returns:
+            AsyncEngine: The SQLAlchemy async engine instance.
+        """
+        return self._engine
