@@ -3,15 +3,14 @@ from datetime import datetime
 from typing import Any
 
 import pytest
-
-from agents import Agent, GuardrailFunctionOutput, InputGuardrail, Runner, RunContextWrapper
-from agents.items import TResponseInputItem
-from agents.exceptions import InputGuardrailTripwireTriggered
-
 from openai.types.responses import ResponseCompletedEvent
+
+from agents import Agent, GuardrailFunctionOutput, InputGuardrail, RunContextWrapper, Runner
+from agents.exceptions import InputGuardrailTripwireTriggered
+from agents.items import TResponseInputItem
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
-from tests.testing_processor import fetch_ordered_spans, fetch_events
+from tests.testing_processor import fetch_events, fetch_ordered_spans
 
 
 def make_input_guardrail(delay_seconds: float, *, trip: bool) -> InputGuardrail[Any]:
@@ -32,7 +31,7 @@ def make_input_guardrail(delay_seconds: float, *, trip: bool) -> InputGuardrail[
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guardrail_delay", [0.0, 0.2])
 async def test_run_streamed_input_guardrail_timing_is_consistent(guardrail_delay: float):
-    """Ensure streaming behavior matches whether input guardrail finishes before or after LLM stream.
+    """Ensure streaming behavior matches when input guardrail finishes before and after LLM stream.
 
     We verify that:
     - The sequence of streamed event types is identical.
@@ -140,7 +139,7 @@ class SlowCompleteFakeModel(FakeModel):
         super().__init__(tracing_enabled=tracing_enabled)
         self._delay_seconds = delay_seconds
 
-    async def stream_response(self, *args, **kwargs):  # type: ignore[override]
+    async def stream_response(self, *args, **kwargs):
         async for ev in super().stream_response(*args, **kwargs):
             if isinstance(ev, ResponseCompletedEvent) and self._delay_seconds > 0:
                 await asyncio.sleep(self._delay_seconds)
