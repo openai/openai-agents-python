@@ -67,19 +67,37 @@ class ModelSettings:
     """
 
     temperature: float | None = None
-    """The temperature to use when calling the model."""
+    """Controls randomness in responses (0.0-2.0). 
+    Lower values (e.g., 0.2) make output more focused and deterministic.
+    Higher values (e.g., 1.5) make output more creative and varied.
+    Default is typically 1.0.
+    """
 
     top_p: float | None = None
-    """The top_p to use when calling the model."""
+    """Nucleus sampling threshold (0.0-1.0). Controls diversity by 
+        considering only tokens with cumulative probability up to this value.
+        E.g., 0.9 means consider tokens in the top 90% probability mass.
+        Alternative to temperature sampling.
+    """
 
     frequency_penalty: float | None = None
-    """The frequency penalty to use when calling the model."""
+    """Penalizes token repetition based on frequency (-2.0 to 2.0).
+        Positive values reduce likelihood of repeating tokens that already 
+        appeared, proportional to how often they've appeared. 
+        Useful for reducing repetitive text.
+    """
 
     presence_penalty: float | None = None
-    """The presence penalty to use when calling the model."""
+    """Penalizes token repetition based on presence (-2.0 to 2.0).
+        Positive values reduce likelihood of repeating any token that has 
+        already appeared, regardless of frequency. Encourages topic diversity.
+    """
 
     tool_choice: ToolChoice | None = None
-    """The tool choice to use when calling the model."""
+    """Controls which function/tool the model should use.
+        Can be "auto" (model decides), "none" (no tools), or specify 
+        a particular tool name to force its use.
+    """
 
     parallel_tool_calls: bool | None = None
     """Controls whether the model can make multiple parallel tool calls in a single turn.
