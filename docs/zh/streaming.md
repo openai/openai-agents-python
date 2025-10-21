@@ -89,3 +89,63 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## 工具输出流式事件
+
+[`ToolOutputStreamEvent`][agents.stream_events.ToolOutputStreamEvent] 允许你在工具执行时接收增量输出。这对于长时间运行的工具非常有用，可以实时向用户显示进度。
+
+要创建流式工具，请定义一个异步生成器函数，逐块 yield 字符串：
+
+```python
+import asyncio
+from collections.abc import AsyncIterator
+from agents import Agent, Runner, ToolOutputStreamEvent, function_tool
+
+@function_tool
+async def search_documents(query: str) -> AsyncIterator[str]:
+    """搜索文档并流式返回找到的结果。"""
+    documents = [
+        f"文档 1 包含关于 {query} 的信息...\n",
+        f"文档 2 提供关于 {query} 的更多细节...\n",
+        f"文档 3 分析了 {query}...\n",
+    ]
+    
+    for doc in documents:
+        # 模拟处理时间
+        await asyncio.sleep(0.5)
+        # yield 增量结果
+        yield doc
+
+
+async def main():
+    agent = Agent(
+        name="Research Assistant",
+        instructions="你帮助用户搜索信息。",
+        tools=[search_documents],
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="搜索关于人工智能的信息",
+    )
+
+    async for event in result.stream_events():
+        # 处理工具流式事件
+        if event.type == "tool_output_stream_event":
+            print(f"[{event.tool_name}] {event.delta}", end="", flush=True)
+        # 处理最终工具输出
+        elif event.type == "run_item_stream_event" and event.name == "tool_output":
+            print(f"\n✓ 工具完成\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+关于流式工具的要点：
+
+- 流式工具必须返回 `AsyncIterator[str]`（一个 yield 字符串的异步生成器）
+- 每个 yield 的块都会作为 `ToolOutputStreamEvent` 发出
+- 所有块会自动累积并作为最终工具输出发送给 LLM
+- 非流式工具可以与流式工具正常共存
+- 在非流式模式（`Runner.run()`）中，流式工具会在返回前自动收集所有块

@@ -410,7 +410,18 @@ class RealtimeSession(RealtimeModelListener):
                 tool_call_id=event.call_id,
                 tool_arguments=event.arguments,
             )
-            result = await func_tool.on_invoke_tool(tool_context, event.arguments)
+            # on_invoke_tool always returns an Awaitable
+            result_or_generator = await func_tool.on_invoke_tool(tool_context, event.arguments)
+            # Check if the result is an async generator (streaming tool)
+            result: Any
+            if inspect.isasyncgen(result_or_generator):
+                # For streaming tools in realtime, collect all chunks
+                chunks = []
+                async for chunk in result_or_generator:
+                    chunks.append(str(chunk))
+                result = "".join(chunks)
+            else:
+                result = result_or_generator
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(

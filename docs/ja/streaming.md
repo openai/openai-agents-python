@@ -89,3 +89,63 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## ツール出力ストリーミングイベント
+
+[`ToolOutputStreamEvent`][agents.stream_events.ToolOutputStreamEvent] を使用すると、ツールの実行中に増分出力を受け取ることができます。これは、長時間実行されるツールでユーザーにリアルタイムで進捗を表示したい場合に有用です。
+
+ストリーミングツールを作成するには、文字列チャンクを yield する非同期ジェネレータ関数を定義します：
+
+```python
+import asyncio
+from collections.abc import AsyncIterator
+from agents import Agent, Runner, ToolOutputStreamEvent, function_tool
+
+@function_tool
+async def search_documents(query: str) -> AsyncIterator[str]:
+    """ドキュメントを検索し、見つかった結果をストリーミングします。"""
+    documents = [
+        f"ドキュメント 1 には {query} に関する情報が含まれています...\n",
+        f"ドキュメント 2 には {query} に関する追加の詳細があります...\n",
+        f"ドキュメント 3 は {query} の分析を提供します...\n",
+    ]
+    
+    for doc in documents:
+        # 処理時間をシミュレート
+        await asyncio.sleep(0.5)
+        # 増分結果を yield
+        yield doc
+
+
+async def main():
+    agent = Agent(
+        name="Research Assistant",
+        instructions="あなたはユーザーの情報検索を支援します。",
+        tools=[search_documents],
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="AI に関する情報を検索してください",
+    )
+
+    async for event in result.stream_events():
+        # ツールストリーミングイベントを処理
+        if event.type == "tool_output_stream_event":
+            print(f"[{event.tool_name}] {event.delta}", end="", flush=True)
+        # 最終ツール出力を処理
+        elif event.type == "run_item_stream_event" and event.name == "tool_output":
+            print(f"\n✓ ツール完了\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+ストリーミングツールに関する重要なポイント：
+
+- ストリーミングツールは `AsyncIterator[str]`（文字列を yield する非同期ジェネレータ）を返す必要があります
+- yield された各チャンクは `ToolOutputStreamEvent` として発行されます
+- すべてのチャンクは自動的に蓄積され、最終的なツール出力として LLM に送信されます
+- 非ストリーミングツールはストリーミングツールと一緒に正常に動作します
+- 非ストリーミングモード（`Runner.run()`）では、ストリーミングツールは返す前にすべてのチャンクを自動的に収集します

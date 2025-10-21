@@ -43,7 +43,7 @@ async def test_sync_no_context_with_args_invocation():
     tool = sync_no_context_with_args
     input_data = {"a": 5, "b": 7}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
-    assert int(output) == 12
+    assert int(output) == 12  # type: ignore[arg-type]
 
 
 @function_tool
@@ -70,7 +70,7 @@ async def test_async_no_context_invocation():
     tool = async_no_context
     input_data = {"a": 3, "b": 4}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
-    assert int(output) == 12
+    assert int(output) == 12  # type: ignore[arg-type]
 
 
 @function_tool

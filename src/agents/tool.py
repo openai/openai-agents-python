@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
@@ -142,15 +142,19 @@ class FunctionTool:
     params_json_schema: dict[str, Any]
     """The JSON schema for the tool's parameters."""
 
-    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any]]
+    on_invoke_tool: Callable[[ToolContext[Any], str], Awaitable[Any | AsyncIterator[str]]]
     """A function that invokes the tool with the given context and parameters. The params passed
     are:
     1. The tool run context.
     2. The arguments from the LLM, as a JSON string.
 
-    You must return a one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
-    ToolOutputFileContent) or a string representation of the tool output, or a list of them,
-    or something we can call `str()` on.
+    The function returns an Awaitable that, when awaited, yields one of:
+    - A structured tool output type (e.g. ToolOutputText, ToolOutputImage, ToolOutputFileContent)
+    - A string representation of the tool output
+    - A list of the above
+    - Something we can call `str()` on
+    - An AsyncIterator[str] for streaming output (caller should iterate with async for)
+
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
     return a string error message (which will be sent back to the LLM).
     """
@@ -464,7 +468,9 @@ def function_tool(
             strict_json_schema=strict_mode,
         )
 
-        async def _on_invoke_tool_impl(ctx: ToolContext[Any], input: str) -> Any:
+        async def _on_invoke_tool_impl(
+            ctx: ToolContext[Any], input: str
+        ) -> Any | AsyncIterator[str]:
             try:
                 json_data: dict[str, Any] = json.loads(input) if input else {}
             except Exception as e:
@@ -495,7 +501,14 @@ def function_tool(
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
 
-            if inspect.iscoroutinefunction(the_func):
+            # Check if the function is an async generator
+            if inspect.isasyncgenfunction(the_func):
+                # Return the async generator for streaming output
+                if schema.takes_context:
+                    return the_func(ctx, *args, **kwargs_dict)
+                else:
+                    return the_func(*args, **kwargs_dict)
+            elif inspect.iscoroutinefunction(the_func):
                 if schema.takes_context:
                     result = await the_func(ctx, *args, **kwargs_dict)
                 else:
@@ -506,16 +519,21 @@ def function_tool(
                 else:
                     result = the_func(*args, **kwargs_dict)
 
-            if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Tool {schema.name} completed.")
-            else:
-                logger.debug(f"Tool {schema.name} returned {result}")
+            if not inspect.isasyncgenfunction(the_func):
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool {schema.name} completed.")
+                else:
+                    logger.debug(f"Tool {schema.name} returned {result}")
 
             return result
 
-        async def _on_invoke_tool(ctx: ToolContext[Any], input: str) -> Any:
+        async def _on_invoke_tool(ctx: ToolContext[Any], input: str) -> Any | AsyncIterator[str]:
             try:
-                return await _on_invoke_tool_impl(ctx, input)
+                result = await _on_invoke_tool_impl(ctx, input)
+                # If the result is an async generator, return it directly for streaming
+                if inspect.isasyncgen(result):
+                    return result
+                return result
             except Exception as e:
                 if failure_error_function is None:
                     raise
