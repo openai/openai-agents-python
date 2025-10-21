@@ -704,7 +704,7 @@ class RealtimeSession(RealtimeModelListener):
             )
 
             # Interrupt the model
-            await self._model.send_event(RealtimeModelSendInterrupt())
+            await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
 
             # Send guardrail triggered message
             guardrail_names = [result.guardrail.get_name() for result in triggered_results]
