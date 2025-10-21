@@ -266,7 +266,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _emit_event(self, event: RealtimeModelEvent) -> None:
         """Emit an event to the listeners."""
-        for listener in self._listeners:
+        # Copy list to avoid modification during iteration
+        for listener in list(self._listeners):
             await listener.on_event(event)
 
     async def _listen_for_messages(self):
@@ -431,7 +432,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             and session.audio is not None
             and session.audio.input is not None
             and session.audio.input.turn_detection is not None
-            and session.audio.input.turn_detection.interrupt_response is True,
+            and session.audio.input.turn_detection.interrupt_response is True
         )
         if not automatic_response_cancellation_enabled:
             await self._cancel_response()
@@ -516,6 +517,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._websocket = None
         if self._websocket_task:
             self._websocket_task.cancel()
+            try:
+                await self._websocket_task
+            except asyncio.CancelledError:
+                pass
             self._websocket_task = None
 
     async def _cancel_response(self) -> None:
@@ -616,7 +621,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     and session.audio is not None
                     and session.audio.input is not None
                     and session.audio.input.turn_detection is not None
-                    and session.audio.input.turn_detection.interrupt_response is True,
+                    and session.audio.input.turn_detection.interrupt_response is True
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
