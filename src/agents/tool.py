@@ -15,7 +15,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
@@ -75,6 +75,13 @@ class ToolOutputImage(BaseModel):
     file_id: str | None = None
     detail: Literal["low", "high", "auto"] | None = None
 
+    @model_validator(mode="after")
+    def check_at_least_one_required_field(self) -> ToolOutputImage:
+        """Validate that at least one of image_url or file_id is provided."""
+        if self.image_url is None and self.file_id is None:
+            raise ValueError("At least one of image_url or file_id must be provided")
+        return self
+
 
 class ToolOutputImageDict(TypedDict, total=False):
     """TypedDict variant for image tool outputs."""
@@ -97,6 +104,13 @@ class ToolOutputFileContent(BaseModel):
     file_url: str | None = None
     file_id: str | None = None
     filename: str | None = None
+
+    @model_validator(mode="after")
+    def check_at_least_one_required_field(self) -> ToolOutputFileContent:
+        """Validate that at least one of file_data, file_url, or file_id is provided."""
+        if self.file_data is None and self.file_url is None and self.file_id is None:
+            raise ValueError("At least one of file_data, file_url, or file_id must be provided")
+        return self
 
 
 class ToolOutputFileContentDict(TypedDict, total=False):
