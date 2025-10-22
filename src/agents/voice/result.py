@@ -270,7 +270,16 @@ class StreamedAudioResult:
 
         # Wait for all cancelled tasks to complete and collect exceptions
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Check if any task failed with a real exception (not CancelledError)
+            # This catches exceptions that occurred after _check_errors() but before cancellation
+            if not self._stored_exception:
+                for result in results:
+                    is_exception = isinstance(result, Exception)
+                    is_not_cancelled = not isinstance(result, asyncio.CancelledError)
+                    if is_exception and is_not_cancelled:
+                        self._stored_exception = result
+                        break
 
     def _check_errors(self):
         """Check for exceptions in completed tasks.
