@@ -176,3 +176,41 @@ async def test_empty_kwargs_handling(monkeypatch):
 
     # Should work without error and include regular parameters
     assert captured["temperature"] == 0.3
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_reasoning_effort_falls_back_to_extra_args(monkeypatch):
+    """
+    Ensure reasoning_effort from extra_args is promoted when reasoning settings are missing.
+    """
+    captured: dict[str, object] = {}
+
+    async def fake_acompletion(model, messages=None, **kwargs):
+        captured.update(kwargs)
+        msg = Message(role="assistant", content="test response")
+        choice = Choices(index=0, message=msg)
+        return ModelResponse(choices=[choice], usage=Usage(0, 0, 0))
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    # GitHub issue context: https://github.com/openai/openai-agents-python/issues/1764.
+    settings = ModelSettings(
+        extra_args={"reasoning_effort": "none", "custom_param": "custom_value"}
+    )
+    model = LitellmModel(model="test-model")
+
+    await model.get_response(
+        system_instructions=None,
+        input="test input",
+        model_settings=settings,
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+    )
+
+    assert captured["reasoning_effort"] == "none"
+    assert captured["custom_param"] == "custom_value"
+    assert settings.extra_args == {"reasoning_effort": "none", "custom_param": "custom_value"}
