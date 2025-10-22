@@ -11,6 +11,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from .agent_output import AgentOutputSchemaBase
+from .exceptions import UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .items import ItemHelpers
@@ -245,6 +246,23 @@ class Agent(AgentBase, Generic[TContext]):
 
         if not isinstance(self.tools, list):
             raise TypeError(f"Agent tools must be a list, got {type(self.tools).__name__}")
+
+        # Validate each tool is a valid Tool type
+        # Tool is a Union type, so we need to get the valid types from it
+        from typing import get_args
+
+        valid_tool_types = get_args(Tool) + (Handoff,)
+
+        for i, tool in enumerate(self.tools):
+            if not isinstance(tool, valid_tool_types):
+                # Generate a friendly list of valid types for the error message
+                type_names = ", ".join(t.__name__ for t in valid_tool_types)
+                raise UserError(
+                    f"tools[{i}] must be a valid Tool object ({type_names}), "
+                    f"got {type(tool).__name__}. "
+                    f"Did you forget to use @function_tool decorator or pass the function itself "
+                    f"instead of a tool?"
+                )
 
         if not isinstance(self.mcp_servers, list):
             raise TypeError(

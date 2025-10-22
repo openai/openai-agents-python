@@ -214,6 +214,49 @@ class TestAgentValidation:
         with pytest.raises(TypeError, match="Agent handoffs must be a list"):
             Agent(name="test", handoffs="not_a_list")  # type: ignore
 
+    def test_tools_content_validation_issue_1443(self):
+        """Test that tools list validates each element is a valid Tool object (Issue #1443)
+
+        This test addresses the issue where passing invalid tool types (e.g., raw functions)
+        in a list would pass __post_init__ validation but fail later at runtime with:
+        AttributeError: 'function' object has no attribute 'name'
+
+        The fix validates each tool in the list during initialization.
+        """
+        from agents.exceptions import UserError
+
+        def raw_function():
+            """A raw function, not decorated with @function_tool"""
+            return "test"
+
+        # Case 1: Raw function in tools list should raise UserError at init
+        with pytest.raises(
+            UserError,
+            match=r"tools\[0\] must be a valid Tool object.*got function.*@function_tool",
+        ):
+            Agent(name="test", tools=[raw_function])  # type: ignore
+
+        # Case 2: String in tools list should raise UserError at init
+        with pytest.raises(
+            UserError,
+            match=r"tools\[0\] must be a valid Tool object.*got str",
+        ):
+            Agent(name="test", tools=["invalid_string"])  # type: ignore
+
+        # Case 3: Mixed valid and invalid tools - should catch invalid at correct index
+        from agents import function_tool
+
+        @function_tool
+        def valid_tool() -> str:
+            """A valid tool"""
+            return "ok"
+
+        with pytest.raises(
+            UserError,
+            match=r"tools\[1\] must be a valid Tool object.*got str",
+        ):
+            Agent(name="test", tools=[valid_tool, "invalid"])  # type: ignore
+
     def test_model_settings_validation(self):
         """Test model_settings validation - prevents runtime errors"""
         # Valid case
