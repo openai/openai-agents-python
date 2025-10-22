@@ -22,6 +22,8 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: make sync
+      - name: Verify formatting
+        run: make format-check
       - name: Run lint
         run: make lint
 
