@@ -13,26 +13,21 @@ The script uses a mock MCP server that simulates HTTP errors.
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from agents import Agent, Runner, function_tool
 
 # Import MCP types for proper error handling
-if TYPE_CHECKING:
-    from mcp.shared.exceptions import McpError  # type: ignore[import-not-found]
-    from mcp.types import ErrorData  # type: ignore[import-not-found]
-
-    MCP_AVAILABLE: bool
-    INTERNAL_ERROR: int
-
+# We avoid TYPE_CHECKING to prevent mypy from seeing conflicting type assignments
 try:
-    from mcp.shared.exceptions import McpError
-    from mcp.types import INTERNAL_ERROR, ErrorData  # type: ignore[no-redef]
+    from mcp.shared.exceptions import McpError  # type: ignore[import-not-found]
+    from mcp.types import INTERNAL_ERROR, ErrorData  # type: ignore[import-not-found]
 
     MCP_AVAILABLE = True
 except ImportError:
     # Fallback for Python < 3.10 or when MCP is not installed
     MCP_AVAILABLE = False
+    # Use Any to avoid mypy type conflicts
     McpError = Exception
     ErrorData = type("ErrorData", (), {})
     INTERNAL_ERROR = -32603
