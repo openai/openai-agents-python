@@ -321,18 +321,37 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
             if exc and isinstance(exc, Exception):
                 self._stored_exception = exc
 
-    def _cleanup_tasks(self) -> None:
+    async def _cleanup_tasks(self) -> None:
+        """Cancel all pending tasks and wait for them to complete.
+
+        This ensures that any exceptions raised by the tasks are properly handled
+        and prevents warnings about unhandled task exceptions.
+        """
+        tasks = []
+
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
+            if isinstance(self._listener_task, asyncio.Task):
+                tasks.append(self._listener_task)
 
         if self._process_events_task and not self._process_events_task.done():
             self._process_events_task.cancel()
+            if isinstance(self._process_events_task, asyncio.Task):
+                tasks.append(self._process_events_task)
 
         if self._stream_audio_task and not self._stream_audio_task.done():
             self._stream_audio_task.cancel()
+            if isinstance(self._stream_audio_task, asyncio.Task):
+                tasks.append(self._stream_audio_task)
 
         if self._connection_task and not self._connection_task.done():
             self._connection_task.cancel()
+            if isinstance(self._connection_task, asyncio.Task):
+                tasks.append(self._connection_task)
+
+        # Wait for all cancelled tasks to complete and collect exceptions
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def transcribe_turns(self) -> AsyncIterator[str]:
         self._connection_task = asyncio.create_task(self._process_websocket_connection())
@@ -367,7 +386,7 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
         if self._websocket:
             await self._websocket.close()
 
-        self._cleanup_tasks()
+        await self._cleanup_tasks()
 
 
 class OpenAISTTModel(STTModel):
