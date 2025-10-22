@@ -1234,72 +1234,80 @@ class AgentRunner:
         )
 
         # 1. Stream the output events
-        async for event in model.stream_response(
-            filtered.instructions,
-            filtered.input,
-            model_settings,
-            all_tools,
-            output_schema,
-            handoffs,
-            get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
-            ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-        ):
-            # Emit the raw event ASAP
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+        try:
+            async for event in model.stream_response(
+                filtered.instructions,
+                filtered.input,
+                model_settings,
+                all_tools,
+                output_schema,
+                handoffs,
+                get_model_tracing_impl(
+                    run_config.tracing_disabled, run_config.trace_include_sensitive_data
+                ),
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt_config,
+            ):
+                # Emit the raw event ASAP
+                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
-            if isinstance(event, ResponseCompletedEvent):
-                usage = (
-                    Usage(
-                        requests=1,
-                        input_tokens=event.response.usage.input_tokens,
-                        output_tokens=event.response.usage.output_tokens,
-                        total_tokens=event.response.usage.total_tokens,
-                        input_tokens_details=event.response.usage.input_tokens_details,
-                        output_tokens_details=event.response.usage.output_tokens_details,
+                if isinstance(event, ResponseCompletedEvent):
+                    usage = (
+                        Usage(
+                            requests=1,
+                            input_tokens=event.response.usage.input_tokens,
+                            output_tokens=event.response.usage.output_tokens,
+                            total_tokens=event.response.usage.total_tokens,
+                            input_tokens_details=event.response.usage.input_tokens_details,
+                            output_tokens_details=event.response.usage.output_tokens_details,
+                        )
+                        if event.response.usage
+                        else Usage()
                     )
-                    if event.response.usage
-                    else Usage()
-                )
-                final_response = ModelResponse(
-                    output=event.response.output,
-                    usage=usage,
-                    response_id=event.response.id,
-                )
-                context_wrapper.usage.add(usage)
-
-            if isinstance(event, ResponseOutputItemDoneEvent):
-                output_item = event.item
-
-                if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id: str | None = getattr(
-                        output_item, "call_id", getattr(output_item, "id", None)
+                    final_response = ModelResponse(
+                        output=event.response.output,
+                        usage=usage,
+                        response_id=event.response.id,
                     )
+                    context_wrapper.usage.add(usage)
 
-                    if call_id and call_id not in emitted_tool_call_ids:
-                        emitted_tool_call_ids.add(call_id)
+                if isinstance(event, ResponseOutputItemDoneEvent):
+                    output_item = event.item
 
-                        tool_item = ToolCallItem(
-                            raw_item=cast(ToolCallItemTypes, output_item),
-                            agent=agent,
-                        )
-                        streamed_result._event_queue.put_nowait(
-                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                    if isinstance(output_item, _TOOL_CALL_TYPES):
+                        call_id: str | None = getattr(
+                            output_item, "call_id", getattr(output_item, "id", None)
                         )
 
-                elif isinstance(output_item, ResponseReasoningItem):
-                    reasoning_id: str | None = getattr(output_item, "id", None)
+                        if call_id and call_id not in emitted_tool_call_ids:
+                            emitted_tool_call_ids.add(call_id)
 
-                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
-                        emitted_reasoning_item_ids.add(reasoning_id)
+                            tool_item = ToolCallItem(
+                                raw_item=cast(ToolCallItemTypes, output_item),
+                                agent=agent,
+                            )
+                            streamed_result._event_queue.put_nowait(
+                                RunItemStreamEvent(item=tool_item, name="tool_called")
+                            )
 
-                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
-                        streamed_result._event_queue.put_nowait(
-                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
-                        )
+                    elif isinstance(output_item, ResponseReasoningItem):
+                        reasoning_id: str | None = getattr(output_item, "id", None)
+
+                        if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                            emitted_reasoning_item_ids.add(reasoning_id)
+
+                            reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                            streamed_result._event_queue.put_nowait(
+                                RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                            )
+        except Exception:
+            # Track that a request was made, even if we didn't get usage info from the response
+            # This ensures usage tracking is not completely lost when streaming fails
+            # (Issue #1973)
+            if final_response is None:
+                context_wrapper.usage.add(Usage(requests=1))
+            raise
 
         # Call hook just after the model response is finalized.
         if final_response is not None:
