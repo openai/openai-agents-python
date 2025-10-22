@@ -21,11 +21,14 @@ from agents import Agent, Runner, function_tool
 try:
     from mcp.shared.exceptions import McpError  # type: ignore[import-not-found]
     from mcp.types import INTERNAL_ERROR, ErrorData  # type: ignore[import-not-found]
+
+    MCP_AVAILABLE = True
 except ImportError:
     # Fallback for Python < 3.10 or when MCP is not installed
-    McpError = None
+    MCP_AVAILABLE = False
+    McpError = Exception
     ErrorData = None
-    INTERNAL_ERROR = None
+    INTERNAL_ERROR = -32603
 
 
 # Mock MCP server that simulates HTTP errors
@@ -44,28 +47,31 @@ class MockMCPServerWithErrors:
 
         if "invalid" in query.lower():
             # Simulate 422 Validation Error
-            if McpError is not None and ErrorData is not None and INTERNAL_ERROR is not None:
+            if MCP_AVAILABLE:
                 raise McpError(
                     ErrorData(
-                        INTERNAL_ERROR,
-                        "GET https://api.example.com/search: 422 Validation Error",
+                        code=INTERNAL_ERROR,
+                        message="GET https://api.example.com/search: 422 Validation Error",
                     )
                 )
 
         if "notfound" in query.lower():
             # Simulate 404 Not Found
-            if McpError is not None and ErrorData is not None and INTERNAL_ERROR is not None:
+            if MCP_AVAILABLE:
                 raise McpError(
-                    ErrorData(INTERNAL_ERROR, "GET https://api.example.com/search: 404 Not Found")
+                    ErrorData(
+                        code=INTERNAL_ERROR,
+                        message="GET https://api.example.com/search: 404 Not Found",
+                    )
                 )
 
         if "servererror" in query.lower():
             # Simulate 500 Internal Server Error
-            if McpError is not None and ErrorData is not None and INTERNAL_ERROR is not None:
+            if MCP_AVAILABLE:
                 raise McpError(
                     ErrorData(
-                        INTERNAL_ERROR,
-                        "GET https://api.example.com/search: 500 Internal Server Error",
+                        code=INTERNAL_ERROR,
+                        message="GET https://api.example.com/search: 500 Internal Server Error",
                     )
                 )
 
@@ -111,7 +117,7 @@ async def search(query: str) -> str:
         return result_json
     except Exception as e:
         # Check if it's an MCP error (only when MCP is available)
-        if McpError is not None and isinstance(e, McpError):
+        if MCP_AVAILABLE and isinstance(e, McpError):
             # After PR #1948: Return structured error instead of crashing
             return json.dumps(
                 {"error": {"message": str(e), "tool": "search", "type": "upstream_error"}}
