@@ -2087,7 +2087,7 @@ dev = [
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<46" },
-    { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.14.0" },
+    { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffe", specifier = ">=1.5.6,<2" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },

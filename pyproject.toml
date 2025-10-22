@@ -41,7 +41,7 @@ realtime = ["websockets>=15.0, <16"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=6.4.0"]
-dapr = ["dapr>=1.14.0", "grpcio>=1.60.0"]
+dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
 
 [dependency-groups]
 dev = [

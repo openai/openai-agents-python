@@ -35,19 +35,16 @@ PRODUCTION FEATURES (provided by Dapr):
 PREREQUISITES:
 1. Install Dapr CLI: https://docs.dapr.io/getting-started/install-dapr-cli/
 2. Install Docker (for running Redis and optionally Dapr containers)
-3. Choose one of the following setups:
-
-   Option A - Full Dapr environment (recommended if you plan to use other Dapr features):
-     - Run: dapr init
-     - This installs Redis, Zipkin, and Placement service locally
-     - Useful for workflows, actors, pub/sub, and other Dapr building blocks
-
-   Option B - Minimal setup (just for DaprSession):
-     - Start Redis only: docker run -d -p 6379:6379 redis:7-alpine
-     - Requires only Dapr CLI (no dapr init needed)
-
-4. Create components directory with statestore.yaml configuration (see setup_instructions())
+3. Install openai-agents with dapr in your environment:
+        pip install openai-agents[dapr]
+4. Use the built-in helper to create components and start containers (Creates ./components with Redis + PostgreSQL and starts containers if Docker is available.):
+        python examples/memory/dapr_session_example.py --setup-env --only-setup
 5. As always, ensure that the OPENAI_API_KEY environment variable is set.
+6. Optionally, if planning on using other Dapr features, run: dapr init
+     - This installs Redis, Zipkin, and Placement service locally
+     - Useful for workflows, actors, pub/sub, and other Dapr building blocks that are incredible useful for agents.
+7. Start dapr sidecar (The app-id is the name of the application that will be running the agent. It can be any name you want. You can check the app-id with `dapr list`.):
+        dapr run --app-id openai-agents-example --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components
 
 COMMON ISSUES:
 - "Health check connection refused (port 3500)": Always use --dapr-http-port 3500
@@ -55,12 +52,22 @@ COMMON ISSUES:
 - "State store not found": Ensure component YAML is in --resources-path directory
 - "Dapr sidecar not reachable": Check with `dapr list` and verify gRPC port 50001
 
+Important:
+- If you recreate the PostgreSQL container while daprd stays running, the Postgres state store component
+  may keep an old connection pool and not re-run initialization, leading to errors like
+  "relation \"state\" does not exist". Fix by restarting daprd or triggering a component reload by
+  touching the component YAML under your --resources-path.
+
 Note: This example clears the session at the start to ensure a clean demonstration.
 In production, you may want to preserve existing conversation history.
 """
 
+import argparse
 import asyncio
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
 os.environ["GRPC_VERBOSITY"] = (
     "ERROR"  # Suppress gRPC warnings caused by the Dapr Python SDK gRPC connection.
@@ -74,6 +81,22 @@ from agents.extensions.memory import (
 )
 
 grpc_port = os.environ.get("DAPR_GRPC_PORT", "50001")
+DEFAULT_STATE_STORE = os.environ.get("DAPR_STATE_STORE", "statestore")
+
+
+async def ping_with_retry(
+    session: DaprSession, timeout_seconds: float = 5.0, interval_seconds: float = 0.5
+) -> bool:
+    """Retry session.ping() until success or timeout."""
+    now = asyncio.get_running_loop().time
+    deadline = now() + timeout_seconds
+    while True:
+        if await session.ping():
+            return True
+        print("Dapr sidecar is not available! Retrying...")
+        if now() >= deadline:
+            return False
+        await asyncio.sleep(interval_seconds)
 
 
 async def main():
@@ -84,7 +107,11 @@ async def main():
     )
 
     print("=== Dapr Session Example ===")
+    print()
+    print("########################################################")
     print("This example requires Dapr sidecar to be running")
+    print("########################################################")
+    print()
     print(
         "Start Dapr with: dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
     )  # noqa: E501
@@ -96,11 +123,11 @@ async def main():
         # Use async with to automatically close the session on exit
         async with DaprSession.from_address(
             session_id,
-            state_store_name="statestore",
+            state_store_name=DEFAULT_STATE_STORE,
             dapr_address=f"localhost:{grpc_port}",
         ) as session:
             # Test Dapr connectivity
-            if not await session.ping():
+            if not await ping_with_retry(session, timeout_seconds=5.0, interval_seconds=0.5):
                 print("Dapr sidecar is not available!")
                 print("Please start Dapr sidecar and try again.")
                 print(
@@ -110,7 +137,7 @@ async def main():
 
             print("Connected to Dapr successfully!")
             print(f"Session ID: {session_id}")
-            print("State Store: statestore")
+            print(f"State Store: {DEFAULT_STATE_STORE}")
 
             # Clear any existing session data for a clean start
             await session.clear_session()
@@ -171,7 +198,7 @@ async def main():
             # Use context manager for the new session too
             async with DaprSession.from_address(
                 "different_conversation_456",
-                state_store_name="statestore",
+                state_store_name=DEFAULT_STATE_STORE,
                 dapr_address=f"localhost:{grpc_port}",
             ) as new_session:
                 print("Creating a new session with different ID...")
@@ -209,7 +236,7 @@ async def demonstrate_advanced_features():
         print("\n1. TTL Configuration:")
         async with DaprSession.from_address(
             "ttl_demo_session",
-            state_store_name="statestore",
+            state_store_name=DEFAULT_STATE_STORE,
             dapr_address=f"localhost:{grpc_port}",
             ttl=3600,  # 1 hour TTL
         ) as ttl_session:
@@ -228,7 +255,7 @@ async def demonstrate_advanced_features():
         # Eventual consistency (better performance)
         async with DaprSession.from_address(
             "eventual_session",
-            state_store_name="statestore",
+            state_store_name=DEFAULT_STATE_STORE,
             dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_EVENTUAL,
         ) as eventual_session:
@@ -239,7 +266,7 @@ async def demonstrate_advanced_features():
         # Strong consistency (guaranteed read-after-write)
         async with DaprSession.from_address(
             "strong_session",
-            state_store_name="statestore",
+            state_store_name=DEFAULT_STATE_STORE,
             dapr_address=f"localhost:{grpc_port}",
             consistency=DAPR_CONSISTENCY_STRONG,
         ) as strong_session:
@@ -254,7 +281,7 @@ async def demonstrate_advanced_features():
             session_id = f"{tenant_id}:{user_id}"
             return DaprSession.from_address(
                 session_id,
-                state_store_name="statestore",
+                state_store_name=DEFAULT_STATE_STORE,
                 dapr_address=f"localhost:{grpc_port}",
             )
 
@@ -271,12 +298,221 @@ async def demonstrate_advanced_features():
 
 async def setup_instructions():
     """Print setup instructions for running the example."""
-    print("\n=== Setup Instructions ===")
-    print("\n1. Create a components directory:")
-    print("   mkdir -p components")
-    print("\n2. Create statestore.yaml with your chosen state store:")
-    print("\n   OPTION A - Redis (recommended for getting started):")
+    print("\n=== Setup Instructions (Multi-store) ===")
+    print("\n1. Create components (Redis + PostgreSQL) in ./components:")
     print("""
+# Save as components/statestore-redis.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore-redis
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: localhost:6379
+  - name: redisPassword
+    value: ""
+
+# Save as components/statestore-postgres.yaml
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore-postgres
+spec:
+  type: state.postgresql
+  version: v2
+  metadata:
+  - name: connectionString
+    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
+""")
+    print("   You can select which one the main demo uses via env var:")
+    print("   export DAPR_STATE_STORE=statestore-redis  # or statestore-postgres")
+    print("   Start both Redis and PostgreSQL for this multi-store demo:")
+    print("   docker run -d -p 6379:6379 redis:7-alpine")
+    print(
+        "   docker run -d -p 5432:5432 -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=dapr postgres:16-alpine"
+    )
+
+    print("\n   NOTE: Always use secret references for passwords/keys in production!")
+    print("   See: https://docs.dapr.io/operations/components/component-secrets/")
+
+    print("\n2. Start Dapr sidecar:")
+    print(
+        "   dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
+    )
+    print("\n   IMPORTANT: Always specify --dapr-http-port 3500 to avoid connection errors!")
+    print(
+        "   If you recreate PostgreSQL while daprd is running, restart daprd or touch the component YAML"
+    )
+    print(
+        "   to trigger a reload, otherwise you may see 'relation "
+        + '\\"state\\"'
+        + " does not exist'."
+    )
+
+    print("\n3. Run this example:")
+    print("   python examples/memory/dapr_session_example.py")
+
+    print("\n   Optional: Override store names via env vars:")
+    print("   export DAPR_STATE_STORE=statestore-postgres")
+    print("   export DAPR_STATE_STORE_REDIS=statestore-redis")
+    print("   export DAPR_STATE_STORE_POSTGRES=statestore-postgres")
+
+    print("\n   TIP: If you get 'connection refused' errors, set the HTTP endpoint:")
+    print("   export DAPR_HTTP_ENDPOINT='http://localhost:3500'")
+    print("   python examples/memory/dapr_session_example.py")
+
+    print("\n4. For Kubernetes deployment:")
+    print("   Add these annotations to your pod spec:")
+    print("   dapr.io/enabled: 'true'")
+    print("   dapr.io/app-id: 'agents-app'")
+    print("   Then use: dapr_address='localhost:50001' in your code")
+
+    print("\nDocs: Supported state stores and configuration:")
+    print("https://docs.dapr.io/reference/components-reference/supported-state-stores/")
+
+
+async def demonstrate_multi_store():
+    """Demonstrate using two different state stores in the same app."""
+    print("\n=== Multi-store Demo (Redis + PostgreSQL) ===")
+    redis_store = os.environ.get("DAPR_STATE_STORE_REDIS", "statestore-redis")
+    pg_store = os.environ.get("DAPR_STATE_STORE_POSTGRES", "statestore-postgres")
+
+    try:
+        async with (
+            DaprSession.from_address(
+                "multi_store_demo:redis",
+                state_store_name=redis_store,
+                dapr_address=f"localhost:{grpc_port}",
+            ) as redis_session,
+            DaprSession.from_address(
+                "multi_store_demo:postgres",
+                state_store_name=pg_store,
+                dapr_address=f"localhost:{grpc_port}",
+            ) as pg_session,
+        ):
+            ok_redis = await ping_with_retry(
+                redis_session, timeout_seconds=5.0, interval_seconds=0.5
+            )
+            ok_pg = await ping_with_retry(pg_session, timeout_seconds=5.0, interval_seconds=0.5)
+            if not (ok_redis and ok_pg):
+                print(
+                    "----------------------------------------\n"
+                    "ERROR: One or both state stores are unavailable. Ensure both components exist and are running. \n"
+                    "Run with --setup-env to create the components and start the containers.\n"
+                    "----------------------------------------\n"
+                )
+                print(f"Redis store name: {redis_store}")
+                print(f"PostgreSQL store name: {pg_store}")
+                return
+
+            await redis_session.clear_session()
+            await pg_session.clear_session()
+
+            await redis_session.add_items([{"role": "user", "content": "Hello from Redis"}])
+            await pg_session.add_items([{"role": "user", "content": "Hello from PostgreSQL"}])
+
+            r_items = await redis_session.get_items()
+            p_items = await pg_session.get_items()
+
+            r_example = r_items[-1]["content"] if r_items else "empty"
+            p_example = p_items[-1]["content"] if p_items else "empty"
+
+            print(f"{redis_store}: {len(r_items)} items; example: {r_example}")
+            print(f"{pg_store}: {len(p_items)} items; example: {p_example}")
+            print("Data is isolated per state store.")
+    except Exception as e:
+        print(f"Multi-store demo error: {e}")
+
+
+# ------------------------------------------------------------------------------------------------
+# ---               Setup Helper Functions                                                      --
+# ------------------------------------------------------------------------------------------------
+
+
+def _write_text_file(path: Path, content: str, overwrite: bool) -> None:
+    if path.exists() and not overwrite:
+        return
+    path.write_text(content, encoding="utf-8")
+
+
+def _docker_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def _container_running(name: str):
+    if not _docker_available():
+        return None
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip().lower() == "true"
+    except Exception:
+        return None
+
+
+def _ensure_container(name: str, run_args: list[str]) -> None:
+    if not _docker_available():
+        raise SystemExit(
+            "Docker is required to automatically start containers for '"
+            + name
+            + "'.\nInstall Docker: https://docs.docker.com/get-docker/\n"
+            + "Alternatively, start the container manually and re-run with --setup-env."
+        )
+    status = _container_running(name)
+    if status is True:
+        print(f"Container '{name}' already running.")
+        return
+    if status is False:
+        subprocess.run(["docker", "start", name], check=False)
+        print(f"Started existing container '{name}'.")
+        return
+    subprocess.run(["docker", "run", "-d", "--name", name, *run_args], check=False)
+    print(f"Created and started container '{name}'.")
+
+
+def setup_environment(components_dir: str = "./components", overwrite: bool = False) -> None:
+    """Create Redis/PostgreSQL component files and start containers if available."""
+    components_path = Path(components_dir)
+    components_path.mkdir(parents=True, exist_ok=True)
+
+    redis_component = """
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore-redis
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: localhost:6379
+  - name: redisPassword
+    value: ""
+""".lstrip()
+
+    postgres_component = """
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore-postgres
+spec:
+  type: state.postgresql
+  version: v2
+  metadata:
+  - name: connectionString
+    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
+""".lstrip()
+
+    default_component = """
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -289,92 +525,62 @@ spec:
     value: localhost:6379
   - name: redisPassword
     value: ""
-""")
-    print("   Start Redis: docker run -d -p 6379:6379 redis:7-alpine")
-    print("   (Skip if you already ran 'dapr init' - it installs Redis locally)")
+""".lstrip()
 
-    print("\n   OPTION B - PostgreSQL (v2 recommended):")
-    print("""
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: statestore
-spec:
-  type: state.postgresql
-  version: v2
-  metadata:
-  - name: connectionString
-    value: "host=localhost user=postgres password=postgres dbname=dapr port=5432"
-""")
-    print(
-        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-postgresql-v2/"
+    _write_text_file(components_path / "statestore-redis.yaml", redis_component, overwrite)
+    _write_text_file(components_path / "statestore-postgres.yaml", postgres_component, overwrite)
+    _write_text_file(components_path / "statestore.yaml", default_component, overwrite)
+
+    print(f"Components written under: {components_path.resolve()}")
+
+    _ensure_container("dapr_redis", ["-p", "6379:6379", "redis:7-alpine"])
+    _ensure_container(
+        "dapr_postgres",
+        [
+            "-p",
+            "5432:5432",
+            "-e",
+            "POSTGRES_USER=postgres",
+            "-e",
+            "POSTGRES_PASSWORD=postgres",
+            "-e",
+            "POSTGRES_DB=dapr",
+            "postgres:16-alpine",
+        ],
     )
-
-    print("\n   OPTION C - MongoDB:")
-    print("""
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: statestore
-spec:
-  type: state.mongodb
-  version: v1
-  metadata:
-  - name: host
-    value: "localhost:27017"
-""")
-    print(
-        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-mongodb/"
-    )
-
-    print("\n   OPTION D - Azure Cosmos DB:")
-    print("""
-apiVersion: dapr.io/v1alpha1
-kind: Component
-metadata:
-  name: statestore
-spec:
-  type: state.azure.cosmosdb
-  version: v1
-  metadata:
-  - name: url
-    value: "https://<your-account>.documents.azure.com:443/"
-  - name: masterKey
-    value: "<your-master-key>"
-  - name: database
-    value: "dapr"
-""")
-    print(
-        "   See: https://docs.dapr.io/reference/components-reference/supported-state-stores/setup-azure-cosmosdb/"
-    )
-
-    print("\n   NOTE: Always use secret references for passwords/keys in production!")
-    print("   See: https://docs.dapr.io/operations/components/component-secrets/")
-
-    print("\n3. Start Dapr sidecar:")
-    print(
-        "   dapr run --app-id myapp --dapr-http-port 3500 --dapr-grpc-port 50001 --resources-path ./components"
-    )
-    print("\n   IMPORTANT: Always specify --dapr-http-port 3500 to avoid connection errors!")
-
-    print("\n4. Run this example:")
-    print("   python examples/memory/dapr_session_example.py")
-
-    print("\n   TIP: If you get 'connection refused' errors, set the HTTP endpoint:")
-    print("   export DAPR_HTTP_ENDPOINT='http://localhost:3500'")
-    print("   python examples/memory/dapr_session_example.py")
-
-    print("\n5. For Kubernetes deployment:")
-    print("   Add these annotations to your pod spec:")
-    print("   dapr.io/enabled: 'true'")
-    print("   dapr.io/app-id: 'agents-app'")
-    print("   Then use: dapr_address='localhost:50001' in your code")
-
-    print("\nFull list of 30+ supported state stores:")
-    print("https://docs.dapr.io/reference/components-reference/supported-state-stores/")
+    print("Environment setup complete.")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Dapr session example")
+    parser.add_argument(
+        "--setup-env",
+        action="store_true",
+        help="Create ./components and add Redis/PostgreSQL components; start containers if possible.",
+    )
+    parser.add_argument(
+        "--components-dir",
+        default="./components",
+        help="Path to Dapr components directory (default: ./components)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing component files if present.",
+    )
+    parser.add_argument(
+        "--only-setup",
+        action="store_true",
+        help="Exit after setting up the environment.",
+    )
+    args = parser.parse_args()
+
+    if args.setup_env:
+        setup_environment(args.components_dir, overwrite=args.overwrite)
+        if args.only_setup:
+            raise SystemExit(0)
+
     asyncio.run(setup_instructions())
     asyncio.run(main())
     asyncio.run(demonstrate_advanced_features())
+    asyncio.run(demonstrate_multi_store())

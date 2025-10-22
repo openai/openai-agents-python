@@ -37,6 +37,7 @@ except ImportError as e:
     ) from e
 
 from ...items import TResponseInputItem
+from ...logger import logger
 from ...memory.session import SessionABC
 
 # Type alias for consistency levels
@@ -356,11 +357,31 @@ class DaprSession(SessionABC):
             True if Dapr is reachable, False otherwise.
         """
         try:
-            # Try to get state with a test key
+            # First attempt a read; some stores may not be initialized yet.
             await self._dapr_client.get_state(
                 store_name=self._state_store_name,
                 key="__ping__",
+                state_metadata=self._get_read_metadata(),
             )
             return True
-        except Exception:
-            return False
+        except Exception as initial_error:
+            # If relation/table is missing or store isn't initialized,
+            # attempt a write to initialize it, then read again.
+            try:
+                await self._dapr_client.save_state(
+                    store_name=self._state_store_name,
+                    key="__ping__",
+                    value="ok",
+                    state_metadata=self._get_metadata(),
+                    options=self._get_state_options(),
+                )
+                # Read again after write.
+                await self._dapr_client.get_state(
+                    store_name=self._state_store_name,
+                    key="__ping__",
+                    state_metadata=self._get_read_metadata(),
+                )
+                return True
+            except Exception:
+                logger.error("Dapr connection failed: %s", initial_error)
+                return False
