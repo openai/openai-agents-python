@@ -110,18 +110,27 @@ class LitellmModel(Model):
                 prompt=prompt,
             )
 
-            assert isinstance(response.choices[0], litellm.types.utils.Choices)
+            message: litellm.types.utils.Message | None = None
+            first_choice: litellm.types.utils.Choices | litellm.types.utils.StreamingChoices | None = (
+                None
+            )
+            if response.choices and len(response.choices) > 0:
+                first_choice = response.choices[0]
+                assert isinstance(first_choice, litellm.types.utils.Choices)
+                message = first_choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
-                logger.debug(
-                    f"""LLM resp:\n{
-                        json.dumps(
-                            response.choices[0].message.model_dump(), indent=2, ensure_ascii=False
-                        )
-                    }\n"""
-                )
+                if message is not None:
+                    logger.debug(
+                        f"""LLM resp:\n{
+                            json.dumps(message.model_dump(), indent=2, ensure_ascii=False)
+                        }\n"""
+                    )
+                else:
+                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
 
             if hasattr(response, "usage"):
                 response_usage = response.usage
@@ -151,16 +160,18 @@ class LitellmModel(Model):
                 usage = Usage()
                 logger.warning("No usage information returned from Litellm")
 
-            if tracing.include_data():
-                span_generation.span_data.output = [response.choices[0].message.model_dump()]
+            if tracing.include_data() and message is not None:
+                span_generation.span_data.output = [message.model_dump()]
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(
-                LitellmConverter.convert_message_to_openai(response.choices[0].message)
-            )
+            items = []
+            if message is not None:
+                items = Converter.message_to_output_items(
+                    LitellmConverter.convert_message_to_openai(message)
+                )
 
             return ModelResponse(
                 output=items,
