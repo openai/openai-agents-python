@@ -13,23 +13,28 @@ The script uses a mock MCP server that simulates HTTP errors.
 
 import asyncio
 import json
+import sys
 from typing import Any
 
 from agents import Agent, Runner, function_tool
 
-# Import MCP types for proper error handling
-# We avoid TYPE_CHECKING to prevent mypy from seeing conflicting type assignments
-try:
-    from mcp.shared.exceptions import McpError  # type: ignore[import-not-found]
-    from mcp.types import INTERNAL_ERROR, ErrorData  # type: ignore[import-not-found]
+# Import MCP types for proper error handling (requires Python 3.10+)
+if sys.version_info >= (3, 10):
+    try:
+        from mcp.shared.exceptions import McpError
+        from mcp.types import INTERNAL_ERROR, ErrorData
 
-    MCP_AVAILABLE = True
-except ImportError:
-    # Fallback for Python < 3.10 or when MCP is not installed
+        MCP_AVAILABLE = True
+    except ImportError:
+        MCP_AVAILABLE = False
+        McpError = None  # type: ignore[assignment,misc]
+        ErrorData = None  # type: ignore[assignment,misc]
+        INTERNAL_ERROR = -32603
+else:
+    # Python < 3.10: MCP not available
     MCP_AVAILABLE = False
-    # Use Any to avoid mypy type conflicts
-    McpError = Exception
-    ErrorData = type("ErrorData", (), {})
+    McpError = None  # type: ignore[assignment,misc]
+    ErrorData = None  # type: ignore[assignment,misc]
     INTERNAL_ERROR = -32603
 
 
@@ -49,7 +54,7 @@ class MockMCPServerWithErrors:
 
         if "invalid" in query.lower():
             # Simulate 422 Validation Error
-            if MCP_AVAILABLE:
+            if McpError is not None and ErrorData is not None:
                 raise McpError(
                     ErrorData(
                         code=INTERNAL_ERROR,
@@ -59,7 +64,7 @@ class MockMCPServerWithErrors:
 
         if "notfound" in query.lower():
             # Simulate 404 Not Found
-            if MCP_AVAILABLE:
+            if McpError is not None and ErrorData is not None:
                 raise McpError(
                     ErrorData(
                         code=INTERNAL_ERROR,
@@ -69,7 +74,7 @@ class MockMCPServerWithErrors:
 
         if "servererror" in query.lower():
             # Simulate 500 Internal Server Error
-            if MCP_AVAILABLE:
+            if McpError is not None and ErrorData is not None:
                 raise McpError(
                     ErrorData(
                         code=INTERNAL_ERROR,
@@ -119,7 +124,7 @@ async def search(query: str) -> str:
         return result_json
     except Exception as e:
         # Check if it's an MCP error (only when MCP is available)
-        if MCP_AVAILABLE and isinstance(e, McpError):
+        if McpError is not None and isinstance(e, McpError):
             # After PR #1948: Return structured error instead of crashing
             return json.dumps(
                 {"error": {"message": str(e), "tool": "search", "type": "upstream_error"}}
