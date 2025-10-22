@@ -1299,7 +1299,9 @@ class AgentRunner:
 
                             reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
                             streamed_result._event_queue.put_nowait(
-                                RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                                RunItemStreamEvent(
+                                    item=reasoning_item, name="reasoning_item_created"
+                                )
                             )
         except Exception:
             # Track that a request was made, even if we didn't get usage info from the response

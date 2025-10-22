@@ -100,7 +100,7 @@ async def test_usage_tracking_multi_turn_with_error():
 
     from agents.usage import Usage
 
-    from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+    from .test_responses import get_function_tool, get_function_tool_call
 
     model = FakeModel()
 
