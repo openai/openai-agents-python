@@ -275,18 +275,14 @@ class StreamedAudioResult:
     def _check_errors(self):
         """Check for exceptions in completed tasks.
 
-        Note: CancelledError is not checked as it's expected during cleanup.
+        Note: task.cancelled() check ensures CancelledError is never raised.
         """
         for task in self._tasks:
             if task.done() and not task.cancelled():
-                try:
-                    exc = task.exception()
-                    if exc:
-                        self._stored_exception = exc
-                        break
-                except asyncio.CancelledError:
-                    # Task was cancelled, skip it
-                    pass
+                exc = task.exception()
+                if exc:
+                    self._stored_exception = exc
+                    break
 
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
