@@ -111,9 +111,9 @@ class LitellmModel(Model):
             )
 
             message: litellm.types.utils.Message | None = None
-            first_choice: litellm.types.utils.Choices | litellm.types.utils.StreamingChoices | None = (
-                None
-            )
+            first_choice: (
+                litellm.types.utils.Choices | litellm.types.utils.StreamingChoices | None
+            ) = None
             if response.choices and len(response.choices) > 0:
                 first_choice = response.choices[0]
                 assert isinstance(first_choice, litellm.types.utils.Choices)
