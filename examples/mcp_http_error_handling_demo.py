@@ -96,7 +96,7 @@ async def search(query: str) -> str:
         return json.dumps(
             {"error": {"message": str(e), "tool": "search", "type": "upstream_error"}}
         )
-    except Exception as e:
+    except Exception:
         # Programming errors still raise
         raise
 
