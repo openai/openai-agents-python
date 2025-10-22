@@ -44,6 +44,7 @@ from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
+from ...models.openai_responses import Converter as OpenAIResponsesConverter
 from ...tool import Tool
 from ...tracing import generation_span
 from ...tracing.span_data import GenerationSpanData
@@ -367,15 +368,19 @@ class LitellmModel(Model):
         if isinstance(ret, litellm.types.utils.ModelResponse):
             return ret
 
+        responses_tool_choice = OpenAIResponsesConverter.convert_tool_choice(
+            model_settings.tool_choice
+        )
+        if responses_tool_choice is None or responses_tool_choice is omit:
+            responses_tool_choice = "auto"
+
         response = Response(
             id=FAKE_RESPONSES_ID,
             created_at=time.time(),
             model=self.model,
             object="response",
             output=[],
-            tool_choice=cast(Literal["auto", "required", "none"], tool_choice)
-            if tool_choice is not omit
-            else "auto",
+            tool_choice=responses_tool_choice,  # type: ignore[arg-type]
             top_p=model_settings.top_p,
             temperature=model_settings.temperature,
             tools=[],

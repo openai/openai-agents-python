@@ -361,6 +361,9 @@ class ItemHelpers:
         if isinstance(output, (ToolOutputText, ToolOutputImage, ToolOutputFileContent)):
             return output
         elif isinstance(output, dict):
+            # Require explicit 'type' field in dict to be considered a structured output
+            if "type" not in output:
+                return None
             try:
                 return ValidToolOutputPydanticModelsTypeAdapter.validate_python(output)
             except pydantic.ValidationError:
