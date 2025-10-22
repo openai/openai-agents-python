@@ -518,9 +518,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         model._ongoing_response = True
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
-                input=SimpleNamespace(
-                    turn_detection=SimpleNamespace(interrupt_response=True)
-                )
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
             )
         )
 
@@ -545,9 +543,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         model._ongoing_response = True
         model._created_session = SimpleNamespace(
             audio=SimpleNamespace(
-                input=SimpleNamespace(
-                    turn_detection=SimpleNamespace(interrupt_response=True)
-                )
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
             )
         )
 
