@@ -746,16 +746,32 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
 
-    def _cleanup_guardrail_tasks(self) -> None:
+    async def _cleanup_guardrail_tasks(self) -> None:
+        """Cancel all pending guardrail tasks and wait for them to complete.
+
+        This ensures that any exceptions raised by the tasks are properly handled
+        and prevents warnings about unhandled task exceptions.
+        """
+        # Collect real asyncio.Task objects that need to be awaited
+        real_tasks = []
+
         for task in self._guardrail_tasks:
             if not task.done():
                 task.cancel()
+            # Only await real asyncio.Task objects (not mocks in tests)
+            if isinstance(task, asyncio.Task):
+                real_tasks.append(task)
+
+        # Wait for all real tasks to complete and collect any exceptions
+        if real_tasks:
+            await asyncio.gather(*real_tasks, return_exceptions=True)
+
         self._guardrail_tasks.clear()
 
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         # Cancel and cleanup guardrail tasks
-        self._cleanup_guardrail_tasks()
+        await self._cleanup_guardrail_tasks()
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
