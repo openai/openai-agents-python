@@ -167,11 +167,13 @@ class LitellmModel(Model):
                 "output_tokens": usage.output_tokens,
             }
 
-            items = []
-            if message is not None:
-                items = Converter.message_to_output_items(
+            items = (
+                Converter.message_to_output_items(
                     LitellmConverter.convert_message_to_openai(message)
                 )
+                if message is not None
+                else []
+            )
 
             return ModelResponse(
                 output=items,
