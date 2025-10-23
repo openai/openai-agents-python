@@ -583,7 +583,9 @@ class TestEventHandling:
             await session.on_event(function_call_event)
 
             # Should have called the tool handler
-            handle_tool_call_mock.assert_called_once_with(function_call_event)
+            handle_tool_call_mock.assert_called_once_with(
+                function_call_event, agent_snapshot=mock_agent
+            )
 
             # Should still have raw event
             assert session._event_queue.qsize() == 1
@@ -611,7 +613,9 @@ class TestEventHandling:
             # Let the background task run
             await asyncio.sleep(0)
 
-            handle_tool_call_mock.assert_awaited_once_with(function_call_event)
+            handle_tool_call_mock.assert_awaited_once_with(
+                function_call_event, agent_snapshot=mock_agent
+            )
 
         # Raw event still enqueued
         assert session._event_queue.qsize() == 1
