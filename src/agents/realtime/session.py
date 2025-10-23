@@ -218,10 +218,11 @@ class RealtimeSession(RealtimeModelListener):
         if event.type == "error":
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
+            agent_snapshot = self._current_agent
             if self._async_tool_calls:
-                self._enqueue_tool_call_task(event)
+                self._enqueue_tool_call_task(event, agent_snapshot)
             else:
-                await self._handle_tool_call(event)
+                await self._handle_tool_call(event, agent_snapshot=agent_snapshot)
         elif event.type == "audio":
             await self._put_event(
                 RealtimeAudio(
@@ -389,11 +390,17 @@ class RealtimeSession(RealtimeModelListener):
         """Put an event into the queue."""
         await self._event_queue.put(event)
 
-    async def _handle_tool_call(self, event: RealtimeModelToolCallEvent) -> None:
+    async def _handle_tool_call(
+        self,
+        event: RealtimeModelToolCallEvent,
+        *,
+        agent_snapshot: RealtimeAgent | None = None,
+    ) -> None:
         """Handle a tool call event."""
+        agent = agent_snapshot or self._current_agent
         tools, handoffs = await asyncio.gather(
-            self._current_agent.get_all_tools(self._context_wrapper),
-            self._get_handoffs(self._current_agent, self._context_wrapper),
+            agent.get_all_tools(self._context_wrapper),
+            self._get_handoffs(agent, self._context_wrapper),
         )
         function_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
@@ -403,7 +410,7 @@ class RealtimeSession(RealtimeModelListener):
                 RealtimeToolStart(
                     info=self._event_info,
                     tool=function_map[event.name],
-                    agent=self._current_agent,
+                    agent=agent,
                 )
             )
 
@@ -428,7 +435,7 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                     tool=func_tool,
                     output=result,
-                    agent=self._current_agent,
+                    agent=agent,
                 )
             )
         elif event.name in handoff_map:
@@ -449,7 +456,7 @@ class RealtimeSession(RealtimeModelListener):
                 )
 
             # Store previous agent for event
-            previous_agent = self._current_agent
+            previous_agent = agent
 
             # Update current agent
             self._current_agent = result
@@ -757,9 +764,13 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         self._guardrail_tasks.clear()
 
-    def _enqueue_tool_call_task(self, event: RealtimeModelToolCallEvent) -> None:
+    def _enqueue_tool_call_task(
+        self, event: RealtimeModelToolCallEvent, agent_snapshot: RealtimeAgent
+    ) -> None:
         """Run tool calls in the background to avoid blocking realtime transport."""
-        task = asyncio.create_task(self._handle_tool_call(event))
+        task = asyncio.create_task(
+            self._handle_tool_call(event, agent_snapshot=agent_snapshot)
+        )
         self._tool_call_tasks.add(task)
         task.add_done_callback(self._on_tool_call_task_done)
 
