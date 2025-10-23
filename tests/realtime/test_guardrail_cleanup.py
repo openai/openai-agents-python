@@ -165,9 +165,7 @@ async def test_guardrail_task_cleanup_with_exception(mock_model, mock_agent):
             # Simulate an error during cleanup
             raise RuntimeError("Cleanup error") from e
 
-    guardrail = OutputGuardrail(
-        guardrail_function=failing_guardrail_func, name="failing_guardrail"
-    )
+    guardrail = OutputGuardrail(guardrail_function=failing_guardrail_func, name="failing_guardrail")
 
     run_config: RealtimeRunConfig = {
         "output_guardrails": [guardrail],
