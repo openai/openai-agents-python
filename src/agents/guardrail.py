@@ -70,7 +70,7 @@ class OutputGuardrailResult:
 
 @dataclass
 class InputGuardrail(Generic[TContext]):
-    """Input guardrails are checks that run in parallel to the agent's execution.
+    """Input guardrails are checks that run either in parallel with the agent or before it starts.
     They can be used to do things like:
     - Check if input messages are off-topic
     - Take over control of the agent's execution if an unexpected input is detected
