@@ -184,6 +184,9 @@ class RealtimeRunConfig(TypedDict):
     tracing_disabled: NotRequired[bool]
     """Whether tracing is disabled for this run."""
 
+    async_tool_calls: NotRequired[bool]
+    """Whether function tool calls should run asynchronously. Defaults to True."""
+
     # TODO (rm) Add history audio storage config
 
 

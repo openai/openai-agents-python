@@ -123,6 +123,8 @@ class RealtimeSession(RealtimeModelListener):
         )
 
         self._guardrail_tasks: set[asyncio.Task[Any]] = set()
+        self._tool_call_tasks: set[asyncio.Task[Any]] = set()
+        self._async_tool_calls: bool = bool(self._run_config.get("async_tool_calls", True))
 
     @property
     def model(self) -> RealtimeModel:
@@ -216,7 +218,10 @@ class RealtimeSession(RealtimeModelListener):
         if event.type == "error":
             await self._put_event(RealtimeError(info=self._event_info, error=event.error))
         elif event.type == "function_call":
-            await self._handle_tool_call(event)
+            if self._async_tool_calls:
+                self._enqueue_tool_call_task(event)
+            else:
+                await self._handle_tool_call(event)
         elif event.type == "audio":
             await self._put_event(
                 RealtimeAudio(
@@ -752,10 +757,47 @@ class RealtimeSession(RealtimeModelListener):
                 task.cancel()
         self._guardrail_tasks.clear()
 
+    def _enqueue_tool_call_task(self, event: RealtimeModelToolCallEvent) -> None:
+        """Run tool calls in the background to avoid blocking realtime transport."""
+        task = asyncio.create_task(self._handle_tool_call(event))
+        self._tool_call_tasks.add(task)
+        task.add_done_callback(self._on_tool_call_task_done)
+
+    def _on_tool_call_task_done(self, task: asyncio.Task[Any]) -> None:
+        self._tool_call_tasks.discard(task)
+
+        if task.cancelled():
+            return
+
+        exception = task.exception()
+        if exception is None:
+            return
+
+        logger.exception("Realtime tool call task failed", exc_info=exception)
+
+        if self._stored_exception is None:
+            self._stored_exception = exception
+
+        asyncio.create_task(
+            self._put_event(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Tool call task failed: {exception}"},
+                )
+            )
+        )
+
+    def _cleanup_tool_call_tasks(self) -> None:
+        for task in self._tool_call_tasks:
+            if not task.done():
+                task.cancel()
+        self._tool_call_tasks.clear()
+
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         # Cancel and cleanup guardrail tasks
         self._cleanup_guardrail_tasks()
+        self._cleanup_tool_call_tasks()
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
