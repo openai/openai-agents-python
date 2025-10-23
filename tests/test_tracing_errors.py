@@ -15,6 +15,7 @@ from agents import (
     MaxTurnsExceeded,
     ModelBehaviorError,
     RunContextWrapper,
+    RunError,
     Runner,
     TResponseInputItem,
 )
@@ -39,8 +40,11 @@ async def test_single_turn_model_error():
         name="test_agent",
         model=model,
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(RunError) as exc_info:
         await Runner.run(agent, input="first_test")
+
+    # Verify the original exception is preserved
+    assert isinstance(exc_info.value.original_exception, ValueError)
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -92,8 +96,11 @@ async def test_multi_turn_no_handoffs():
         ]
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(RunError) as exc_info:
         await Runner.run(agent, input="first_test")
+
+    # Verify the original exception is preserved
+    assert isinstance(exc_info.value.original_exception, ValueError)
 
     assert fetch_normalized_spans() == snapshot(
         [

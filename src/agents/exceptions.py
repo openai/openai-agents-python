@@ -129,3 +129,20 @@ class ToolOutputGuardrailTripwireTriggered(AgentsException):
         self.guardrail = guardrail
         self.output = output
         super().__init__(f"Tool output guardrail {guardrail.__class__.__name__} triggered tripwire")
+
+
+class RunError(AgentsException):
+    """Wrapper exception for non-AgentsException errors that occur during agent runs.
+
+    This exception wraps external errors (API errors, connection failures, etc.) to ensure
+    that run data including usage information is preserved and accessible.
+    """
+
+    original_exception: Exception
+    """The original exception that was raised."""
+
+    def __init__(self, original_exception: Exception):
+        self.original_exception = original_exception
+        super().__init__(str(original_exception))
+        # Preserve the original exception as the cause
+        self.__cause__ = original_exception

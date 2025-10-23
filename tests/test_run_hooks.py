@@ -172,6 +172,8 @@ async def test_async_run_hooks_with_agent_hooks_with_llm():
 
 @pytest.mark.asyncio
 async def test_run_hooks_llm_error_non_streaming(monkeypatch):
+    from agents import RunError
+
     hooks = RunHooksForTests()
     model = FakeModel()
     agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
@@ -181,8 +183,15 @@ async def test_run_hooks_llm_error_non_streaming(monkeypatch):
 
     monkeypatch.setattr(FakeModel, "get_response", boom, raising=True)
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(RunError) as exc_info:
         await Runner.run(agent, input="hello", hooks=hooks)
+
+    # Verify the original exception is preserved
+    assert isinstance(exc_info.value.original_exception, RuntimeError)
+    assert str(exc_info.value.original_exception) == "boom"
+    # Verify run_data is attached
+    assert exc_info.value.run_data is not None
+    assert exc_info.value.run_data.context_wrapper is not None
 
     # Current behavior is that hooks will not fire on LLM failure
     assert hooks.events["on_agent_start"] == 1
@@ -229,15 +238,25 @@ async def test_streamed_run_hooks_llm_error(monkeypatch):
     Verify that when the streaming path raises, we still emit on_llm_start
     but do NOT emit on_llm_end (current behavior), and the exception propagates.
     """
+    from agents import RunError
+
     hooks = RunHooksForTests()
     agent = Agent(name="A", model=BoomModel(), tools=[get_function_tool("f", "res")], handoffs=[])
 
     stream = Runner.run_streamed(agent, input="hello", hooks=hooks)
 
-    # Consuming the stream should surface the exception
-    with pytest.raises(RuntimeError, match="stream blew up"):
+    # Consuming the stream should surface the exception (wrapped in RunError to preserve usage data)
+    with pytest.raises(RunError) as exc_info:
         async for _ in stream.stream_events():
             pass
+
+    # Verify the original exception is preserved and accessible
+    assert isinstance(exc_info.value.original_exception, RuntimeError)
+    assert str(exc_info.value.original_exception) == "stream blew up"
+    # Verify run_data is attached with usage information
+    assert exc_info.value.run_data is not None
+    assert exc_info.value.run_data.context_wrapper is not None
+    assert exc_info.value.run_data.context_wrapper.usage is not None
 
     # Current behavior: success-only on_llm_end; ensure starts fired but ends did not.
     assert hooks.events["on_agent_start"] == 1

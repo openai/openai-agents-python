@@ -18,6 +18,7 @@ from agents import (
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
+    RunError,
     Runner,
     TResponseInputItem,
 )
@@ -42,10 +43,13 @@ async def test_single_turn_model_error():
         name="test_agent",
         model=model,
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(RunError) as exc_info:
         result = Runner.run_streamed(agent, input="first_test")
         async for _ in result.stream_events():
             pass
+
+    # Verify the original exception is preserved
+    assert isinstance(exc_info.value.original_exception, ValueError)
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -98,10 +102,13 @@ async def test_multi_turn_no_handoffs():
         ]
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(RunError) as exc_info:
         result = Runner.run_streamed(agent, input="first_test")
         async for _ in result.stream_events():
             pass
+
+    # Verify the original exception is preserved
+    assert isinstance(exc_info.value.original_exception, ValueError)
 
     assert fetch_normalized_spans() == snapshot(
         [

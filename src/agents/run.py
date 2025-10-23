@@ -35,6 +35,7 @@ from .exceptions import (
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
+    RunError,
     RunErrorDetails,
     UserError,
 )
@@ -702,6 +703,19 @@ class AgentRunner:
                     output_guardrail_results=[],
                 )
                 raise
+            except Exception as exc:
+                # Wrap non-AgentsException to preserve run_data including usage
+                wrapped_exc = RunError(exc)
+                wrapped_exc.run_data = RunErrorDetails(
+                    input=original_input,
+                    new_items=generated_items,
+                    raw_responses=model_responses,
+                    last_agent=current_agent,
+                    context_wrapper=context_wrapper,
+                    input_guardrail_results=input_guardrail_results,
+                    output_guardrail_results=[],
+                )
+                raise wrapped_exc from exc
             finally:
                 if current_span:
                     current_span.finish(reset_current=True)

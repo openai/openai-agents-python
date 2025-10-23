@@ -15,6 +15,7 @@ from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    RunError,
     RunErrorDetails,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
@@ -299,23 +300,40 @@ class RunResultStreaming(RunResultBase):
         if self._run_impl_task and self._run_impl_task.done():
             run_impl_exc = self._run_impl_task.exception()
             if run_impl_exc and isinstance(run_impl_exc, Exception):
-                if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
-                    run_impl_exc.run_data = self._create_error_details()
-                self._stored_exception = run_impl_exc
+                if isinstance(run_impl_exc, AgentsException):
+                    # For AgentsException, attach run_data if missing
+                    if run_impl_exc.run_data is None:
+                        run_impl_exc.run_data = self._create_error_details()
+                    self._stored_exception = run_impl_exc
+                else:
+                    # For non-AgentsException, wrap it to preserve run_data
+                    wrapped_exc = RunError(run_impl_exc)
+                    wrapped_exc.run_data = self._create_error_details()
+                    self._stored_exception = wrapped_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
             in_guard_exc = self._input_guardrails_task.exception()
             if in_guard_exc and isinstance(in_guard_exc, Exception):
-                if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
-                    in_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = in_guard_exc
+                if isinstance(in_guard_exc, AgentsException):
+                    if in_guard_exc.run_data is None:
+                        in_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = in_guard_exc
+                else:
+                    wrapped_exc = RunError(in_guard_exc)
+                    wrapped_exc.run_data = self._create_error_details()
+                    self._stored_exception = wrapped_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
             out_guard_exc = self._output_guardrails_task.exception()
             if out_guard_exc and isinstance(out_guard_exc, Exception):
-                if isinstance(out_guard_exc, AgentsException) and out_guard_exc.run_data is None:
-                    out_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = out_guard_exc
+                if isinstance(out_guard_exc, AgentsException):
+                    if out_guard_exc.run_data is None:
+                        out_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = out_guard_exc
+                else:
+                    wrapped_exc = RunError(out_guard_exc)
+                    wrapped_exc.run_data = self._create_error_details()
+                    self._stored_exception = wrapped_exc
 
     def _cleanup_tasks(self):
         if self._run_impl_task and not self._run_impl_task.done():
