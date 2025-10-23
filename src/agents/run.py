@@ -981,7 +981,9 @@ class AgentRunner:
                 t.cancel()
             raise
 
-        streamed_result.input_guardrail_results = guardrail_results
+        streamed_result.input_guardrail_results = (
+            streamed_result.input_guardrail_results + guardrail_results
+        )
 
     @classmethod
     async def _start_streaming(
@@ -1082,7 +1084,7 @@ class AgentRunner:
                     ]
                     parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
 
-                    # Run sequential guardrails first (will raise exception if tripwire triggered).
+                    # Run sequential guardrails first.
                     if sequential_guardrails:
                         await cls._run_input_guardrails_with_queue(
                             starting_agent,
@@ -1092,6 +1094,10 @@ class AgentRunner:
                             streamed_result,
                             current_span,
                         )
+                        # Check if any blocking guardrail triggered and raise before starting agent.
+                        for result in streamed_result.input_guardrail_results:
+                            if result.output.tripwire_triggered:
+                                raise InputGuardrailTripwireTriggered(result)
 
                     # Run parallel guardrails in background.
                     streamed_result._input_guardrails_task = asyncio.create_task(
