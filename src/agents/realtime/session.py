@@ -768,9 +768,7 @@ class RealtimeSession(RealtimeModelListener):
         self, event: RealtimeModelToolCallEvent, agent_snapshot: RealtimeAgent
     ) -> None:
         """Run tool calls in the background to avoid blocking realtime transport."""
-        task = asyncio.create_task(
-            self._handle_tool_call(event, agent_snapshot=agent_snapshot)
-        )
+        task = asyncio.create_task(self._handle_tool_call(event, agent_snapshot=agent_snapshot))
         self._tool_call_tasks.add(task)
         task.add_done_callback(self._on_tool_call_task_done)
 
