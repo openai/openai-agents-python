@@ -5,9 +5,12 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from ..items import TResponseInputItem
 from .session import SessionABC
+
+T = TypeVar("T")
 
 
 class SQLiteSession(SessionABC):
@@ -54,7 +57,7 @@ class SQLiteSession(SessionABC):
         """Get a database connection."""
         return self._shared_connection
 
-    async def _to_thread_with_lock(self, func, *args, **kwargs):
+    async def _to_thread_with_lock(self, func: Callable[..., T], *args, **kwargs) -> T:
         """Execute a function in a thread pool with lock protection.
 
         This ensures thread-safe access to the shared database connection
@@ -70,7 +73,7 @@ class SQLiteSession(SessionABC):
             The result of the function execution
         """
 
-        def wrapped():
+        def wrapped() -> T:
             with self._lock:
                 return func(*args, **kwargs)
 
