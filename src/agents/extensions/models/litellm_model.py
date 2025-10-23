@@ -326,6 +326,23 @@ class LitellmModel(Model):
             )
 
         reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none"
+        # Priority order:
+        #  1. model_settings.reasoning.effort
+        #  2. model_settings.extra_body["reasoning_effort"]
+        #  3. model_settings.extra_args["reasoning_effort"]
+        if (
+            reasoning_effort is None  # Unset in model_settings
+            and isinstance(model_settings.extra_body, dict)
+            and "reasoning_effort" in model_settings.extra_body
+        ):
+            reasoning_effort = model_settings.extra_body["reasoning_effort"]
+        if (
+            reasoning_effort is None  # Unset in both model_settings and model_settings.extra_body
+            and model_settings.extra_args
+            and "reasoning_effort" in model_settings.extra_args
+        ):
+            reasoning_effort = model_settings.extra_args["reasoning_effort"]
 
         stream_options = None
         if stream and model_settings.include_usage is not None:
@@ -342,6 +359,9 @@ class LitellmModel(Model):
         # Add kwargs from model_settings.extra_args, filtering out None values
         if model_settings.extra_args:
             extra_kwargs.update(model_settings.extra_args)
+
+        # Prevent duplicate reasoning_effort kwargs when it was promoted to a top-level argument.
+        extra_kwargs.pop("reasoning_effort", None)
 
         ret = await litellm.acompletion(
             model=self.model,
