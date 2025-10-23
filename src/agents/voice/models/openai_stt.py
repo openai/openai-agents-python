@@ -331,23 +331,19 @@ class OpenAISTTTranscriptionSession(StreamedTranscriptionSession):
 
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
-            if isinstance(self._listener_task, asyncio.Task):
-                tasks.append(self._listener_task)
+            tasks.append(self._listener_task)
 
         if self._process_events_task and not self._process_events_task.done():
             self._process_events_task.cancel()
-            if isinstance(self._process_events_task, asyncio.Task):
-                tasks.append(self._process_events_task)
+            tasks.append(self._process_events_task)
 
         if self._stream_audio_task and not self._stream_audio_task.done():
             self._stream_audio_task.cancel()
-            if isinstance(self._stream_audio_task, asyncio.Task):
-                tasks.append(self._stream_audio_task)
+            tasks.append(self._stream_audio_task)
 
         if self._connection_task and not self._connection_task.done():
             self._connection_task.cancel()
-            if isinstance(self._connection_task, asyncio.Task):
-                tasks.append(self._connection_task)
+            tasks.append(self._connection_task)
 
         # Wait for all cancelled tasks to complete and collect exceptions
         if tasks:
