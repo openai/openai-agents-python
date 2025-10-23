@@ -752,19 +752,13 @@ class RealtimeSession(RealtimeModelListener):
         This ensures that any exceptions raised by the tasks are properly handled
         and prevents warnings about unhandled task exceptions.
         """
-        # Collect real asyncio.Task objects that need to be awaited
-        real_tasks = []
-
         for task in self._guardrail_tasks:
             if not task.done():
                 task.cancel()
-            # Only await real asyncio.Task objects (not mocks in tests)
-            if isinstance(task, asyncio.Task):
-                real_tasks.append(task)
 
-        # Wait for all real tasks to complete and collect any exceptions
-        if real_tasks:
-            await asyncio.gather(*real_tasks, return_exceptions=True)
+        # Wait for all tasks to complete and collect any exceptions
+        if self._guardrail_tasks:
+            await asyncio.gather(*self._guardrail_tasks, return_exceptions=True)
 
         self._guardrail_tasks.clear()
 
