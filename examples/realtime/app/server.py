@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
-from agents.realtime.config import RealtimeRunConfig, RealtimeUserInputMessage
+from agents.realtime.config import RealtimeUserInputMessage
 from agents.realtime.items import RealtimeItem
 from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_inputs import RealtimeModelSendRawMessage

@@ -112,7 +112,7 @@ class RealtimeSession(RealtimeModelListener):
         }
         self._event_queue: asyncio.Queue[RealtimeSessionEvent] = asyncio.Queue()
         self._closed = False
-        self._stored_exception: Exception | None = None
+        self._stored_exception: BaseException | None = None
 
         # Guardrails state tracking
         self._interrupted_response_ids: set[str] = set()
