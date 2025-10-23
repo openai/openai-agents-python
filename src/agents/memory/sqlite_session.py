@@ -38,40 +38,43 @@ class SQLiteSession(SessionABC):
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
-        self._local = threading.local()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
-        # For in-memory databases, we need a shared connection to avoid thread isolation
-        # For file databases, we use thread-local connections for better concurrency
+        # Keep _is_memory_db for backward compatibility with AdvancedSQLiteSession
         self._is_memory_db = str(db_path) == ":memory:"
-        if self._is_memory_db:
-            self._shared_connection = sqlite3.connect(":memory:", check_same_thread=False)
-            self._shared_connection.execute("PRAGMA journal_mode=WAL")
-            self._init_db_for_connection(self._shared_connection)
-        else:
-            # For file databases, initialize the schema once since it persists
-            init_conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            init_conn.execute("PRAGMA journal_mode=WAL")
-            self._init_db_for_connection(init_conn)
-            init_conn.close()
+
+        # Use a shared connection for all database types
+        # This avoids file descriptor leaks from thread-local connections
+        # WAL mode enables concurrent readers/writers even with a shared connection
+        self._shared_connection = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._shared_connection.execute("PRAGMA journal_mode=WAL")
+        self._init_db_for_connection(self._shared_connection)
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection."""
-        if self._is_memory_db:
-            # Use shared connection for in-memory database to avoid thread isolation
-            return self._shared_connection
-        else:
-            # Use thread-local connections for file databases
-            if not hasattr(self._local, "connection"):
-                self._local.connection = sqlite3.connect(
-                    str(self.db_path),
-                    check_same_thread=False,
-                )
-                self._local.connection.execute("PRAGMA journal_mode=WAL")
-            assert isinstance(self._local.connection, sqlite3.Connection), (
-                f"Expected sqlite3.Connection, got {type(self._local.connection)}"
-            )
-            return self._local.connection
+        return self._shared_connection
+
+    async def _to_thread_with_lock(self, func, *args, **kwargs):
+        """Execute a function in a thread pool with lock protection.
+
+        This ensures thread-safe access to the shared database connection
+        when operations are executed via asyncio.to_thread(). Uses RLock
+        so it's safe to call even if the lock is already held.
+
+        Args:
+            func: The function to execute
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+
+        Returns:
+            The result of the function execution
+        """
+
+        def wrapped():
+            with self._lock:
+                return func(*args, **kwargs)
+
+        return await asyncio.to_thread(wrapped)
 
     def _init_db_for_connection(self, conn: sqlite3.Connection) -> None:
         """Initialize the database schema for a specific connection."""
@@ -120,7 +123,7 @@ class SQLiteSession(SessionABC):
 
         def _get_items_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 if limit is None:
                     # Fetch all items in chronological order
                     cursor = conn.execute(
@@ -174,7 +177,7 @@ class SQLiteSession(SessionABC):
         def _add_items_sync():
             conn = self._get_connection()
 
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 # Ensure session exists
                 conn.execute(
                     f"""
@@ -215,7 +218,7 @@ class SQLiteSession(SessionABC):
 
         def _pop_item_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 # Use DELETE with RETURNING to atomically delete and return the most recent item
                 cursor = conn.execute(
                     f"""
@@ -252,7 +255,7 @@ class SQLiteSession(SessionABC):
 
         def _clear_session_sync():
             conn = self._get_connection()
-            with self._lock if self._is_memory_db else threading.Lock():
+            with self._lock:
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                     (self.session_id,),
@@ -267,9 +270,12 @@ class SQLiteSession(SessionABC):
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._is_memory_db:
-            if hasattr(self, "_shared_connection"):
-                self._shared_connection.close()
-        else:
-            if hasattr(self._local, "connection"):
-                self._local.connection.close()
+        if hasattr(self, "_shared_connection"):
+            self._shared_connection.close()
+
+    def __del__(self) -> None:
+        """Ensure connection is closed when the session is garbage collected."""
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during finalization
