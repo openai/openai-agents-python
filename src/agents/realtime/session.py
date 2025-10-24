@@ -758,10 +758,20 @@ class RealtimeSession(RealtimeModelListener):
                     )
                 )
 
-    def _cleanup_guardrail_tasks(self) -> None:
+    async def _cleanup_guardrail_tasks(self) -> None:
+        """Cancel all pending guardrail tasks and wait for them to complete.
+
+        This ensures that any exceptions raised by the tasks are properly handled
+        and prevents warnings about unhandled task exceptions.
+        """
         for task in self._guardrail_tasks:
             if not task.done():
                 task.cancel()
+
+        # Wait for all tasks to complete and collect any exceptions
+        if self._guardrail_tasks:
+            await asyncio.gather(*self._guardrail_tasks, return_exceptions=True)
+
         self._guardrail_tasks.clear()
 
     def _enqueue_tool_call_task(
@@ -796,17 +806,27 @@ class RealtimeSession(RealtimeModelListener):
             )
         )
 
-    def _cleanup_tool_call_tasks(self) -> None:
+    async def _cleanup_tool_call_tasks(self) -> None:
+        """Cancel all pending tool call tasks and wait for them to complete.
+
+        This ensures that any exceptions raised by the tasks are properly handled
+        and prevents warnings about unhandled task exceptions.
+        """
         for task in self._tool_call_tasks:
             if not task.done():
                 task.cancel()
+
+        # Wait for all tasks to complete and collect any exceptions
+        if self._tool_call_tasks:
+            await asyncio.gather(*self._tool_call_tasks, return_exceptions=True)
+
         self._tool_call_tasks.clear()
 
     async def _cleanup(self) -> None:
         """Clean up all resources and mark session as closed."""
         # Cancel and cleanup guardrail tasks
-        self._cleanup_guardrail_tasks()
-        self._cleanup_tool_call_tasks()
+        await self._cleanup_guardrail_tasks()
+        await self._cleanup_tool_call_tasks()
 
         # Remove ourselves as a listener
         self._model.remove_listener(self)
