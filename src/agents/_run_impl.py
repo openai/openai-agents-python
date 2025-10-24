@@ -260,6 +260,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
+        event_queue: asyncio.Queue[Any] | None = None,
     ) -> SingleStepResult:
         # Make a copy of the generated items
         pre_step_items = list(pre_step_items)
@@ -279,6 +280,7 @@ class RunImpl:
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 config=run_config,
+                event_queue=event_queue,
             ),
             cls.execute_computer_actions(
                 agent=agent,
@@ -721,7 +723,7 @@ class RunImpl:
             tool_call: The tool call details.
 
         Returns:
-            The result from the tool execution.
+            The result from the tool execution. May be an async generator for streaming tools.
         """
         await asyncio.gather(
             hooks.on_tool_start(tool_context, agent, func_tool),
@@ -732,7 +734,10 @@ class RunImpl:
             ),
         )
 
-        return await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+        # on_invoke_tool always returns an Awaitable, so we must await it.
+        # The awaited result may be a regular value or an AsyncIterator[str].
+        result = await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+        return result
 
     @classmethod
     async def execute_function_tool_calls(
@@ -743,6 +748,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
+        event_queue: asyncio.Queue[Any] | None = None,
     ) -> tuple[
         list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
     ]:
@@ -782,6 +788,27 @@ class RunImpl:
                             hooks=hooks,
                             tool_call=tool_call,
                         )
+
+                        # Check if the result is an async generator (streaming output)
+                        if inspect.isasyncgen(real_result):
+                            # Stream the tool output
+                            from .stream_events import ToolOutputStreamEvent
+
+                            accumulated_output = []
+                            async for chunk in real_result:
+                                accumulated_output.append(str(chunk))
+                                # Emit streaming event if event_queue is available
+                                if event_queue is not None:
+                                    event_queue.put_nowait(
+                                        ToolOutputStreamEvent(
+                                            tool_name=func_tool.name,
+                                            tool_call_id=tool_call.call_id,
+                                            delta=str(chunk),
+                                            agent=agent,
+                                        )
+                                    )
+                            # Use accumulated output as the final result
+                            real_result = "".join(accumulated_output)
 
                         # 3) Run output tool guardrails, if any
                         final_result = await cls._execute_output_guardrails(
