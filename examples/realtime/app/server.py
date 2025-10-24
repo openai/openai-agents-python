@@ -13,6 +13,8 @@ from typing_extensions import assert_never
 
 from agents.realtime import RealtimeRunner, RealtimeSession, RealtimeSessionEvent
 from agents.realtime.config import RealtimeUserInputMessage
+from agents.realtime.items import RealtimeItem
+from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_inputs import RealtimeModelSendRawMessage
 
 # Import TwilioHandler class - handle both module and package use cases
@@ -45,7 +47,21 @@ class RealtimeWebSocketManager:
 
         agent = get_starting_agent()
         runner = RealtimeRunner(agent)
-        session_context = await runner.run()
+        # If you want to customize the runner behavior, you can pass options:
+        # runner_config = RealtimeRunConfig(async_tool_calls=False)
+        # runner = RealtimeRunner(agent, config=runner_config)
+        model_config: RealtimeModelConfig = {
+            "initial_model_settings": {
+                "turn_detection": {
+                    "type": "server_vad",
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                    "interrupt_response": True,
+                    "create_response": True,
+                },
+            },
+        }
+        session_context = await runner.run(model_config=model_config)
         session = await session_context.__aenter__()
         self.active_sessions[session_id] = session
         self.session_contexts[session_id] = session_context
@@ -103,7 +119,25 @@ class RealtimeWebSocketManager:
                 event_data = await self._serialize_event(event)
                 await websocket.send_text(json.dumps(event_data))
         except Exception as e:
+            print(e)
             logger.error(f"Error processing events for session {session_id}: {e}")
+
+    def _sanitize_history_item(self, item: RealtimeItem) -> dict[str, Any]:
+        """Remove large binary payloads from history items while keeping transcripts."""
+        item_dict = item.model_dump()
+        content = item_dict.get("content")
+        if isinstance(content, list):
+            sanitized_content: list[Any] = []
+            for part in content:
+                if isinstance(part, dict):
+                    sanitized_part = part.copy()
+                    if sanitized_part.get("type") in {"audio", "input_audio"}:
+                        sanitized_part.pop("audio", None)
+                    sanitized_content.append(sanitized_part)
+                else:
+                    sanitized_content.append(part)
+            item_dict["content"] = sanitized_content
+        return item_dict
 
     async def _serialize_event(self, event: RealtimeSessionEvent) -> dict[str, Any]:
         base_event: dict[str, Any] = {
@@ -129,11 +163,11 @@ class RealtimeWebSocketManager:
         elif event.type == "audio_end":
             pass
         elif event.type == "history_updated":
-            base_event["history"] = [item.model_dump(mode="json") for item in event.history]
+            base_event["history"] = [self._sanitize_history_item(item) for item in event.history]
         elif event.type == "history_added":
             # Provide the added item so the UI can render incrementally.
             try:
-                base_event["item"] = event.item.model_dump(mode="json")
+                base_event["item"] = self._sanitize_history_item(event.item)
             except Exception:
                 base_event["item"] = None
         elif event.type == "guardrail_tripped":

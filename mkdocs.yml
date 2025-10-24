@@ -57,7 +57,11 @@ plugins:
             - Documentation:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - Sessions:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -146,7 +150,7 @@ plugins:
                     - ref/extensions/litellm.md
                     - ref/extensions/memory/sqlalchemy_session.md
                     - ref/extensions/memory/encrypt_session.md
-
+                    - ref/extensions/memory/advanced_sqlite_session.md
         - locale: ja
           name: 日本語
           build: true
@@ -157,7 +161,11 @@ plugins:
             - ドキュメント:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - セッション:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -174,6 +182,7 @@ plugins:
                     - models/litellm.md
                 - config.md
                 - visualization.md
+                - release.md
                 - 音声エージェント:
                     - voice/quickstart.md
                     - voice/pipeline.md
@@ -192,7 +201,11 @@ plugins:
             - 문서:
                 - agents.md
                 - running_agents.md
-                - sessions.md
+                - 세션:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
                 - results.md
                 - streaming.md
                 - repl.md
@@ -217,6 +230,45 @@ plugins:
                 - 실시간 에이전트:
                     - realtime/quickstart.md
                     - realtime/guide.md
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav:
+            - 介绍: index.md
+            - 快速开始: quickstart.md
+            - 示例: examples.md
+            - 文档:
+                - agents.md
+                - running_agents.md
+                - 会话:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - results.md
+                - streaming.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - 模型:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - 语音智能体:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - 实时智能体:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
 
 extra:
   # Remove material generation message in footer
@@ -232,6 +284,9 @@ extra:
     - name: 한국어
       link: /openai-agents-python/ko/
       lang: ko
+    - name: 简体中文
+      link: /openai-agents-python/zh/
+      lang: zh
 
 markdown_extensions:
   - pymdownx.superfences:

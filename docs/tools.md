@@ -173,6 +173,14 @@ for tool in agent.tools:
     }
     ```
 
+### Returning images or files from function tools
+
+In addition to returning text outputs, you can return one or many images or files as the output of a function tool. To do so, you can return any of:
+
+-   Images: [`ToolOutputImage`][agents.tool.ToolOutputImage] (or the TypedDict version, [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
+-   Files: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (or the TypedDict version, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
+-   Text: either a string or stringable objects, or [`ToolOutputText`][agents.tool.ToolOutputText] (or the TypedDict version, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
+
 ### Custom function tools
 
 Sometimes, you don't want to use a Python function as a tool. You can directly create a [`FunctionTool`][agents.tool.FunctionTool] if you prefer. You'll need to provide:
@@ -288,9 +296,9 @@ async def run_my_agent() -> str:
 
 In certain cases, you might want to modify the output of the tool-agents before returning it to the central agent. This may be useful if you want to:
 
-- Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
-- Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
-- Validate the output or provide a fallback value when the agent’s response is missing or malformed.
+-   Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
+-   Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
+-   Validate the output or provide a fallback value when the agent’s response is missing or malformed.
 
 You can do this by supplying the `custom_output_extractor` argument to the `as_tool` method:
 
@@ -370,16 +378,16 @@ asyncio.run(main())
 
 The `is_enabled` parameter accepts:
 
-- **Boolean values**: `True` (always enabled) or `False` (always disabled)
-- **Callable functions**: Functions that take `(context, agent)` and return a boolean
-- **Async functions**: Async functions for complex conditional logic
+-   **Boolean values**: `True` (always enabled) or `False` (always disabled)
+-   **Callable functions**: Functions that take `(context, agent)` and return a boolean
+-   **Async functions**: Async functions for complex conditional logic
 
 Disabled tools are completely hidden from the LLM at runtime, making this useful for:
 
-- Feature gating based on user permissions
-- Environment-specific tool availability (dev vs prod)
-- A/B testing different tool configurations
-- Dynamic tool filtering based on runtime state
+-   Feature gating based on user permissions
+-   Environment-specific tool availability (dev vs prod)
+-   A/B testing different tool configurations
+-   Dynamic tool filtering based on runtime state
 
 ## Handling errors in function tools
 

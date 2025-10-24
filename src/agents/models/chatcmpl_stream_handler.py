@@ -150,6 +150,12 @@ class ChatCmplStreamHandler:
                     )
 
                 if reasoning_content and state.reasoning_content_index_and_output:
+                    # Ensure summary list has at least one element
+                    if not state.reasoning_content_index_and_output[1].summary:
+                        state.reasoning_content_index_and_output[1].summary = [
+                            Summary(text="", type="summary_text")
+                        ]
+
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
                         item_id=FAKE_RESPONSES_ID,
@@ -201,7 +207,7 @@ class ChatCmplStreamHandler:
                     )
 
                     # Create a new summary with updated text
-                    if state.reasoning_content_index_and_output[1].content is None:
+                    if not state.reasoning_content_index_and_output[1].content:
                         state.reasoning_content_index_and_output[1].content = [
                             Content(text="", type="reasoning_text")
                         ]

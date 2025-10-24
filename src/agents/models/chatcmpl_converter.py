@@ -8,6 +8,7 @@ from openai import Omit, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
@@ -27,6 +28,7 @@ from openai.types.responses import (
     ResponseFileSearchToolCallParam,
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseInputAudioParam,
     ResponseInputContentParam,
     ResponseInputFileParam,
     ResponseInputImageParam,
@@ -284,6 +286,32 @@ class Converter:
                         image_url={
                             "url": casted_image_param["image_url"],
                             "detail": casted_image_param.get("detail", "auto"),
+                        },
+                    )
+                )
+            elif isinstance(c, dict) and c.get("type") == "input_audio":
+                casted_audio_param = cast(ResponseInputAudioParam, c)
+                audio_payload = casted_audio_param.get("input_audio")
+                if not audio_payload:
+                    raise UserError(
+                        f"Only audio data is supported for input_audio {casted_audio_param}"
+                    )
+                if not isinstance(audio_payload, dict):
+                    raise UserError(
+                        f"input_audio must provide audio data and format {casted_audio_param}"
+                    )
+                audio_data = audio_payload.get("data")
+                audio_format = audio_payload.get("format")
+                if not audio_data or not audio_format:
+                    raise UserError(
+                        f"input_audio requires both data and format {casted_audio_param}"
+                    )
+                out.append(
+                    ChatCompletionContentPartInputAudioParam(
+                        type="input_audio",
+                        input_audio={
+                            "data": audio_data,
+                            "format": audio_format,
                         },
                     )
                 )

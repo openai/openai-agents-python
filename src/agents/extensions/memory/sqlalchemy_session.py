@@ -195,7 +195,10 @@ class SQLAlchemySession(SessionABC):
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
-                    .order_by(self._messages.c.created_at.asc())
+                    .order_by(
+                        self._messages.c.created_at.asc(),
+                        self._messages.c.id.asc(),
+                    )
                 )
             else:
                 stmt = (
@@ -203,7 +206,10 @@ class SQLAlchemySession(SessionABC):
                     .where(self._messages.c.session_id == self.session_id)
                     # Use DESC + LIMIT to get the latest N
                     # then reverse later for chronological order.
-                    .order_by(self._messages.c.created_at.desc())
+                    .order_by(
+                        self._messages.c.created_at.desc(),
+                        self._messages.c.id.desc(),
+                    )
                     .limit(limit)
                 )
 
@@ -278,7 +284,10 @@ class SQLAlchemySession(SessionABC):
                 subq = (
                     select(self._messages.c.id)
                     .where(self._messages.c.session_id == self.session_id)
-                    .order_by(self._messages.c.created_at.desc())
+                    .order_by(
+                        self._messages.c.created_at.desc(),
+                        self._messages.c.id.desc(),
+                    )
                     .limit(1)
                 )
                 res = await sess.execute(subq)
@@ -310,3 +319,16 @@ class SQLAlchemySession(SessionABC):
                 await sess.execute(
                     delete(self._sessions).where(self._sessions.c.session_id == self.session_id)
                 )
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """Access the underlying SQLAlchemy AsyncEngine.
+
+        This property provides direct access to the engine for advanced use cases,
+        such as checking connection pool status, configuring engine settings,
+        or manually disposing the engine when needed.
+
+        Returns:
+            AsyncEngine: The SQLAlchemy async engine instance.
+        """
+        return self._engine

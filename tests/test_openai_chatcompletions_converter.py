@@ -32,6 +32,7 @@ from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseInputAudioParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -278,6 +279,39 @@ def test_extract_all_and_text_content_for_strings_and_lists():
     assert isinstance(text_parts, list)
     assert all(p["type"] == "text" for p in text_parts)
     assert [p["text"] for p in text_parts] == ["one", "two"]
+
+
+def test_extract_all_content_handles_input_audio():
+    """
+    input_audio entries should translate into ChatCompletion input_audio parts.
+    """
+    audio: ResponseInputAudioParam = {
+        "type": "input_audio",
+        "input_audio": {"data": "AAA=", "format": "wav"},
+    }
+    parts = Converter.extract_all_content([audio])
+    assert isinstance(parts, list)
+    assert parts == [
+        {
+            "type": "input_audio",
+            "input_audio": {"data": "AAA=", "format": "wav"},
+        }
+    ]
+
+
+def test_extract_all_content_rejects_invalid_input_audio():
+    """
+    input_audio requires both data and format fields to be present.
+    """
+    audio_missing_data = cast(
+        ResponseInputAudioParam,
+        {
+            "type": "input_audio",
+            "input_audio": {"format": "wav"},
+        },
+    )
+    with pytest.raises(UserError):
+        Converter.extract_all_content([audio_missing_data])
 
 
 def test_items_to_messages_handles_system_and_developer_roles():
