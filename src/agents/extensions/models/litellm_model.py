@@ -110,18 +110,26 @@ class LitellmModel(Model):
                 prompt=prompt,
             )
 
-            assert isinstance(response.choices[0], litellm.types.utils.Choices)
+            message: litellm.types.utils.Message | None = None
+            first_choice: litellm.types.utils.Choices | None = None
+            if response.choices and len(response.choices) > 0:
+                choice = response.choices[0]
+                if isinstance(choice, litellm.types.utils.Choices):
+                    first_choice = choice
+                    message = first_choice.message
 
             if _debug.DONT_LOG_MODEL_DATA:
                 logger.debug("Received model response")
             else:
-                logger.debug(
-                    f"""LLM resp:\n{
-                        json.dumps(
-                            response.choices[0].message.model_dump(), indent=2, ensure_ascii=False
-                        )
-                    }\n"""
-                )
+                if message is not None:
+                    logger.debug(
+                        f"""LLM resp:\n{
+                            json.dumps(message.model_dump(), indent=2, ensure_ascii=False)
+                        }\n"""
+                    )
+                else:
+                    finish_reason = first_choice.finish_reason if first_choice else "-"
+                    logger.debug(f"LLM resp had no message. finish_reason: {finish_reason}")
 
             if hasattr(response, "usage"):
                 response_usage = response.usage
@@ -152,14 +160,20 @@ class LitellmModel(Model):
                 logger.warning("No usage information returned from Litellm")
 
             if tracing.include_data():
-                span_generation.span_data.output = [response.choices[0].message.model_dump()]
+                span_generation.span_data.output = (
+                    [message.model_dump()] if message is not None else []
+                )
             span_generation.span_data.usage = {
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(
-                LitellmConverter.convert_message_to_openai(response.choices[0].message)
+            items = (
+                Converter.message_to_output_items(
+                    LitellmConverter.convert_message_to_openai(message)
+                )
+                if message is not None
+                else []
             )
 
             return ModelResponse(
