@@ -47,6 +47,9 @@ class RealtimeWebSocketManager:
 
         agent = get_starting_agent()
         runner = RealtimeRunner(agent)
+        # If you want to customize the runner behavior, you can pass options:
+        # runner_config = RealtimeRunConfig(async_tool_calls=False)
+        # runner = RealtimeRunner(agent, config=runner_config)
         model_config: RealtimeModelConfig = {
             "initial_model_settings": {
                 "turn_detection": {
