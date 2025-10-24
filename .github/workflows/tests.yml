@@ -51,8 +51,7 @@ jobs:
           - "3.11"
           - "3.12"
           - "3.13"
-          # TODO: enable this https://github.com/openai/openai-agents-python/pull/1961/
-          # - "3.14"
+          - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
     steps:
