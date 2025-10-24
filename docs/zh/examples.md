@@ -2,9 +2,9 @@
 search:
   exclude: true
 ---
-# 示例
+# 代码示例
 
-在[仓库](https://github.com/openai/openai-agents-python/tree/main/examples)的 examples 部分查看该 SDK 的多种示例实现。这些示例按多个目录组织，展示不同的模式与能力。
+在[repo](https://github.com/openai/openai-agents-python/tree/main/examples) 的 examples 目录中查看该 SDK 的多种示例实现。这些代码示例按多个目录组织，展示不同的模式与能力。
 
 ## 目录
 
@@ -14,30 +14,30 @@ search:
     -   确定性工作流
     -   将智能体作为工具
     -   智能体并行执行
-    -   条件式工具使用
+    -   有条件的工具使用
     -   输入/输出安全防护措施
-    -   由 LLM 作为评判
+    -   将 LLM 作为裁判
     -   路由
     -   流式传输安全防护措施
 
 -   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
-    这些示例展示该 SDK 的基础能力，例如：
+    这些示例展示 SDK 的基础能力，例如：
 
-    -   Hello World code examples（默认模型、GPT-5、开源权重模型）
+    -   Hello World 代码示例（默认模型、GPT-5、开放权重模型）
     -   智能体生命周期管理
     -   动态系统提示词
-    -   流式传输输出（文本、项、函数调用参数）
-    -   提示模板
+    -   流式传输输出（文本、条目、函数调用参数）
+    -   提示词模板
     -   文件处理（本地与远程、图像与 PDF）
     -   使用跟踪
     -   非严格输出类型
-    -   先前响应 ID 的用法
+    -   先前响应 ID 的使用
 
 -   **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):**
-    航空公司的客户服务系统示例。
+    航空公司的示例客服系统。
 
 -   **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):**
-    一个金融研究智能体，展示使用智能体与工具进行金融数据分析的结构化研究工作流。
+    一个金融研究智能体，演示使用智能体和工具进行金融数据分析的结构化研究工作流。
 
 -   **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
     查看带消息过滤的智能体任务转移的实用示例。
@@ -48,20 +48,20 @@ search:
 -   **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
     学习如何使用 MCP (Model Context Protocol) 构建智能体，包括：
 
-    -   文件系统示例
-    -   Git 示例
-    -   MCP 提示服务示例
-    -   SSE (Server-Sent Events) 示例
-    -   可流式传输的 HTTP 示例
+    -   文件系统代码示例
+    -   Git 代码示例
+    -   MCP 提示词服务代码示例
+    -   SSE（Server-Sent Events）代码示例
+    -   可流式传输的 HTTP 代码示例
 
 -   **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):**
-    不同的智能体内存实现示例，包括：
+    智能体的不同内存实现示例，包括：
 
     -   SQLite 会话存储
     -   高级 SQLite 会话存储
     -   Redis 会话存储
     -   SQLAlchemy 会话存储
-    -   加密的会话存储
+    -   加密会话存储
     -   OpenAI 会话存储
 
 -   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
@@ -81,7 +81,7 @@ search:
     简单的深度研究克隆，展示复杂的多智能体研究工作流。
 
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-    了解如何实现由OpenAI托管的工具，如：
+    学习如何实现由OpenAI托管的工具，例如：
 
     -   网络检索与带筛选的网络检索
     -   文件检索
@@ -90,4 +90,4 @@ search:
     -   图像生成
 
 -   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
-    查看语音智能体的示例，使用我们的 TTS 和 STT 模型，包括流式传输语音示例。
+    查看语音智能体示例，使用我们的 TTS 和 STT 模型，包括流式语音示例。

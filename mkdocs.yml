@@ -182,6 +182,7 @@ plugins:
                     - models/litellm.md
                 - config.md
                 - visualization.md
+                - release.md
                 - 音声エージェント:
                     - voice/quickstart.md
                     - voice/pipeline.md
@@ -260,6 +261,7 @@ plugins:
                     - models/litellm.md
                 - config.md
                 - visualization.md
+                - release.md
                 - 语音智能体:
                     - voice/quickstart.md
                     - voice/pipeline.md

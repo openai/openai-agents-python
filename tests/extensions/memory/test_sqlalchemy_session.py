@@ -14,6 +14,7 @@ from openai.types.responses.response_reasoning_item_param import (
     Summary,
 )
 from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.sql import Select
 
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
@@ -219,19 +220,20 @@ async def test_get_items_same_timestamp_consistent_order():
             )
         )
         id_map = {
-            json.loads(message_json)["id"]: row_id
-            for row_id, message_json in rows.fetchall()
+            json.loads(message_json)["id"]: row_id for row_id, message_json in rows.fetchall()
         }
         shared = datetime(2025, 10, 15, 17, 26, 39, 132483)
         older = shared - timedelta(milliseconds=1)
         await sess.execute(
             update(session._messages)
-            .where(session._messages.c.id.in_(
-                [
-                    id_map["rs_same_ts"],
-                    id_map["msg_same_ts"],
-                ]
-            ))
+            .where(
+                session._messages.c.id.in_(
+                    [
+                        id_map["rs_same_ts"],
+                        id_map["msg_same_ts"],
+                    ]
+                )
+            )
             .values(created_at=shared)
         )
         await sess.execute(
@@ -320,9 +322,7 @@ async def test_pop_item_same_timestamp_returns_latest():
     async with session._session_factory() as sess:
         await sess.execute(
             text(
-                "UPDATE agent_messages "
-                "SET created_at = :created_at "
-                "WHERE session_id = :session_id"
+                "UPDATE agent_messages SET created_at = :created_at WHERE session_id = :session_id"
             ),
             {
                 "created_at": "2025-10-15 17:26:39.132483",
@@ -391,3 +391,56 @@ async def test_get_items_orders_by_id_for_ties():
 
     assert _item_ids(retrieved_full) == ["rs_first", "msg_second"]
     assert _item_ids(retrieved_limited) == ["rs_first", "msg_second"]
+
+
+async def test_engine_property_from_url():
+    """Test that the engine property returns the AsyncEngine from from_url."""
+    session_id = "engine_property_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    # Verify engine property returns an AsyncEngine instance
+    assert isinstance(session.engine, AsyncEngine)
+
+    # Verify we can use the engine for advanced operations
+    # For example, check pool status
+    assert session.engine.pool is not None
+
+    # Verify we can manually dispose the engine
+    await session.engine.dispose()
+
+
+async def test_engine_property_from_external_engine():
+    """Test that the engine property returns the external engine."""
+    session_id = "external_engine_test"
+
+    # Create engine externally
+    external_engine = create_async_engine(DB_URL)
+
+    # Create session with external engine
+    session = SQLAlchemySession(session_id, engine=external_engine, create_tables=True)
+
+    # Verify engine property returns the same engine instance
+    assert session.engine is external_engine
+
+    # Verify we can use the engine
+    assert isinstance(session.engine, AsyncEngine)
+
+    # Clean up - user is responsible for disposing external engine
+    await external_engine.dispose()
+
+
+async def test_engine_property_is_read_only():
+    """Test that the engine property cannot be modified."""
+    session_id = "readonly_engine_test"
+    session = SQLAlchemySession.from_url(session_id, url=DB_URL, create_tables=True)
+
+    # Verify engine property exists
+    assert hasattr(session, "engine")
+
+    # Verify it's a property (read-only, cannot be set)
+    # Type ignore needed because mypy correctly detects this is read-only
+    with pytest.raises(AttributeError):
+        session.engine = create_async_engine(DB_URL)  # type: ignore[misc]
+
+    # Clean up
+    await session.engine.dispose()

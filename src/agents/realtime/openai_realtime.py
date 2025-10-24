@@ -266,7 +266,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def _emit_event(self, event: RealtimeModelEvent) -> None:
         """Emit an event to the listeners."""
-        for listener in self._listeners:
+        # Copy list to avoid modification during iteration
+        for listener in list(self._listeners):
             await listener.on_event(event)
 
     async def _listen_for_messages(self):
@@ -394,6 +395,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         current_item_id = playback_state.get("current_item_id")
         current_item_content_index = playback_state.get("current_item_content_index")
         elapsed_ms = playback_state.get("elapsed_ms")
+
         if current_item_id is None or elapsed_ms is None:
             logger.debug(
                 "Skipping interrupt. "
@@ -401,29 +403,28 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 f"elapsed ms: {elapsed_ms}, "
                 f"content index: {current_item_content_index}"
             )
-            return
-
-        current_item_content_index = current_item_content_index or 0
-        if elapsed_ms > 0:
-            await self._emit_event(
-                RealtimeModelAudioInterruptedEvent(
-                    item_id=current_item_id,
-                    content_index=current_item_content_index,
-                )
-            )
-            converted = _ConversionHelper.convert_interrupt(
-                current_item_id,
-                current_item_content_index,
-                int(elapsed_ms),
-            )
-            await self._send_raw_message(converted)
         else:
-            logger.debug(
-                "Didn't interrupt bc elapsed ms is < 0. "
-                f"Item id: {current_item_id}, "
-                f"elapsed ms: {elapsed_ms}, "
-                f"content index: {current_item_content_index}"
-            )
+            current_item_content_index = current_item_content_index or 0
+            if elapsed_ms > 0:
+                await self._emit_event(
+                    RealtimeModelAudioInterruptedEvent(
+                        item_id=current_item_id,
+                        content_index=current_item_content_index,
+                    )
+                )
+                converted = _ConversionHelper.convert_interrupt(
+                    current_item_id,
+                    current_item_content_index,
+                    int(elapsed_ms),
+                )
+                await self._send_raw_message(converted)
+            else:
+                logger.debug(
+                    "Didn't interrupt bc elapsed ms is < 0. "
+                    f"Item id: {current_item_id}, "
+                    f"elapsed ms: {elapsed_ms}, "
+                    f"content index: {current_item_content_index}"
+                )
 
         session = self._created_session
         automatic_response_cancellation_enabled = (
@@ -431,14 +432,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             and session.audio is not None
             and session.audio.input is not None
             and session.audio.input.turn_detection is not None
-            and session.audio.input.turn_detection.interrupt_response is True,
+            and session.audio.input.turn_detection.interrupt_response is True
         )
-        if not automatic_response_cancellation_enabled:
+        should_cancel_response = event.force_response_cancel or (
+            not automatic_response_cancellation_enabled
+        )
+        if should_cancel_response:
             await self._cancel_response()
 
-        self._audio_state_tracker.on_interrupted()
-        if self._playback_tracker:
-            self._playback_tracker.on_interrupted()
+        if current_item_id is not None and elapsed_ms is not None:
+            self._audio_state_tracker.on_interrupted()
+            if self._playback_tracker:
+                self._playback_tracker.on_interrupted()
 
     async def _send_session_update(self, event: RealtimeModelSendSessionUpdate) -> None:
         """Send a session update to the model."""
@@ -516,6 +521,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             self._websocket = None
         if self._websocket_task:
             self._websocket_task.cancel()
+            try:
+                await self._websocket_task
+            except asyncio.CancelledError:
+                pass
             self._websocket_task = None
 
     async def _cancel_response(self) -> None:
@@ -616,7 +625,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     and session.audio is not None
                     and session.audio.input is not None
                     and session.audio.input.turn_detection is not None
-                    and session.audio.input.turn_detection.interrupt_response is True,
+                    and session.audio.input.turn_detection.interrupt_response is True
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
