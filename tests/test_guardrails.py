@@ -260,3 +260,58 @@ async def test_output_guardrail_decorators():
     assert not result.output.tripwire_triggered
     assert result.output.output_info == "test_4"
     assert guardrail.get_name() == "Custom name"
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_run_in_parallel_default():
+    guardrail = InputGuardrail(
+        guardrail_function=lambda ctx, agent, input: GuardrailFunctionOutput(
+            output_info=None, tripwire_triggered=False
+        )
+    )
+    assert guardrail.run_in_parallel is True
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_run_in_parallel_false():
+    guardrail = InputGuardrail(
+        guardrail_function=lambda ctx, agent, input: GuardrailFunctionOutput(
+            output_info=None, tripwire_triggered=False
+        ),
+        run_in_parallel=False,
+    )
+    assert guardrail.run_in_parallel is False
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_decorator_with_run_in_parallel():
+    @input_guardrail(run_in_parallel=False)
+    def blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info="blocking",
+            tripwire_triggered=False,
+        )
+
+    assert blocking_guardrail.run_in_parallel is False
+    result = await blocking_guardrail.run(
+        agent=Agent(name="test"), input="test", context=RunContextWrapper(context=None)
+    )
+    assert not result.output.tripwire_triggered
+    assert result.output.output_info == "blocking"
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_decorator_with_name_and_run_in_parallel():
+    @input_guardrail(name="custom_name", run_in_parallel=False)
+    def named_blocking_guardrail(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info="named_blocking",
+            tripwire_triggered=False,
+        )
+
+    assert named_blocking_guardrail.get_name() == "custom_name"
+    assert named_blocking_guardrail.run_in_parallel is False
