@@ -15,6 +15,7 @@ from agents import (
     function_tool,
 )
 from agents.items import ModelResponse, TResponseInputItem
+from agents.tool_context import ToolContext
 
 
 class LoggingHooks(AgentHooks[Any]):
@@ -71,17 +72,29 @@ class ExampleHooks(RunHooks):
 
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
-        print(
-            f"### {self.event_counter}: Tool {tool.name} started. name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
-        )
+        # During tool execution, context will be a ToolContext with tool metadata
+        if isinstance(context, ToolContext):
+            print(
+                f"### {self.event_counter}: Tool {tool.name} started. name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"
+            )
+        else:
+            print(
+                f"### {self.event_counter}: Tool {tool.name} started. Usage: {self._usage_to_str(context.usage)}"
+            )
 
     async def on_tool_end(
         self, context: RunContextWrapper, agent: Agent, tool: Tool, result: str
     ) -> None:
         self.event_counter += 1
-        print(
-            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
-        )
+        # During tool execution, context will be a ToolContext with tool metadata
+        if isinstance(context, ToolContext):
+            print(
+                f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"
+            )
+        else:
+            print(
+                f"### {self.event_counter}: Tool {tool.name} finished. result={result}. Usage: {self._usage_to_str(context.usage)}"
+            )
 
     async def on_handoff(
         self, context: RunContextWrapper, from_agent: Agent, to_agent: Agent
