@@ -82,6 +82,8 @@ handoff_obj = handoff(
 
 When a handoff occurs, it's as though the new agent takes over the conversation, and gets to see the entire previous conversation history. If you want to change this, you can set an [`input_filter`][agents.handoffs.Handoff.input_filter]. An input filter is a function that receives the existing input via a [`HandoffInputData`][agents.handoffs.HandoffInputData], and must return a new `HandoffInputData`.
 
+By default the runner now wraps the prior transcript inside a developer-role summary message (see [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]). That default only applies when neither the handoff nor the run supplies an explicit `input_filter`, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes.
+
 There are some common patterns (for example removing all tool calls from the history), which are implemented for you in [`agents.extensions.handoff_filters`][]
 
 ```python
@@ -97,6 +99,35 @@ handoff_obj = handoff(
 ```
 
 1. This will automatically remove all tools from the history when `FAQ agent` is called.
+
+### Inspecting handoff payloads
+
+When you are debugging a workflow it is often useful to print the exact transcript that will be sent to the next agent. You can do this by inserting a lightweight filter that logs the `HandoffInputData` and then returns either the unmodified payload or the output from [`nest_handoff_history`](agents.extensions.handoff_filters.nest_handoff_history).
+
+```python
+import json
+
+from agents import Agent, HandoffInputData, handoff
+from agents.extensions.handoff_filters import nest_handoff_history
+
+
+def log_handoff_payload(data: HandoffInputData) -> HandoffInputData:
+    nested = nest_handoff_history(data)
+    history_items = nested.input_history if isinstance(nested.input_history, tuple) else ()
+    for idx, item in enumerate(history_items, start=1):
+        print(f"Turn {idx}: {json.dumps(item, indent=2, ensure_ascii=False)}")
+    return nested
+
+
+math_agent = Agent(name="Math agent")
+
+router = Agent(
+    name="Router",
+    handoffs=[handoff(math_agent, input_filter=log_handoff_payload)],
+)
+```
+
+The new [examples/handoffs/log_handoff_history.py](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs/log_handoff_history.py) script contains a complete runnable sample that prints the nested transcript every time a handoff occurs.
 
 ## Recommended prompts
 
