@@ -144,7 +144,10 @@ async def observe_call(call_id: str) -> None:
                                 logger.info("Caller: %s", user_content.text)
                     elif isinstance(item, AssistantMessageItem):
                         for assistant_content in item.content:
-                            if isinstance(assistant_content, AssistantText) and assistant_content.text:
+                            if (
+                                isinstance(assistant_content, AssistantText)
+                                and assistant_content.text
+                            ):
                                 logger.info("Assistant (text): %s", assistant_content.text)
                             elif (
                                 isinstance(assistant_content, AssistantAudio)
