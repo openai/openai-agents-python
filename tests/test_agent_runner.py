@@ -164,9 +164,9 @@ async def test_handoffs():
 
     assert result.final_output == "done"
     assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 7, (
-        "should have 7 inputs: orig input, tool call, tool result, message, handoff, handoff"
-        "result, and done message"
+    assert len(result.to_input_list()) == 8, (
+        "should have 8 inputs: dev summary, latest user input, tool call, tool result, message, "
+        "handoff, handoff result, and done message"
     )
     assert result.last_agent == agent_1, "should have handed off to agent_1"
 
@@ -268,6 +268,60 @@ async def test_handoff_filters():
     assert len(result.to_input_list()) == 2, (
         "should only have 2 inputs: orig input and last message"
     )
+
+
+@pytest.mark.asyncio
+async def test_default_handoff_history_nested_and_filters_respected():
+    model = FakeModel()
+    agent_1 = Agent(
+        name="delegate",
+        model=model,
+    )
+    agent_2 = Agent(
+        name="triage",
+        model=model,
+        handoffs=[agent_1],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("triage summary"), get_handoff_tool_call(agent_1)],
+            [get_text_message("resolution")],
+        ]
+    )
+
+    result = await Runner.run(agent_2, input="user_message")
+
+    assert isinstance(result.input, list)
+    assert result.input[0]["role"] == "developer"
+    assert "Previous conversation" in result.input[0]["content"]
+    assert "triage summary" in result.input[0]["content"]
+    assert result.input[1]["role"] == "user"
+    assert result.input[1]["content"] == "user_message"
+
+    passthrough_model = FakeModel()
+    delegate = Agent(name="delegate", model=passthrough_model)
+
+    def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
+        return data
+
+    triage_with_filter = Agent(
+        name="triage",
+        model=passthrough_model,
+        handoffs=[handoff(delegate, input_filter=passthrough_filter)],
+    )
+
+    passthrough_model.add_multiple_turn_outputs(
+        [
+            [get_text_message("triage summary"), get_handoff_tool_call(delegate)],
+            [get_text_message("resolution")],
+        ]
+    )
+
+    filtered_result = await Runner.run(triage_with_filter, input="user_message")
+
+    assert isinstance(filtered_result.input, str)
+    assert filtered_result.input == "user_message"
 
 
 @pytest.mark.asyncio

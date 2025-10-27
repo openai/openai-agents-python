@@ -51,6 +51,7 @@ from .exceptions import (
     ToolOutputGuardrailTripwireTriggered,
     UserError,
 )
+from .extensions.handoff_filters import nest_handoff_history
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
 from .handoffs import Handoff, HandoffInputData
 from .items import (
@@ -998,8 +999,8 @@ class RunImpl:
             input_filter = handoff.input_filter or (
                 run_config.handoff_input_filter if run_config else None
             )
-            if input_filter:
-                logger.debug("Filtering inputs for handoff")
+            handoff_input_data: HandoffInputData | None = None
+            if input_filter or run_config.nest_handoff_history:
                 handoff_input_data = HandoffInputData(
                     input_history=tuple(original_input)
                     if isinstance(original_input, list)
@@ -1008,6 +1009,9 @@ class RunImpl:
                     new_items=tuple(new_step_items),
                     run_context=context_wrapper,
                 )
+
+            if input_filter and handoff_input_data is not None:
+                logger.debug("Filtering inputs for handoff")
                 if not callable(input_filter):
                     _error_tracing.attach_error_to_span(
                         span_handoff,
@@ -1037,6 +1041,15 @@ class RunImpl:
                 )
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
+            elif run_config.nest_handoff_history and handoff_input_data is not None:
+                nested = nest_handoff_history(handoff_input_data)
+                original_input = (
+                    nested.input_history
+                    if isinstance(nested.input_history, str)
+                    else list(nested.input_history)
+                )
+                pre_step_items = list(nested.pre_handoff_items)
+                new_step_items = list(nested.new_items)
 
         return SingleStepResult(
             original_input=original_input,

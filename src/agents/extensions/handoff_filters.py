@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
+from typing import Any
+
 from ..handoffs import HandoffInputData
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
+    ItemHelpers,
     ReasoningItem,
     RunItem,
     ToolCallItem,
@@ -32,6 +37,102 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
         new_items=filtered_new_items,
         run_context=handoff_input_data.run_context,
     )
+
+
+def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputData:
+    """Summarizes the previous transcript into a developer message for the next agent."""
+
+    normalized_history = _normalize_input_history(handoff_input_data.input_history)
+    pre_items_as_inputs = [
+        _run_item_to_plain_input(item) for item in handoff_input_data.pre_handoff_items
+    ]
+    new_items_as_inputs = [_run_item_to_plain_input(item) for item in handoff_input_data.new_items]
+    transcript = normalized_history + pre_items_as_inputs + new_items_as_inputs
+
+    developer_message = _build_developer_message(transcript)
+    latest_user = _find_latest_user_turn(transcript)
+    history_items: list[TResponseInputItem] = [developer_message]
+    if latest_user is not None:
+        history_items.append(latest_user)
+
+    filtered_pre_items = tuple(
+        item
+        for item in handoff_input_data.pre_handoff_items
+        if _get_run_item_role(item) != "assistant"
+    )
+
+    return handoff_input_data.clone(
+        input_history=tuple(history_items),
+        pre_handoff_items=filtered_pre_items,
+    )
+
+
+def _normalize_input_history(
+    input_history: str | tuple[TResponseInputItem, ...],
+) -> list[TResponseInputItem]:
+    if isinstance(input_history, str):
+        return ItemHelpers.input_to_new_input_list(input_history)
+    return [deepcopy(item) for item in input_history]
+
+
+def _run_item_to_plain_input(run_item: RunItem) -> TResponseInputItem:
+    return deepcopy(run_item.to_input_item())
+
+
+def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
+    if transcript:
+        summary_lines = [
+            f"{idx + 1}. {_format_transcript_item(item)}" for idx, item in enumerate(transcript)
+        ]
+    else:
+        summary_lines = ["(no previous turns recorded)"]
+
+    content = "Previous conversation before this handoff:\n" + "\n".join(summary_lines)
+    return {"role": "developer", "content": content}
+
+
+def _format_transcript_item(item: TResponseInputItem) -> str:
+    role = item.get("role")
+    if isinstance(role, str):
+        prefix = role
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            prefix = f"{prefix} ({name})"
+        content_str = _stringify_content(item.get("content"))
+        return f"{prefix}: {content_str}" if content_str else prefix
+
+    item_type = item.get("type", "item")
+    rest = {k: v for k, v in item.items() if k != "type"}
+    try:
+        serialized = json.dumps(rest, ensure_ascii=False, default=str)
+    except TypeError:
+        serialized = str(rest)
+    return f"{item_type}: {serialized}" if serialized else str(item_type)
+
+
+def _stringify_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(content)
+
+
+def _find_latest_user_turn(
+    transcript: list[TResponseInputItem],
+) -> TResponseInputItem | None:
+    for item in reversed(transcript):
+        if item.get("role") == "user":
+            return deepcopy(item)
+    return None
+
+
+def _get_run_item_role(run_item: RunItem) -> str | None:
+    role_candidate = run_item.to_input_item().get("role")
+    return role_candidate if isinstance(role_candidate, str) else None
 
 
 def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:

@@ -196,6 +196,11 @@ class RunConfig:
     agent. See the documentation in `Handoff.input_filter` for more details.
     """
 
+    nest_handoff_history: bool = True
+    """Wrap prior run history in a developer message before handing off when no custom input
+    filter is set. Set to False to preserve the raw transcript behavior from previous releases.
+    """
+
     input_guardrails: list[InputGuardrail[Any]] | None = None
     """A list of input guardrails to run on the initial run input."""
 

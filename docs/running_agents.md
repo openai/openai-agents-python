@@ -51,10 +51,13 @@ The `run_config` parameter lets you configure some global settings for the agent
 -   [`model_settings`][agents.run.RunConfig.model_settings]: Overrides agent-specific settings. For example, you can set a global `temperature` or `top_p`.
 -   [`input_guardrails`][agents.run.RunConfig.input_guardrails], [`output_guardrails`][agents.run.RunConfig.output_guardrails]: A list of input or output guardrails to include on all runs.
 -   [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]: A global input filter to apply to all handoffs, if the handoff doesn't already have one. The input filter allows you to edit the inputs that are sent to the new agent. See the documentation in [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] for more details.
+-   [`nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]: When `True` (the default) the runner wraps the prior transcript in a developer-role summary message and keeps the latest user turn separate before invoking the next agent. Set this to `False` or provide a custom handoff filter if you prefer to pass through the raw transcript. You can also call [`nest_handoff_history`](agents.extensions.handoff_filters.nest_handoff_history) from your own filters to reuse the default behavior.
 -   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: Allows you to disable [tracing](tracing.md) for the entire run.
 -   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: Configures whether traces will include potentially sensitive data, such as LLM and tool call inputs/outputs.
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
+
+By default, the SDK now nests prior turns inside a developer summary message whenever an agent hands off to another agent. This reduces repeated assistant messages and keeps the most recent user turn explicit for the receiving agent. If you'd like to return to the legacy behavior, pass `RunConfig(nest_handoff_history=False)` or supply a `handoff_input_filter` that forwards the conversation exactly as you need.
 
 ## Conversations/chat threads
 
