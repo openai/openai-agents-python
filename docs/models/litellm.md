@@ -71,3 +71,20 @@ if __name__ == "__main__":
 
     asyncio.run(main(model, api_key))
 ```
+
+## Tracking usage data
+
+If you want LiteLLM responses to populate the Agents SDK usage metrics, pass `ModelSettings(include_usage=True)` when creating your agent.
+
+```python
+from agents import Agent, ModelSettings
+from agents.extensions.models.litellm_model import LitellmModel
+
+agent = Agent(
+    name="Assistant",
+    model=LitellmModel(model="your/model", api_key="..."),
+    model_settings=ModelSettings(include_usage=True),
+)
+```
+
+With `include_usage=True`, LiteLLM requests report token and request counts through `result.context_wrapper.usage` just like the built-in OpenAI models.

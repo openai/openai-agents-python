@@ -1,13 +1,14 @@
 import asyncio
 import random
+from dataclasses import dataclass
 from typing import Literal
 
 from agents import Agent, RunContextWrapper, Runner
 
 
+@dataclass
 class CustomContext:
-    def __init__(self, style: Literal["haiku", "pirate", "robot"]):
-        self.style = style
+    style: Literal["haiku", "pirate", "robot"]
 
 
 def custom_instructions(
@@ -29,9 +30,8 @@ agent = Agent(
 
 
 async def main():
-    choice: Literal["haiku", "pirate", "robot"] = random.choice(["haiku", "pirate", "robot"])
-    context = CustomContext(style=choice)
-    print(f"Using style: {choice}\n")
+    context = CustomContext(style=random.choice(["haiku", "pirate", "robot"]))
+    print(f"Using style: {context.style}\n")
 
     user_message = "Tell me a joke."
     print(f"User: {user_message}")
@@ -42,6 +42,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 """
 $ python examples/basic/dynamic_system_prompt.py

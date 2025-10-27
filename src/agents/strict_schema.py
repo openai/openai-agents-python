@@ -87,6 +87,20 @@ def _ensure_strict_json_schema(
             for i, variant in enumerate(any_of)
         ]
 
+    # oneOf is not supported by OpenAI's structured outputs in nested contexts,
+    # so we convert it to anyOf which provides equivalent functionality for
+    # discriminated unions
+    one_of = json_schema.get("oneOf")
+    if is_list(one_of):
+        existing_any_of = json_schema.get("anyOf", [])
+        if not is_list(existing_any_of):
+            existing_any_of = []
+        json_schema["anyOf"] = existing_any_of + [
+            _ensure_strict_json_schema(variant, path=(*path, "oneOf", str(i)), root=root)
+            for i, variant in enumerate(one_of)
+        ]
+        json_schema.pop("oneOf")
+
     # intersections
     all_of = json_schema.get("allOf")
     if is_list(all_of):

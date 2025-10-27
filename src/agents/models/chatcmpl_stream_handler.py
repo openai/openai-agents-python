@@ -62,6 +62,9 @@ class StreamingState:
     # Fields for real-time function call streaming
     function_call_streaming: dict[int, bool] = field(default_factory=dict)
     function_call_output_idx: dict[int, int] = field(default_factory=dict)
+    # Store accumulated thinking text and signature for Anthropic compatibility
+    thinking_text: str = ""
+    thinking_signature: str | None = None
 
 
 class SequenceNumber:
@@ -101,6 +104,19 @@ class ChatCmplStreamHandler:
 
             delta = chunk.choices[0].delta
 
+            # Handle thinking blocks from Anthropic (for preserving signatures)
+            if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+                for block in delta.thinking_blocks:
+                    if isinstance(block, dict):
+                        # Accumulate thinking text
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            state.thinking_text += thinking_text
+                        # Store signature if present
+                        signature = block.get("signature")
+                        if signature:
+                            state.thinking_signature = signature
+
             # Handle reasoning content for reasoning summaries
             if hasattr(delta, "reasoning_content"):
                 reasoning_content = delta.reasoning_content
@@ -134,6 +150,12 @@ class ChatCmplStreamHandler:
                     )
 
                 if reasoning_content and state.reasoning_content_index_and_output:
+                    # Ensure summary list has at least one element
+                    if not state.reasoning_content_index_and_output[1].summary:
+                        state.reasoning_content_index_and_output[1].summary = [
+                            Summary(text="", type="summary_text")
+                        ]
+
                     yield ResponseReasoningSummaryTextDeltaEvent(
                         delta=reasoning_content,
                         item_id=FAKE_RESPONSES_ID,
@@ -185,7 +207,7 @@ class ChatCmplStreamHandler:
                     )
 
                     # Create a new summary with updated text
-                    if state.reasoning_content_index_and_output[1].content is None:
+                    if not state.reasoning_content_index_and_output[1].content:
                         state.reasoning_content_index_and_output[1].content = [
                             Content(text="", type="reasoning_text")
                         ]
@@ -527,7 +549,19 @@ class ChatCmplStreamHandler:
 
         # include Reasoning item if it exists
         if state.reasoning_content_index_and_output:
-            outputs.append(state.reasoning_content_index_and_output[1])
+            reasoning_item = state.reasoning_content_index_and_output[1]
+            # Store thinking text in content and signature in encrypted_content
+            if state.thinking_text:
+                # Add thinking text as a Content object
+                if not reasoning_item.content:
+                    reasoning_item.content = []
+                reasoning_item.content.append(
+                    Content(text=state.thinking_text, type="reasoning_text")
+                )
+            # Store signature in encrypted_content
+            if state.thinking_signature:
+                reasoning_item.encrypted_content = state.thinking_signature
+            outputs.append(reasoning_item)
 
         # include text or refusal content if they exist
         if state.text_content_index_and_output or state.refusal_content_index_and_output:

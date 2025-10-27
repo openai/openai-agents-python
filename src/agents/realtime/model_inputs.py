@@ -95,6 +95,9 @@ class RealtimeModelSendToolOutput:
 class RealtimeModelSendInterrupt:
     """Send an interrupt to the model."""
 
+    force_response_cancel: bool = False
+    """Force sending a response.cancel event even if automatic cancellation is enabled."""
+
 
 @dataclass
 class RealtimeModelSendSessionUpdate:

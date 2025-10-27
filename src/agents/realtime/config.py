@@ -61,6 +61,13 @@ class RealtimeInputAudioTranscriptionConfig(TypedDict):
     """An optional prompt to guide transcription."""
 
 
+class RealtimeInputAudioNoiseReductionConfig(TypedDict):
+    """Noise reduction configuration for input audio."""
+
+    type: NotRequired[Literal["near_field", "far_field"]]
+    """Noise reduction mode to apply to input audio."""
+
+
 class RealtimeTurnDetectionConfig(TypedDict):
     """Turn detection config. Allows extra vendor keys if needed."""
 
@@ -119,6 +126,9 @@ class RealtimeSessionModelSettings(TypedDict):
     input_audio_transcription: NotRequired[RealtimeInputAudioTranscriptionConfig]
     """Configuration for transcribing input audio."""
 
+    input_audio_noise_reduction: NotRequired[RealtimeInputAudioNoiseReductionConfig | None]
+    """Noise reduction configuration for input audio."""
+
     turn_detection: NotRequired[RealtimeTurnDetectionConfig]
     """Configuration for detecting conversation turns."""
 
@@ -173,6 +183,9 @@ class RealtimeRunConfig(TypedDict):
 
     tracing_disabled: NotRequired[bool]
     """Whether tracing is disabled for this run."""
+
+    async_tool_calls: NotRequired[bool]
+    """Whether function tool calls should run asynchronously. Defaults to True."""
 
     # TODO (rm) Add history audio storage config
 

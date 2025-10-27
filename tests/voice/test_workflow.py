@@ -144,7 +144,11 @@ async def test_single_agent_workflow(monkeypatch) -> None:
                 "status": "completed",
                 "type": "message",
             },
-            {"call_id": "2", "output": "tool_result", "type": "function_call_output"},
+            {
+                "call_id": "2",
+                "output": "tool_result",
+                "type": "function_call_output",
+            },
             {
                 "id": "1",
                 "content": [{"annotations": [], "text": "done", "type": "output_text"}],
@@ -180,7 +184,11 @@ async def test_single_agent_workflow(monkeypatch) -> None:
                 "status": "completed",
                 "type": "message",
             },
-            {"call_id": "2", "output": "tool_result", "type": "function_call_output"},
+            {
+                "call_id": "2",
+                "output": "tool_result",
+                "type": "function_call_output",
+            },
             {
                 "id": "1",
                 "content": [{"annotations": [], "text": "done", "type": "output_text"}],

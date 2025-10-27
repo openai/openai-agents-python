@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,7 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+from .utils.simple_session import SimpleListSession
 
 
 @pytest.mark.asyncio
@@ -543,6 +545,40 @@ async def test_input_guardrail_tripwire_triggered_causes_exception():
 
 
 @pytest.mark.asyncio
+async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_session():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        # Delay to ensure the agent has time to produce output before the guardrail finishes.
+        await asyncio.sleep(0.01)
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(agent, input="user_message", session=session)
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert "role" in first_item
+    assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_output_guardrail_tripwire_triggered_causes_exception():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
@@ -704,7 +740,7 @@ async def test_multi_turn_previous_response_id_passed_between_runs():
 
     assert model.last_turn_args.get("previous_response_id") is None
     await Runner.run(agent, input="test", previous_response_id="resp-test-123")
-    assert model.last_turn_args.get("previous_response_id") == "resp-test-123"
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
 
 
 @pytest.mark.asyncio
@@ -750,7 +786,343 @@ async def test_previous_response_id_passed_between_runs_streamed_multi_turn():
     async for _ in result.stream_events():
         pass
 
-    assert model.last_turn_args.get("previous_response_id") == "resp-stream-test"
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_conversation_id_only_sends_new_items_multi_turn():
+    """Test that conversation_id mode only sends new items on subsequent turns."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: another message and tool call
+            [get_text_message("b_message"), get_function_tool_call("test_func", '{"arg": "bar"}')],
+            # Third turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message", conversation_id="conv-test-123")
+    assert result.final_output == "done"
+
+    # Check the first call - it should include the original input since generated_items is empty
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check the input from the last turn (third turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In conversation_id mode, the third turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_conversation_id_only_sends_new_items_multi_turn_streamed():
+    """Test that conversation_id mode only sends new items on subsequent turns (streamed mode)."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: another message and tool call
+            [get_text_message("b_message"), get_function_tool_call("test_func", '{"arg": "bar"}')],
+            # Third turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", conversation_id="conv-test-123")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    # Check the first call - it should include the original input since generated_items is empty
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check the input from the last turn (third turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In conversation_id mode, the third turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_only_sends_new_items_multi_turn():
+    """Test that previous_response_id mode only sends new items and updates
+    previous_response_id between turns."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    assert result.final_output == "done"
+
+    # Check the first call - it should include the original input since generated_items is empty
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check the input from the last turn (second turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In previous_response_id mode, the third turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # Verify that previous_response_id is modified according to fake_model behavior
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_only_sends_new_items_multi_turn_streamed():
+    """Test that previous_response_id mode only sends new items and updates
+    previous_response_id between turns (streamed mode)."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent, input="user_message", previous_response_id="initial-response-123"
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    # Check the first call - it should include the original input since generated_items is empty
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check the input from the last turn (second turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In previous_response_id mode, the third turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # Verify that previous_response_id is modified according to fake_model behavior
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_default_send_all_items():
+    """Test that without conversation_id or previous_response_id, all items are sent."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(
+        agent, input="user_message"
+    )  # No conversation_id or previous_response_id
+    assert result.final_output == "done"
+
+    # Check the input from the last turn (second turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In defaul, the second turn should contain ALL items:
+    # 1. Original user message
+    # 2. Assistant response message
+    # 3. Function call
+    # 4. Function result
+    assert isinstance(last_input, list)
+    assert (
+        len(last_input) == 4
+    )  # User message + assistant message + function call + function result
+
+    # Verify the items are in the expected order
+    user_message = last_input[0]
+    assistant_message = last_input[1]
+    function_call = last_input[2]
+    function_result = last_input[3]
+
+    # Check user message
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check assistant message
+    assert assistant_message.get("role") == "assistant"
+
+    # Check function call
+    assert function_call.get("name") == "test_func"
+    assert function_call.get("arguments") == '{"arg": "foo"}'
+
+    # Check function result
+    assert function_result.get("type") == "function_call_output"
+    assert function_result.get("call_id") is not None
+
+
+@pytest.mark.asyncio
+async def test_default_send_all_items_streamed():
+    """Test that without conversation_id or previous_response_id, all items are sent
+    (streamed mode)."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent, input="user_message"
+    )  # No conversation_id or previous_response_id
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    # Check the input from the last turn (second turn after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In default mode, the second turn should contain ALL items:
+    # 1. Original user message
+    # 2. Assistant response message
+    # 3. Function call
+    # 4. Function result
+    assert isinstance(last_input, list)
+    assert (
+        len(last_input) == 4
+    )  # User message + assistant message + function call + function result
+
+    # Verify the items are in the expected order
+    user_message = last_input[0]
+    assistant_message = last_input[1]
+    function_call = last_input[2]
+    function_result = last_input[3]
+
+    # Check user message
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # Check assistant message
+    assert assistant_message.get("role") == "assistant"
+
+    # Check function call
+    assert function_call.get("name") == "test_func"
+    assert function_call.get("arguments") == '{"arg": "foo"}'
+
+    # Check function result
+    assert function_result.get("type") == "function_call_output"
+    assert function_result.get("call_id") is not None
 
 
 @pytest.mark.asyncio

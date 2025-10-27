@@ -68,6 +68,51 @@ if __name__ == "__main__":
 4. The context is passed to the `run` function.
 5. The agent correctly calls the tool and gets the age.
 
+---
+
+### Advanced: `ToolContext`
+
+In some cases, you might want to access extra metadata about the tool being executed — such as its name, call ID, or raw argument string.  
+For this, you can use the [`ToolContext`][agents.tool_context.ToolContext] class, which extends `RunContextWrapper`.
+
+```python
+from typing import Annotated
+from pydantic import BaseModel, Field
+from agents import Agent, Runner, function_tool
+from agents.tool_context import ToolContext
+
+class WeatherContext(BaseModel):
+    user_id: str
+
+class Weather(BaseModel):
+    city: str = Field(description="The city name")
+    temperature_range: str = Field(description="The temperature range in Celsius")
+    conditions: str = Field(description="The weather conditions")
+
+@function_tool
+def get_weather(ctx: ToolContext[WeatherContext], city: Annotated[str, "The city to get the weather for"]) -> Weather:
+    print(f"[debug] Tool context: (name: {ctx.tool_name}, call_id: {ctx.tool_call_id}, args: {ctx.tool_arguments})")
+    return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="You are a helpful agent that can tell the weather of a given city.",
+    tools=[get_weather],
+)
+```
+
+`ToolContext` provides the same `.context` property as `RunContextWrapper`,  
+plus additional fields specific to the current tool call:
+
+- `tool_name` – the name of the tool being invoked  
+- `tool_call_id` – a unique identifier for this tool call  
+- `tool_arguments` – the raw argument string passed to the tool  
+
+Use `ToolContext` when you need tool-level metadata during execution.  
+For general context sharing between agents and tools, `RunContextWrapper` remains sufficient.
+
+---
+
 ## Agent/LLM context
 
 When an LLM is called, the **only** data it can see is from the conversation history. This means that if you want to make some new data available to the LLM, you must do it in a way that makes it available in that history. There are a few ways to do this:

@@ -5,7 +5,7 @@ import inspect
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Literal, get_args, get_origin, get_type_hints
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
@@ -185,6 +185,31 @@ def generate_func_documentation(
     )
 
 
+def _strip_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
+    """Returns the underlying annotation and any metadata from typing.Annotated."""
+
+    metadata: tuple[Any, ...] = ()
+    ann = annotation
+
+    while get_origin(ann) is Annotated:
+        args = get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+        metadata = (*metadata, *args[1:])
+
+    return ann, metadata
+
+
+def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
+    """Extracts a human readable description from Annotated metadata if present."""
+
+    for item in metadata:
+        if isinstance(item, str):
+            return item
+    return None
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -219,17 +244,34 @@ def function_schema(
     # 1. Grab docstring info
     if use_docstring_info:
         doc_info = generate_func_documentation(func, docstring_style)
-        param_descs = doc_info.param_descriptions or {}
+        param_descs = dict(doc_info.param_descriptions or {})
     else:
         doc_info = None
         param_descs = {}
+
+    type_hints_with_extras = get_type_hints(func, include_extras=True)
+    type_hints: dict[str, Any] = {}
+    annotated_param_descs: dict[str, str] = {}
+
+    for name, annotation in type_hints_with_extras.items():
+        if name == "return":
+            continue
+
+        stripped_ann, metadata = _strip_annotated(annotation)
+        type_hints[name] = stripped_ann
+
+        description = _extract_description_from_metadata(metadata)
+        if description is not None:
+            annotated_param_descs[name] = description
+
+    for name, description in annotated_param_descs.items():
+        param_descs.setdefault(name, description)
 
     # Ensure name_override takes precedence even if docstring info is disabled.
     func_name = name_override or (doc_info.name if doc_info else func.__name__)
 
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)
-    type_hints = get_type_hints(func)
     params = list(sig.parameters.items())
     takes_context = False
     filtered_params = []

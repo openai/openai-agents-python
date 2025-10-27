@@ -16,6 +16,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_valid_async_signature_passes(self, mock_run_context):
         """Test that async function with correct signature works"""
+
         async def valid_instructions(context, agent):
             return "Valid async instructions"
 
@@ -26,6 +27,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_valid_sync_signature_passes(self, mock_run_context):
         """Test that sync function with correct signature works"""
+
         def valid_instructions(context, agent):
             return "Valid sync instructions"
 
@@ -36,6 +38,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_one_parameter_raises_error(self, mock_run_context):
         """Test that function with only one parameter raises TypeError"""
+
         def invalid_instructions(context):
             return "Should fail"
 
@@ -50,6 +53,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_three_parameters_raises_error(self, mock_run_context):
         """Test that function with three parameters raises TypeError"""
+
         def invalid_instructions(context, agent, extra):
             return "Should fail"
 
@@ -64,6 +68,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_zero_parameters_raises_error(self, mock_run_context):
         """Test that function with no parameters raises TypeError"""
+
         def invalid_instructions():
             return "Should fail"
 
@@ -78,6 +83,7 @@ class TestInstructionsSignatureValidation:
     @pytest.mark.asyncio
     async def test_function_with_args_kwargs_fails(self, mock_run_context):
         """Test that function with *args/**kwargs fails validation"""
+
         def flexible_instructions(context, agent, *args, **kwargs):
             return "Flexible instructions"
 

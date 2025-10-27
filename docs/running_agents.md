@@ -89,7 +89,7 @@ async def main():
 
 ### Automatic conversation management with Sessions
 
-For a simpler approach, you can use [Sessions](sessions.md) to automatically handle conversation history without manually calling `.to_input_list()`:
+For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -119,7 +119,72 @@ Sessions automatically:
 -   Stores new messages after each run
 -   Maintains separate conversations for different session IDs
 
-See the [Sessions documentation](sessions.md) for more details.
+See the [Sessions documentation](sessions/index.md) for more details.
+
+
+### Server-managed conversations
+
+You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
+
+OpenAI provides two ways to track state across turns:
+
+#### 1. Using `conversation_id`
+
+You first create a conversation using the OpenAI Conversations API and then reuse its ID for every subsequent call:
+
+```python
+from agents import Agent, Runner
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+async def main():
+    # Create a server-managed conversation
+    conversation = await client.conversations.create()
+    conv_id = conversation.id    
+
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    # First turn
+    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?", conversation_id=conv_id)
+    print(result1.final_output)
+    # San Francisco
+
+    # Second turn reuses the same conversation_id
+    result2 = await Runner.run(
+        agent,
+        "What state is it in?",
+        conversation_id=conv_id,
+    )
+    print(result2.final_output)
+    # California
+```
+
+#### 2. Using `previous_response_id`
+
+Another option is **response chaining**, where each turn links explicitly to the response ID from the previous turn.
+
+```python
+from agents import Agent, Runner
+
+async def main():
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    # First turn
+    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
+    print(result1.final_output)
+    # San Francisco
+
+    # Second turn, chained to the previous response
+    result2 = await Runner.run(
+        agent,
+        "What state is it in?",
+        previous_response_id=result1.last_response_id,
+    )
+    print(result2.final_output)
+    # California
+```
+
 
 ## Long running agents & human-in-the-loop
 

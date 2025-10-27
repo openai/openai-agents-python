@@ -4,6 +4,7 @@ from ..handoffs import HandoffInputData
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
+    ReasoningItem,
     RunItem,
     ToolCallItem,
     ToolCallOutputItem,
@@ -41,6 +42,7 @@ def _remove_tools_from_items(items: tuple[RunItem, ...]) -> tuple[RunItem, ...]:
             or isinstance(item, HandoffOutputItem)
             or isinstance(item, ToolCallItem)
             or isinstance(item, ToolCallOutputItem)
+            or isinstance(item, ReasoningItem)
         ):
             continue
         filtered_items.append(item)

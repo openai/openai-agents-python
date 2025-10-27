@@ -561,8 +561,13 @@ class TestEventHandling:
 
     @pytest.mark.asyncio
     async def test_function_call_event_triggers_tool_handling(self, mock_model, mock_agent):
-        """Test that function_call events trigger tool call handling"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        """Test that function_call events trigger tool call handling synchronously when disabled"""
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
 
         # Create function call event
         function_call_event = RealtimeModelToolCallEvent(
@@ -578,13 +583,45 @@ class TestEventHandling:
             await session.on_event(function_call_event)
 
             # Should have called the tool handler
-            handle_tool_call_mock.assert_called_once_with(function_call_event)
+            handle_tool_call_mock.assert_called_once_with(
+                function_call_event, agent_snapshot=mock_agent
+            )
 
             # Should still have raw event
             assert session._event_queue.qsize() == 1
             raw_event = await session._event_queue.get()
             assert isinstance(raw_event, RealtimeRawModelEvent)
             assert raw_event.data == function_call_event
+
+    @pytest.mark.asyncio
+    async def test_function_call_event_runs_async_by_default(self, mock_model, mock_agent):
+        """Function call handling should be scheduled asynchronously by default"""
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        function_call_event = RealtimeModelToolCallEvent(
+            name="test_function",
+            call_id="call_async",
+            arguments='{"param": "value"}',
+        )
+
+        with pytest.MonkeyPatch().context() as m:
+            handle_tool_call_mock = AsyncMock()
+            m.setattr(session, "_handle_tool_call", handle_tool_call_mock)
+
+            await session.on_event(function_call_event)
+
+            # Let the background task run
+            await asyncio.sleep(0)
+
+            handle_tool_call_mock.assert_awaited_once_with(
+                function_call_event, agent_snapshot=mock_agent
+            )
+
+        # Raw event still enqueued
+        assert session._event_queue.qsize() == 1
+        raw_event = await session._event_queue.get()
+        assert isinstance(raw_event, RealtimeRawModelEvent)
+        assert raw_event.data == function_call_event
 
 
 class TestHistoryManagement:

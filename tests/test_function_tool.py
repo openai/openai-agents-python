@@ -27,7 +27,7 @@ async def test_argless_function():
     assert tool.name == "argless_function"
 
     result = await tool.on_invoke_tool(
-        ToolContext(context=None, tool_name=tool.name, tool_call_id="1"), ""
+        ToolContext(context=None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
     )
     assert result == "ok"
 
@@ -41,12 +41,15 @@ async def test_argless_with_context():
     tool = function_tool(argless_with_context)
     assert tool.name == "argless_with_context"
 
-    result = await tool.on_invoke_tool(ToolContext(None, tool_name=tool.name, tool_call_id="1"), "")
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
+    )
     assert result == "ok"
 
     # Extra JSON should not raise an error
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), '{"a": 1}'
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1}'),
+        '{"a": 1}',
     )
     assert result == "ok"
 
@@ -61,18 +64,22 @@ async def test_simple_function():
     assert tool.name == "simple_function"
 
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), '{"a": 1}'
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1}'),
+        '{"a": 1}',
     )
     assert result == 6
 
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), '{"a": 1, "b": 2}'
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1, "b": 2}'),
+        '{"a": 1, "b": 2}',
     )
     assert result == 3
 
     # Missing required argument should raise an error
     with pytest.raises(ModelBehaviorError):
-        await tool.on_invoke_tool(ToolContext(None, tool_name=tool.name, tool_call_id="1"), "")
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
+        )
 
 
 class Foo(BaseModel):
@@ -101,7 +108,8 @@ async def test_complex_args_function():
         }
     )
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), valid_json
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=valid_json),
+        valid_json,
     )
     assert result == "6 hello10 hello"
 
@@ -112,7 +120,8 @@ async def test_complex_args_function():
         }
     )
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), valid_json
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=valid_json),
+        valid_json,
     )
     assert result == "3 hello10 hello"
 
@@ -124,14 +133,18 @@ async def test_complex_args_function():
         }
     )
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), valid_json
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=valid_json),
+        valid_json,
     )
     assert result == "3 hello10 world"
 
     # Missing required argument should raise an error
     with pytest.raises(ModelBehaviorError):
         await tool.on_invoke_tool(
-            ToolContext(None, tool_name=tool.name, tool_call_id="1"), '{"foo": {"a": 1}}'
+            ToolContext(
+                None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"foo": {"a": 1}}'
+            ),
+            '{"foo": {"a": 1}}',
         )
 
 
@@ -193,7 +206,10 @@ async def test_manual_function_tool_creation_works():
     assert tool.strict_json_schema
 
     result = await tool.on_invoke_tool(
-        ToolContext(None, tool_name=tool.name, tool_call_id="1"), '{"data": "hello"}'
+        ToolContext(
+            None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"data": "hello"}'
+        ),
+        '{"data": "hello"}',
     )
     assert result == "hello_done"
 
@@ -209,7 +225,12 @@ async def test_manual_function_tool_creation_works():
     assert "additionalProperties" not in tool_not_strict.params_json_schema
 
     result = await tool_not_strict.on_invoke_tool(
-        ToolContext(None, tool_name=tool_not_strict.name, tool_call_id="1"),
+        ToolContext(
+            None,
+            tool_name=tool_not_strict.name,
+            tool_call_id="1",
+            tool_arguments='{"data": "hello", "bar": "baz"}',
+        ),
         '{"data": "hello", "bar": "baz"}',
     )
     assert result == "hello_done"
@@ -221,7 +242,7 @@ async def test_function_tool_default_error_works():
         raise ValueError("test")
 
     tool = function_tool(my_func)
-    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1")
+    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="")
 
     result = await tool.on_invoke_tool(ctx, "")
     assert "Invalid JSON" in str(result)
@@ -245,7 +266,7 @@ async def test_sync_custom_error_function_works():
         return f"error_{error.__class__.__name__}"
 
     tool = function_tool(my_func, failure_error_function=custom_sync_error_function)
-    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1")
+    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="")
 
     result = await tool.on_invoke_tool(ctx, "")
     assert result == "error_ModelBehaviorError"
@@ -269,7 +290,7 @@ async def test_async_custom_error_function_works():
         return f"error_{error.__class__.__name__}"
 
     tool = function_tool(my_func, failure_error_function=custom_sync_error_function)
-    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1")
+    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments="")
 
     result = await tool.on_invoke_tool(ctx, "")
     assert result == "error_ModelBehaviorError"

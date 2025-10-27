@@ -19,6 +19,14 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.4.0
+
+In this version, [openai](https://pypi.org/project/openai/) package v1.x versions are no longer supported. Please use openai v2.x along with this SDK.
+
+### 0.3.0
+
+In this version, the Realtime API support migrates to gpt-realtime model and its API interface (GA version).
+
 ### 0.2.0
 
 In this version, a few places that used to take `Agent` as an arg, now take `AgentBase` as an arg instead. For example, the `list_tools()` call in MCP servers. This is a purely typing change, you will still receive `Agent` objects. To update, just fix type errors by replacing `Agent` with `AgentBase`.

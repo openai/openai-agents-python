@@ -15,7 +15,7 @@ We test the following aspects:
   the tool choice values accepted by the Responses API, including special types
   like `file_search` and `web_search`, and falling back to function names
   for arbitrary string values.
-- `get_response_format` returns `openai.NOT_GIVEN` for plain-text response
+- `get_response_format` returns `openai.omit` for plain-text response
   formats and an appropriate format dict when a JSON-structured output schema
   is provided.
 - `convert_tools` maps our internal `Tool` dataclasses into the appropriate
@@ -24,7 +24,7 @@ We test the following aspects:
 """
 
 import pytest
-from openai import NOT_GIVEN
+from openai import omit
 from pydantic import BaseModel
 
 from agents import (
@@ -49,7 +49,7 @@ def test_convert_tool_choice_standard_values():
     to "auto"/"required"/"none" as appropriate, and that special string
     values map to the appropriate dicts.
     """
-    assert Converter.convert_tool_choice(None) is NOT_GIVEN
+    assert Converter.convert_tool_choice(None) is omit
     assert Converter.convert_tool_choice("auto") == "auto"
     assert Converter.convert_tool_choice("required") == "required"
     assert Converter.convert_tool_choice("none") == "none"
@@ -67,16 +67,16 @@ def test_convert_tool_choice_standard_values():
 def test_get_response_format_plain_text_and_json_schema():
     """
     For plain text output (default, or output type of `str`), the converter
-    should return NOT_GIVEN, indicating no special response format constraint.
+    should return omit, indicating no special response format constraint.
     If an output schema is provided for a structured type, the converter
     should return a `format` dict with the schema and strictness. The exact
     JSON schema depends on the output type; we just assert that required
     keys are present and that we get back the original schema.
     """
     # Default output (None) should be considered plain text.
-    assert Converter.get_response_format(None) is NOT_GIVEN
-    # An explicit plain-text schema (str) should also yield NOT_GIVEN.
-    assert Converter.get_response_format(AgentOutputSchema(str)) is NOT_GIVEN
+    assert Converter.get_response_format(None) is omit
+    # An explicit plain-text schema (str) should also yield omit.
+    assert Converter.get_response_format(AgentOutputSchema(str)) is omit
 
     # A model-based schema should produce a format dict.
     class OutModel(BaseModel):

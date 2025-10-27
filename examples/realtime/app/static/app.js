@@ -5,16 +5,16 @@ class RealtimeDemo {
         this.isMuted = false;
         this.isCapturing = false;
         this.audioContext = null;
-        this.processor = null;
+        this.captureSource = null;
+        this.captureNode = null;
         this.stream = null;
         this.sessionId = this.generateSessionId();
 
-        // Audio playback queue
-        this.audioQueue = [];
         this.isPlayingAudio = false;
         this.playbackAudioContext = null;
-        this.currentAudioSource = null;
-        this.currentAudioGain = null; // per-chunk gain for smooth fades
+        this.playbackNode = null;
+        this.playbackInitPromise = null;
+        this.pendingPlaybackChunks = [];
         this.playbackFadeSec = 0.02; // ~20ms fade to reduce clicks
         this.messageNodes = new Map(); // item_id -> DOM node
         this.seenItemIds = new Set(); // item_id set for append-only syncing
@@ -227,29 +227,34 @@ class RealtimeDemo {
             });
 
             this.audioContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
-            const source = this.audioContext.createMediaStreamSource(this.stream);
+            if (this.audioContext.state === 'suspended') {
+                try { await this.audioContext.resume(); } catch {}
+            }
 
-            // Create a script processor to capture audio data
-            this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
-            source.connect(this.processor);
-            this.processor.connect(this.audioContext.destination);
+            if (!this.audioContext.audioWorklet) {
+                throw new Error('AudioWorklet API not supported in this browser.');
+            }
 
-            this.processor.onaudioprocess = (event) => {
-                if (!this.isMuted && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                    const inputBuffer = event.inputBuffer.getChannelData(0);
-                    const int16Buffer = new Int16Array(inputBuffer.length);
+            await this.audioContext.audioWorklet.addModule('audio-recorder.worklet.js');
 
-                    // Convert float32 to int16
-                    for (let i = 0; i < inputBuffer.length; i++) {
-                        int16Buffer[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
-                    }
+            this.captureSource = this.audioContext.createMediaStreamSource(this.stream);
+            this.captureNode = new AudioWorkletNode(this.audioContext, 'pcm-recorder');
 
-                    this.ws.send(JSON.stringify({
-                        type: 'audio',
-                        data: Array.from(int16Buffer)
-                    }));
-                }
+            this.captureNode.port.onmessage = (event) => {
+                if (this.isMuted) return;
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+                const chunk = event.data instanceof ArrayBuffer ? new Int16Array(event.data) : event.data;
+                if (!chunk || !(chunk instanceof Int16Array) || chunk.length === 0) return;
+
+                this.ws.send(JSON.stringify({
+                    type: 'audio',
+                    data: Array.from(chunk)
+                }));
             };
+
+            this.captureSource.connect(this.captureNode);
+            this.captureNode.connect(this.audioContext.destination);
 
             this.isCapturing = true;
             this.updateMuteUI();
@@ -264,9 +269,15 @@ class RealtimeDemo {
 
         this.isCapturing = false;
 
-        if (this.processor) {
-            this.processor.disconnect();
-            this.processor = null;
+        if (this.captureSource) {
+            try { this.captureSource.disconnect(); } catch {}
+            this.captureSource = null;
+        }
+
+        if (this.captureNode) {
+            this.captureNode.port.onmessage = null;
+            try { this.captureNode.disconnect(); } catch {}
+            this.captureNode = null;
         }
 
         if (this.audioContext) {
@@ -544,141 +555,117 @@ class RealtimeDemo {
                 return;
             }
 
-            // Add to queue
-            this.audioQueue.push(audioBase64);
-
-            // Start processing queue if not already playing
-            if (!this.isPlayingAudio) {
-                this.processAudioQueue();
+            const int16Array = this.decodeBase64ToInt16(audioBase64);
+            if (!int16Array || int16Array.length === 0) {
+                console.warn('Audio chunk has no samples, skipping');
+                return;
             }
+
+            this.pendingPlaybackChunks.push(int16Array);
+            await this.ensurePlaybackNode();
+            this.flushPendingPlaybackChunks();
 
         } catch (error) {
             console.error('Failed to play audio:', error);
+            this.pendingPlaybackChunks = [];
         }
     }
 
-    async processAudioQueue() {
-        if (this.isPlayingAudio || this.audioQueue.length === 0) {
+    async ensurePlaybackNode() {
+        if (this.playbackNode) {
             return;
         }
 
-        this.isPlayingAudio = true;
+        if (!this.playbackInitPromise) {
+            this.playbackInitPromise = (async () => {
+                if (!this.playbackAudioContext) {
+                    this.playbackAudioContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
+                }
 
-        // Initialize audio context if needed
-        if (!this.playbackAudioContext) {
-            this.playbackAudioContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
+                if (this.playbackAudioContext.state === 'suspended') {
+                    try { await this.playbackAudioContext.resume(); } catch {}
+                }
+
+                if (!this.playbackAudioContext.audioWorklet) {
+                    throw new Error('AudioWorklet API not supported in this browser.');
+                }
+
+                await this.playbackAudioContext.audioWorklet.addModule('audio-playback.worklet.js');
+
+                this.playbackNode = new AudioWorkletNode(this.playbackAudioContext, 'pcm-playback', { outputChannelCount: [1] });
+                this.playbackNode.port.onmessage = (event) => {
+                    const message = event.data;
+                    if (!message || typeof message !== 'object') return;
+                    if (message.type === 'drained') {
+                        this.isPlayingAudio = false;
+                    }
+                };
+
+                // Provide initial configuration for fades.
+                const fadeSamples = Math.floor(this.playbackAudioContext.sampleRate * this.playbackFadeSec);
+                this.playbackNode.port.postMessage({ type: 'config', fadeSamples });
+
+                this.playbackNode.connect(this.playbackAudioContext.destination);
+            })().catch((error) => {
+                this.playbackInitPromise = null;
+                throw error;
+            });
         }
 
-        // Ensure context is running (autoplay policies can suspend it)
-        if (this.playbackAudioContext.state === 'suspended') {
-            try { await this.playbackAudioContext.resume(); } catch {}
-        }
-
-        while (this.audioQueue.length > 0) {
-            const audioBase64 = this.audioQueue.shift();
-            await this.playAudioChunk(audioBase64);
-        }
-
-        this.isPlayingAudio = false;
+        await this.playbackInitPromise;
     }
 
-    async playAudioChunk(audioBase64) {
-        return new Promise((resolve, reject) => {
-            try {
-                // Decode base64 to ArrayBuffer
-                const binaryString = atob(audioBase64);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
+    flushPendingPlaybackChunks() {
+        if (!this.playbackNode) {
+            return;
+        }
 
-                const int16Array = new Int16Array(bytes.buffer);
-
-                if (int16Array.length === 0) {
-                    console.warn('Audio chunk has no samples, skipping');
-                    resolve();
-                    return;
-                }
-
-                const float32Array = new Float32Array(int16Array.length);
-
-                // Convert int16 to float32
-                for (let i = 0; i < int16Array.length; i++) {
-                    float32Array[i] = int16Array[i] / 32768.0;
-                }
-
-                const audioBuffer = this.playbackAudioContext.createBuffer(1, float32Array.length, 24000);
-                audioBuffer.getChannelData(0).set(float32Array);
-
-                const source = this.playbackAudioContext.createBufferSource();
-                source.buffer = audioBuffer;
-
-                // Per-chunk gain with short fade-in/out to avoid clicks
-                const gainNode = this.playbackAudioContext.createGain();
-                const now = this.playbackAudioContext.currentTime;
-                const fade = Math.min(this.playbackFadeSec, Math.max(0.005, audioBuffer.duration / 8));
-                try {
-                    gainNode.gain.cancelScheduledValues(now);
-                    gainNode.gain.setValueAtTime(0.0, now);
-                    gainNode.gain.linearRampToValueAtTime(1.0, now + fade);
-                    const endTime = now + audioBuffer.duration;
-                    gainNode.gain.setValueAtTime(1.0, Math.max(now + fade, endTime - fade));
-                    gainNode.gain.linearRampToValueAtTime(0.0001, endTime);
-                } catch {}
-
-                source.connect(gainNode);
-                gainNode.connect(this.playbackAudioContext.destination);
-
-                // Store references to allow smooth stop on interruption
-                this.currentAudioSource = source;
-                this.currentAudioGain = gainNode;
-
-                source.onended = () => {
-                    this.currentAudioSource = null;
-                    this.currentAudioGain = null;
-                    resolve();
-                };
-                source.start();
-
-            } catch (error) {
-                console.error('Failed to play audio chunk:', error);
-                reject(error);
+        while (this.pendingPlaybackChunks.length > 0) {
+            const chunk = this.pendingPlaybackChunks.shift();
+            if (!chunk || !(chunk instanceof Int16Array) || chunk.length === 0) {
+                continue;
             }
-        });
+
+            try {
+                this.playbackNode.port.postMessage(
+                    { type: 'chunk', payload: chunk.buffer },
+                    [chunk.buffer]
+                );
+                this.isPlayingAudio = true;
+            } catch (error) {
+                console.error('Failed to enqueue audio chunk to worklet:', error);
+            }
+        }
+    }
+
+    decodeBase64ToInt16(audioBase64) {
+        try {
+            const binaryString = atob(audioBase64);
+            const length = binaryString.length;
+            const bytes = new Uint8Array(length);
+            for (let i = 0; i < length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return new Int16Array(bytes.buffer);
+        } catch (error) {
+            console.error('Failed to decode audio chunk:', error);
+            return null;
+        }
     }
 
     stopAudioPlayback() {
         console.log('Stopping audio playback due to interruption');
 
-        // Smoothly ramp down before stopping to avoid clicks
-        if (this.currentAudioSource && this.playbackAudioContext) {
+        this.pendingPlaybackChunks = [];
+
+        if (this.playbackNode) {
             try {
-                const now = this.playbackAudioContext.currentTime;
-                const fade = Math.max(0.01, this.playbackFadeSec);
-                if (this.currentAudioGain) {
-                    try {
-                        this.currentAudioGain.gain.cancelScheduledValues(now);
-                        // Capture current value to ramp from it
-                        const current = this.currentAudioGain.gain.value ?? 1.0;
-                        this.currentAudioGain.gain.setValueAtTime(current, now);
-                        this.currentAudioGain.gain.linearRampToValueAtTime(0.0001, now + fade);
-                    } catch {}
-                }
-                // Stop after the fade completes
-                setTimeout(() => {
-                    try { this.currentAudioSource && this.currentAudioSource.stop(); } catch {}
-                    this.currentAudioSource = null;
-                    this.currentAudioGain = null;
-                }, Math.ceil(fade * 1000));
+                this.playbackNode.port.postMessage({ type: 'stop' });
             } catch (error) {
-                console.error('Error stopping audio source:', error);
+                console.error('Failed to notify playback worklet to stop:', error);
             }
         }
 
-        // Clear the audio queue
-        this.audioQueue = [];
-
-        // Reset playback state
         this.isPlayingAudio = false;
 
         console.log('Audio playback stopped and queue cleared');

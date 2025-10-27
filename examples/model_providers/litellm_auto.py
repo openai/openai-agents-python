@@ -15,10 +15,12 @@ set_tracing_disabled(disabled=True)
 # import logging
 # logging.basicConfig(level=logging.DEBUG)
 
+
 @function_tool
 def get_weather(city: str):
     print(f"[debug] getting weather for {city}")
     return f"The weather in {city} is sunny."
+
 
 class Result(BaseModel):
     output_text: str

@@ -37,6 +37,7 @@ class RunItemStreamEvent:
         "tool_output",
         "reasoning_item_created",
         "mcp_approval_requested",
+        "mcp_approval_response",
         "mcp_list_tools",
     ]
     """The name of the event."""

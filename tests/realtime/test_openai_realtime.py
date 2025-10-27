@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -95,6 +97,88 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
                 assert model._websocket == mock_websocket
         assert model._websocket_task is not None
         assert model.model == "gpt-4o-realtime-preview"
+
+    @pytest.mark.asyncio
+    async def test_session_update_includes_noise_reduction(self, model, mock_websocket):
+        """Session.update should pass through input_audio_noise_reduction config."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+                "input_audio_noise_reduction": {"type": "near_field"},
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update contains the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert session.get("audio", {}).get("input", {}).get("noise_reduction") == {
+            "type": "near_field"
+        }
+
+    @pytest.mark.asyncio
+    async def test_session_update_omits_noise_reduction_when_not_provided(
+        self, model, mock_websocket
+    ):
+        """Session.update should omit input_audio_noise_reduction when not provided."""
+        config = {
+            "api_key": "test-api-key-123",
+            "initial_model_settings": {
+                "model_name": "gpt-4o-realtime-preview",
+            },
+        }
+
+        sent_messages: list[dict[str, Any]] = []
+
+        async def async_websocket(*args, **kwargs):
+            async def send(payload: str):
+                sent_messages.append(json.loads(payload))
+                return None
+
+            mock_websocket.send.side_effect = send
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+                await model.connect(config)
+
+        # Find the session.update events
+        session_updates = [m for m in sent_messages if m.get("type") == "session.update"]
+        assert len(session_updates) >= 1
+        # Verify the last session.update omits the noise_reduction field
+        session = session_updates[-1]["session"]
+        assert "audio" in session and "input" in session["audio"]
+        assert "noise_reduction" not in session["audio"]["input"]
 
     @pytest.mark.asyncio
     async def test_connect_with_custom_headers_overrides_defaults(self, model, mock_websocket):
@@ -425,6 +509,55 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         # interrupt -> 1
         # session update -> 1
         assert send_raw.await_count == 8
+
+    @pytest.mark.asyncio
+    async def test_interrupt_force_cancel_overrides_auto_cancellation(self, model, monkeypatch):
+        """Interrupt should send response.cancel even when auto cancel is enabled."""
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        model._ongoing_response = True
+        model._created_session = SimpleNamespace(
+            audio=SimpleNamespace(
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
+            )
+        )
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt(force_response_cancel=True))
+
+        assert send_raw.await_count == 2
+        payload_types = {call.args[0].type for call in send_raw.call_args_list}
+        assert payload_types == {"conversation.item.truncate", "response.cancel"}
+        assert model._ongoing_response is False
+        assert model._audio_state_tracker.get_last_audio_item() is None
+
+    @pytest.mark.asyncio
+    async def test_interrupt_respects_auto_cancellation_when_not_forced(self, model, monkeypatch):
+        """Interrupt should avoid sending response.cancel when relying on automatic cancellation."""
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"\x00" * 4800)
+        model._ongoing_response = True
+        model._created_session = SimpleNamespace(
+            audio=SimpleNamespace(
+                input=SimpleNamespace(turn_detection=SimpleNamespace(interrupt_response=True))
+            )
+        )
+
+        send_raw = AsyncMock()
+        emit_event = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        monkeypatch.setattr(model, "_emit_event", emit_event)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        assert send_raw.await_count == 1
+        assert send_raw.call_args_list[0].args[0].type == "conversation.item.truncate"
+        assert all(call.args[0].type != "response.cancel" for call in send_raw.call_args_list)
+        assert model._ongoing_response is True
 
     def test_add_remove_listener_and_tools_conversion(self, model):
         listener = AsyncMock()

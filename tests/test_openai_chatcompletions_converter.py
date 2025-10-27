@@ -26,11 +26,13 @@ from __future__ import annotations
 from typing import Literal, cast
 
 import pytest
+from openai import omit
 from openai.types.chat import ChatCompletionMessage, ChatCompletionMessageFunctionToolCall
 from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseInputAudioParam,
     ResponseInputTextParam,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -197,12 +199,12 @@ def test_items_to_messages_with_output_message_and_function_call():
 
 def test_convert_tool_choice_handles_standard_and_named_options() -> None:
     """
-    The `Converter.convert_tool_choice` method should return NOT_GIVEN
+    The `Converter.convert_tool_choice` method should return the omit sentinel
     if no choice is provided, pass through values like "auto", "required",
     or "none" unchanged, and translate any other string into a function
     selection dict.
     """
-    assert Converter.convert_tool_choice(None).__class__.__name__ == "NotGiven"
+    assert Converter.convert_tool_choice(None) is omit
     assert Converter.convert_tool_choice("auto") == "auto"
     assert Converter.convert_tool_choice("required") == "required"
     assert Converter.convert_tool_choice("none") == "none"
@@ -214,17 +216,15 @@ def test_convert_tool_choice_handles_standard_and_named_options() -> None:
 
 def test_convert_response_format_returns_not_given_for_plain_text_and_dict_for_schemas() -> None:
     """
-    The `Converter.convert_response_format` method should return NOT_GIVEN
+    The `Converter.convert_response_format` method should return the omit sentinel
     when no output schema is provided or if the output schema indicates
     plain text. For structured output schemas, it should return a dict
     with type `json_schema` and include the generated JSON schema and
     strict flag from the provided `AgentOutputSchema`.
     """
     # when output is plain text (schema None or output_type str), do not include response_format
-    assert Converter.convert_response_format(None).__class__.__name__ == "NotGiven"
-    assert (
-        Converter.convert_response_format(AgentOutputSchema(str)).__class__.__name__ == "NotGiven"
-    )
+    assert Converter.convert_response_format(None) is omit
+    assert Converter.convert_response_format(AgentOutputSchema(str)) is omit
     # For e.g. integer output, we expect a response_format dict
     schema = AgentOutputSchema(int)
     resp_format = Converter.convert_response_format(schema)
@@ -279,6 +279,39 @@ def test_extract_all_and_text_content_for_strings_and_lists():
     assert isinstance(text_parts, list)
     assert all(p["type"] == "text" for p in text_parts)
     assert [p["text"] for p in text_parts] == ["one", "two"]
+
+
+def test_extract_all_content_handles_input_audio():
+    """
+    input_audio entries should translate into ChatCompletion input_audio parts.
+    """
+    audio: ResponseInputAudioParam = {
+        "type": "input_audio",
+        "input_audio": {"data": "AAA=", "format": "wav"},
+    }
+    parts = Converter.extract_all_content([audio])
+    assert isinstance(parts, list)
+    assert parts == [
+        {
+            "type": "input_audio",
+            "input_audio": {"data": "AAA=", "format": "wav"},
+        }
+    ]
+
+
+def test_extract_all_content_rejects_invalid_input_audio():
+    """
+    input_audio requires both data and format fields to be present.
+    """
+    audio_missing_data = cast(
+        ResponseInputAudioParam,
+        {
+            "type": "input_audio",
+            "input_audio": {"format": "wav"},
+        },
+    )
+    with pytest.raises(UserError):
+        Converter.extract_all_content([audio_missing_data])
 
 
 def test_items_to_messages_handles_system_and_developer_roles():

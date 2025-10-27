@@ -22,7 +22,7 @@ def get_weather(city: str) -> str:
 agent = Agent(
     name="Haiku agent",
     instructions="Always respond in haiku form",
-    model="o3-mini",
+    model="gpt-5-nano",
     tools=[get_weather],
 )
 ```
@@ -163,7 +163,7 @@ By using the `clone()` method on an agent, you can duplicate an Agent, and optio
 pirate_agent = Agent(
     name="Pirate",
     instructions="Write like a pirate",
-    model="o3-mini",
+    model="gpt-4.1",
 )
 
 robot_agent = pirate_agent.clone(

@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import pytest
 from pydantic import BaseModel, Field, ValidationError
@@ -519,6 +519,44 @@ def test_function_with_field_optional_with_default():
     # Invalid input: negative value (should violate ge=0.0)
     with pytest.raises(ValidationError):
         fs.params_pydantic_model(**{"required_param": "test", "optional_param": -1.0})
+
+
+def test_function_uses_annotated_descriptions_without_docstring() -> None:
+    """Test that Annotated metadata populates parameter descriptions when docstrings are ignored."""
+
+    def add(
+        a: Annotated[int, "First number to add"],
+        b: Annotated[int, "Second number to add"],
+    ) -> int:
+        return a + b
+
+    fs = function_schema(add, use_docstring_info=False)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["a"].get("description") == "First number to add"
+    assert properties["b"].get("description") == "Second number to add"
+
+
+def test_function_prefers_docstring_descriptions_over_annotated_metadata() -> None:
+    """Test that docstring parameter descriptions take precedence over Annotated metadata."""
+
+    def add(
+        a: Annotated[int, "Annotated description for a"],
+        b: Annotated[int, "Annotated description for b"],
+    ) -> int:
+        """Adds two integers.
+
+        Args:
+            a: Docstring provided description.
+        """
+
+        return a + b
+
+    fs = function_schema(add)
+
+    properties = fs.params_json_schema.get("properties", {})
+    assert properties["a"].get("description") == "Docstring provided description."
+    assert properties["b"].get("description") == "Annotated description for b"
 
 
 def test_function_with_field_description_merge():

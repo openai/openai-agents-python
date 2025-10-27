@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from openai import AsyncOpenAI
 
 from ..model_settings import ModelSettings
@@ -7,6 +9,10 @@ from ..version import __version__
 
 _USER_AGENT = f"Agents/Python {__version__}"
 HEADERS = {"User-Agent": _USER_AGENT}
+
+HEADERS_OVERRIDE: ContextVar[dict[str, str] | None] = ContextVar(
+    "openai_chatcompletions_headers_override", default=None
+)
 
 
 class ChatCmplHelpers:
