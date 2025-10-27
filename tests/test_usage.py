@@ -263,7 +263,7 @@ def test_anthropic_cost_calculation_scenario():
     assert usage.request_usage_entries[1].input_tokens == 150_000
     assert usage.request_usage_entries[2].input_tokens == 80_000
 
-     # All request_usage_entries are under 200K threshold
+    # All request_usage_entries are under 200K threshold
     for req in usage.request_usage_entries:
         assert req.input_tokens < 200_000
         assert req.output_tokens < 200_000
