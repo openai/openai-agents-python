@@ -294,7 +294,7 @@ async def test_default_handoff_history_nested_and_filters_respected():
 
     assert isinstance(result.input, list)
     assert result.input[0]["role"] == "developer"
-    assert "Previous conversation" in result.input[0]["content"]
+    assert "<CONVERSATION HISTORY>" in result.input[0]["content"]
     assert "triage summary" in result.input[0]["content"]
     assert result.input[1]["role"] == "user"
     assert result.input[1]["content"] == "user_message"
@@ -322,6 +322,39 @@ async def test_default_handoff_history_nested_and_filters_respected():
 
     assert isinstance(filtered_result.input, str)
     assert filtered_result.input == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_default_handoff_history_accumulates_across_multiple_handoffs():
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    closer_model = FakeModel()
+
+    closer = Agent(name="closer", model=closer_model)
+    delegate = Agent(name="delegate", model=delegate_model, handoffs=[closer])
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs(
+        [[get_text_message("delegate update"), get_handoff_tool_call(closer)]]
+    )
+    closer_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
+
+    result = await Runner.run(triage, input="user_question")
+
+    assert result.final_output == "resolution"
+    assert closer_model.first_turn_args is not None
+    closer_input = closer_model.first_turn_args["input"]
+    assert isinstance(closer_input, list)
+    assert closer_input[0]["role"] == "developer"
+    developer_content = closer_input[0]["content"]
+    assert developer_content.count("<CONVERSATION HISTORY>") == 1
+    assert "triage summary" in developer_content
+    assert "delegate update" in developer_content
+    assert closer_input[1]["role"] == "user"
+    assert closer_input[1]["content"] == "user_question"
 
 
 @pytest.mark.asyncio

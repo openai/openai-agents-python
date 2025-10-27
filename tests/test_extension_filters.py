@@ -243,7 +243,19 @@ def test_nest_handoff_history_wraps_transcript() -> None:
 
     assert isinstance(nested.input_history, tuple)
     assert nested.input_history[0]["role"] == "developer"
-    assert "Assist reply" in nested.input_history[0]["content"]
+    developer_content = nested.input_history[0]["content"]
+    assert "<CONVERSATION HISTORY>" in developer_content
+    assert "</CONVERSATION HISTORY>" in developer_content
+    assert "Assist reply" in developer_content
+    metadata = nested.input_history[0].get("metadata")
+    assert isinstance(metadata, dict)
+    history_payload = metadata.get("nest_handoff_history")
+    assert isinstance(history_payload, dict)
+    transcript = history_payload.get("transcript")
+    assert isinstance(transcript, list)
+    assert len(transcript) == 4
+    assert transcript[0]["role"] == "user"
+    assert transcript[1]["role"] == "assistant"
     assert nested.input_history[1]["role"] == "user"
     assert nested.input_history[1]["content"] == "Hello"
     assert len(nested.pre_handoff_items) == 0
@@ -264,3 +276,39 @@ def test_nest_handoff_history_handles_missing_user() -> None:
     assert len(nested.input_history) == 1
     assert nested.input_history[0]["role"] == "developer"
     assert "reasoning" in nested.input_history[0]["content"].lower()
+
+
+def test_nest_handoff_history_appends_existing_history() -> None:
+    first = HandoffInputData(
+        input_history=(_get_user_input_item("Hello"),),
+        pre_handoff_items=(_get_message_output_run_item("First reply"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    first_nested = nest_handoff_history(first)
+    developer_message = first_nested.input_history[0]
+
+    follow_up_history = (
+        developer_message,
+        _get_user_input_item("Another question"),
+    )
+
+    second = HandoffInputData(
+        input_history=follow_up_history,
+        pre_handoff_items=(_get_message_output_run_item("Second reply"),),
+        new_items=(_get_handoff_output_run_item("transfer"),),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    second_nested = nest_handoff_history(second)
+
+    assert isinstance(second_nested.input_history, tuple)
+    developer = second_nested.input_history[0]
+    assert developer["role"] == "developer"
+    content = developer["content"]
+    assert content.count("<CONVERSATION HISTORY>") == 1
+    assert content.count("</CONVERSATION HISTORY>") == 1
+    assert "First reply" in content
+    assert "Second reply" in content
+    assert "Another question" in content

@@ -39,15 +39,22 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
     )
 
 
+_CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
+_CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
+_NEST_HISTORY_METADATA_KEY = "nest_handoff_history"
+_NEST_HISTORY_TRANSCRIPT_KEY = "transcript"
+
+
 def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputData:
     """Summarizes the previous transcript into a developer message for the next agent."""
 
     normalized_history = _normalize_input_history(handoff_input_data.input_history)
+    flattened_history = _flatten_nested_history_messages(normalized_history)
     pre_items_as_inputs = [
         _run_item_to_plain_input(item) for item in handoff_input_data.pre_handoff_items
     ]
     new_items_as_inputs = [_run_item_to_plain_input(item) for item in handoff_input_data.new_items]
-    transcript = normalized_history + pre_items_as_inputs + new_items_as_inputs
+    transcript = flattened_history + pre_items_as_inputs + new_items_as_inputs
 
     developer_message = _build_developer_message(transcript)
     latest_user = _find_latest_user_turn(transcript)
@@ -80,15 +87,23 @@ def _run_item_to_plain_input(run_item: RunItem) -> TResponseInputItem:
 
 
 def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
-    if transcript:
+    transcript_copy = [deepcopy(item) for item in transcript]
+    if transcript_copy:
         summary_lines = [
-            f"{idx + 1}. {_format_transcript_item(item)}" for idx, item in enumerate(transcript)
+            f"{idx + 1}. {_format_transcript_item(item)}" for idx, item in enumerate(transcript_copy)
         ]
     else:
         summary_lines = ["(no previous turns recorded)"]
 
-    content = "Previous conversation before this handoff:\n" + "\n".join(summary_lines)
-    return {"role": "developer", "content": content}
+    content_lines = [_CONVERSATION_HISTORY_START, *summary_lines, _CONVERSATION_HISTORY_END]
+    content = "\n".join(content_lines)
+    return {
+        "role": "developer",
+        "content": content,
+        "metadata": {
+            _NEST_HISTORY_METADATA_KEY: {_NEST_HISTORY_TRANSCRIPT_KEY: transcript_copy}
+        },
+    }
 
 
 def _format_transcript_item(item: TResponseInputItem) -> str:
@@ -128,6 +143,40 @@ def _find_latest_user_turn(
         if item.get("role") == "user":
             return deepcopy(item)
     return None
+
+
+def _flatten_nested_history_messages(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    flattened: list[TResponseInputItem] = []
+    for item in items:
+        nested_transcript = _extract_nested_history_transcript(item)
+        if nested_transcript is not None:
+            flattened.extend(nested_transcript)
+            continue
+        flattened.append(deepcopy(item))
+    return flattened
+
+
+def _extract_nested_history_transcript(
+    item: TResponseInputItem,
+) -> list[TResponseInputItem] | None:
+    if item.get("role") != "developer":
+        return None
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    payload = metadata.get(_NEST_HISTORY_METADATA_KEY)
+    if not isinstance(payload, dict):
+        return None
+    transcript = payload.get(_NEST_HISTORY_TRANSCRIPT_KEY)
+    if not isinstance(transcript, list):
+        return None
+    normalized: list[TResponseInputItem] = []
+    for entry in transcript:
+        if isinstance(entry, dict):
+            normalized.append(deepcopy(entry))
+    return normalized if normalized else []
 
 
 def _get_run_item_role(run_item: RunItem) -> str | None:

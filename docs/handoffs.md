@@ -82,7 +82,7 @@ handoff_obj = handoff(
 
 When a handoff occurs, it's as though the new agent takes over the conversation, and gets to see the entire previous conversation history. If you want to change this, you can set an [`input_filter`][agents.handoffs.Handoff.input_filter]. An input filter is a function that receives the existing input via a [`HandoffInputData`][agents.handoffs.HandoffInputData], and must return a new `HandoffInputData`.
 
-By default the runner now wraps the prior transcript inside a developer-role summary message (see [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]). That default only applies when neither the handoff nor the run supplies an explicit `input_filter`, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes.
+By default the runner now wraps the prior transcript inside a developer-role summary message (see [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]). The summary appears inside a `<CONVERSATION HISTORY>` block that keeps appending new turns when multiple handoffs happen during the same run. That default only applies when neither the handoff nor the run supplies an explicit `input_filter`, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes.
 
 There are some common patterns (for example removing all tool calls from the history), which are implemented for you in [`agents.extensions.handoff_filters`][]
 
@@ -127,7 +127,7 @@ router = Agent(
 )
 ```
 
-The new [examples/handoffs/log_handoff_history.py](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs/log_handoff_history.py) script contains a complete runnable sample that prints the nested transcript every time a handoff occurs.
+The new [examples/handoffs/log_handoff_history.py](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs/log_handoff_history.py) script contains a complete runnable sample that prints the nested transcript every time a handoff occurs so you can see the `<CONVERSATION HISTORY>` block that will be passed to the next agent.
 
 ## Recommended prompts
 
