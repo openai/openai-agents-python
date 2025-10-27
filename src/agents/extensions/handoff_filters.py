@@ -41,8 +41,6 @@ def remove_all_tools(handoff_input_data: HandoffInputData) -> HandoffInputData:
 
 _CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
 _CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
-_NEST_HISTORY_METADATA_KEY = "nest_handoff_history"
-_NEST_HISTORY_TRANSCRIPT_KEY = "transcript"
 
 
 def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputData:
@@ -100,9 +98,6 @@ def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseI
     return {
         "role": "developer",
         "content": content,
-        "metadata": {
-            _NEST_HISTORY_METADATA_KEY: {_NEST_HISTORY_TRANSCRIPT_KEY: transcript_copy}
-        },
     }
 
 
@@ -163,20 +158,55 @@ def _extract_nested_history_transcript(
 ) -> list[TResponseInputItem] | None:
     if item.get("role") != "developer":
         return None
-    metadata = item.get("metadata")
-    if not isinstance(metadata, dict):
+    content = item.get("content")
+    if not isinstance(content, str):
         return None
-    payload = metadata.get(_NEST_HISTORY_METADATA_KEY)
-    if not isinstance(payload, dict):
+    start_idx = content.find(_CONVERSATION_HISTORY_START)
+    end_idx = content.find(_CONVERSATION_HISTORY_END)
+    if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
         return None
-    transcript = payload.get(_NEST_HISTORY_TRANSCRIPT_KEY)
-    if not isinstance(transcript, list):
+    start_idx += len(_CONVERSATION_HISTORY_START)
+    body = content[start_idx:end_idx]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    parsed: list[TResponseInputItem] = []
+    for line in lines:
+        parsed_item = _parse_summary_line(line)
+        if parsed_item is not None:
+            parsed.append(parsed_item)
+    return parsed
+
+
+def _parse_summary_line(line: str) -> TResponseInputItem | None:
+    stripped = line.strip()
+    if not stripped:
         return None
-    normalized: list[TResponseInputItem] = []
-    for entry in transcript:
-        if isinstance(entry, dict):
-            normalized.append(deepcopy(entry))
-    return normalized if normalized else []
+    dot_index = stripped.find(".")
+    if dot_index != -1 and stripped[:dot_index].isdigit():
+        stripped = stripped[dot_index + 1 :].lstrip()
+    role_part, sep, remainder = stripped.partition(":")
+    if not sep:
+        return None
+    role_text = role_part.strip()
+    if not role_text:
+        return None
+    role, name = _split_role_and_name(role_text)
+    reconstructed: TResponseInputItem = {"role": role}
+    if name:
+        reconstructed["name"] = name
+    content = remainder.strip()
+    if content:
+        reconstructed["content"] = content
+    return reconstructed
+
+
+def _split_role_and_name(role_text: str) -> tuple[str, str | None]:
+    if role_text.endswith(")") and "(" in role_text:
+        open_idx = role_text.rfind("(")
+        possible_name = role_text[open_idx + 1 : -1].strip()
+        role_candidate = role_text[:open_idx].strip()
+        if possible_name:
+            return (role_candidate or "developer", possible_name)
+    return (role_text or "developer", None)
 
 
 def _get_run_item_role(run_item: RunItem) -> str | None:

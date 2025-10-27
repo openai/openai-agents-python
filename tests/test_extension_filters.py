@@ -247,15 +247,6 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     assert "<CONVERSATION HISTORY>" in developer_content
     assert "</CONVERSATION HISTORY>" in developer_content
     assert "Assist reply" in developer_content
-    metadata = nested.input_history[0].get("metadata")
-    assert isinstance(metadata, dict)
-    history_payload = metadata.get("nest_handoff_history")
-    assert isinstance(history_payload, dict)
-    transcript = history_payload.get("transcript")
-    assert isinstance(transcript, list)
-    assert len(transcript) == 4
-    assert transcript[0]["role"] == "user"
-    assert transcript[1]["role"] == "assistant"
     assert nested.input_history[1]["role"] == "user"
     assert nested.input_history[1]["content"] == "Hello"
     assert len(nested.pre_handoff_items) == 0

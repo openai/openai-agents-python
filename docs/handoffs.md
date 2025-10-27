@@ -100,35 +100,6 @@ handoff_obj = handoff(
 
 1. This will automatically remove all tools from the history when `FAQ agent` is called.
 
-### Inspecting handoff payloads
-
-When you are debugging a workflow it is often useful to print the exact transcript that will be sent to the next agent. You can do this by inserting a lightweight filter that logs the `HandoffInputData` and then returns either the unmodified payload or the output from [`nest_handoff_history`](agents.extensions.handoff_filters.nest_handoff_history).
-
-```python
-import json
-
-from agents import Agent, HandoffInputData, handoff
-from agents.extensions.handoff_filters import nest_handoff_history
-
-
-def log_handoff_payload(data: HandoffInputData) -> HandoffInputData:
-    nested = nest_handoff_history(data)
-    history_items = nested.input_history if isinstance(nested.input_history, tuple) else ()
-    for idx, item in enumerate(history_items, start=1):
-        print(f"Turn {idx}: {json.dumps(item, indent=2, ensure_ascii=False)}")
-    return nested
-
-
-math_agent = Agent(name="Math agent")
-
-router = Agent(
-    name="Router",
-    handoffs=[handoff(math_agent, input_filter=log_handoff_payload)],
-)
-```
-
-The new [examples/handoffs/log_handoff_history.py](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs/log_handoff_history.py) script contains a complete runnable sample that prints the nested transcript every time a handoff occurs so you can see the `<CONVERSATION HISTORY>` block that will be passed to the next agent.
-
 ## Recommended prompts
 
 To make sure that LLMs understand handoffs properly, we recommend including information about handoffs in your agents. We have a suggested prefix in [`agents.extensions.handoff_prompt.RECOMMENDED_PROMPT_PREFIX`][], or you can call [`agents.extensions.handoff_prompt.prompt_with_handoff_instructions`][] to automatically add recommended data to your prompts.
