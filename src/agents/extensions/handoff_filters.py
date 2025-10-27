@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
 from ..handoffs import HandoffInputData
 from ..items import (
@@ -88,17 +88,19 @@ def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseI
     transcript_copy = [deepcopy(item) for item in transcript]
     if transcript_copy:
         summary_lines = [
-            f"{idx + 1}. {_format_transcript_item(item)}" for idx, item in enumerate(transcript_copy)
+            f"{idx + 1}. {_format_transcript_item(item)}"
+            for idx, item in enumerate(transcript_copy)
         ]
     else:
         summary_lines = ["(no previous turns recorded)"]
 
     content_lines = [_CONVERSATION_HISTORY_START, *summary_lines, _CONVERSATION_HISTORY_END]
     content = "\n".join(content_lines)
-    return {
+    developer_message: dict[str, Any] = {
         "role": "developer",
         "content": content,
     }
+    return cast(TResponseInputItem, developer_message)
 
 
 def _format_transcript_item(item: TResponseInputItem) -> str:
@@ -190,13 +192,13 @@ def _parse_summary_line(line: str) -> TResponseInputItem | None:
     if not role_text:
         return None
     role, name = _split_role_and_name(role_text)
-    reconstructed: TResponseInputItem = {"role": role}
+    reconstructed: dict[str, Any] = {"role": role}
     if name:
         reconstructed["name"] = name
     content = remainder.strip()
     if content:
         reconstructed["content"] = content
-    return reconstructed
+    return cast(TResponseInputItem, reconstructed)
 
 
 def _split_role_and_name(role_text: str) -> tuple[str, str | None]:

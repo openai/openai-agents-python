@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -94,6 +96,14 @@ def _get_reasoning_output_run_item() -> ReasoningItem:
     return ReasoningItem(
         agent=fake_agent(), raw_item=ResponseReasoningItem(id="rid", summary=[], type="reasoning")
     )
+
+
+def _as_message(item: TResponseInputItem) -> dict[str, Any]:
+    assert isinstance(item, dict)
+    role = item.get("role")
+    assert isinstance(role, str)
+    assert role in {"assistant", "user", "system", "developer"}
+    return cast(dict[str, Any], item)
 
 
 def test_empty_data():
@@ -242,13 +252,16 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     nested = nest_handoff_history(data)
 
     assert isinstance(nested.input_history, tuple)
-    assert nested.input_history[0]["role"] == "developer"
-    developer_content = nested.input_history[0]["content"]
+    developer = _as_message(nested.input_history[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
     assert "<CONVERSATION HISTORY>" in developer_content
     assert "</CONVERSATION HISTORY>" in developer_content
     assert "Assist reply" in developer_content
-    assert nested.input_history[1]["role"] == "user"
-    assert nested.input_history[1]["content"] == "Hello"
+    latest_user = _as_message(nested.input_history[1])
+    assert latest_user["role"] == "user"
+    assert latest_user["content"] == "Hello"
     assert len(nested.pre_handoff_items) == 0
     assert nested.new_items == data.new_items
 
@@ -265,8 +278,11 @@ def test_nest_handoff_history_handles_missing_user() -> None:
 
     assert isinstance(nested.input_history, tuple)
     assert len(nested.input_history) == 1
-    assert nested.input_history[0]["role"] == "developer"
-    assert "reasoning" in nested.input_history[0]["content"].lower()
+    developer = _as_message(nested.input_history[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
+    assert "reasoning" in developer_content.lower()
 
 
 def test_nest_handoff_history_appends_existing_history() -> None:
@@ -278,9 +294,10 @@ def test_nest_handoff_history_appends_existing_history() -> None:
     )
 
     first_nested = nest_handoff_history(first)
+    assert isinstance(first_nested.input_history, tuple)
     developer_message = first_nested.input_history[0]
 
-    follow_up_history = (
+    follow_up_history: tuple[TResponseInputItem, ...] = (
         developer_message,
         _get_user_input_item("Another question"),
     )
@@ -295,9 +312,10 @@ def test_nest_handoff_history_appends_existing_history() -> None:
     second_nested = nest_handoff_history(second)
 
     assert isinstance(second_nested.input_history, tuple)
-    developer = second_nested.input_history[0]
+    developer = _as_message(second_nested.input_history[0])
     assert developer["role"] == "developer"
     content = developer["content"]
+    assert isinstance(content, str)
     assert content.count("<CONVERSATION HISTORY>") == 1
     assert content.count("</CONVERSATION HISTORY>") == 1
     assert "First reply" in content

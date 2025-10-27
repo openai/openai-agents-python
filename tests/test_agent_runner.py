@@ -43,6 +43,14 @@ from .test_responses import (
 from .utils.simple_session import SimpleListSession
 
 
+def _as_message(item: Any) -> dict[str, Any]:
+    assert isinstance(item, dict)
+    role = item.get("role")
+    assert isinstance(role, str)
+    assert role in {"assistant", "user", "system", "developer"}
+    return cast(dict[str, Any], item)
+
+
 @pytest.mark.asyncio
 async def test_simple_first_run():
     model = FakeModel()
@@ -293,11 +301,15 @@ async def test_default_handoff_history_nested_and_filters_respected():
     result = await Runner.run(agent_2, input="user_message")
 
     assert isinstance(result.input, list)
-    assert result.input[0]["role"] == "developer"
-    assert "<CONVERSATION HISTORY>" in result.input[0]["content"]
-    assert "triage summary" in result.input[0]["content"]
-    assert result.input[1]["role"] == "user"
-    assert result.input[1]["content"] == "user_message"
+    developer = _as_message(result.input[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
+    assert "<CONVERSATION HISTORY>" in developer_content
+    assert "triage summary" in developer_content
+    latest_user = _as_message(result.input[1])
+    assert latest_user["role"] == "user"
+    assert latest_user["content"] == "user_message"
 
     passthrough_model = FakeModel()
     delegate = Agent(name="delegate", model=passthrough_model)
@@ -348,13 +360,16 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     assert closer_model.first_turn_args is not None
     closer_input = closer_model.first_turn_args["input"]
     assert isinstance(closer_input, list)
-    assert closer_input[0]["role"] == "developer"
-    developer_content = closer_input[0]["content"]
+    developer = _as_message(closer_input[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
     assert developer_content.count("<CONVERSATION HISTORY>") == 1
     assert "triage summary" in developer_content
     assert "delegate update" in developer_content
-    assert closer_input[1]["role"] == "user"
-    assert closer_input[1]["content"] == "user_question"
+    latest_user = _as_message(closer_input[1])
+    assert latest_user["role"] == "user"
+    assert latest_user["content"] == "user_question"
 
 
 @pytest.mark.asyncio
