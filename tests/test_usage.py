@@ -1,6 +1,6 @@
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from agents.usage import IndividualRequestUsage, Usage
+from agents.usage import RequestUsage, Usage
 
 
 def test_usage_add_aggregates_all_fields():
@@ -52,9 +52,9 @@ def test_usage_add_aggregates_with_none_values():
     assert u1.output_tokens_details.reasoning_tokens == 6
 
 
-def test_individual_request_usage_creation():
-    """Test that IndividualRequestUsage is created correctly."""
-    individual = IndividualRequestUsage(
+def test_request_usage_creation():
+    """Test that RequestUsage is created correctly."""
+    request_usage = RequestUsage(
         input_tokens=100,
         output_tokens=200,
         total_tokens=300,
@@ -62,15 +62,15 @@ def test_individual_request_usage_creation():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=20),
     )
 
-    assert individual.input_tokens == 100
-    assert individual.output_tokens == 200
-    assert individual.total_tokens == 300
-    assert individual.input_tokens_details.cached_tokens == 10
-    assert individual.output_tokens_details.reasoning_tokens == 20
+    assert request_usage.input_tokens == 100
+    assert request_usage.output_tokens == 200
+    assert request_usage.total_tokens == 300
+    assert request_usage.input_tokens_details.cached_tokens == 10
+    assert request_usage.output_tokens_details.reasoning_tokens == 20
 
 
 def test_usage_add_preserves_single_request():
-    """Test that adding a single request Usage creates an IndividualRequestUsage entry."""
+    """Test that adding a single request Usage creates an RequestUsage entry."""
     u1 = Usage()
     u2 = Usage(
         requests=1,
@@ -83,18 +83,18 @@ def test_usage_add_preserves_single_request():
 
     u1.add(u2)
 
-    # Should preserve the individual request details
-    assert len(u1.individual_requests) == 1
-    individual = u1.individual_requests[0]
-    assert individual.input_tokens == 100
-    assert individual.output_tokens == 200
-    assert individual.total_tokens == 300
-    assert individual.input_tokens_details.cached_tokens == 10
-    assert individual.output_tokens_details.reasoning_tokens == 20
+    # Should preserve the request usage details
+    assert len(u1.request_usage_entries) == 1
+    request_usage = u1.request_usage_entries[0]
+    assert request_usage.input_tokens == 100
+    assert request_usage.output_tokens == 200
+    assert request_usage.total_tokens == 300
+    assert request_usage.input_tokens_details.cached_tokens == 10
+    assert request_usage.output_tokens_details.reasoning_tokens == 20
 
 
 def test_usage_add_ignores_zero_token_requests():
-    """Test that zero-token requests don't create IndividualRequestUsage entries."""
+    """Test that zero-token requests don't create request_usage_entries."""
     u1 = Usage()
     u2 = Usage(
         requests=1,
@@ -107,12 +107,12 @@ def test_usage_add_ignores_zero_token_requests():
 
     u1.add(u2)
 
-    # Should not create an individual request entry for zero tokens
-    assert len(u1.individual_requests) == 0
+    # Should not create a request_usage_entry for zero tokens
+    assert len(u1.request_usage_entries) == 0
 
 
 def test_usage_add_ignores_multi_request_usage():
-    """Test that multi-request Usage objects don't create IndividualRequestUsage entries."""
+    """Test that multi-request Usage objects don't create request_usage_entries."""
     u1 = Usage()
     u2 = Usage(
         requests=3,  # Multiple requests
@@ -125,13 +125,13 @@ def test_usage_add_ignores_multi_request_usage():
 
     u1.add(u2)
 
-    # Should not create an individual request entry for multi-request usage
-    assert len(u1.individual_requests) == 0
+    # Should not create a request usage entry for multi-request usage
+    assert len(u1.request_usage_entries) == 0
 
 
-def test_usage_add_merges_existing_individual_requests():
-    """Test that existing individual_requests are merged when adding Usage objects."""
-    # Create first usage with individual requests
+def test_usage_add_merges_existing_request_usage_entries():
+    """Test that existing request_usage_entries are merged when adding Usage objects."""
+    # Create first usage with request_usage_entries
     u1 = Usage()
     u2 = Usage(
         requests=1,
@@ -143,7 +143,7 @@ def test_usage_add_merges_existing_individual_requests():
     )
     u1.add(u2)
 
-    # Create second usage with individual requests
+    # Create second usage with request_usage_entries
     u3 = Usage(
         requests=1,
         input_tokens=50,
@@ -155,27 +155,27 @@ def test_usage_add_merges_existing_individual_requests():
 
     u1.add(u3)
 
-    # Should have both individual requests
-    assert len(u1.individual_requests) == 2
+    # Should have both request_usage_entries
+    assert len(u1.request_usage_entries) == 2
 
     # First request
-    first = u1.individual_requests[0]
+    first = u1.request_usage_entries[0]
     assert first.input_tokens == 100
     assert first.output_tokens == 200
     assert first.total_tokens == 300
 
     # Second request
-    second = u1.individual_requests[1]
+    second = u1.request_usage_entries[1]
     assert second.input_tokens == 50
     assert second.output_tokens == 75
     assert second.total_tokens == 125
 
 
-def test_usage_add_with_pre_existing_individual_requests():
-    """Test adding Usage objects that already have individual_requests."""
+def test_usage_add_with_pre_existing_request_usage_entries():
+    """Test adding Usage objects that already have request_usage_entries."""
     u1 = Usage()
 
-    # Create a usage with individual requests
+    # Create a usage with request_usage_entries
     u2 = Usage(
         requests=1,
         input_tokens=100,
@@ -186,7 +186,7 @@ def test_usage_add_with_pre_existing_individual_requests():
     )
     u1.add(u2)
 
-    # Create another usage with individual requests
+    # Create another usage with request_usage_entries
     u3 = Usage(
         requests=1,
         input_tokens=50,
@@ -199,16 +199,16 @@ def test_usage_add_with_pre_existing_individual_requests():
     # Add u3 to u1
     u1.add(u3)
 
-    # Should have both individual requests
-    assert len(u1.individual_requests) == 2
-    assert u1.individual_requests[0].input_tokens == 100
-    assert u1.individual_requests[1].input_tokens == 50
+    # Should have both request_usage_entries
+    assert len(u1.request_usage_entries) == 2
+    assert u1.request_usage_entries[0].input_tokens == 100
+    assert u1.request_usage_entries[1].input_tokens == 50
 
 
-def test_usage_individual_requests_default_empty():
-    """Test that individual_requests defaults to an empty list."""
+def test_usage_request_usage_entries_default_empty():
+    """Test that request_usage_entries defaults to an empty list."""
     u = Usage()
-    assert u.individual_requests == []
+    assert u.request_usage_entries == []
 
 
 def test_anthropic_cost_calculation_scenario():
@@ -257,13 +257,13 @@ def test_anthropic_cost_calculation_scenario():
     assert usage.output_tokens == 165_000  # 50K + 75K + 40K
     assert usage.total_tokens == 495_000  # 150K + 225K + 120K
 
-    # Verify individual request preservation
-    assert len(usage.individual_requests) == 3
-    assert usage.individual_requests[0].input_tokens == 100_000
-    assert usage.individual_requests[1].input_tokens == 150_000
-    assert usage.individual_requests[2].input_tokens == 80_000
+    # Verify request_usage_entries preservation
+    assert len(usage.request_usage_entries) == 3
+    assert usage.request_usage_entries[0].input_tokens == 100_000
+    assert usage.request_usage_entries[1].input_tokens == 150_000
+    assert usage.request_usage_entries[2].input_tokens == 80_000
 
-    # All individual requests are under 200K threshold
-    for req in usage.individual_requests:
+     # All request_usage_entries are under 200K threshold
+    for req in usage.request_usage_entries:
         assert req.input_tokens < 200_000
         assert req.output_tokens < 200_000
