@@ -31,7 +31,7 @@ async def test_sip_model_uses_call_id_in_url(monkeypatch: pytest.MonkeyPatch) ->
     dummy_ws = _DummyWebSocket()
     captured: dict[str, object] = {}
 
-    async def fake_connect(url: str, **kwargs):  # type: ignore[override]
+    async def fake_connect(url: str, **kwargs):
         captured["url"] = url
         captured["kwargs"] = kwargs
         return dummy_ws

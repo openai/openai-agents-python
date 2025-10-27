@@ -937,7 +937,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
     """Realtime model that attaches to SIP-originated calls using a call ID."""
 
-    async def connect(self, options: RealtimeModelConfig) -> None:  # type: ignore[override]
+    async def connect(self, options: RealtimeModelConfig) -> None:
         call_id = options.get("call_id")
         if not call_id:
             raise UserError("OpenAIRealtimeSIPModel requires `call_id` in the model configuration.")

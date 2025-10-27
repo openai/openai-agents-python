@@ -10,6 +10,7 @@ import websockets
 from fastapi import FastAPI, HTTPException, Request, Response
 from openai import APIStatusError, AsyncOpenAI, InvalidWebhookSignatureError
 
+from agents.realtime.config import RealtimeSessionModelSettings
 from agents.realtime.items import (
     AssistantAudio,
     AssistantMessageItem,
@@ -89,9 +90,7 @@ async def accept_call(call_id: str) -> None:
             except Exception:  # noqa: BLE001
                 detail = str(exc.response)
 
-        logger.error(
-            "Failed to accept call %s: %s %s", call_id, exc.status_code, detail
-        )
+        logger.error("Failed to accept call %s: %s %s", call_id, exc.status_code, detail)
         raise HTTPException(status_code=500, detail="Failed to accept call") from exc
 
     logger.info("Accepted call %s", call_id)
@@ -103,17 +102,16 @@ async def observe_call(call_id: str) -> None:
     runner = RealtimeRunner(assistant_agent, model=OpenAIRealtimeSIPModel())
 
     try:
-        initial_settings = {
+        initial_model_settings: RealtimeSessionModelSettings = {
             "turn_detection": {
                 "type": "semantic_vad",
                 "interrupt_response": True,
             }
         }
-
         async with await runner.run(
             model_config={
                 "call_id": call_id,
-                "initial_model_settings": initial_settings,
+                "initial_model_settings": initial_model_settings,
             }
         ) as session:
             # Trigger an initial greeting so callers hear the agent right away.
@@ -124,12 +122,14 @@ async def observe_call(call_id: str) -> None:
                 RealtimeModelSendRawMessage(
                     message={
                         "type": "response.create",
-                        "response": {
-                            "instructions": (
-                                "Say exactly '"
-                                f"{WELCOME_MESSAGE}"
-                                "' now before continuing the conversation."
-                            )
+                        "other_data": {
+                            "response": {
+                                "instructions": (
+                                    "Say exactly '"
+                                    f"{WELCOME_MESSAGE}"
+                                    "' now before continuing the conversation."
+                                )
+                            }
                         },
                     }
                 )
@@ -139,15 +139,21 @@ async def observe_call(call_id: str) -> None:
                 if event.type == "history_added":
                     item = event.item
                     if isinstance(item, UserMessageItem):
-                        for content in item.content:
-                            if isinstance(content, InputText) and content.text:
-                                logger.info("Caller: %s", content.text)
+                        for user_content in item.content:
+                            if isinstance(user_content, InputText) and user_content.text:
+                                logger.info("Caller: %s", user_content.text)
                     elif isinstance(item, AssistantMessageItem):
-                        for content in item.content:
-                            if isinstance(content, AssistantText) and content.text:
-                                logger.info("Assistant (text): %s", content.text)
-                            elif isinstance(content, AssistantAudio) and content.transcript:
-                                logger.info("Assistant (audio transcript): %s", content.transcript)
+                        for assistant_content in item.content:
+                            if isinstance(assistant_content, AssistantText) and assistant_content.text:
+                                logger.info("Assistant (text): %s", assistant_content.text)
+                            elif (
+                                isinstance(assistant_content, AssistantAudio)
+                                and assistant_content.transcript
+                            ):
+                                logger.info(
+                                    "Assistant (audio transcript): %s",
+                                    assistant_content.transcript,
+                                )
                 elif event.type == "error":
                     logger.error("Realtime session error: %s", event.error)
 
