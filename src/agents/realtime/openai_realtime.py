@@ -208,7 +208,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         self._playback_tracker = options.get("playback_tracker", None)
 
-        self.model = model_settings.get("model_name", self.model)
+        call_id = options.get("call_id")
+        model_name = model_settings.get("model_name")
+        if call_id and model_name:
+            error_message = (
+                "Cannot specify both `call_id` and `model_name` "
+                "when attaching to an existing realtime call."
+            )
+            raise UserError(error_message)
+
+        if model_name:
+            self.model = model_name
+
         api_key = await get_api_key(options.get("api_key"))
 
         if "tracing" in model_settings:
@@ -216,7 +227,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             self._tracing_config = "auto"
 
-        call_id = options.get("call_id")
         if call_id:
             url = options.get("url", f"wss://api.openai.com/v1/realtime?call_id={call_id}")
         else:
