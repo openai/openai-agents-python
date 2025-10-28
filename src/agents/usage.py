@@ -6,11 +6,7 @@ from pydantic.dataclasses import dataclass
 
 @dataclass
 class RequestUsage:
-    """Usage details for a single API request.
-
-    This is useful for cost calculation when different pricing rates apply based on
-    per-request token counts (e.g., Anthropic's 200K token threshold pricing).
-    """
+    """Usage details for a single API request."""
 
     input_tokens: int
     """Input tokens for this individual request."""
@@ -52,12 +48,7 @@ class Usage:
     """Total tokens sent and received, across all requests."""
 
     request_usage_entries: list[RequestUsage] = field(default_factory=list)
-    """List of individual request usage details for accurate per-request cost calculation.
-
-    This field preserves the token counts for each individual API request made during a run.
-    This is particularly useful for providers like Anthropic that have different pricing
-    tiers based on per-request token counts (e.g., different rates for requests with more
-    or fewer than 200K tokens).
+    """List of RequestUsage entries for accurate per-request cost calculation.
 
     Each call to `add()` automatically creates an entry in this list if the added usage
     represents a new request (i.e., has non-zero tokens).
@@ -65,16 +56,14 @@ class Usage:
     Example:
         For a run that makes 3 API calls with 100K, 150K, and 80K input tokens each,
         the aggregated `input_tokens` would be 330K, but `request_usage_entries` would
-        preserve the [100K, 150K, 80K] breakdown needed for accurate cost calculation.
+        preserve the [100K, 150K, 80K] breakdown, which could be helpful for detailed
+        cost calculation or context window management.
     """
 
     def add(self, other: "Usage") -> None:
         """Add another Usage object to this one, aggregating all fields.
 
-        This method automatically preserves individual request details for accurate
-        cost calculation. When adding a Usage object that represents a single request
-        (requests=1), it creates an RequestUsage entry to preserve the
-        per-request token breakdown.
+        This method automatically preserves request_usage_entries.
 
         Args:
             other: The Usage object to add to this one.
@@ -93,7 +82,7 @@ class Usage:
             + other.output_tokens_details.reasoning_tokens
         )
 
-        # Automatically preserve individual request details for accurate cost calculation.
+        # Automatically preserve request_usage_entries.
         # If the other Usage represents a single request with tokens, record it.
         if other.requests == 1 and other.total_tokens > 0:
             individual_usage = RequestUsage(

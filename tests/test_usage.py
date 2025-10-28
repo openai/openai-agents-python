@@ -212,7 +212,7 @@ def test_usage_request_usage_entries_default_empty():
 
 
 def test_anthropic_cost_calculation_scenario():
-    """Test a realistic scenario for Anthropic cost calculation with 200K token thresholds."""
+    """Test a realistic scenario for Sonnet 4.5 cost calculation with 200K token thresholds."""
     # Simulate 3 API calls: 100K, 150K, and 80K input tokens each
     # None exceed 200K, so they should all use the lower pricing tier
 
