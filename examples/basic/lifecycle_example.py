@@ -1,6 +1,6 @@
 import asyncio
 import random
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from pydantic import BaseModel
 
@@ -15,6 +15,7 @@ from agents import (
     function_tool,
 )
 from agents.items import ModelResponse, TResponseInputItem
+from agents.tool_context import ToolContext
 
 
 class LoggingHooks(AgentHooks[Any]):
@@ -71,16 +72,22 @@ class ExampleHooks(RunHooks):
 
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} started. name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
+            f"### {self.event_counter}: Tool {tool.name} started. name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_tool_end(
         self, context: RunContextWrapper, agent: Agent, tool: Tool, result: str
     ) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={context.tool_name}, call_id={context.tool_call_id}, args={context.tool_arguments}. Usage: {self._usage_to_str(context.usage)}"  # type: ignore[attr-defined]
+            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_handoff(
