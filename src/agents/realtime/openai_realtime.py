@@ -629,8 +629,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
-            # Avoid sending conversation.item.truncate here; when GA is set to
-            # interrupt on VAD start, the server will handle truncation.
+            # Avoid sending conversation.item.truncate here. When the session's
+            # turn_detection.interrupt_response is enabled (GA default), the server emits
+            # conversation.item.truncated after the VAD start and takes care of history updates.
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
