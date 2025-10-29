@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Generator
+from typing import Any
 
 import pytest
 
@@ -72,3 +73,48 @@ def test_run_sync_errors_when_loop_already_running(monkeypatch, fresh_event_loop
             runner.run_sync(Agent(name="test-agent"), "input")
 
     asyncio.run(invoke())
+
+
+def test_run_sync_cancels_task_when_interrupted(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+
+    async def fake_run(self, *_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    test_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(test_loop)
+
+    created_tasks: list[asyncio.Task[Any]] = []
+    original_create_task = test_loop.create_task
+
+    def capturing_create_task(coro):
+        task = original_create_task(coro)
+        created_tasks.append(task)
+        return task
+
+    original_run_until_complete = test_loop.run_until_complete
+    call_count = {"value": 0}
+
+    def interrupt_once(future):
+        call_count["value"] += 1
+        if call_count["value"] == 1:
+            raise KeyboardInterrupt()
+        return original_run_until_complete(future)
+
+    monkeypatch.setattr(test_loop, "create_task", capturing_create_task)
+    monkeypatch.setattr(test_loop, "run_until_complete", interrupt_once)
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner.run_sync(Agent(name="test-agent"), "input")
+
+        assert created_tasks, "Expected run_sync to schedule a task."
+        assert created_tasks[0].done()
+        assert created_tasks[0].cancelled()
+        assert call_count["value"] >= 2
+    finally:
+        monkeypatch.undo()
+        fresh_event_loop_policy.set_event_loop(None)
+        test_loop.close()

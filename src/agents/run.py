@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import os
 import warnings
@@ -751,7 +752,7 @@ class AgentRunner:
         # We intentionally leave the default loop open even if we had to create one above. Session
         # instances and other helpers stash loop-bound primitives between calls and expect to find
         # the same default loop every time run_sync is invoked on this thread.
-        return default_loop.run_until_complete(
+        task = default_loop.create_task(
             self.run(
                 starting_agent,
                 input,
@@ -764,6 +765,15 @@ class AgentRunner:
                 conversation_id=conversation_id,
             )
         )
+
+        try:
+            return default_loop.run_until_complete(task)
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    default_loop.run_until_complete(task)
+            raise
 
     def run_streamed(
         self,
