@@ -173,8 +173,15 @@ async def observe_call(call_id: str) -> None:
 
 def _track_call_task(call_id: str) -> None:
     existing = active_call_tasks.get(call_id)
-    if existing and not existing.done():
-        existing.cancel()
+    if existing:
+        if not existing.done():
+            logger.info(
+                "Call %s already has an active observer; ignoring duplicate webhook delivery.",
+                call_id,
+            )
+            return
+        # Remove completed tasks so a new observer can start for a fresh call.
+        active_call_tasks.pop(call_id, None)
 
     task = asyncio.create_task(observe_call(call_id))
     active_call_tasks[call_id] = task
