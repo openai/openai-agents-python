@@ -118,3 +118,31 @@ def test_run_sync_cancels_task_when_interrupted(monkeypatch, fresh_event_loop_po
         monkeypatch.undo()
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()
+
+
+def test_run_sync_finalizes_async_generators(monkeypatch, fresh_event_loop_policy):
+    runner = AgentRunner()
+    cleanup_markers: list[str] = []
+
+    async def fake_run(self, *_args, **_kwargs):
+        async def agen():
+            try:
+                yield None
+            finally:
+                cleanup_markers.append("done")
+
+        gen = agen()
+        await gen.__anext__()
+        return "ok"
+
+    monkeypatch.setattr(AgentRunner, "run", fake_run, raising=False)
+
+    test_loop = asyncio.new_event_loop()
+    fresh_event_loop_policy.set_event_loop(test_loop)
+
+    try:
+        runner.run_sync(Agent(name="test-agent"), "input")
+        assert cleanup_markers == ["done"], "Async generators must be finalized after run_sync returns."
+    finally:
+        fresh_event_loop_policy.set_event_loop(None)
+        test_loop.close()

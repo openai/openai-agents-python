@@ -736,6 +736,8 @@ class AgentRunner:
 
         if already_running_loop is not None:
             # This method is only expected to run when no loop is already active.
+            # (Each thread has its own default loop; concurrent sync runs should happen on
+            # different threads. In a single thread use the async API to interleave work.)
             raise RuntimeError(
                 "AgentRunner.run_sync() cannot be called when an event loop is already running."
             )
@@ -752,6 +754,7 @@ class AgentRunner:
         # We intentionally leave the default loop open even if we had to create one above. Session
         # instances and other helpers stash loop-bound primitives between calls and expect to find
         # the same default loop every time run_sync is invoked on this thread.
+        # Schedule the async run on the default loop so that we can manage cancellation explicitly.
         task = default_loop.create_task(
             self.run(
                 starting_agent,
@@ -767,13 +770,22 @@ class AgentRunner:
         )
 
         try:
+            # Drive the coroutine to completion, harvesting the final RunResult.
             return default_loop.run_until_complete(task)
         except BaseException:
+            # If the sync caller aborts (KeyboardInterrupt, etc.), make sure the scheduled task
+            # does not linger on the shared loop by cancelling it and waiting for completion.
             if not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     default_loop.run_until_complete(task)
             raise
+        finally:
+            if not default_loop.is_closed():
+                # The loop stays open for subsequent runs, but we still need to flush any pending
+                # async generators so their cleanup code executes promptly.
+                with contextlib.suppress(RuntimeError):
+                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
     def run_streamed(
         self,
