@@ -142,9 +142,9 @@ def test_run_sync_finalizes_async_generators(monkeypatch, fresh_event_loop_polic
 
     try:
         runner.run_sync(Agent(name="test-agent"), "input")
-        assert cleanup_markers == [
-            "done"
-        ], "Async generators must be finalized after run_sync returns."
+        assert cleanup_markers == ["done"], (
+            "Async generators must be finalized after run_sync returns."
+        )
     finally:
         fresh_event_loop_policy.set_event_loop(None)
         test_loop.close()
