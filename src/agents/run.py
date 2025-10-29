@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, cast, get_args
 
@@ -720,19 +721,37 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        # Python 3.14 no longer creates a default loop implicitly, so we inspect the running loop.
+        # Python 3.14 stopped implicitly wiring up a default event loop
+        # when synchronous code touches asyncio APIs for the first time.
+        # Several of our synchronous entry points (for example the Redis/SQLAlchemy session helpers)
+        # construct asyncio primitives like asyncio.Lock during __init__,
+        # which binds them to whatever loop happens to be the thread's default at that moment.
+        # To keep those locks usable we must ensure that run_sync reuses that same default loop
+        # instead of hopping over to a brand-new asyncio.run() loop.
         try:
-            loop = asyncio.get_running_loop()
+            already_running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = None
+            already_running_loop = None
 
-        if loop is not None:
+        if already_running_loop is not None:
             # This method is only expected to run when no loop is already active.
             raise RuntimeError(
                 "AgentRunner.run_sync() cannot be called when an event loop is already running."
             )
 
-        return asyncio.run(
+        policy = asyncio.get_event_loop_policy()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                default_loop = policy.get_event_loop()
+            except RuntimeError:
+                default_loop = policy.new_event_loop()
+                policy.set_event_loop(default_loop)
+
+        # We intentionally leave the default loop open even if we had to create one above. Session
+        # instances and other helpers stash loop-bound primitives between calls and expect to find
+        # the same default loop every time run_sync is invoked on this thread.
+        return default_loop.run_until_complete(
             self.run(
                 starting_agent,
                 input,
