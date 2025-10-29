@@ -2076,8 +2076,7 @@ dev = [
     { name = "rich" },
     { name = "ruff" },
     { name = "sounddevice" },
-    { name = "testcontainers", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["redis"], marker = "python_full_version < '3.9.2'" },
-    { name = "testcontainers", version = "4.13.2", source = { registry = "https://pypi.org/simple" }, extra = ["redis"], marker = "python_full_version >= '3.9.2'" },
+    { name = "testcontainers" },
     { name = "textual" },
     { name = "types-pynput" },
     { name = "websockets" },
@@ -2132,7 +2131,7 @@ dev = [
     { name = "rich", specifier = ">=13.1.0,<14" },
     { name = "ruff", specifier = "==0.9.2" },
     { name = "sounddevice" },
-    { name = "testcontainers", extras = ["redis"], specifier = ">=4.0.0" },
+    { name = "testcontainers", specifier = "==4.12.0" },
     { name = "textual" },
     { name = "types-pynput" },
     { name = "websockets" },
@@ -3253,52 +3252,18 @@ wheels = [
 
 [[package]]
 name = "testcontainers"
-version = "4.13.0"
+version = "4.12.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version < '3.9.2'",
-]
 dependencies = [
-    { name = "docker", marker = "python_full_version < '3.9.2'" },
-    { name = "python-dotenv", marker = "python_full_version < '3.9.2'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.9.2'" },
-    { name = "urllib3", marker = "python_full_version < '3.9.2'" },
-    { name = "wrapt", marker = "python_full_version < '3.9.2'" },
+    { name = "docker" },
+    { name = "python-dotenv" },
+    { name = "typing-extensions" },
+    { name = "urllib3" },
+    { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/e5/807161552b8bf7072d63a21d5fd3c7df54e29420e325d50b9001571fcbb6/testcontainers-4.13.0.tar.gz", hash = "sha256:ee2bc39324eeeeb710be779208ae070c8373fa9058861859203f536844b0f412", size = 77824 }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/62/01d9f648e9b943175e0dcddf749cf31c769665d8ba08df1e989427163f33/testcontainers-4.12.0.tar.gz", hash = "sha256:13ee89cae995e643f225665aad8b200b25c4f219944a6f9c0b03249ec3f31b8d", size = 66631 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/a2/ec749772b9d0fcc659b1722858f463a9cbfc7e29aca374123fb87e87fc1d/testcontainers-4.13.0-py3-none-any.whl", hash = "sha256:784292e0a3f3a4588fbbf5d6649adda81fea5fd61ad3dc73f50a7a903904aade", size = 123838 },
-]
-
-[package.optional-dependencies]
-redis = [
-    { name = "redis", marker = "python_full_version < '3.9.2'" },
-]
-
-[[package]]
-name = "testcontainers"
-version = "4.13.2"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.11'",
-    "python_full_version == '3.10.*'",
-    "python_full_version >= '3.9.2' and python_full_version < '3.10'",
-]
-dependencies = [
-    { name = "docker", marker = "python_full_version >= '3.9.2'" },
-    { name = "python-dotenv", marker = "python_full_version >= '3.9.2'" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.9.2'" },
-    { name = "urllib3", marker = "python_full_version >= '3.9.2'" },
-    { name = "wrapt", marker = "python_full_version >= '3.9.2'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/18/51/edac83edab339d8b4dce9a7b659163afb1ea7e011bfed1d5573d495a4485/testcontainers-4.13.2.tar.gz", hash = "sha256:2315f1e21b059427a9d11e8921f85fef322fbe0d50749bcca4eaa11271708ba4", size = 78692 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/5e/73aa94770f1df0595364aed526f31d54440db5492911e2857318ed326e51/testcontainers-4.13.2-py3-none-any.whl", hash = "sha256:0209baf8f4274b568cde95bef2cadf7b1d33b375321f793790462e235cd684ee", size = 124771 },
-]
-
-[package.optional-dependencies]
-redis = [
-    { name = "redis", marker = "python_full_version >= '3.9.2'" },
+    { url = "https://files.pythonhosted.org/packages/b2/e8/9e2c392e5d671afda47b917597cac8fde6a452f5776c4c9ceb93fbd2889f/testcontainers-4.12.0-py3-none-any.whl", hash = "sha256:26caef57e642d5e8c5fcc593881cf7df3ab0f0dc9170fad22765b184e226ab15", size = 111791 },
 ]
 
 [[package]]

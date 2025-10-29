@@ -26,6 +26,8 @@ class FakeDaprClient:
 
     def __init__(self):
         self._state: dict[str, bytes] = {}
+        self._etags: dict[str, str] = {}
+        self._etag_counter = 0
         self._closed = False
 
     async def get_state(
@@ -38,6 +40,7 @@ class FakeDaprClient:
         """Get state from in-memory store."""
         response = Mock()
         response.data = self._state.get(key, b"")
+        response.etag = self._etags.get(key)
         return response
 
     async def save_state(
@@ -47,12 +50,31 @@ class FakeDaprClient:
         value: str | bytes,
         state_metadata: dict[str, str] | None = None,
         options: Any = None,
+        etag: str | None = None,
     ) -> None:
         """Save state to in-memory store."""
+        concurrency = getattr(options, "concurrency", None)
+        current_etag = self._etags.get(key)
+
+        expects_match = False
+        if concurrency is not None:
+            concurrency_name = getattr(concurrency, "name", str(concurrency))
+            expects_match = concurrency_name == "first_write"
+
+        if expects_match:
+            if current_etag is None:
+                if etag not in (None, ""):
+                    raise RuntimeError("etag mismatch: key does not exist")
+            elif etag != current_etag:
+                raise RuntimeError("etag mismatch: stale data")
+
         if isinstance(value, str):
             self._state[key] = value.encode("utf-8")
         else:
             self._state[key] = value
+
+        self._etag_counter += 1
+        self._etags[key] = str(self._etag_counter)
 
     async def delete_state(
         self,
@@ -64,6 +86,7 @@ class FakeDaprClient:
         """Delete state from in-memory store."""
         if key in self._state:
             del self._state[key]
+            self._etags.pop(key, None)
 
     async def close(self) -> None:
         """Mark client as closed."""
@@ -74,6 +97,70 @@ class FakeDaprClient:
 def fake_dapr_client() -> FakeDaprClient:
     """Fixture for fake Dapr client."""
     return FakeDaprClient()
+
+
+class ConflictFakeDaprClient(FakeDaprClient):
+    """Fake client that simulates optimistic concurrency conflicts once per key."""
+
+    def __init__(self):
+        super().__init__()
+        self._conflicted_keys: set[str] = set()
+
+    def _simulate_concurrent_update(self, key: str) -> None:
+        raw_payload = self._state.get(key, b"[]")
+        try:
+            decoded = json.loads(raw_payload.decode("utf-8"))
+            if not isinstance(decoded, list):
+                decoded = []
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            decoded = []
+
+        competitor_item = json.dumps(
+            {"role": "assistant", "content": "from-concurrent-writer"},
+            separators=(",", ":"),
+        )
+        decoded.append(competitor_item)
+        self._state[key] = json.dumps(decoded, separators=(",", ":")).encode("utf-8")
+        self._etag_counter += 1
+        self._etags[key] = str(self._etag_counter)
+
+    async def save_state(
+        self,
+        store_name: str,
+        key: str,
+        value: str | bytes,
+        state_metadata: dict[str, str] | None = None,
+        options: Any = None,
+        etag: str | None = None,
+    ) -> None:
+        concurrency = getattr(options, "concurrency", None)
+        concurrency_name = getattr(concurrency, "name", str(concurrency))
+        current_etag = self._etags.get(key)
+
+        if (
+            concurrency_name == "first_write"
+            and key.endswith(":messages")
+            and current_etag is not None
+            and key not in self._conflicted_keys
+        ):
+            self._conflicted_keys.add(key)
+            self._simulate_concurrent_update(key)
+            raise RuntimeError("etag mismatch: concurrent writer")
+
+        await super().save_state(
+            store_name=store_name,
+            key=key,
+            value=value,
+            state_metadata=state_metadata,
+            options=options,
+            etag=etag,
+        )
+
+
+@pytest.fixture
+def conflict_dapr_client() -> ConflictFakeDaprClient:
+    """Fixture for fake client that forces concurrency conflicts."""
+    return ConflictFakeDaprClient()
 
 
 @pytest.fixture
@@ -210,6 +297,53 @@ async def test_session_isolation(fake_dapr_client: FakeDaprClient):
             pass  # Ignore cleanup errors
         await session1.close()
         await session2.close()
+
+
+async def test_add_items_retries_on_concurrency(conflict_dapr_client: ConflictFakeDaprClient):
+    """Ensure add_items retries after a simulated optimistic concurrency failure."""
+    session = await _create_test_session(conflict_dapr_client, "concurrency_add")
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "seed"},
+            ]
+        )
+
+        await session.add_items(
+            [
+                {"role": "assistant", "content": "new message"},
+            ]
+        )
+
+        contents = [item.get("content") for item in await session.get_items()]
+        assert contents == ["seed", "from-concurrent-writer", "new message"]
+        assert session._messages_key in conflict_dapr_client._conflicted_keys
+    finally:
+        await session.close()
+
+
+async def test_pop_item_retries_on_concurrency(conflict_dapr_client: ConflictFakeDaprClient):
+    """Ensure pop_item retries after a simulated optimistic concurrency failure."""
+    session = await _create_test_session(conflict_dapr_client, "concurrency_pop")
+
+    try:
+        await session.add_items(
+            [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"},
+            ]
+        )
+
+        popped = await session.pop_item()
+        assert popped is not None
+        assert popped.get("content") == "from-concurrent-writer"
+
+        contents = [item.get("content") for item in await session.get_items()]
+        assert contents == ["first", "second"]
+        assert session._messages_key in conflict_dapr_client._conflicted_keys
+    finally:
+        await session.close()
 
 
 async def test_get_items_with_limit(fake_dapr_client: FakeDaprClient):

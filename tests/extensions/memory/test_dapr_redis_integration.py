@@ -9,11 +9,11 @@ Run with: pytest tests/extensions/memory/test_dapr_redis_integration.py -v
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import time
 import urllib.request
-from urllib.error import URLError
 
 import pytest
 
@@ -23,7 +23,7 @@ pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
 
 from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
 from testcontainers.core.network import Network  # type: ignore[import-untyped]
-from testcontainers.redis import RedisContainer  # type: ignore[import-untyped]
+from testcontainers.core.waiting_utils import wait_for_logs  # type: ignore[import-untyped]
 
 from agents import Agent, Runner, TResponseInputItem
 from agents.extensions.memory import (
@@ -59,11 +59,8 @@ def wait_for_dapr_health(host: str, port: int, timeout: int = 60) -> bool:
                 if 200 <= response.status < 300:
                     print(f"✓ Dapr health check passed on {health_url}")
                     return True
-        except URLError:
-            # Connection refused or other error - Dapr not ready yet
+        except Exception:
             pass
-        except Exception as e:
-            print(f"Unexpected error checking Dapr health: {e}")
 
         time.sleep(1)
 
@@ -81,16 +78,18 @@ def docker_network():
 @pytest.fixture(scope="module")
 def redis_container(docker_network):
     """Start Redis container on the shared network."""
-    container = RedisContainer("redis:7-alpine")
-    container = container.with_network(docker_network)
-    container = container.with_network_aliases("redis")  # Important: named alias
+    container = (
+        DockerContainer("redis:7-alpine")
+        .with_network(docker_network)
+        .with_network_aliases("redis")
+        .with_exposed_ports(6379)
+    )
     container.start()
-
-    # Wait for Redis to be ready
-    time.sleep(2)
-
-    yield container
-    container.stop()
+    wait_for_logs(container, "Ready to accept connections", timeout=30)
+    try:
+        yield container
+    finally:
+        container.stop()
 
 
 @pytest.fixture(scope="module")
@@ -459,3 +458,81 @@ async def test_dapr_unicode_and_special_chars(dapr_container, monkeypatch):
     finally:
         await session.clear_session()
         await session.close()
+
+
+async def test_dapr_concurrent_writes_resolution(dapr_container, monkeypatch):
+    """
+    Concurrent writes from multiple session instances should resolve via
+    optimistic concurrency.
+    """
+    from dapr.clients.health import DaprHealth
+
+    monkeypatch.setattr(DaprHealth, "wait_until_ready", lambda: None)
+
+    dapr_host = dapr_container.get_container_host_ip()
+    dapr_port = dapr_container.get_exposed_port(50001)
+    dapr_address = f"{dapr_host}:{dapr_port}"
+
+    # Use two different session objects pointing to the same logical session_id
+    # to create real contention.
+    session_id = "concurrent_integration_session"
+    s1 = DaprSession.from_address(
+        session_id=session_id,
+        state_store_name="statestore",
+        dapr_address=dapr_address,
+    )
+    s2 = DaprSession.from_address(
+        session_id=session_id,
+        state_store_name="statestore",
+        dapr_address=dapr_address,
+    )
+
+    try:
+        # Clean slate.
+        await s1.clear_session()
+
+        # Fire multiple parallel add_items calls from two different session instances.
+        tasks: list[asyncio.Task[None]] = []
+        for i in range(10):
+            tasks.append(
+                asyncio.create_task(
+                    s1.add_items(
+                        [
+                            {"role": "user", "content": f"A-{i}"},
+                        ]
+                    )
+                )
+            )
+            tasks.append(
+                asyncio.create_task(
+                    s2.add_items(
+                        [
+                            {"role": "assistant", "content": f"B-{i}"},
+                        ]
+                    )
+                )
+            )
+
+        await asyncio.gather(*tasks)
+
+        # Validate all messages were persisted.
+        # Use a fresh session object for readback to avoid any local caching
+        # (none expected, but explicit).
+        s_read = DaprSession.from_address(
+            session_id=session_id,
+            state_store_name="statestore",
+            dapr_address=dapr_address,
+        )
+        try:
+            items = await s_read.get_items()
+            contents = [item.get("content") for item in items]
+            # We expect 20 total messages: A-0..9 and B-0..9 (order unspecified).
+            assert len(contents) == 20
+            for i in range(10):
+                assert f"A-{i}" in contents
+                assert f"B-{i}" in contents
+        finally:
+            await s_read.close()
+    finally:
+        await s1.close()
+        await s2.close()

@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import time
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 try:
     from dapr.aio.clients import DaprClient
-    from dapr.clients.grpc._state import Consistency, StateOptions
+    from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
 except ImportError as e:
     raise ImportError(
         "DaprSession requires the 'dapr' package. Install it with: pip install dapr"
@@ -46,6 +47,10 @@ ConsistencyLevel = Literal["eventual", "strong"]
 # Consistency level constants
 DAPR_CONSISTENCY_EVENTUAL: ConsistencyLevel = "eventual"
 DAPR_CONSISTENCY_STRONG: ConsistencyLevel = "strong"
+
+_MAX_WRITE_ATTEMPTS: Final[int] = 5
+_RETRY_BASE_DELAY_SECONDS: Final[float] = 0.05
+_RETRY_MAX_DELAY_SECONDS: Final[float] = 1.0
 
 
 class DaprSession(SessionABC):
@@ -130,12 +135,17 @@ class DaprSession(SessionABC):
             metadata["consistency"] = self._consistency
         return metadata
 
-    def _get_state_options(self) -> StateOptions | None:
-        """Get StateOptions for write/delete consistency level."""
+    def _get_state_options(self, *, concurrency: Concurrency | None = None) -> StateOptions | None:
+        """Get StateOptions configured with consistency and optional concurrency."""
+        options_kwargs: dict[str, Any] = {}
         if self._consistency == DAPR_CONSISTENCY_STRONG:
-            return StateOptions(consistency=Consistency.strong)
+            options_kwargs["consistency"] = Consistency.strong
         elif self._consistency == DAPR_CONSISTENCY_EVENTUAL:
-            return StateOptions(consistency=Consistency.eventual)
+            options_kwargs["consistency"] = Consistency.eventual
+        if concurrency is not None:
+            options_kwargs["concurrency"] = concurrency
+        if options_kwargs:
+            return StateOptions(**options_kwargs)
         return None
 
     def _get_metadata(self) -> dict[str, str]:
@@ -152,6 +162,57 @@ class DaprSession(SessionABC):
     async def _deserialize_item(self, item: str) -> TResponseInputItem:
         """Deserialize a JSON string to an item. Can be overridden by subclasses."""
         return json.loads(item)  # type: ignore[no-any-return]
+
+    def _decode_messages(self, data: bytes | None) -> list[Any]:
+        if not data:
+            return []
+        try:
+            messages_json = data.decode("utf-8")
+            messages = json.loads(messages_json)
+            if isinstance(messages, list):
+                return list(messages)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return []
+        return []
+
+    def _calculate_retry_delay(self, attempt: int) -> float:
+        base: float = _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
+        delay: float = min(base, _RETRY_MAX_DELAY_SECONDS)
+        # Add jitter (10%) similar to tracing processors to avoid thundering herd.
+        return delay + random.uniform(0, 0.1 * delay)
+
+    def _is_concurrency_conflict(self, error: Exception) -> bool:
+        code_attr = getattr(error, "code", None)
+        if callable(code_attr):
+            try:
+                status_code = code_attr()
+            except Exception:
+                status_code = None
+            if status_code is not None:
+                status_name = getattr(status_code, "name", str(status_code))
+                if status_name in {"ABORTED", "FAILED_PRECONDITION"}:
+                    return True
+        message = str(error).lower()
+        conflict_markers = (
+            "etag mismatch",
+            "etag does not match",
+            "precondition failed",
+            "concurrency conflict",
+            "invalid etag",
+            "failed to set key",  # Redis state store Lua script error during conditional write
+            "user_script",  # Redis script failure hint
+        )
+        return any(marker in message for marker in conflict_markers)
+
+    async def _handle_concurrency_conflict(self, error: Exception, attempt: int) -> bool:
+        if not self._is_concurrency_conflict(error):
+            return False
+        if attempt >= _MAX_WRITE_ATTEMPTS:
+            return False
+        delay = self._calculate_retry_delay(attempt)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return True
 
     # ------------------------------------------------------------------
     # Session protocol implementation
@@ -175,41 +236,24 @@ class DaprSession(SessionABC):
                 state_metadata=self._get_read_metadata(),
             )
 
-            if not response.data:
+            messages = self._decode_messages(response.data)
+            if not messages:
                 return []
-
-            try:
-                # Parse the messages list from JSON
-                messages_json = response.data.decode("utf-8")
-                messages = json.loads(messages_json)
-
-                if not isinstance(messages, list):
+            if limit is not None:
+                if limit <= 0:
                     return []
-
-                # Apply limit if specified
-                if limit is not None:
-                    if limit <= 0:
-                        return []
-                    # Return the latest N items
-                    messages = messages[-limit:]
-
-                items: list[TResponseInputItem] = []
-                for msg in messages:
-                    try:
-                        if isinstance(msg, str):
-                            item = await self._deserialize_item(msg)
-                        else:
-                            item = msg  # Already deserialized
-                        items.append(item)
-                    except (json.JSONDecodeError, TypeError):
-                        # Skip corrupted messages
-                        continue
-
-                return items
-
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # Return empty list for corrupted data
-                return []
+                messages = messages[-limit:]
+            items: list[TResponseInputItem] = []
+            for msg in messages:
+                try:
+                    if isinstance(msg, str):
+                        item = await self._deserialize_item(msg)
+                    else:
+                        item = msg
+                    items.append(item)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            return items
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Add new items to the conversation history.
@@ -221,38 +265,34 @@ class DaprSession(SessionABC):
             return
 
         async with self._lock:
-            # Get existing messages with consistency level
-            response = await self._dapr_client.get_state(
-                store_name=self._state_store_name,
-                key=self._messages_key,
-                state_metadata=self._get_read_metadata(),
-            )
-
-            # Parse existing messages
-            existing_messages = []
-            if response.data:
+            serialized_items: list[str] = [await self._serialize_item(item) for item in items]
+            attempt = 0
+            while True:
+                attempt += 1
+                response = await self._dapr_client.get_state(
+                    store_name=self._state_store_name,
+                    key=self._messages_key,
+                    state_metadata=self._get_read_metadata(),
+                )
+                existing_messages = self._decode_messages(response.data)
+                updated_messages = existing_messages + serialized_items
+                messages_json = json.dumps(updated_messages, separators=(",", ":"))
+                etag = response.etag
                 try:
-                    messages_json = response.data.decode("utf-8")
-                    existing_messages = json.loads(messages_json)
-                    if not isinstance(existing_messages, list):
-                        existing_messages = []
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    existing_messages = []
-
-            # Serialize and append new items
-            for item in items:
-                serialized = await self._serialize_item(item)
-                existing_messages.append(serialized)
-
-            # Save updated messages list
-            messages_json = json.dumps(existing_messages, separators=(",", ":"))
-            await self._dapr_client.save_state(
-                store_name=self._state_store_name,
-                key=self._messages_key,
-                value=messages_json,
-                state_metadata=self._get_metadata(),
-                options=self._get_state_options(),
-            )
+                    await self._dapr_client.save_state(
+                        store_name=self._state_store_name,
+                        key=self._messages_key,
+                        value=messages_json,
+                        etag=etag,
+                        state_metadata=self._get_metadata(),
+                        options=self._get_state_options(concurrency=Concurrency.first_write),
+                    )
+                    break
+                except Exception as error:
+                    should_retry = await self._handle_concurrency_conflict(error, attempt)
+                    if should_retry:
+                        continue
+                    raise
 
             # Update metadata
             metadata = {
@@ -275,45 +315,41 @@ class DaprSession(SessionABC):
             The most recent item if it exists, None if the session is empty
         """
         async with self._lock:
-            # Get messages from state store with consistency level
-            response = await self._dapr_client.get_state(
-                store_name=self._state_store_name,
-                key=self._messages_key,
-                state_metadata=self._get_read_metadata(),
-            )
-
-            if not response.data:
-                return None
-
-            try:
-                # Parse the messages list
-                messages_json = response.data.decode("utf-8")
-                messages = json.loads(messages_json)
-
-                if not isinstance(messages, list) or len(messages) == 0:
-                    return None
-
-                # Pop the last item
-                last_item = messages.pop()
-
-                # Save updated messages list
-                messages_json = json.dumps(messages, separators=(",", ":"))
-                await self._dapr_client.save_state(
+            attempt = 0
+            while True:
+                attempt += 1
+                response = await self._dapr_client.get_state(
                     store_name=self._state_store_name,
                     key=self._messages_key,
-                    value=messages_json,
-                    state_metadata=self._get_metadata(),
-                    options=self._get_state_options(),
+                    state_metadata=self._get_read_metadata(),
                 )
-
-                # Deserialize and return the item
+                messages = self._decode_messages(response.data)
+                if not messages:
+                    return None
+                last_item = messages.pop()
+                messages_json = json.dumps(messages, separators=(",", ":"))
+                etag = getattr(response, "etag", None) or None
+                etag = getattr(response, "etag", None) or None
+                try:
+                    await self._dapr_client.save_state(
+                        store_name=self._state_store_name,
+                        key=self._messages_key,
+                        value=messages_json,
+                        etag=etag,
+                        state_metadata=self._get_metadata(),
+                        options=self._get_state_options(concurrency=Concurrency.first_write),
+                    )
+                    break
+                except Exception as error:
+                    should_retry = await self._handle_concurrency_conflict(error, attempt)
+                    if should_retry:
+                        continue
+                    raise
+            try:
                 if isinstance(last_item, str):
                     return await self._deserialize_item(last_item)
-                else:
-                    return last_item  # type: ignore[no-any-return]
-
-            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
-                # Return None for corrupted data
+                return last_item  # type: ignore[no-any-return]
+            except (json.JSONDecodeError, TypeError):
                 return None
 
     async def clear_session(self) -> None:

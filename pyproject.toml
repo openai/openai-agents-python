@@ -72,7 +72,7 @@ dev = [
     "fakeredis>=2.31.3",
     "dapr>=1.14.0",
     "grpcio>=1.60.0",
-    "testcontainers[redis]>=4.0.0",
+    "testcontainers==4.12.0", # pinned to 4.12.0 because 4.13.0 has a warning bug in wait_for_logs, see https://github.com/testcontainers/testcontainers-python/issues/874
 ]
 
 [tool.uv.workspace]
