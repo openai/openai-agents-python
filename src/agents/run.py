@@ -720,7 +720,19 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        return asyncio.get_event_loop().run_until_complete(
+        # Python 3.14 no longer creates a default loop implicitly, so we inspect the running loop.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            # This method is only expected to run when no loop is already active.
+            raise RuntimeError(
+                "AgentRunner.run_sync() cannot be called when an event loop is already running."
+            )
+
+        return asyncio.run(
             self.run(
                 starting_agent,
                 input,
