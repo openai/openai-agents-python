@@ -3,6 +3,7 @@ from collections.abc import Generator
 
 import pytest
 
+from agents.agent import Agent
 from agents.run import AgentRunner
 
 
@@ -31,7 +32,7 @@ def test_run_sync_reuses_existing_default_loop(monkeypatch, fresh_event_loop_pol
     fresh_event_loop_policy.set_event_loop(test_loop)
 
     try:
-        runner.run_sync(object(), "input")
+        runner.run_sync(Agent(name="test-agent"), "input")
         assert observed_loops and observed_loops[0] is test_loop
     finally:
         fresh_event_loop_policy.set_event_loop(None)
@@ -50,7 +51,7 @@ def test_run_sync_creates_default_loop_when_missing(monkeypatch, fresh_event_loo
 
     fresh_event_loop_policy.set_event_loop(None)
 
-    runner.run_sync(object(), "input")
+    runner.run_sync(Agent(name="test-agent"), "input")
     created_loop = observed_loops[0]
     assert created_loop is fresh_event_loop_policy.get_event_loop()
 
@@ -68,6 +69,6 @@ def test_run_sync_errors_when_loop_already_running(monkeypatch, fresh_event_loop
 
     async def invoke():
         with pytest.raises(RuntimeError):
-            runner.run_sync(object(), "input")
+            runner.run_sync(Agent(name="test-agent"), "input")
 
     asyncio.run(invoke())
