@@ -299,9 +299,12 @@ class OpenAIResponsesModel(Model):
             if response_format is not omit:
                 response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
             else:
-                # When no output_schema is present, text needs an explicit format key.
-                # Use the plain text format with verbosity to produce a valid `text` payload.
-                response_format = {"format": "text", "verbosity": model_settings.verbosity}
+                # When no output_schema is present, `text` needs an explicit format object.
+                # Use the plain text format object with verbosity to produce a valid `text` payload.
+                response_format = {
+                    "format": {"type": "text"},
+                    "verbosity": model_settings.verbosity,
+                }
 
         stream_param: Literal[True] | Omit = True if stream else omit
 
