@@ -1541,6 +1541,7 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            event_queue=event_queue,
         )
 
     @classmethod

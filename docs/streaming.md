@@ -85,3 +85,63 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## Tool output streaming events
+
+[`ToolOutputStreamEvent`][agents.stream_events.ToolOutputStreamEvent] allows you to receive incremental output from tools as they execute. This is useful for long-running tools where you want to show progress to the user in real-time.
+
+To create a streaming tool, define an async generator function that yields string chunks:
+
+```python
+import asyncio
+from collections.abc import AsyncIterator
+from agents import Agent, Runner, ToolOutputStreamEvent, function_tool
+
+@function_tool
+async def search_documents(query: str) -> AsyncIterator[str]:
+    """Search through documents and stream results as they are found."""
+    documents = [
+        f"Document 1 contains information about {query}...\n",
+        f"Document 2 has additional details on {query}...\n",
+        f"Document 3 provides analysis of {query}...\n",
+    ]
+    
+    for doc in documents:
+        # Simulate processing time
+        await asyncio.sleep(0.5)
+        # Yield incremental results
+        yield doc
+
+
+async def main():
+    agent = Agent(
+        name="Research Assistant",
+        instructions="You help users search for information.",
+        tools=[search_documents],
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="Search for information about AI",
+    )
+
+    async for event in result.stream_events():
+        # Handle tool streaming events
+        if event.type == "tool_output_stream_event":
+            print(f"[{event.tool_name}] {event.delta}", end="", flush=True)
+        # Handle final tool output
+        elif event.type == "run_item_stream_event" and event.name == "tool_output":
+            print(f"\n✓ Tool completed\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Key points about streaming tools:
+
+- Streaming tools must return `AsyncIterator[str]` (an async generator that yields strings)
+- Each yielded chunk is emitted as a `ToolOutputStreamEvent`
+- All chunks are automatically accumulated and sent to the LLM as the final tool output
+- Non-streaming tools continue to work normally alongside streaming tools
+- In non-streaming mode (`Runner.run()`), streaming tools automatically collect all chunks before returning

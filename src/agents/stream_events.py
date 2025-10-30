@@ -58,5 +58,29 @@ class AgentUpdatedStreamEvent:
     type: Literal["agent_updated_stream_event"] = "agent_updated_stream_event"
 
 
-StreamEvent: TypeAlias = Union[RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent]
+@dataclass
+class ToolOutputStreamEvent:
+    """Streaming event for tool execution output. This event is emitted during tool execution
+    to provide incremental output chunks as the tool runs.
+    """
+
+    tool_name: str
+    """The name of the tool being executed."""
+
+    tool_call_id: str
+    """The ID of the tool call."""
+
+    delta: str
+    """The incremental output from the tool."""
+
+    agent: Agent[Any]
+    """The agent executing the tool."""
+
+    type: Literal["tool_output_stream_event"] = "tool_output_stream_event"
+    """The type of the event."""
+
+
+StreamEvent: TypeAlias = Union[
+    RawResponsesStreamEvent, RunItemStreamEvent, AgentUpdatedStreamEvent, ToolOutputStreamEvent
+]
 """A streaming event from an agent."""
