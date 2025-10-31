@@ -290,30 +290,39 @@ class OpenAIChatCompletionsModel(Model):
 
         stream_param: Literal[True] | Omit = True if stream else omit
 
-        ret = await self._get_client().chat.completions.create(
-            model=self.model,
-            messages=converted_messages,
-            tools=tools_param,
-            temperature=self._non_null_or_omit(model_settings.temperature),
-            top_p=self._non_null_or_omit(model_settings.top_p),
-            frequency_penalty=self._non_null_or_omit(model_settings.frequency_penalty),
-            presence_penalty=self._non_null_or_omit(model_settings.presence_penalty),
-            max_tokens=self._non_null_or_omit(model_settings.max_tokens),
-            tool_choice=tool_choice,
-            response_format=response_format,
-            parallel_tool_calls=parallel_tool_calls,
-            stream=cast(Any, stream_param),
-            stream_options=self._non_null_or_omit(stream_options),
-            store=self._non_null_or_omit(store),
-            reasoning_effort=self._non_null_or_omit(reasoning_effort),
-            verbosity=self._non_null_or_omit(model_settings.verbosity),
-            top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
-            extra_headers=self._merge_headers(model_settings),
-            extra_query=model_settings.extra_query,
-            extra_body=model_settings.extra_body,
-            metadata=self._non_null_or_omit(model_settings.metadata),
-            **(model_settings.extra_args or {}),
-        )
+        request_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": converted_messages,
+            "tools": tools_param,
+            "temperature": self._non_null_or_omit(model_settings.temperature),
+            "top_p": self._non_null_or_omit(model_settings.top_p),
+            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
+            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
+            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
+            "tool_choice": tool_choice,
+            "response_format": response_format,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": cast(Any, stream_param),
+            "stream_options": self._non_null_or_omit(stream_options),
+            "store": self._non_null_or_omit(store),
+            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
+            "verbosity": self._non_null_or_omit(model_settings.verbosity),
+            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
+            "extra_headers": self._merge_headers(model_settings),
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            "metadata": self._non_null_or_omit(model_settings.metadata),
+        }
+
+        request_kwargs.update(model_settings.extra_args or {})
+
+        sanitized_kwargs = {
+            key: value
+            for key, value in request_kwargs.items()
+            if not isinstance(value, Omit) and value is not omit
+        }
+
+        ret = await self._get_client().chat.completions.create(**sanitized_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret

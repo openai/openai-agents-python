@@ -1,6 +1,7 @@
 import litellm
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse, Usage
+from openai import Omit, omit
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
@@ -123,6 +124,9 @@ async def test_openai_chatcompletions_kwargs_forwarded(monkeypatch):
 
     # Verify regular parameters are still passed
     assert captured["temperature"] == 0.7
+
+    assert all(not isinstance(value, Omit) for value in captured.values())
+    assert omit not in captured.values()
 
 
 @pytest.mark.allow_call_model_methods
