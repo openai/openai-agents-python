@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
 
 import pydantic
@@ -84,6 +85,22 @@ class RunItemBase(Generic[T], abc.ABC):
     (i.e. `openai.types.responses.ResponseInputItemParam`).
     """
 
+    _agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        # Store the producing agent weakly to avoid keeping it alive after the run.
+        self._agent_ref = weakref.ref(self.agent)
+        object.__delattr__(self, "agent")
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "agent":
+            return self._agent_ref() if self._agent_ref else None
+        raise AttributeError(name)
+
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
         if isinstance(self.raw_item, dict):
@@ -130,6 +147,32 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
     """The agent that is being handed off to."""
 
     type: Literal["handoff_output_item"] = "handoff_output_item"
+
+    _source_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+    _target_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Handoff metadata should not hold strong references to the agents either.
+        self._source_agent_ref = weakref.ref(self.source_agent)
+        self._target_agent_ref = weakref.ref(self.target_agent)
+        object.__delattr__(self, "source_agent")
+        object.__delattr__(self, "target_agent")
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "source_agent":
+            return self._source_agent_ref() if self._source_agent_ref else None
+        if name == "target_agent":
+            return self._target_agent_ref() if self._target_agent_ref else None
+        return super().__getattr__(name)
 
 
 ToolCallItemTypes: TypeAlias = Union[
