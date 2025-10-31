@@ -92,7 +92,7 @@ class Usage:
                 input_tokens_details=other.input_tokens_details,
                 output_tokens_details=other.output_tokens_details,
             )
-            self.request_usage_entries.append(individual_usage)
+            self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
             self.request_usage_entries.extend(other.request_usage_entries)
