@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 import pytest
-from openai import AsyncOpenAI, omit
+from openai import AsyncOpenAI, Omit, omit
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -283,19 +283,22 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
             stream=False,
         )
     assert result is chat
+
     # Ensure expected args were passed through to OpenAI client.
     kwargs = completions.kwargs
-    assert kwargs["stream"] is omit
-    assert kwargs["store"] is omit
     assert kwargs["model"] == "gpt-4"
     assert kwargs["messages"][0]["role"] == "system"
     assert kwargs["messages"][0]["content"] == "sys"
     assert kwargs["messages"][1]["role"] == "user"
-    # Defaults for optional fields become the omit sentinel
-    assert kwargs["tools"] is omit
-    assert kwargs["tool_choice"] is omit
-    assert kwargs["response_format"] is omit
-    assert kwargs["stream_options"] is omit
+    assert kwargs["messages"][1]["content"] == "hi"
+    assert "stream" not in kwargs
+    assert "store" not in kwargs
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
+    assert "response_format" not in kwargs
+    assert "stream_options" not in kwargs
+    assert "parallel_tool_calls" not in kwargs
+    assert all(not isinstance(value, Omit) and value is not omit for value in kwargs.values())
 
 
 @pytest.mark.asyncio
@@ -340,8 +343,14 @@ async def test_fetch_response_stream(monkeypatch) -> None:
         )
     # Check OpenAI client was called for streaming
     assert completions.kwargs["stream"] is True
-    assert completions.kwargs["store"] is omit
-    assert completions.kwargs["stream_options"] is omit
+    assert completions.kwargs["model"] == "gpt-4"
+    assert "store" not in completions.kwargs
+    assert "stream_options" not in completions.kwargs
+    assert "tools" not in completions.kwargs
+    assert "parallel_tool_calls" not in completions.kwargs
+    assert all(
+        not isinstance(value, Omit) and value is not omit for value in completions.kwargs.values()
+    )
     # Response is a proper openai Response
     assert isinstance(response, Response)
     assert response.id == FAKE_RESPONSES_ID
