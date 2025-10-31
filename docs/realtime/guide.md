@@ -156,6 +156,35 @@ Send audio to the session using [`session.send_audio(audio_bytes)`][agents.realt
 
 For audio output, listen for `audio` events and play the audio data through your preferred audio library. Make sure to listen for `audio_interrupted` events to stop playback immediately and clear any queued audio when the user interrupts the agent.
 
+## SIP integration
+
+You can attach realtime agents to phone calls that arrive via the [Realtime Calls API](https://platform.openai.com/docs/guides/realtime-sip). The SDK provides [`OpenAIRealtimeSIPModel`][agents.realtime.openai_realtime.OpenAIRealtimeSIPModel], which reuses the same agent flow while negotiating media over SIP.
+
+To use it, pass the model instance to the runner and supply the SIP `call_id` when starting the session. The call ID is delivered by the webhook that signals an incoming call.
+
+```python
+from agents.realtime import RealtimeAgent, RealtimeRunner
+from agents.realtime.openai_realtime import OpenAIRealtimeSIPModel
+
+runner = RealtimeRunner(
+    starting_agent=agent,
+    model=OpenAIRealtimeSIPModel(),
+)
+
+async with await runner.run(
+    model_config={
+        "call_id": call_id_from_webhook,
+        "initial_model_settings": {
+            "turn_detection": {"type": "semantic_vad", "interrupt_response": True},
+        },
+    },
+) as session:
+    async for event in session:
+        ...
+```
+
+When the caller hangs up, the SIP session ends and the realtime connection closes automatically. For a complete telephony example, see [`examples/realtime/twilio_sip`](https://github.com/openai/openai-agents-python/tree/main/examples/realtime/twilio_sip).
+
 ## Direct model access
 
 You can access the underlying model to add custom listeners or perform advanced operations:
