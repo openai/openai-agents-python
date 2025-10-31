@@ -43,6 +43,14 @@ from .test_responses import (
 from .utils.simple_session import SimpleListSession
 
 
+def _as_message(item: Any) -> dict[str, Any]:
+    assert isinstance(item, dict)
+    role = item.get("role")
+    assert isinstance(role, str)
+    assert role in {"assistant", "user", "system", "developer"}
+    return cast(dict[str, Any], item)
+
+
 @pytest.mark.asyncio
 async def test_simple_first_run():
     model = FakeModel()
@@ -164,9 +172,9 @@ async def test_handoffs():
 
     assert result.final_output == "done"
     assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 7, (
-        "should have 7 inputs: orig input, tool call, tool result, message, handoff, handoff"
-        "result, and done message"
+    assert len(result.to_input_list()) == 8, (
+        "should have 8 inputs: dev summary, latest user input, tool call, tool result, message, "
+        "handoff, handoff result, and done message"
     )
     assert result.last_agent == agent_1, "should have handed off to agent_1"
 
@@ -268,6 +276,100 @@ async def test_handoff_filters():
     assert len(result.to_input_list()) == 2, (
         "should only have 2 inputs: orig input and last message"
     )
+
+
+@pytest.mark.asyncio
+async def test_default_handoff_history_nested_and_filters_respected():
+    model = FakeModel()
+    agent_1 = Agent(
+        name="delegate",
+        model=model,
+    )
+    agent_2 = Agent(
+        name="triage",
+        model=model,
+        handoffs=[agent_1],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("triage summary"), get_handoff_tool_call(agent_1)],
+            [get_text_message("resolution")],
+        ]
+    )
+
+    result = await Runner.run(agent_2, input="user_message")
+
+    assert isinstance(result.input, list)
+    developer = _as_message(result.input[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
+    assert "<CONVERSATION HISTORY>" in developer_content
+    assert "triage summary" in developer_content
+    latest_user = _as_message(result.input[1])
+    assert latest_user["role"] == "user"
+    assert latest_user["content"] == "user_message"
+
+    passthrough_model = FakeModel()
+    delegate = Agent(name="delegate", model=passthrough_model)
+
+    def passthrough_filter(data: HandoffInputData) -> HandoffInputData:
+        return data
+
+    triage_with_filter = Agent(
+        name="triage",
+        model=passthrough_model,
+        handoffs=[handoff(delegate, input_filter=passthrough_filter)],
+    )
+
+    passthrough_model.add_multiple_turn_outputs(
+        [
+            [get_text_message("triage summary"), get_handoff_tool_call(delegate)],
+            [get_text_message("resolution")],
+        ]
+    )
+
+    filtered_result = await Runner.run(triage_with_filter, input="user_message")
+
+    assert isinstance(filtered_result.input, str)
+    assert filtered_result.input == "user_message"
+
+
+@pytest.mark.asyncio
+async def test_default_handoff_history_accumulates_across_multiple_handoffs():
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+    closer_model = FakeModel()
+
+    closer = Agent(name="closer", model=closer_model)
+    delegate = Agent(name="delegate", model=delegate_model, handoffs=[closer])
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs(
+        [[get_text_message("delegate update"), get_handoff_tool_call(closer)]]
+    )
+    closer_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
+
+    result = await Runner.run(triage, input="user_question")
+
+    assert result.final_output == "resolution"
+    assert closer_model.first_turn_args is not None
+    closer_input = closer_model.first_turn_args["input"]
+    assert isinstance(closer_input, list)
+    developer = _as_message(closer_input[0])
+    assert developer["role"] == "developer"
+    developer_content = developer["content"]
+    assert isinstance(developer_content, str)
+    assert developer_content.count("<CONVERSATION HISTORY>") == 1
+    assert "triage summary" in developer_content
+    assert "delegate update" in developer_content
+    latest_user = _as_message(closer_input[1])
+    assert latest_user["role"] == "user"
+    assert latest_user["content"] == "user_question"
 
 
 @pytest.mark.asyncio
