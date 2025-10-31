@@ -19,6 +19,13 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.5.0
+
+This version doesn’t introduce any visible breaking changes, but it includes new features and a few significant updates under the hood:
+
+- Added support for `RealtimeRunner` to handle [SIP protocol connections](https://platform.openai.com/docs/guides/realtime-sip)
+- Significantly revised the internal logic of `Runner#run_sync` for Python 3.14 compatibility
+
 ### 0.4.0
 
 In this version, [openai](https://pypi.org/project/openai/) package v1.x versions are no longer supported. Please use openai v2.x along with this SDK.
