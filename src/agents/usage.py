@@ -85,7 +85,7 @@ class Usage:
         # Automatically preserve request_usage_entries.
         # If the other Usage represents a single request with tokens, record it.
         if other.requests == 1 and other.total_tokens > 0:
-            individual_usage = RequestUsage(
+            request_usage = RequestUsage(
                 input_tokens=other.input_tokens,
                 output_tokens=other.output_tokens,
                 total_tokens=other.total_tokens,
