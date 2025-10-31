@@ -306,6 +306,12 @@ make lint   # run linter
 make format-check # run style checker
 ```
 
+Format code if `make format-check` fails above by running:
+
+```
+make format
+```
+
 ## Acknowledgements
 
 We'd like to acknowledge the excellent work of the open-source community, especially:
