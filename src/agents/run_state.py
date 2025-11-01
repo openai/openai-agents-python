@@ -14,6 +14,7 @@ from .run_context import RunContextWrapper
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from ._run_impl import NextStepInterruption
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem, ToolApprovalItem
@@ -23,14 +24,6 @@ TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
 
 # Schema version for serialization compatibility
 CURRENT_SCHEMA_VERSION = "1.0"
-
-
-@dataclass
-class NextStepInterruption:
-    """Represents an interruption in the agent run due to tool approval requests."""
-
-    interruptions: list[ToolApprovalItem]
-    """The list of tool calls awaiting approval."""
 
 
 @dataclass
@@ -106,12 +99,14 @@ class RunState(Generic[TContext, TAgent]):
         self._current_step = None
         self._current_turn = 0
 
-    def get_interruptions(self) -> list[ToolApprovalItem]:
+    def get_interruptions(self) -> list[RunItem]:
         """Returns all interruptions if the current step is an interruption.
 
         Returns:
             List of tool approval items awaiting approval, or empty list if no interruptions.
         """
+        from ._run_impl import NextStepInterruption
+
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
         return self._current_step.interruptions
@@ -240,6 +235,8 @@ class RunState(Generic[TContext, TAgent]):
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
+        from ._run_impl import NextStepInterruption
+
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
 
@@ -369,6 +366,99 @@ class RunState(Generic[TContext, TAgent]):
         if current_step_data and current_step_data.get("type") == "next_step_interruption":
             from openai.types.responses import ResponseFunctionToolCall
 
+            from ._run_impl import NextStepInterruption
+            from .items import ToolApprovalItem
+
+            interruptions = []
+            for item_data in current_step_data.get("interruptions", []):
+                agent_name = item_data["agent"]["name"]
+                agent = agent_map.get(agent_name)
+                if agent:
+                    raw_item = ResponseFunctionToolCall(**item_data["rawItem"])
+                    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+                    interruptions.append(approval_item)
+
+            state._current_step = NextStepInterruption(interruptions=interruptions)
+
+        return state
+
+    @staticmethod
+    def from_json(
+        initial_agent: Agent[Any], state_json: dict[str, Any]
+    ) -> RunState[Any, Agent[Any]]:
+        """Deserializes a run state from a JSON dictionary.
+
+        This method is used to deserialize a run state from a dict that was created using
+        the `to_json()` method.
+
+        Args:
+            initial_agent: The initial agent (used to build agent map for resolution).
+            state_json: The JSON dictionary to deserialize.
+
+        Returns:
+            A reconstructed RunState instance.
+
+        Raises:
+            UserError: If the dict has incompatible schema version.
+        """
+        # Check schema version
+        schema_version = state_json.get("$schemaVersion")
+        if not schema_version:
+            raise UserError("Run state is missing schema version")
+        if schema_version != CURRENT_SCHEMA_VERSION:
+            raise UserError(
+                f"Run state schema version {schema_version} is not supported. "
+                f"Please use version {CURRENT_SCHEMA_VERSION}"
+            )
+
+        # Build agent map for name resolution
+        agent_map = _build_agent_map(initial_agent)
+
+        # Find the current agent
+        current_agent_name = state_json["currentAgent"]["name"]
+        current_agent = agent_map.get(current_agent_name)
+        if not current_agent:
+            raise UserError(f"Agent {current_agent_name} not found in agent map")
+
+        # Rebuild context
+        context_data = state_json["context"]
+        usage = Usage()
+        usage.requests = context_data["usage"]["requests"]
+        usage.input_tokens = context_data["usage"]["inputTokens"]
+        usage.output_tokens = context_data["usage"]["outputTokens"]
+        usage.total_tokens = context_data["usage"]["totalTokens"]
+
+        context = RunContextWrapper(context=context_data.get("context", {}))
+        context.usage = usage
+        context._rebuild_approvals(context_data.get("approvals", {}))
+
+        # Create the RunState instance
+        state = RunState(
+            context=context,
+            original_input=state_json["originalInput"],
+            starting_agent=current_agent,
+            max_turns=state_json["maxTurns"],
+        )
+
+        state._current_turn = state_json["currentTurn"]
+
+        # Reconstruct model responses
+        state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
+
+        # Reconstruct generated items
+        state._generated_items = _deserialize_items(state_json.get("generatedItems", []), agent_map)
+
+        # Reconstruct guardrail results (simplified - full reconstruction would need more info)
+        # For now, we store the basic info
+        state._input_guardrail_results = []
+        state._output_guardrail_results = []
+
+        # Reconstruct current step if it's an interruption
+        current_step_data = state_json.get("currentStep")
+        if current_step_data and current_step_data.get("type") == "next_step_interruption":
+            from openai.types.responses import ResponseFunctionToolCall
+
+            from ._run_impl import NextStepInterruption
             from .items import ToolApprovalItem
 
             interruptions = []
