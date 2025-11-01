@@ -175,6 +175,48 @@ class RunResult(RunResultBase):
         # Preserve dataclass field so repr/asdict continue to succeed.
         self.__dict__["_last_agent"] = None
 
+    def to_state(self) -> Any:
+        """Create a RunState from this result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = await Runner.run(agent, "Use the delete_file tool")
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = await Runner.run(agent, state)
+            ```
+        """
+        from .run_state import RunState
+
+        # Create a RunState from the current result
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=self.input,
+            starting_agent=self.last_agent,
+            max_turns=10,  # This will be overridden by the runner
+        )
+
+        # Populate the state with data from the result
+        state._generated_items = self.new_items
+        state._model_responses = self.raw_responses
+        state._input_guardrail_results = self.input_guardrail_results
+        state._output_guardrail_results = self.output_guardrail_results
+
+        return state
+
     def __str__(self) -> str:
         return pretty_print_result(self)
 
