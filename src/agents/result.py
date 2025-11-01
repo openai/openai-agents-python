@@ -70,6 +70,11 @@ class RunResultBase(abc.ABC):
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
 
+    interruptions: list[RunItem]
+    """Any interruptions (e.g., tool approval requests) that occurred during the run.
+    If non-empty, the run was paused waiting for user action (e.g., approve/reject tool calls).
+    """
+
     @property
     @abc.abstractmethod
     def last_agent(self) -> Agent[Any]:

@@ -228,6 +228,15 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    needs_approval: (
+        bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+    ) = False
+    """Whether the tool needs approval before execution. If True, the run will be interrupted
+    and the tool call will need to be approved using RunState.approve() or rejected using
+    RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
+    function that takes (run_context, tool_parameters, call_id) and returns whether this
+    specific call needs approval."""
+
     # Tool-specific guardrails
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
     """Optional list of input guardrails to run before invoking this tool."""
@@ -687,6 +696,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -702,6 +713,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -717,6 +730,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -748,6 +763,11 @@ def function_tool(
         is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the tool is enabled. Disabled tools are hidden
             from the LLM at runtime.
+        needs_approval: Whether the tool needs approval before execution. If True, the run will
+            be interrupted and the tool call will need to be approved using RunState.approve() or
+            rejected using RunState.reject() before continuing. Can be a bool (always/never needs
+            approval) or a function that takes (run_context, tool_parameters, call_id) and returns
+            whether this specific call needs approval.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -845,6 +865,7 @@ def function_tool(
             on_invoke_tool=_on_invoke_tool,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,
+            needs_approval=needs_approval,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses

@@ -56,6 +56,7 @@ from .items import (
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -78,6 +79,7 @@ from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
 from .run import RunConfig, Runner
 from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_state import NextStepInterruption, RunState
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
