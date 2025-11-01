@@ -198,6 +198,7 @@ class ProcessedResponse:
     apply_patch_calls: list[ToolRunApplyPatchCall]
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
+    interruptions: list[RunItem]  # Tool approval items awaiting user decision
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -213,6 +214,10 @@ class ProcessedResponse:
                 self.mcp_approval_requests,
             ]
         )
+
+    def has_interruptions(self) -> bool:
+        """Check if there are tool calls awaiting approval."""
+        return len(self.interruptions) > 0
 
 
 @dataclass
@@ -231,6 +236,14 @@ class NextStepRunAgain:
 
 
 @dataclass
+class NextStepInterruption:
+    """Represents an interruption in the agent run due to tool approval requests."""
+
+    interruptions: list[RunItem]
+    """The list of tool calls (ToolApprovalItem) awaiting approval."""
+
+
+@dataclass
 class SingleStepResult:
     original_input: str | list[TResponseInputItem]
     """The input items i.e. the items before run() was called. May be mutated by handoff input
@@ -245,7 +258,7 @@ class SingleStepResult:
     new_step_items: list[RunItem]
     """Items generated during this current step."""
 
-    next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
+    next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain | NextStepInterruption
     """The next step to take."""
 
     tool_input_guardrail_results: list[ToolInputGuardrailResult]
@@ -340,7 +353,31 @@ class RunImpl:
                 config=run_config,
             ),
         )
-        new_step_items.extend([result.run_item for result in function_results])
+        # Check for tool approval interruptions before adding items
+        from .items import ToolApprovalItem
+
+        interruptions: list[RunItem] = []
+        approved_function_results = []
+        for result in function_results:
+            if isinstance(result.run_item, ToolApprovalItem):
+                interruptions.append(result.run_item)
+            else:
+                approved_function_results.append(result)
+
+        # If there are interruptions, return immediately without executing remaining tools
+        if interruptions:
+            # Return the interruption step
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=interruptions,
+                next_step=NextStepInterruption(interruptions=interruptions),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
+
+        new_step_items.extend([result.run_item for result in approved_function_results])
         new_step_items.extend(computer_results)
         new_step_items.extend(shell_results)
         new_step_items.extend(apply_patch_results)
@@ -768,6 +805,7 @@ class RunImpl:
             apply_patch_calls=apply_patch_calls,
             tools_used=tools_used,
             mcp_approval_requests=mcp_approval_requests,
+            interruptions=[],  # Will be populated after tool execution
         )
 
     @classmethod
@@ -947,7 +985,65 @@ class RunImpl:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    # 1) Run input tool guardrails, if any
+                    # 1) Check if tool needs approval
+                    needs_approval_result = func_tool.needs_approval
+                    if callable(needs_approval_result):
+                        # Parse arguments for dynamic approval check
+                        import json
+
+                        try:
+                            parsed_args = (
+                                json.loads(tool_call.arguments) if tool_call.arguments else {}
+                            )
+                        except json.JSONDecodeError:
+                            parsed_args = {}
+                        needs_approval_result = await needs_approval_result(
+                            context_wrapper, parsed_args, tool_call.call_id
+                        )
+
+                    if needs_approval_result:
+                        # Check if tool has been approved/rejected
+                        approval_status = context_wrapper.is_tool_approved(
+                            func_tool.name, tool_call.call_id
+                        )
+
+                        if approval_status is None:
+                            # Not yet decided - need to interrupt for approval
+                            from .items import ToolApprovalItem
+
+                            approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+                            return FunctionToolResult(
+                                tool=func_tool, output=None, run_item=approval_item
+                            )
+
+                        if approval_status is False:
+                            # Rejected - return rejection message
+                            rejection_msg = "Tool execution was not approved."
+                            span_fn.set_error(
+                                SpanError(
+                                    message=rejection_msg,
+                                    data={
+                                        "tool_name": func_tool.name,
+                                        "error": (
+                                            f"Tool execution for {tool_call.call_id} "
+                                            "was manually rejected by user."
+                                        ),
+                                    },
+                                )
+                            )
+                            result = rejection_msg
+                            span_fn.span_data.output = result
+                            return FunctionToolResult(
+                                tool=func_tool,
+                                output=result,
+                                run_item=ToolCallOutputItem(
+                                    output=result,
+                                    raw_item=ItemHelpers.tool_call_output_item(tool_call, result),
+                                    agent=agent,
+                                ),
+                            )
+
+                    # 2) Run input tool guardrails, if any
                     rejected_message = await cls._execute_input_guardrails(
                         func_tool=func_tool,
                         tool_context=tool_context,
