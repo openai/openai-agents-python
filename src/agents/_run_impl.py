@@ -67,6 +67,7 @@ from .items import (
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -1107,18 +1108,25 @@ class RunImpl:
 
         results = await asyncio.gather(*tasks)
 
-        function_tool_results = [
-            FunctionToolResult(
-                tool=tool_run.function_tool,
-                output=result,
-                run_item=ToolCallOutputItem(
-                    output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
-                    agent=agent,
-                ),
-            )
-            for tool_run, result in zip(tool_runs, results)
-        ]
+        function_tool_results = []
+        for tool_run, result in zip(tool_runs, results):
+            # If result is already a FunctionToolResult (e.g., from approval interruption),
+            # use it directly instead of wrapping it
+            if isinstance(result, FunctionToolResult):
+                function_tool_results.append(result)
+            else:
+                # Normal case: wrap the result in a FunctionToolResult
+                function_tool_results.append(
+                    FunctionToolResult(
+                        tool=tool_run.function_tool,
+                        output=result,
+                        run_item=ToolCallOutputItem(
+                            output=result,
+                            raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
+                            agent=agent,
+                        ),
+                    )
+                )
 
         return function_tool_results, tool_input_guardrail_results, tool_output_guardrail_results
 
@@ -1540,6 +1548,9 @@ class RunImpl:
                 event = RunItemStreamEvent(item=item, name="mcp_approval_response")
             elif isinstance(item, MCPListToolsItem):
                 event = RunItemStreamEvent(item=item, name="mcp_list_tools")
+            elif isinstance(item, ToolApprovalItem):
+                # Tool approval items should not be streamed - they represent interruptions
+                event = None
 
             else:
                 logger.warning(f"Unexpected item type: {type(item)}")

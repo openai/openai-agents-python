@@ -27,6 +27,7 @@ from ._run_impl import (
     QueueCompleteSentinel,
     RunImpl,
     SingleStepResult,
+    ToolRunFunction,
     TraceCtxManager,
     get_model_tracing_impl,
 )
@@ -630,6 +631,21 @@ class AgentRunner:
             # save only the new user input to the session, not the combined history
             await self._save_result_to_session(session, original_user_input, [])
 
+            # If resuming from an interrupted state, execute approved tools first
+            if is_resumed_state and run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await self._execute_approved_tools(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=generated_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
+
             try:
                 while True:
                     all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
@@ -956,24 +972,32 @@ class AgentRunner:
         )
 
         output_schema = AgentRunner._get_output_schema(starting_agent)
-        context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-            context=context  # type: ignore
-        )
 
         # Handle RunState input
-        if isinstance(input, RunState):
-            input_for_result = input._original_input
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+        input_for_result: str | list[TResponseInputItem]
+
+        if is_resumed_state:
+            run_state = cast(RunState[TContext], input)
+            input_for_result = run_state._original_input
+            # Use context from RunState if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+            # Use context wrapper from RunState
+            context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
         else:
-            input_for_result = input
+            input_for_result = cast(str | list[TResponseInputItem], input)
+            context_wrapper = RunContextWrapper(context=context)  # type: ignore
 
         streamed_result = RunResultStreaming(
             input=_copy_str_or_list(input_for_result),
-            new_items=[],
+            new_items=run_state._generated_items if run_state else [],
             current_agent=starting_agent,
-            raw_responses=[],
+            raw_responses=run_state._model_responses if run_state else [],
             final_output=None,
             is_complete=False,
-            current_turn=0,
+            current_turn=run_state._current_turn if run_state else 0,
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
@@ -999,6 +1023,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
                 session=session,
+                run_state=run_state,
             )
         )
         return streamed_result
@@ -1128,6 +1153,7 @@ class AgentRunner:
         auto_previous_response_id: bool,
         conversation_id: str | None,
         session: Session | None,
+        run_state: RunState[TContext] | None = None,
     ):
         if streamed_result.trace:
             streamed_result.trace.start(mark_as_current=True)
@@ -1164,6 +1190,21 @@ class AgentRunner:
             streamed_result.input = prepared_input
 
             await AgentRunner._save_result_to_session(session, starting_input, [])
+
+            # If resuming from an interrupted state, execute approved tools first
+            if run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await cls._execute_approved_tools_static(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=streamed_result.new_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
 
             while True:
                 # Check for soft cancel before starting new turn
@@ -1334,6 +1375,11 @@ class AgentRunner:
                                     session, [], turn_result.new_step_items
                                 )
 
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    elif isinstance(turn_result.next_step, NextStepInterruption):
+                        # Tool approval is needed - complete the stream with interruptions
+                        streamed_result.interruptions = turn_result.next_step.interruptions
+                        streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
                         if session is not None:
@@ -1634,6 +1680,119 @@ class AgentRunner:
         filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
+
+    async def _execute_approved_tools(
+        self,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (instance method version).
+
+        This is a thin wrapper around the classmethod version for use in non-streaming mode.
+        """
+        await AgentRunner._execute_approved_tools_static(
+            agent=agent,
+            interruptions=interruptions,
+            context_wrapper=context_wrapper,
+            generated_items=generated_items,
+            run_config=run_config,
+            hooks=hooks,
+        )
+
+    @classmethod
+    async def _execute_approved_tools_static(
+        cls,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (classmethod version)."""
+        from .items import ToolApprovalItem, ToolCallOutputItem
+
+        tool_runs: list[ToolRunFunction] = []
+
+        # Find all tools from the agent
+        all_tools = await AgentRunner._get_all_tools(agent, context_wrapper)
+        tool_map = {tool.name: tool for tool in all_tools}
+
+        for interruption in interruptions:
+            if not isinstance(interruption, ToolApprovalItem):
+                continue
+
+            tool_call = interruption.raw_item
+            tool_name = tool_call.name
+
+            # Check if this tool was approved
+            approval_status = context_wrapper.is_tool_approved(tool_name, tool_call.call_id)
+            if approval_status is not True:
+                # Not approved or rejected - add rejection message
+                if approval_status is False:
+                    output = "Tool execution was not approved."
+                else:
+                    output = "Tool approval status unclear."
+
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Tool was approved - find it and prepare for execution
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                # Tool not found - add error output
+                output = f"Tool '{tool_name}' not found."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Only function tools can be executed via ToolRunFunction
+            from .tool import FunctionTool
+
+            if not isinstance(tool, FunctionTool):
+                output = f"Tool '{tool_name}' is not a function tool."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            tool_runs.append(ToolRunFunction(function_tool=tool, tool_call=tool_call))
+
+        # Execute approved tools
+        if tool_runs:
+            (
+                function_results,
+                tool_input_guardrail_results,
+                tool_output_guardrail_results,
+            ) = await RunImpl.execute_function_tool_calls(
+                agent=agent,
+                tool_runs=tool_runs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            )
+
+            # Add tool outputs to generated_items
+            for result in function_results:
+                generated_items.append(result.run_item)
 
     @classmethod
     async def _run_single_turn(

@@ -199,6 +199,7 @@ class RunResult(RunResultBase):
                 result = await Runner.run(agent, state)
             ```
         """
+        from ._run_impl import NextStepInterruption
         from .run_state import RunState
 
         # Create a RunState from the current result
@@ -214,6 +215,10 @@ class RunResult(RunResultBase):
         state._model_responses = self.raw_responses
         state._input_guardrail_results = self.input_guardrail_results
         state._output_guardrail_results = self.output_guardrail_results
+
+        # If there are interruptions, set the current step
+        if self.interruptions:
+            state._current_step = NextStepInterruption(interruptions=self.interruptions)
 
         return state
 
@@ -469,3 +474,55 @@ class RunResultStreaming(RunResultBase):
             except Exception:
                 # The exception will be surfaced via _check_errors() if needed.
                 pass
+
+    def to_state(self) -> Any:
+        """Create a RunState from this streaming result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run_streamed()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = Runner.run_streamed(agent, "Use the delete_file tool")
+            async for event in result.stream_events():
+                pass
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = Runner.run_streamed(agent, state)
+                async for event in result.stream_events():
+                    pass
+            ```
+        """
+        from ._run_impl import NextStepInterruption
+        from .run_state import RunState
+
+        # Create a RunState from the current result
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=self.input,
+            starting_agent=self.last_agent,
+            max_turns=self.max_turns,
+        )
+
+        # Populate the state with data from the result
+        state._generated_items = self.new_items
+        state._model_responses = self.raw_responses
+        state._input_guardrail_results = self.input_guardrail_results
+        state._output_guardrail_results = self.output_guardrail_results
+        state._current_turn = self.current_turn
+
+        # If there are interruptions, set the current step
+        if self.interruptions:
+            state._current_step = NextStepInterruption(interruptions=self.interruptions)
+
+        return state
