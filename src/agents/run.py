@@ -1178,6 +1178,11 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
+
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
