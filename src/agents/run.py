@@ -22,6 +22,7 @@ from ._run_impl import (
     AgentToolUseTracker,
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepInterruption,
     NextStepRunAgain,
     QueueCompleteSentinel,
     RunImpl,
@@ -65,6 +66,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_state import RunState
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -304,7 +306,7 @@ class Runner:
     async def run(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -381,7 +383,7 @@ class Runner:
     def run_sync(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -456,7 +458,7 @@ class Runner:
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
@@ -533,7 +535,7 @@ class AgentRunner:
     async def run(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -547,6 +549,27 @@ class AgentRunner:
 
         if run_config is None:
             run_config = RunConfig()
+
+        # Check if we're resuming from a RunState
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+
+        if is_resumed_state:
+            # Resuming from a saved state
+            run_state = cast(RunState[TContext], input)
+            original_user_input = run_state._original_input
+            prepared_input = run_state._original_input
+
+            # Override context with the state's context if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+        else:
+            # Keep original user input separate from session-prepared input
+            raw_input = cast(str | list[TResponseInputItem], input)
+            original_user_input = raw_input
+            prepared_input = await self._prepare_input_with_session(
+                raw_input, session, run_config.session_input_callback
+            )
 
         # Check whether to enable OpenAI server-managed conversation
         if (
@@ -562,12 +585,13 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
-        # Keep original user input separate from session-prepared input
-        original_user_input = input
-        prepared_input = await self._prepare_input_with_session(
-            input, session, run_config.session_input_callback
-        )
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
 
+        # Always create a fresh tool_use_tracker
+        # (it's rebuilt from the run state if needed during execution)
         tool_use_tracker = AgentToolUseTracker()
 
         with TraceCtxManager(
@@ -577,14 +601,23 @@ class AgentRunner:
             metadata=run_config.trace_metadata,
             disabled=run_config.tracing_disabled,
         ):
-            current_turn = 0
-            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
-            generated_items: list[RunItem] = []
-            model_responses: list[ModelResponse] = []
-
-            context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-                context=context,  # type: ignore
-            )
+            if is_resumed_state and run_state is not None:
+                # Restore state from RunState
+                current_turn = run_state._current_turn
+                original_input = run_state._original_input
+                generated_items = run_state._generated_items
+                model_responses = run_state._model_responses
+                # Cast to the correct type since we know this is TContext
+                context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+            else:
+                # Fresh run
+                current_turn = 0
+                original_input = _copy_str_or_list(prepared_input)
+                generated_items = []
+                model_responses = []
+                context_wrapper = RunContextWrapper(
+                    context=context,  # type: ignore
+                )
 
             input_guardrail_results: list[InputGuardrailResult] = []
             tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
@@ -730,6 +763,7 @@ class AgentRunner:
                                 tool_input_guardrail_results=tool_input_guardrail_results,
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
+                                interruptions=[],
                             )
                             if not any(
                                 guardrail_result.output.tripwire_triggered
@@ -738,7 +772,22 @@ class AgentRunner:
                                 await self._save_result_to_session(
                                     session, [], turn_result.new_step_items
                                 )
-
+                            return result
+                        elif isinstance(turn_result.next_step, NextStepInterruption):
+                            # Tool approval is needed - return a result with interruptions
+                            result = RunResult(
+                                input=original_input,
+                                new_items=generated_items,
+                                raw_responses=model_responses,
+                                final_output=None,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=[],
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                interruptions=turn_result.next_step.interruptions,
+                            )
                             return result
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             # Save the conversation to session if enabled (before handoff)
@@ -795,7 +844,7 @@ class AgentRunner:
     def run_sync(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -876,7 +925,7 @@ class AgentRunner:
     def run_streamed(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
@@ -911,8 +960,14 @@ class AgentRunner:
             context=context  # type: ignore
         )
 
+        # Handle RunState input
+        if isinstance(input, RunState):
+            input_for_result = input._original_input
+        else:
+            input_for_result = input
+
         streamed_result = RunResultStreaming(
-            input=_copy_str_or_list(input),
+            input=_copy_str_or_list(input_for_result),
             new_items=[],
             current_agent=starting_agent,
             raw_responses=[],
@@ -927,12 +982,13 @@ class AgentRunner:
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
+            interruptions=[],
         )
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
             self._start_streaming(
-                starting_input=input,
+                starting_input=input_for_result,
                 streamed_result=streamed_result,
                 starting_agent=starting_agent,
                 max_turns=max_turns,
