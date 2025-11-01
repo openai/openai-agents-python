@@ -33,6 +33,9 @@ For voice support, install with the optional `voice` group: `pip install 'openai
 
 For Redis session support, install with the optional `redis` group: `pip install 'openai-agents[redis]'`.
 
+> [!NOTE]
+> **For developers working on this project:** When working within the `openai-agents-python` repository, use `pip install -e '.[voice]'` or `pip install -e '.[redis]'` to install the project in editable mode with optional dependencies, instead of installing from PyPI.
+
 ### uv
 
 If you're familiar with [uv](https://docs.astral.sh/uv/), using the tool would be even similar:
@@ -45,6 +48,9 @@ uv add openai-agents
 For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`.
 
 For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
+
+> [!NOTE]
+> **For developers working on this project:** When working within the `openai-agents-python` repository, use `uv sync --extra voice` or `uv sync --extra redis` instead of `uv add`, as the project cannot install itself as a dependency.
 
 ## Hello world example
 
