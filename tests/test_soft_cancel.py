@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, OutputGuardrail, Runner, SQLiteSession
+from agents.guardrail import GuardrailFunctionOutput
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
@@ -485,3 +486,46 @@ async def test_soft_cancel_with_session_and_multiple_turns():
 
     # Cleanup
     await session.clear_session()
+
+
+@pytest.mark.asyncio
+async def test_soft_cancel_runs_output_guardrails_before_canceling():
+    """Verify output guardrails run even when cancellation happens after final output."""
+    model = FakeModel()
+
+    # Track if guardrail was called
+    guardrail_called = False
+
+    def output_guardrail_fn(context, agent, output):
+        nonlocal guardrail_called
+        guardrail_called = True
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(
+        name="Assistant",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=output_guardrail_fn)],
+    )
+
+    # Setup: agent produces final output
+    model.add_multiple_turn_outputs([[get_text_message("Final answer")]])
+
+    result = Runner.run_streamed(agent, input="What is the answer?")
+
+    # Cancel after seeing the message output event (indicates turn completed)
+    # but before consuming all events
+    async for event in result.stream_events():
+        if event.type == "run_item_stream_event" and event.name == "message_output_created":
+            # Cancel after turn completes - guardrails should still run
+            result.cancel(mode="after_turn")
+            # Don't break - continue consuming to let guardrails complete
+
+    # Guardrail should have been called
+    assert guardrail_called, "Output guardrail should run even when canceling after final output"
+
+    # Final output should be set
+    assert result.final_output is not None, "final_output should be set even when canceling"
+    assert result.final_output == "Final answer"
+
+    # Output guardrail results should be recorded
+    assert len(result.output_guardrail_results) == 1, "Output guardrail results should be recorded"
