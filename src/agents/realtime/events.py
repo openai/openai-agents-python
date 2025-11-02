@@ -69,6 +69,10 @@ class RealtimeToolStart:
     """The agent that updated."""
 
     tool: Tool
+    """The tool being called."""
+
+    arguments: str
+    """The arguments passed to the tool as a JSON string."""
 
     info: RealtimeEventInfo
     """Common info for all events, such as the context."""

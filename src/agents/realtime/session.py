@@ -411,6 +411,7 @@ class RealtimeSession(RealtimeModelListener):
                     info=self._event_info,
                     tool=function_map[event.name],
                     agent=agent,
+                    arguments=event.arguments,
                 )
             )
 
