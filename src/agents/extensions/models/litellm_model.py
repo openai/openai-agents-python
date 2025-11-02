@@ -542,7 +542,7 @@ class LitellmModel(Model):
         if value is omit or isinstance(value, NotGiven):
             return None
         return value
-
+        
     def _merge_headers(self, model_settings: ModelSettings):
         return {**HEADERS, **(model_settings.extra_headers or {}), **(HEADERS_OVERRIDE.get() or {})}
 
