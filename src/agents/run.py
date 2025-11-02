@@ -1462,18 +1462,19 @@ class AgentRunner:
                         # Filter out tool calls - they don't have outputs yet, so shouldn't be saved
                         # This prevents saving incomplete tool calls that violate API requirements
                         items_for_session = [
-                            item
-                            for item in items_to_save
-                            if not isinstance(item, ToolCallItem)
+                            item for item in items_to_save if not isinstance(item, ToolCallItem)
                         ]
                         # Type ignore: intentionally filtering out ToolCallItem to avoid saving
                         # incomplete tool calls without corresponding outputs
                         await AgentRunner._save_result_to_session(
-                            session, [], items_for_session  # type: ignore[arg-type]
+                            session,
+                            [],
+                            items_for_session,  # type: ignore[arg-type]
                         )
 
                 # Stream the items to the event queue
                 import dataclasses as _dc
+
                 RunImpl.stream_step_result_to_queue(
                     single_step_result, streamed_result._event_queue
                 )

@@ -94,9 +94,7 @@ async def test_soft_cancel_with_tool_calls():
                 tool_output_seen = True
 
     assert tool_call_seen, "Tool call should be seen"
-    assert tool_output_seen, (
-        "Tool output SHOULD be seen (tools execute before cancel is honored)"
-    )
+    assert tool_output_seen, "Tool output SHOULD be seen (tools execute before cancel is honored)"
     assert result.is_complete, "Result should be marked complete"
 
 
