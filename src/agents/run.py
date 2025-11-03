@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import os
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Generic, cast, get_args
 
 from openai.types.responses import (
@@ -665,6 +665,7 @@ class AgentRunner:
                             output_guardrail_results=output_guardrail_results,
                             tool_input_guardrail_results=tool_input_guardrail_results,
                             tool_output_guardrail_results=tool_output_guardrail_results,
+                            run_config=replace(run_config),
                             context_wrapper=context_wrapper,
                         )
                         if not any(
@@ -702,6 +703,7 @@ class AgentRunner:
                     context_wrapper=context_wrapper,
                     input_guardrail_results=input_guardrail_results,
                     output_guardrail_results=[],
+                    run_config=replace(run_config),
                 )
                 raise
             finally:
@@ -837,6 +839,7 @@ class AgentRunner:
             output_guardrail_results=[],
             tool_input_guardrail_results=[],
             tool_output_guardrail_results=[],
+            run_config=replace(run_config),
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
@@ -1174,6 +1177,7 @@ class AgentRunner:
                         context_wrapper=context_wrapper,
                         input_guardrail_results=streamed_result.input_guardrail_results,
                         output_guardrail_results=streamed_result.output_guardrail_results,
+                        run_config=replace(run_config),
                     )
                     raise
                 except Exception as e:

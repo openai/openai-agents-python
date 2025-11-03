@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from typing_extensions import TypeVar
@@ -31,6 +31,7 @@ from .util._pretty_print import (
 if TYPE_CHECKING:
     from ._run_impl import QueueCompleteSentinel
     from .agent import Agent
+    from .run import RunConfig
     from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 
 T = TypeVar("T")
@@ -68,6 +69,9 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    run_config: "RunConfig"
+    """The run configuration that was used for the agent run."""
 
     @property
     @abc.abstractmethod
@@ -279,6 +283,7 @@ class RunResultStreaming(RunResultBase):
             context_wrapper=self.context_wrapper,
             input_guardrail_results=self.input_guardrail_results,
             output_guardrail_results=self.output_guardrail_results,
+            run_config=replace(self.run_config),
         )
 
     def _check_errors(self):
