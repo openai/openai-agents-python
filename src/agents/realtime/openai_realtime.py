@@ -208,7 +208,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
         self._playback_tracker = options.get("playback_tracker", None)
 
-        self.model = model_settings.get("model_name", self.model)
+        call_id = options.get("call_id")
+        model_name = model_settings.get("model_name")
+        if call_id and model_name:
+            error_message = (
+                "Cannot specify both `call_id` and `model_name` "
+                "when attaching to an existing realtime call."
+            )
+            raise UserError(error_message)
+
+        if model_name:
+            self.model = model_name
+
         api_key = await get_api_key(options.get("api_key"))
 
         if "tracing" in model_settings:
@@ -216,7 +227,10 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         else:
             self._tracing_config = "auto"
 
-        url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
+        if call_id:
+            url = options.get("url", f"wss://api.openai.com/v1/realtime?call_id={call_id}")
+        else:
+            url = options.get("url", f"wss://api.openai.com/v1/realtime?model={self.model}")
 
         headers: dict[str, str] = {}
         if options.get("headers") is not None:
@@ -629,8 +643,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
-            # Avoid sending conversation.item.truncate here; when GA is set to
-            # interrupt on VAD start, the server will handle truncation.
+            # Avoid sending conversation.item.truncate here. When the session's
+            # turn_detection.interrupt_response is enabled (GA default), the server emits
+            # conversation.item.truncated after the VAD start and takes care of history updates.
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
@@ -927,6 +942,18 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             )
 
         return converted_tools
+
+
+class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
+    """Realtime model that attaches to SIP-originated calls using a call ID."""
+
+    async def connect(self, options: RealtimeModelConfig) -> None:
+        call_id = options.get("call_id")
+        if not call_id:
+            raise UserError("OpenAIRealtimeSIPModel requires `call_id` in the model configuration.")
+
+        sip_options = options.copy()
+        await super().connect(sip_options)
 
 
 class _ConversionHelper:

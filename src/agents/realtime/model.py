@@ -139,6 +139,13 @@ class RealtimeModelConfig(TypedDict):
     is played to the user.
     """
 
+    call_id: NotRequired[str]
+    """Attach to an existing realtime call instead of creating a new session.
+
+    When provided, the transport connects using the `call_id` query string parameter rather than a
+    model name. This is used for SIP-originated calls that are accepted via the Realtime Calls API.
+    """
+
 
 class RealtimeModel(abc.ABC):
     """Interface for connecting to a realtime model and sending/receiving events."""
