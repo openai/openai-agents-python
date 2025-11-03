@@ -89,6 +89,23 @@ class TwilioHandler:
         await self.twilio_websocket.accept()
         print("Twilio WebSocket connection accepted")
 
+        # ---------------------------
+        # STARTUP DELAY (fix jitter)
+        # ---------------------------
+        # Small configurable delay to allow websockets/handshakes and buffers
+        # to settle before audio starts. Default is 0.5 seconds.
+        try:
+            startup_delay = float(os.getenv("TWILIO_STARTUP_DELAY_S", "0.5"))
+        except Exception:
+            startup_delay = 0.5
+
+        # Only perform the sleep if a positive value is configured
+        if startup_delay > 0:
+            # allow other coroutines to run while waiting
+            await asyncio.sleep(startup_delay)
+        # ---------------------------
+
+        # create tasks after warmup so we avoid missing the first audio frames
         self._realtime_session_task = asyncio.create_task(self._realtime_session_loop())
         self._message_loop_task = asyncio.create_task(self._twilio_message_loop())
         self._buffer_flush_task = asyncio.create_task(self._buffer_flush_loop())
