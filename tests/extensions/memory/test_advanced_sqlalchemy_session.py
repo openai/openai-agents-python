@@ -62,7 +62,7 @@ def usage_data() -> Usage:
 
 def create_mock_run_result(
     usage: Usage | None = None,
-    agent: Usage | None = None,
+    agent: Agent | None = None,
 ) -> RunResult:
     """Helper function to create a RunResult carrying usage information."""
     if agent is None:
