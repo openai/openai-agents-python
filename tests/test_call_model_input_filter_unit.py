@@ -29,9 +29,7 @@ async def test_call_model_input_filter_sync_non_streamed_unit() -> None:
                 type="message",
                 role="assistant",
                 content=[
-                    ResponseOutputText(
-                        text="ok", type="output_text", annotations=[], logprobs=[]
-                    )
+                    ResponseOutputText(text="ok", type="output_text", annotations=[], logprobs=[])
                 ],
                 status="completed",
             )
@@ -69,9 +67,7 @@ async def test_call_model_input_filter_async_streamed_unit() -> None:
                 type="message",
                 role="assistant",
                 content=[
-                    ResponseOutputText(
-                        text="ok", type="output_text", annotations=[], logprobs=[]
-                    )
+                    ResponseOutputText(text="ok", type="output_text", annotations=[], logprobs=[])
                 ],
                 status="completed",
             )

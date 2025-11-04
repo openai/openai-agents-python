@@ -57,12 +57,8 @@ def make_message(
 
 def test_extract_last_content_of_text_message() -> None:
     # Build a message containing two text segments.
-    content1 = ResponseOutputText(
-        annotations=[], text="Hello ", type="output_text", logprobs=[]
-    )
-    content2 = ResponseOutputText(
-        annotations=[], text="world!", type="output_text", logprobs=[]
-    )
+    content1 = ResponseOutputText(annotations=[], text="Hello ", type="output_text", logprobs=[])
+    content2 = ResponseOutputText(annotations=[], text="world!", type="output_text", logprobs=[])
     message = make_message([content1, content2])
     # Helpers should yield the last segment's text.
     assert ItemHelpers.extract_last_content(message) == "world!"
@@ -93,12 +89,8 @@ def test_extract_last_content_non_message_returns_empty() -> None:
 
 def test_extract_last_text_returns_text_only() -> None:
     # A message whose last segment is text yields the text.
-    first_text = ResponseOutputText(
-        annotations=[], text="part1", type="output_text", logprobs=[]
-    )
-    second_text = ResponseOutputText(
-        annotations=[], text="part2", type="output_text", logprobs=[]
-    )
+    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text", logprobs=[])
+    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text", logprobs=[])
     message = make_message([first_text, second_text])
     assert ItemHelpers.extract_last_text(message) == "part2"
     # Whereas when last content is a refusal, extract_last_text returns None.
@@ -126,13 +118,9 @@ def test_input_to_new_input_list_deep_copies_lists() -> None:
 def test_text_message_output_concatenates_text_segments() -> None:
     # Build a message with both text and refusal segments, only text segments are concatenated.
     pieces: list[ResponseOutputText | ResponseOutputRefusal] = []
-    pieces.append(
-        ResponseOutputText(annotations=[], text="a", type="output_text", logprobs=[])
-    )
+    pieces.append(ResponseOutputText(annotations=[], text="a", type="output_text", logprobs=[]))
     pieces.append(ResponseOutputRefusal(refusal="denied", type="refusal"))
-    pieces.append(
-        ResponseOutputText(annotations=[], text="b", type="output_text", logprobs=[])
-    )
+    pieces.append(ResponseOutputText(annotations=[], text="b", type="output_text", logprobs=[]))
     message = make_message(pieces)
     # Wrap into MessageOutputItem to feed into text_message_output.
     item = MessageOutputItem(agent=Agent(name="test"), raw_item=message)
@@ -321,14 +309,14 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
     # Given a list of message dictionaries, ensure the returned list is a deep copy.
     original = ResponseOutputMessageParam(
         id="a75654dc-7492-4d1c-bce0-89e8312fbdd7",
-            content=[
-                ResponseOutputTextParam(
-                    type="output_text",
-                    text="Hey, what's up?",
-                    annotations=[],
-                    logprobs=[],
-                )
-            ],
+        content=[
+            ResponseOutputTextParam(
+                type="output_text",
+                text="Hey, what's up?",
+                annotations=[],
+                logprobs=[],
+            )
+        ],
         role="assistant",
         status="completed",
         type="message",

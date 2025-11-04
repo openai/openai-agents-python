@@ -43,9 +43,7 @@ def _get_message_output_run_item(content: str) -> MessageOutputItem:
         raw_item=ResponseOutputMessage(
             id="1",
             content=[
-                ResponseOutputText(
-                    text=content, annotations=[], type="output_text", logprobs=[]
-                )
+                ResponseOutputText(text=content, annotations=[], type="output_text", logprobs=[])
             ],
             role="assistant",
             status="completed",
