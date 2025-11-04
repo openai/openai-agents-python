@@ -136,7 +136,9 @@ class Converter:
         )
         if message.content:
             message_item.content.append(
-                ResponseOutputText(text=message.content, type="output_text", annotations=[])
+                ResponseOutputText(
+                    text=message.content, type="output_text", annotations=[], logprobs=[]
+                )
             )
         if message.refusal:
             message_item.content.append(

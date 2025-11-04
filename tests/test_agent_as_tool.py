@@ -240,7 +240,7 @@ async def test_agent_as_tool_returns_concatenated_text(monkeypatch: pytest.Monke
                 annotations=[],
                 text="Hello world",
                 type="output_text",
-                logprobs=None,
+                logprobs=[],
             )
         ],
     )
@@ -304,7 +304,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
                 annotations=[],
                 text="Original text",
                 type="output_text",
-                logprobs=None,
+                logprobs=[],
             )
         ],
     )

@@ -231,6 +231,7 @@ class ChatCmplStreamHandler:
                             text="",
                             type="output_text",
                             annotations=[],
+                            logprobs=[],
                         ),
                     )
                     # Start a new assistant message stream
@@ -258,6 +259,7 @@ class ChatCmplStreamHandler:
                             text="",
                             type="output_text",
                             annotations=[],
+                            logprobs=[],
                         ),
                         type="response.content_part.added",
                         sequence_number=sequence_number.get_and_increment(),

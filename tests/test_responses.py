@@ -31,7 +31,11 @@ def get_text_message(content: str) -> ResponseOutputItem:
         id="1",
         type="message",
         role="assistant",
-        content=[ResponseOutputText(text=content, type="output_text", annotations=[])],
+        content=[
+            ResponseOutputText(
+                text=content, type="output_text", annotations=[], logprobs=[]
+            )
+        ],
         status="completed",
     )
 
@@ -73,6 +77,10 @@ def get_final_output_message(args: str) -> ResponseOutputItem:
         id="1",
         type="message",
         role="assistant",
-        content=[ResponseOutputText(text=args, type="output_text", annotations=[])],
+        content=[
+            ResponseOutputText(
+                text=args, type="output_text", annotations=[], logprobs=[]
+            )
+        ],
         status="completed",
     )
