@@ -10,7 +10,7 @@ the request, then pauses for approval when needed.
 
 import asyncio
 
-from agents import Agent, Runner, function_tool
+from agents import Agent, Runner, ToolApprovalItem, function_tool
 
 
 async def _needs_temperature_approval(_ctx, params, _call_id) -> bool:
@@ -89,10 +89,13 @@ async def main():
         state = result.to_state()
 
         for interruption in result.interruptions:
-            print(f"\nTool call details:")
+            if not isinstance(interruption, ToolApprovalItem):
+                continue
+
+            print("\nTool call details:")
             print(f"  Agent: {interruption.agent.name}")
-            print(f"  Tool: {interruption.raw_item.name}")  # type: ignore
-            print(f"  Arguments: {interruption.raw_item.arguments}")  # type: ignore
+            print(f"  Tool: {interruption.raw_item.name}")
+            print(f"  Arguments: {interruption.raw_item.arguments}")
 
             confirmed = await confirm("\nDo you approve this tool call?")
 

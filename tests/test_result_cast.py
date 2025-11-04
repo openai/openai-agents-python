@@ -23,6 +23,7 @@ def create_run_result(final_output: Any) -> RunResult:
         tool_output_guardrail_results=[],
         _last_agent=Agent(name="test"),
         context_wrapper=RunContextWrapper(context=None),
+        interruptions=[],
     )
 
 

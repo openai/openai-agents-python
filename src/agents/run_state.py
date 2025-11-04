@@ -8,16 +8,17 @@ from typing import TYPE_CHECKING, Any, Generic
 
 from typing_extensions import TypeVar
 
+from ._run_impl import NextStepInterruption
 from .exceptions import UserError
+from .items import ToolApprovalItem
 from .logger import logger
 from .run_context import RunContextWrapper
 from .usage import Usage
 
 if TYPE_CHECKING:
-    from ._run_impl import NextStepInterruption
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
-    from .items import ModelResponse, RunItem, ToolApprovalItem
+    from .items import ModelResponse, RunItem
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
@@ -105,8 +106,6 @@ class RunState(Generic[TContext, TAgent]):
         Returns:
             List of tool approval items awaiting approval, or empty list if no interruptions.
         """
-        from ._run_impl import NextStepInterruption
-
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
         return self._current_step.interruptions
@@ -235,8 +234,6 @@ class RunState(Generic[TContext, TAgent]):
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
-        from ._run_impl import NextStepInterruption
-
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
 
@@ -245,10 +242,15 @@ class RunState(Generic[TContext, TAgent]):
             "interruptions": [
                 {
                     "type": "tool_approval_item",
-                    "rawItem": item.raw_item.model_dump(exclude_unset=True),
+                    "rawItem": (
+                        item.raw_item.model_dump(exclude_unset=True)
+                        if hasattr(item.raw_item, "model_dump")
+                        else item.raw_item
+                    ),
                     "agent": {"name": item.agent.name},
                 }
                 for item in self._current_step.interruptions
+                if isinstance(item, ToolApprovalItem)
             ],
         }
 
@@ -366,10 +368,7 @@ class RunState(Generic[TContext, TAgent]):
         if current_step_data and current_step_data.get("type") == "next_step_interruption":
             from openai.types.responses import ResponseFunctionToolCall
 
-            from ._run_impl import NextStepInterruption
-            from .items import ToolApprovalItem
-
-            interruptions = []
+            interruptions: list[RunItem] = []
             for item_data in current_step_data.get("interruptions", []):
                 agent_name = item_data["agent"]["name"]
                 agent = agent_map.get(agent_name)
@@ -458,10 +457,7 @@ class RunState(Generic[TContext, TAgent]):
         if current_step_data and current_step_data.get("type") == "next_step_interruption":
             from openai.types.responses import ResponseFunctionToolCall
 
-            from ._run_impl import NextStepInterruption
-            from .items import ToolApprovalItem
-
-            interruptions = []
+            interruptions: list[RunItem] = []
             for item_data in current_step_data.get("interruptions", []):
                 agent_name = item_data["agent"]["name"]
                 agent = agent_map.get(agent_name)

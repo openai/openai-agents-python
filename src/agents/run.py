@@ -6,7 +6,7 @@ import inspect
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast, get_args, get_origin
+from typing import Any, Callable, Generic, Union, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -566,7 +566,7 @@ class AgentRunner:
                 context = run_state._context.context
         else:
             # Keep original user input separate from session-prepared input
-            raw_input = cast(str | list[TResponseInputItem], input)
+            raw_input = cast(Union[str, list[TResponseInputItem]], input)
             original_user_input = raw_input
             prepared_input = await self._prepare_input_with_session(
                 raw_input, session, run_config.session_input_callback
@@ -987,7 +987,7 @@ class AgentRunner:
             # Use context wrapper from RunState
             context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
         else:
-            input_for_result = cast(str | list[TResponseInputItem], input)
+            input_for_result = cast(Union[str, list[TResponseInputItem]], input)
             context_wrapper = RunContextWrapper(context=context)  # type: ignore
 
         streamed_result = RunResultStreaming(
