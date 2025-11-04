@@ -629,7 +629,9 @@ class AgentRunner:
             should_run_agent_start_hooks = True
 
             # save only the new user input to the session, not the combined history
-            await self._save_result_to_session(session, original_user_input, [])
+            # Skip saving if resuming from state - input is already in session
+            if not is_resumed_state:
+                await self._save_result_to_session(session, original_user_input, [])
 
             # If resuming from an interrupted state, execute approved tools first
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
