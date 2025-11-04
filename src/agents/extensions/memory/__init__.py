@@ -15,6 +15,7 @@ __all__: list[str] = [
     "RedisSession",
     "SQLAlchemySession",
     "AdvancedSQLiteSession",
+    "AdvancedSQLAlchemySession",
 ]
 
 
@@ -59,5 +60,16 @@ def __getattr__(name: str) -> Any:
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
             raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
+
+    if name == "AdvancedSQLAlchemySession":
+        try:
+            from .advanced_sqlalchemy_session import AdvancedSQLAlchemySession  # noqa: F401
+
+            return AdvancedSQLAlchemySession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "AdvancedSQLAlchemySession requires the 'sqlalchemy' extra. "
+                "Install it with: pip install openai-agents[sqlalchemy]"
+            ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
