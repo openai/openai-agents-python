@@ -10,7 +10,7 @@ This example demonstrates how to:
 import asyncio
 import json
 
-from agents import Agent, Runner, RunState, function_tool
+from agents import Agent, Runner, RunState, ToolApprovalItem, function_tool
 
 
 @function_tool
@@ -101,17 +101,20 @@ async def main():
 
         # Reading state from file (demonstrating deserialization)
         print("Loading state from result.json")
-        with open("result.json", "r") as f:
+        with open("result.json") as f:
             stored_state_json = json.load(f)
 
         state = RunState.from_json(agent, stored_state_json)
 
         # Process each interruption
         for interruption in result.interruptions:
-            print(f"\nTool call details:")
+            if not isinstance(interruption, ToolApprovalItem):
+                continue
+
+            print("\nTool call details:")
             print(f"  Agent: {interruption.agent.name}")
-            print(f"  Tool: {interruption.raw_item.name}")  # type: ignore
-            print(f"  Arguments: {interruption.raw_item.arguments}")  # type: ignore
+            print(f"  Tool: {interruption.raw_item.name}")
+            print(f"  Arguments: {interruption.raw_item.arguments}")
 
             confirmed = await confirm("\nDo you approve this tool call?")
 
