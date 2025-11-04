@@ -60,6 +60,16 @@ class Usage:
         cost calculation or context window management.
     """
 
+    def __post_init__(self) -> None:
+        # Some providers don't populate optional token detail fields
+        # (cached_tokens, reasoning_tokens), and the OpenAI SDK's generated
+        # code can bypass Pydantic validation (e.g., via model_construct),
+        # allowing None values. We normalize these to 0 to prevent TypeErrors.
+        if self.input_tokens_details.cached_tokens is None:
+            self.input_tokens_details = InputTokensDetails(cached_tokens=0)
+        if self.output_tokens_details.reasoning_tokens is None:
+            self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
+
     def add(self, other: "Usage") -> None:
         """Add another Usage object to this one, aggregating all fields.
 

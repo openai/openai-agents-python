@@ -267,3 +267,25 @@ def test_anthropic_cost_calculation_scenario():
     for req in usage.request_usage_entries:
         assert req.input_tokens < 200_000
         assert req.output_tokens < 200_000
+
+
+def test_usage_normalizes_none_token_details():
+    # Some providers don't populate optional fields, resulting in None values
+    input_details = InputTokensDetails(cached_tokens=0)
+    input_details.__dict__["cached_tokens"] = None
+
+    output_details = OutputTokensDetails(reasoning_tokens=0)
+    output_details.__dict__["reasoning_tokens"] = None
+
+    usage = Usage(
+        requests=1,
+        input_tokens=100,
+        input_tokens_details=input_details,
+        output_tokens=50,
+        output_tokens_details=output_details,
+        total_tokens=150,
+    )
+
+    # __post_init__ should normalize None to 0
+    assert usage.input_tokens_details.cached_tokens == 0
+    assert usage.output_tokens_details.reasoning_tokens == 0
