@@ -202,8 +202,12 @@ class RunState(Generic[TContext, TAgent]):
                 },
                 "approvals": approvals_dict,
                 "context": self._context.context
-                if hasattr(self._context.context, "__dict__")
-                else {},
+                if isinstance(self._context.context, dict)
+                else (
+                    self._context.context.__dict__
+                    if hasattr(self._context.context, "__dict__")
+                    else {}
+                ),
             },
             "maxTurns": self._max_turns,
             "inputGuardrailResults": [
@@ -491,9 +495,10 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
 
         # Add handoff agents to the queue
         for handoff in current.handoffs:
-            if hasattr(handoff, "agent") and handoff.agent:
-                if handoff.agent.name not in agent_map:
-                    queue.append(handoff.agent)
+            # Handoff can be either an Agent or a Handoff object with an .agent attribute
+            handoff_agent = handoff if not hasattr(handoff, "agent") else handoff.agent
+            if handoff_agent and handoff_agent.name not in agent_map:  # type: ignore[union-attr]
+                queue.append(handoff_agent)  # type: ignore[arg-type]
 
     return agent_map
 
