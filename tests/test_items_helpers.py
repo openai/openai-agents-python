@@ -321,13 +321,14 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
     # Given a list of message dictionaries, ensure the returned list is a deep copy.
     original = ResponseOutputMessageParam(
         id="a75654dc-7492-4d1c-bce0-89e8312fbdd7",
-        content=[
-            ResponseOutputTextParam(
-                type="output_text",
-                text="Hey, what's up?",
-                annotations=[],
-            )
-        ],
+            content=[
+                ResponseOutputTextParam(
+                    type="output_text",
+                    text="Hey, what's up?",
+                    annotations=[],
+                    logprobs=[],
+                )
+            ],
         role="assistant",
         status="completed",
         type="message",
