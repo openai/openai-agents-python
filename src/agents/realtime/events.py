@@ -90,6 +90,9 @@ class RealtimeToolEnd:
     tool: Tool
     """The tool that was called."""
 
+    arguments: str
+    """The arguments passed to the tool as a JSON string."""
+
     output: Any
     """The output of the tool call."""
 

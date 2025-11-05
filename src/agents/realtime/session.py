@@ -437,6 +437,7 @@ class RealtimeSession(RealtimeModelListener):
                     tool=func_tool,
                     output=result,
                     agent=agent,
+                    arguments=event.arguments,
                 )
             )
         elif event.name in handoff_map:
