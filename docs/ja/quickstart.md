@@ -6,7 +6,7 @@ search:
 
 ## プロジェクトと仮想環境の作成
 
-これは一度だけ実行すれば十分です。
+これは 1 回だけ実行すれば十分です。
 
 ```bash
 mkdir my_project
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-お持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+お持ちでない場合は、OpenAI API キーを作成するために [こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従ってください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは、instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェントは instructions、名前、および任意の config（`model_config` など）で定義されます。
 
 ```python
 from agents import Agent
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## いくつかのエージェントの追加
+## いくつかのエージェントを追加
 
-追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
+追加のエージェントも同様に定義できます。`handoff_descriptions` はハンドオフのルーティングを判断するための追加コンテキストを提供します。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントごとに、タスクを進めるために選択できる送信先ハンドオフ オプションの一覧を定義できます。
+各エージェントで、タスクを進める方法を判断するために選択できる送信側ハンドオフ候補の一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェントのオーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
+ワークフローが動作し、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認します。
 
 ```python
 from agents import Runner
@@ -123,7 +123,7 @@ async def homework_guardrail(ctx, agent, input_data):
 
 ## すべてを組み合わせる
 
-ハンドオフと入力ガードレールを使って、すべてを組み合わせたワークフロー全体を実行しましょう。
+すべてを組み合わせ、ハンドオフと入力ガードレールを使ってワークフロー全体を実行します。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -190,14 +190,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## トレースの表示
+## トレースの確認
 
-エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動し、エージェント実行のトレースを表示します。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動し、実行のトレースを表示します。
 
 ## 次のステップ
 
-さらに複雑なエージェント フローの構築方法を学びましょう:
+より複雑なエージェント フローの構築方法を学びましょう:
 
-- [エージェント](agents.md) の設定について学ぶ。
-- [エージェントの実行](running_agents.md) について学ぶ。
-- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学ぶ。
+- [エージェント](agents.md) の設定方法について学びます。
+- [エージェントの実行](running_agents.md) について学びます。
+- [tools](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学びます。
