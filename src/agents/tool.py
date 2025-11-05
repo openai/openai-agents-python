@@ -185,6 +185,9 @@ class FunctionTool:
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
     """Optional list of output guardrails to run after invoking this tool."""
 
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
+
     def __post_init__(self):
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
@@ -211,6 +214,9 @@ class FileSearchTool:
     filters: Filters | None = None
     """A filter to apply based on file attributes."""
 
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
+
     @property
     def name(self):
         return "file_search"
@@ -231,6 +237,9 @@ class WebSearchTool:
     search_context_size: Literal["low", "medium", "high"] = "medium"
     """The amount of context to use for the search."""
 
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
+
     @property
     def name(self):
         return "web_search"
@@ -247,6 +256,9 @@ class ComputerTool:
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
     """Optional callback to acknowledge computer tool safety checks."""
+
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
 
     @property
     def name(self):
@@ -313,6 +325,9 @@ class HostedMCPTool:
     provided, you will need to manually add approvals/rejections to the input and call
     `Runner.run(...)` again."""
 
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
+
     @property
     def name(self):
         return "hosted_mcp"
@@ -325,6 +340,9 @@ class CodeInterpreterTool:
     tool_config: CodeInterpreter
     """The tool config, which includes the container and other settings."""
 
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
+
     @property
     def name(self):
         return "code_interpreter"
@@ -336,6 +354,9 @@ class ImageGenerationTool:
 
     tool_config: ImageGeneration
     """The tool config, which image generation settings."""
+
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
 
     @property
     def name(self):
@@ -367,6 +388,9 @@ class LocalShellTool:
 
     executor: LocalShellExecutor
     """A function that executes a command on a shell."""
+
+    custom_metadata: dict[str, Any] | None = None
+    """Optional custom metadata to attach to this tool."""
 
     @property
     def name(self):
