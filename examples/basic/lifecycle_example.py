@@ -1,10 +1,38 @@
 import asyncio
 import random
-from typing import Any
+from typing import Any, Optional, cast
 
 from pydantic import BaseModel
 
-from agents import Agent, RunContextWrapper, RunHooks, Runner, Tool, Usage, function_tool
+from agents import (
+    Agent,
+    AgentHooks,
+    RunContextWrapper,
+    RunHooks,
+    Runner,
+    Tool,
+    Usage,
+    function_tool,
+)
+from agents.items import ModelResponse, TResponseInputItem
+from agents.tool_context import ToolContext
+
+
+class LoggingHooks(AgentHooks[Any]):
+    async def on_start(
+        self,
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+    ) -> None:
+        print(f"#### {agent.name} is starting.")
+
+    async def on_end(
+        self,
+        context: RunContextWrapper[Any],
+        agent: Agent[Any],
+        output: Any,
+    ) -> None:
+        print(f"#### {agent.name} produced output: {output}.")
 
 
 class ExampleHooks(RunHooks):
@@ -20,24 +48,50 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} started. Usage: {self._usage_to_str(context.usage)}"
         )
 
+    async def on_llm_start(
+        self,
+        context: RunContextWrapper,
+        agent: Agent,
+        system_prompt: Optional[str],
+        input_items: list[TResponseInputItem],
+    ) -> None:
+        self.event_counter += 1
+        print(f"### {self.event_counter}: LLM started. Usage: {self._usage_to_str(context.usage)}")
+
+    async def on_llm_end(
+        self, context: RunContextWrapper, agent: Agent, response: ModelResponse
+    ) -> None:
+        self.event_counter += 1
+        print(f"### {self.event_counter}: LLM ended. Usage: {self._usage_to_str(context.usage)}")
+
     async def on_agent_end(self, context: RunContextWrapper, agent: Agent, output: Any) -> None:
         self.event_counter += 1
         print(
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
+    # Note: The on_tool_start and on_tool_end hooks apply only to local tools.
+    # They do not include hosted tools that run on the OpenAI server side,
+    # such as WebSearchTool, FileSearchTool, CodeInterpreterTool, HostedMCPTool,
+    # or other built-in hosted tools.
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} started. Usage: {self._usage_to_str(context.usage)}"
+            f"### {self.event_counter}: Tool {tool.name} started. name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_tool_end(
         self, context: RunContextWrapper, agent: Agent, tool: Tool, result: str
     ) -> None:
         self.event_counter += 1
+        # While this type cast is not ideal,
+        # we don't plan to change the context arg type in the near future for backwards compatibility.
+        tool_context = cast(ToolContext[Any], context)
         print(
-            f"### {self.event_counter}: Tool {tool.name} ended with result {result}. Usage: {self._usage_to_str(context.usage)}"
+            f"### {self.event_counter}: Tool {tool.name} finished. result={result}, name={tool_context.tool_name}, call_id={tool_context.tool_call_id}, args={tool_context.tool_arguments}. Usage: {self._usage_to_str(tool_context.usage)}"
         )
 
     async def on_handoff(
@@ -56,7 +110,7 @@ hooks = ExampleHooks()
 
 @function_tool
 def random_number(max: int) -> int:
-    """Generate a random number up to the provided max."""
+    """Generate a random number from 0 to max (inclusive)."""
     return random.randint(0, max)
 
 
@@ -75,6 +129,7 @@ multiply_agent = Agent(
     instructions="Multiply the number by 2 and then return the final result.",
     tools=[multiply_by_two],
     output_type=FinalResult,
+    hooks=LoggingHooks(),
 )
 
 start_agent = Agent(
@@ -83,16 +138,22 @@ start_agent = Agent(
     tools=[random_number],
     output_type=FinalResult,
     handoffs=[multiply_agent],
+    hooks=LoggingHooks(),
 )
 
 
 async def main() -> None:
     user_input = input("Enter a max number: ")
-    await Runner.run(
-        start_agent,
-        hooks=hooks,
-        input=f"Generate a random number between 0 and {user_input}.",
-    )
+    try:
+        max_number = int(user_input)
+        await Runner.run(
+            start_agent,
+            hooks=hooks,
+            input=f"Generate a random number between 0 and {max_number}.",
+        )
+    except ValueError:
+        print("Please enter a valid integer.")
+        return
 
     print("Done!")
 
@@ -104,15 +165,21 @@ $ python examples/basic/lifecycle_example.py
 
 Enter a max number: 250
 ### 1: Agent Start Agent started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens
-### 2: Tool random_number started. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 3: Tool random_number ended with result 101. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 4: Agent Start Agent started. Usage: 1 requests, 148 input tokens, 15 output tokens, 163 total tokens
-### 5: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 6: Agent Multiply Agent started. Usage: 2 requests, 323 input tokens, 30 output tokens, 353 total tokens
-### 7: Tool multiply_by_two started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 8: Tool multiply_by_two ended with result 202. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 9: Agent Multiply Agent started. Usage: 3 requests, 504 input tokens, 46 output tokens, 550 total tokens
-### 10: Agent Multiply Agent ended with output number=202. Usage: 4 requests, 714 input tokens, 63 output tokens, 777 total tokens
+### 2: LLM started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens
+### 3: LLM ended. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 4: Tool random_number started. name=random_number, call_id=call_IujmDZYiM800H0hy7v17VTS0, args={"max":250}. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 5: Tool random_number finished. result=107, name=random_number, call_id=call_IujmDZYiM800H0hy7v17VTS0, args={"max":250}. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 6: LLM started. Usage: 1 requests, 143 input tokens, 15 output tokens, 158 total tokens
+### 7: LLM ended. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 8: Handoff from Start Agent to Multiply Agent. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 9: Agent Multiply Agent started. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 10: LLM started. Usage: 2 requests, 310 input tokens, 29 output tokens, 339 total tokens
+### 11: LLM ended. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 12: Tool multiply_by_two started. name=multiply_by_two, call_id=call_KhHvTfsgaosZsfi741QvzgYw, args={"x":107}. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 13: Tool multiply_by_two finished. result=214, name=multiply_by_two, call_id=call_KhHvTfsgaosZsfi741QvzgYw, args={"x":107}. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 14: LLM started. Usage: 3 requests, 472 input tokens, 45 output tokens, 517 total tokens
+### 15: LLM ended. Usage: 4 requests, 660 input tokens, 56 output tokens, 716 total tokens
+### 16: Agent Multiply Agent ended with output number=214. Usage: 4 requests, 660 input tokens, 56 output tokens, 716 total tokens
 Done!
 
 """

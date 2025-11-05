@@ -28,6 +28,10 @@ class CustomAgentHooks(AgentHooks):
             f"### ({self.display_name}) {self.event_counter}: Agent {source.name} handed off to {agent.name}"
         )
 
+    # Note: The on_tool_start and on_tool_end hooks apply only to local tools.
+    # They do not include hosted tools that run on the OpenAI server side,
+    # such as WebSearchTool, FileSearchTool, CodeInterpreterTool, HostedMCPTool,
+    # or other built-in hosted tools.
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
         print(
@@ -49,7 +53,7 @@ class CustomAgentHooks(AgentHooks):
 @function_tool
 def random_number(max: int) -> int:
     """
-    Generate a random number up to the provided maximum.
+    Generate a random number from 0 to max (inclusive).
     """
     return random.randint(0, max)
 
@@ -84,10 +88,15 @@ start_agent = Agent(
 
 async def main() -> None:
     user_input = input("Enter a max number: ")
-    await Runner.run(
-        start_agent,
-        input=f"Generate a random number between 0 and {user_input}.",
-    )
+    try:
+        max_number = int(user_input)
+        await Runner.run(
+            start_agent,
+            input=f"Generate a random number between 0 and {max_number}.",
+        )
+    except ValueError:
+        print("Please enter a valid integer.")
+        return
 
     print("Done!")
 
@@ -101,12 +110,10 @@ Enter a max number: 250
 ### (Start Agent) 1: Agent Start Agent started
 ### (Start Agent) 2: Agent Start Agent started tool random_number
 ### (Start Agent) 3: Agent Start Agent ended tool random_number with result 37
-### (Start Agent) 4: Agent Start Agent started
-### (Start Agent) 5: Agent Start Agent handed off to Multiply Agent
+### (Start Agent) 4: Agent Start Agent handed off to Multiply Agent
 ### (Multiply Agent) 1: Agent Multiply Agent started
 ### (Multiply Agent) 2: Agent Multiply Agent started tool multiply_by_two
 ### (Multiply Agent) 3: Agent Multiply Agent ended tool multiply_by_two with result 74
-### (Multiply Agent) 4: Agent Multiply Agent started
-### (Multiply Agent) 5: Agent Multiply Agent ended with output number=74
+### (Multiply Agent) 4: Agent Multiply Agent ended with output number=74
 Done!
 """

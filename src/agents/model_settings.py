@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import fields, replace
 from typing import Annotated, Any, Literal, Union
 
 from openai import Omit as _Omit
@@ -10,6 +10,7 @@ from openai._types import Body, Query
 from openai.types.responses import ResponseIncludable
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, GetCoreSchemaHandler
+from pydantic.dataclasses import dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypeAlias
 
@@ -17,9 +18,9 @@ from typing_extensions import TypeAlias
 class _OmitTypeAnnotation:
     @classmethod
     def __get_pydantic_core_schema__(
-            cls,
-            _source_type: Any,
-            _handler: GetCoreSchemaHandler,
+        cls,
+        _source_type: Any,
+        _handler: GetCoreSchemaHandler,
     ) -> core_schema.CoreSchema:
         def validate_from_none(value: None) -> _Omit:
             return _Omit()
@@ -39,12 +40,20 @@ class _OmitTypeAnnotation:
                     from_none_schema,
                 ]
             ),
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                lambda instance: None
-            ),
+            serialization=core_schema.plain_serializer_function_ser_schema(lambda instance: None),
         )
+
+
+@dataclass
+class MCPToolChoice:
+    server_label: str
+    name: str
+
+
 Omit = Annotated[_Omit, _OmitTypeAnnotation]
 Headers: TypeAlias = Mapping[str, Union[str, Omit]]
+ToolChoice: TypeAlias = Union[Literal["auto", "required", "none"], str, MCPToolChoice, None]
+
 
 @dataclass
 class ModelSettings:
@@ -69,7 +78,7 @@ class ModelSettings:
     presence_penalty: float | None = None
     """The presence penalty to use when calling the model."""
 
-    tool_choice: Literal["auto", "required", "none"] | str | None = None
+    tool_choice: ToolChoice | None = None
     """The tool choice to use when calling the model."""
 
     parallel_tool_calls: bool | None = None
@@ -82,7 +91,10 @@ class ModelSettings:
     """
 
     truncation: Literal["auto", "disabled"] | None = None
-    """The truncation strategy to use when calling the model."""
+    """The truncation strategy to use when calling the model.
+    See [Responses API documentation](https://platform.openai.com/docs/api-reference/responses/create#responses_create-truncation)
+    for more details.
+    """
 
     max_tokens: int | None = None
     """The maximum number of output tokens to generate."""
@@ -92,20 +104,32 @@ class ModelSettings:
     [reasoning models](https://platform.openai.com/docs/guides/reasoning).
     """
 
+    verbosity: Literal["low", "medium", "high"] | None = None
+    """Constrains the verbosity of the model's response.
+    """
+
     metadata: dict[str, str] | None = None
     """Metadata to include with the model response call."""
 
     store: bool | None = None
     """Whether to store the generated model response for later retrieval.
-    Defaults to True if not provided."""
+    For Responses API: automatically enabled when not specified.
+    For Chat Completions API: disabled when not specified."""
 
     include_usage: bool | None = None
     """Whether to include usage chunk.
-    Defaults to True if not provided."""
+    Only available for Chat Completions API."""
 
-    response_include: list[ResponseIncludable] | None = None
+    # TODO: revisit ResponseIncludable | str if ResponseIncludable covers more cases
+    # We've added str to support missing ones like
+    # "web_search_call.action.sources" etc.
+    response_include: list[ResponseIncludable | str] | None = None
     """Additional output data to include in the model response.
     [include parameter](https://platform.openai.com/docs/api-reference/responses/create#responses-create-include)"""
+
+    top_logprobs: int | None = None
+    """Number of top tokens to return logprobs for. Setting this will
+    automatically include ``"message.output_text.logprobs"`` in the response."""
 
     extra_query: Query | None = None
     """Additional query fields to provide with the request.

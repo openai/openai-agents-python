@@ -1,0 +1,76 @@
+name: "Update Translated Docs"
+
+# This GitHub Actions job automates the process of updating all translated document pages. Please note the following:
+# 1. The translation results may vary each time; some differences in detail are expected.
+# 2. When you add a new page to the left-hand menu, **make sure to manually update mkdocs.yml** to include the new item.
+# 3. If you switch to a different LLM (for example, from o3 to a newer model), be sure to conduct thorough testing before making the switch.
+
+# To add more languages, you will update the following:
+# 1.  Add '!docs/{lang}/**' to `on.push.paths` in this file
+# 2. Update mkdocs.yml to have the new language
+# 3. Update docs/scripts/translate_docs.py to have the new language
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - mkdocs.yml
+      - '!docs/ja/**'
+      - '!docs/ko/**'
+      - '!docs/zh/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-docs:
+    if: "!contains(github.event.head_commit.message, 'Update all translated document pages')"
+    name: Build and Push Translated Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROD_OPENAI_API_KEY: ${{ secrets.PROD_OPENAI_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: make sync
+      - name: Build full docs
+        run: make build-full-docs
+
+      - name: Commit changes
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Update all translated document pages"
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes to commit"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Pull Request
+        if: steps.commit.outputs.committed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Update all translated document pages"
+          title: "Update all translated document pages"
+          body: |
+            Automated update of translated documentation.
+
+            Triggered by commit: [${{ github.event.head_commit.id }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.head_commit.id }}).
+            Message: `${{ github.event.head_commit.message }}`
+          branch: update-translated-docs-${{ github.run_id }}
+          delete-branch: true

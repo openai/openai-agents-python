@@ -2,33 +2,33 @@
 search:
   exclude: true
 ---
-# LiteLLM 経由でのモデル利用
+# LiteLLM 経由の任意モデル利用
 
 !!! note
 
-    LiteLLM との統合は現在ベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題を見つけた場合は、[GitHub Issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に対応いたします。
+    これは  LiteLLM  のベータ版統合です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題があれば [GitHub Issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に修正します。
 
-[LiteLLM](https://docs.litellm.ai/docs/) は、1 つのインターフェースで 100 以上のモデルを利用できるライブラリです。Agents SDK では LiteLLM との統合により、任意の AI モデルを使用できます。
+[LiteLLM](https://docs.litellm.ai/docs/) は、1 つのインターフェースで 100 以上のモデルを利用できるライブラリです。Agents SDK では  LiteLLM  統合を追加し、任意の AI モデルを利用できるようにしました。
 
 ## セットアップ
 
-`litellm` がインストールされていることを確認してください。オプションの `litellm` 依存関係グループをインストールすることで対応できます。
+`litellm` が利用可能であることを確認します。オプションの `litellm` 依存関係グループをインストールしてください。
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-インストール後、任意のエージェントで [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を利用できます。
+完了したら、任意のエージェントで [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
 
 ## 例
 
-以下は動作する完全なサンプルです。実行するとモデル名と API キーの入力を求められます。例えば次のように入力できます。
+これは完全に動作する例です。実行すると、モデル名と API キーの入力を求められます。例:
 
--   `openai/gpt-4.1` をモデル名に、OpenAI API キーを入力  
--   `anthropic/claude-3-5-sonnet-20240620` をモデル名に、Anthropic API キーを入力  
--   その他
+-   モデルに `openai/gpt-4.1`、OpenAI の API キー
+-   モデルに `anthropic/claude-3-5-sonnet-20240620`、Anthropic の API キー
+-   など
 
-LiteLLM でサポートされているモデルの全リストは、[litellm providers docs](https://docs.litellm.ai/docs/providers) を参照してください。
+LiteLLM でサポートされているモデルの完全な一覧は、[litellm providers docs](https://docs.litellm.ai/docs/providers) を参照してください。
 
 ```python
 from __future__ import annotations
@@ -75,3 +75,20 @@ if __name__ == "__main__":
 
     asyncio.run(main(model, api_key))
 ```
+
+## 使用状況データの追跡
+
+LiteLLM の応答で Agents SDK の使用状況メトリクスを集計したい場合は、エージェント作成時に `ModelSettings(include_usage=True)` を渡してください。
+
+```python
+from agents import Agent, ModelSettings
+from agents.extensions.models.litellm_model import LitellmModel
+
+agent = Agent(
+    name="Assistant",
+    model=LitellmModel(model="your/model", api_key="..."),
+    model_settings=ModelSettings(include_usage=True),
+)
+```
+
+`include_usage=True` の場合、LiteLLM のリクエストは、組み込みの OpenAI モデルと同様に `result.context_wrapper.usage` を介してトークン数およびリクエスト数を報告します。

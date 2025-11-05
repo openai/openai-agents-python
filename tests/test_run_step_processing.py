@@ -7,6 +7,7 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_computer_tool_call import ActionClick
+from openai.types.responses.response_function_web_search import ActionSearch
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from pydantic import BaseModel
 
@@ -306,7 +307,12 @@ async def test_file_search_tool_call_parsed_correctly():
 @pytest.mark.asyncio
 async def test_function_web_search_tool_call_parsed_correctly():
     agent = Agent(name="test")
-    web_search_call = ResponseFunctionWebSearch(id="w1", status="completed", type="web_search_call")
+    web_search_call = ResponseFunctionWebSearch(
+        id="w1",
+        action=ActionSearch(type="search", query="query"),
+        status="completed",
+        type="web_search_call",
+    )
     response = ModelResponse(
         output=[get_text_message("hello"), web_search_call],
         usage=Usage(),

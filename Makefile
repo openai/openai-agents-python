@@ -7,13 +7,17 @@ format:
 	uv run ruff format
 	uv run ruff check --fix
 
+.PHONY: format-check
+format-check:
+	uv run ruff format --check
+
 .PHONY: lint
 lint: 
 	uv run ruff check
 
 .PHONY: mypy
 mypy: 
-	uv run mypy .
+	uv run mypy . --exclude site
 
 .PHONY: tests
 tests: 
@@ -35,11 +39,13 @@ snapshots-create:
 	uv run pytest --inline-snapshot=create 
 
 .PHONY: old_version_tests
-old_version_tests: 
+old_version_tests:
+	UV_PROJECT_ENVIRONMENT=.venv_39 uv sync --python 3.9 --all-extras --all-packages --group dev
 	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest
 
 .PHONY: build-docs
 build-docs:
+	uv run docs/scripts/generate_ref_files.py
 	uv run mkdocs build
 
 .PHONY: build-full-docs
@@ -55,5 +61,5 @@ serve-docs:
 deploy-docs:
 	uv run mkdocs gh-deploy --force --verbose
 
-	
-	
+.PHONY: check
+check: format-check lint mypy tests

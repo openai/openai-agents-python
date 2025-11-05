@@ -4,7 +4,14 @@ import shutil
 from typing import Any
 
 from mcp import Tool as MCPTool
-from mcp.types import CallToolResult, TextContent
+from mcp.types import (
+    CallToolResult,
+    Content,
+    GetPromptResult,
+    ListPromptsResult,
+    PromptMessage,
+    TextContent,
+)
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _MCPServerWithClientSession
@@ -61,11 +68,13 @@ class FakeMCPServer(MCPServer):
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
     ):
+        super().__init__(use_structured_content=False)
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
         self.tool_filter = tool_filter
         self._server_name = server_name
+        self._custom_content: list[Content] | None = None
 
     def add_tool(self, name: str, input_schema: dict[str, Any]):
         self.tools.append(MCPTool(name=name, inputSchema=input_schema))
@@ -90,9 +99,26 @@ class FakeMCPServer(MCPServer):
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
         self.tool_calls.append(tool_name)
         self.tool_results.append(f"result_{tool_name}_{json.dumps(arguments)}")
+
+        # Allow testing custom content scenarios
+        if self._custom_content is not None:
+            return CallToolResult(content=self._custom_content)
+
         return CallToolResult(
             content=[TextContent(text=self.tool_results[-1], type="text")],
         )
+
+    async def list_prompts(self, run_context=None, agent=None) -> ListPromptsResult:
+        """Return empty list of prompts for fake server"""
+        return ListPromptsResult(prompts=[])
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        """Return a simple prompt result for fake server"""
+        content = f"Fake prompt content for {name}"
+        message = PromptMessage(role="user", content=TextContent(type="text", text=content))
+        return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
 
     @property
     def name(self) -> str:

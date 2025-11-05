@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typing_extensions import TypedDict
@@ -34,6 +35,7 @@ from .test_responses import (
     get_text_input_item,
     get_text_message,
 )
+from .utils.simple_session import SimpleListSession
 
 
 @pytest.mark.asyncio
@@ -207,11 +209,13 @@ async def test_structured_output():
             [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
-            # Third turn: tool call and structured output
+            # Third turn: tool call with preamble message
             [
+                get_text_message(json.dumps(Foo(bar="preamble"))),
                 get_function_tool_call("bar", json.dumps({"bar": "baz"})),
-                get_final_output_message(json.dumps(Foo(bar="baz"))),
             ],
+            # Fourth turn: structured output
+            [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
     )
 
@@ -226,10 +230,10 @@ async def test_structured_output():
         pass
 
     assert result.final_output == Foo(bar="baz")
-    assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 10, (
+    assert len(result.raw_responses) == 4, "should have four model responses"
+    assert len(result.to_input_list()) == 11, (
         "should have input: 2 orig inputs, function call, function call result, message, handoff, "
-        "handoff output, tool call, tool call result, final output"
+        "handoff output, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
@@ -241,6 +245,7 @@ def remove_new_items(handoff_input_data: HandoffInputData) -> HandoffInputData:
         input_history=handoff_input_data.input_history,
         pre_handoff_items=(),
         new_items=(),
+        run_context=handoff_input_data.run_context,
     )
 
 
@@ -281,7 +286,7 @@ async def test_handoff_filters():
 
 
 @pytest.mark.asyncio
-async def test_async_input_filter_fails():
+async def test_async_input_filter_supported():
     # DO NOT rename this without updating pyproject.toml
 
     model = FakeModel()
@@ -293,7 +298,7 @@ async def test_async_input_filter_fails():
     async def on_invoke_handoff(_ctx: RunContextWrapper[Any], _input: str) -> Agent[Any]:
         return agent_1
 
-    async def invalid_input_filter(data: HandoffInputData) -> HandoffInputData:
+    async def async_input_filter(data: HandoffInputData) -> HandoffInputData:
         return data  # pragma: no cover
 
     agent_2 = Agent[None](
@@ -306,8 +311,7 @@ async def test_async_input_filter_fails():
                 input_json_schema={},
                 on_invoke_handoff=on_invoke_handoff,
                 agent_name=agent_1.name,
-                # Purposely ignoring the type error here to simulate invalid input
-                input_filter=invalid_input_filter,  # type: ignore
+                input_filter=async_input_filter,
             )
         ],
     )
@@ -319,10 +323,9 @@ async def test_async_input_filter_fails():
         ]
     )
 
-    with pytest.raises(UserError):
-        result = Runner.run_streamed(agent_2, input="user_message")
-        async for _ in result.stream_events():
-            pass
+    result = Runner.run_streamed(agent_2, input="user_message")
+    async for _ in result.stream_events():
+        pass
 
 
 @pytest.mark.asyncio
@@ -523,6 +526,67 @@ async def test_input_guardrail_tripwire_triggered_causes_exception_streamed():
 
 
 @pytest.mark.asyncio
+async def test_input_guardrail_streamed_does_not_save_assistant_message_to_session():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.01)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message", session=session)
+        async for _ in result.stream_events():
+            pass
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert "role" in first_item
+    assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_slow_input_guardrail_still_raises_exception_streamed():
+    async def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        # Simulate a slow guardrail that completes after model streaming ends.
+        await asyncio.sleep(0.05)
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    # Ensure the model finishes streaming quickly.
+    model.set_next_output([get_text_message("ok")])
+
+    agent = Agent(
+        name="test",
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+        model=model,
+    )
+
+    # Even though the guardrail is slower than the model stream, the exception should still raise.
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message")
+        async for _ in result.stream_events():
+            pass
+
+
+@pytest.mark.asyncio
 async def test_output_guardrail_tripwire_triggered_causes_exception_streamed():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
@@ -625,11 +689,10 @@ async def test_streaming_events():
             [get_function_tool_call("foo", json.dumps({"bar": "baz"}))],
             # Second turn: a message and a handoff
             [get_text_message("a_message"), get_handoff_tool_call(agent_1)],
-            # Third turn: tool call and structured output
-            [
-                get_function_tool_call("bar", json.dumps({"bar": "baz"})),
-                get_final_output_message(json.dumps(Foo(bar="baz"))),
-            ],
+            # Third turn: tool call
+            [get_function_tool_call("bar", json.dumps({"bar": "baz"}))],
+            # Fourth turn: structured output
+            [get_final_output_message(json.dumps(Foo(bar="baz")))],
         ]
     )
 
@@ -653,7 +716,7 @@ async def test_streaming_events():
             agent_data.append(event)
 
     assert result.final_output == Foo(bar="baz")
-    assert len(result.raw_responses) == 3, "should have three model responses"
+    assert len(result.raw_responses) == 4, "should have four model responses"
     assert len(result.to_input_list()) == 10, (
         "should have input: 2 orig inputs, function call, function call result, message, handoff, "
         "handoff output, tool call, tool call result, final output"
@@ -665,11 +728,16 @@ async def test_streaming_events():
     # Now lets check the events
 
     expected_item_type_map = {
-        "tool_call": 2,
+        # 3 tool_call_item events:
+        #   1. get_function_tool_call("foo", ...)
+        #   2. get_handoff_tool_call(agent_1) because handoffs are implemented via tool calls too
+        #   3. get_function_tool_call("bar", ...)
+        "tool_call": 3,
+        # Only 2 outputs, handoff tool call doesn't have corresponding tool_call_output event
         "tool_call_output": 2,
-        "message": 2,
-        "handoff": 1,
-        "handoff_output": 1,
+        "message": 2,  # get_text_message("a_message") + get_final_output_message(...)
+        "handoff": 1,  # get_handoff_tool_call(agent_1)
+        "handoff_output": 1,  # handoff_output_item
     }
 
     total_expected_item_count = sum(expected_item_type_map.values())
