@@ -42,7 +42,9 @@ def _get_message_output_run_item(content: str) -> MessageOutputItem:
         agent=fake_agent(),
         raw_item=ResponseOutputMessage(
             id="1",
-            content=[ResponseOutputText(text=content, annotations=[], type="output_text")],
+            content=[
+                ResponseOutputText(text=content, annotations=[], type="output_text", logprobs=[])
+            ],
             role="assistant",
             status="completed",
             type="message",

@@ -1226,6 +1226,7 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
                     "content": [
                         {
                             "annotations": [],
+                            "logprobs": [],
                             "text": "Summary: Echoed foo and bar",
                             "type": "output_text",
                         }

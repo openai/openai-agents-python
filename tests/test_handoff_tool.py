@@ -27,7 +27,9 @@ def message_item(content: str, agent: Agent[Any]) -> MessageOutputItem:
             status="completed",
             role="assistant",
             type="message",
-            content=[ResponseOutputText(text=content, type="output_text", annotations=[])],
+            content=[
+                ResponseOutputText(text=content, type="output_text", annotations=[], logprobs=[])
+            ],
         ),
     )
 

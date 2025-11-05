@@ -152,6 +152,7 @@ def test_items_to_messages_with_output_message_and_function_call():
         text="Part 1",
         type="output_text",
         annotations=[],
+        logprobs=[],
     )
     refusal: ResponseOutputRefusal = ResponseOutputRefusal(
         refusal="won't do that",
