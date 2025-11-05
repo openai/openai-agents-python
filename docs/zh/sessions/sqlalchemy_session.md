@@ -4,7 +4,7 @@ search:
 ---
 # SQLAlchemy 会话
 
-`SQLAlchemySession` 使用 SQLAlchemy 提供可用于生产的会话实现，允许你将 SQLAlchemy 支持的任何数据库（PostgreSQL、MySQL、SQLite 等）用于会话存储。
+`SQLAlchemySession` 使用 SQLAlchemy 提供可用于生产环境的会话实现，使你可以使用 SQLAlchemy 支持的任意数据库（PostgreSQL、MySQL、SQLite 等）进行会话存储。
 
 ## 安装
 
@@ -14,11 +14,11 @@ SQLAlchemy 会话需要安装 `sqlalchemy` 扩展：
 pip install openai-agents[sqlalchemy]
 ```
 
-## 快速入门
+## 快速开始
 
 ### 使用数据库 URL
 
-最简单的用法：
+最简单的入门方式：
 
 ```python
 import asyncio

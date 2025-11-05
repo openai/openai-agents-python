@@ -9,10 +9,10 @@ search:
 ## 기능
 
 - **대화 분기**: 임의의 사용자 메시지에서 대체 대화 경로 생성
-- **사용량 추적**: 각 턴별 상세 토큰 사용량 분석과 전체 JSON 분해 제공
-- **구조화된 쿼리**: 턴 기준 대화 조회, 도구 사용 통계 등
-- **분기 관리**: 독립적인 분기 전환 및 관리
-- **메시지 구조 메타데이터**: 메시지 유형, 도구 사용, 대화 흐름 추적
+- **사용량 추적**: 각 턴별 상세 토큰 사용량 분석과 전체 JSON 분해
+- **구조화된 쿼리**: 턴별 대화, 도구 사용 통계 등 조회
+- **브랜치 관리**: 독립적인 브랜치 전환 및 관리
+- **메시지 구조 메타데이터**: 메시지 타입, 도구 사용, 대화 흐름 추적
 
 ## 빠른 시작
 
@@ -87,13 +87,13 @@ session = AdvancedSQLiteSession(
 - `session_id` (str): 대화 세션의 고유 식별자
 - `db_path` (str | Path): SQLite 데이터베이스 파일 경로. 인메모리 저장을 위해 기본값은 `:memory:`
 - `create_tables` (bool): 고급 테이블을 자동으로 생성할지 여부. 기본값은 `False`
-- `logger` (logging.Logger | None): 세션에 사용할 커스텀 로거. 기본값은 모듈 로거
+- `logger` (logging.Logger | None): 세션에서 사용할 커스텀 로거. 모듈 로거가 기본값
 
 ## 사용량 추적
 
-AdvancedSQLiteSession은 대화의 각 턴마다 토큰 사용 데이터를 저장하여 상세한 사용량 분석을 제공합니다. **이는 각 에이전트 실행 후 `store_run_usage` 메서드를 호출하는 것에 전적으로 의존합니다.**
+AdvancedSQLiteSession은 대화의 각 턴별로 토큰 사용 데이터를 저장하여 상세 사용량 분석을 제공합니다. **이는 각 에이전트 실행 후 `store_run_usage` 메서드가 호출되는 것에 전적으로 의존합니다.**
 
-### 사용 데이터 저장
+### 사용량 데이터 저장
 
 ```python
 # After each agent run, store the usage data
@@ -137,9 +137,9 @@ turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 
 ## 대화 분기
 
-AdvancedSQLiteSession의 핵심 기능 중 하나는 임의의 사용자 메시지에서 대화 분기를 생성해 대체 대화 경로를 탐색할 수 있는 능력입니다.
+AdvancedSQLiteSession의 핵심 기능 중 하나는 임의의 사용자 메시지에서 대화 브랜치를 생성하여 대체 대화 경로를 탐색할 수 있는 능력입니다.
 
-### 분기 생성
+### 브랜치 생성
 
 ```python
 # Get available turns for branching
@@ -165,7 +165,7 @@ branch_id = await session.create_branch_from_content(
 )
 ```
 
-### 분기 관리
+### 브랜치 관리
 
 ```python
 # List all branches
@@ -182,7 +182,7 @@ await session.switch_to_branch(branch_id)
 await session.delete_branch(branch_id, force=True)  # force=True allows deleting current branch
 ```
 
-### 분기 워크플로 예시
+### 브랜치 워크플로 예시
 
 ```python
 # Original conversation
@@ -217,7 +217,7 @@ await session.store_run_usage(result)
 
 ## 구조화된 쿼리
 
-AdvancedSQLiteSession은 대화의 구조와 내용을 분석하기 위한 여러 메서드를 제공합니다.
+AdvancedSQLiteSession은 대화 구조와 내용을 분석하기 위한 여러 메서드를 제공합니다.
 
 ### 대화 분석
 
@@ -245,17 +245,17 @@ for turn in matching_turns:
 
 ### 메시지 구조
 
-세션은 다음을 포함한 메시지 구조를 자동으로 추적합니다:
+세션은 다음을 포함해 메시지 구조를 자동으로 추적합니다:
 
-- 메시지 유형(user, assistant, tool_call 등)
+- 메시지 타입(user, assistant, tool_call 등)
 - 도구 호출의 도구 이름
 - 턴 번호와 시퀀스 번호
-- 분기 연관성
+- 브랜치 연결 관계
 - 타임스탬프
 
 ## 데이터베이스 스키마
 
-AdvancedSQLiteSession은 기본 SQLite 스키마를 두 개의 추가 테이블로 확장합니다:
+AdvancedSQLiteSession은 기본 SQLite 스키마를 두 개의 추가 테이블로 확장합니다.
 
 ### message_structure 테이블
 
@@ -296,10 +296,9 @@ CREATE TABLE turn_usage (
 );
 ```
 
-## 전체 예제
+## 완전한 sample code
 
-모든 기능을 종합적으로 보여주는 [완전한 예제](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)를 확인하세요.
-
+모든 기능을 포괄적으로 보여주는 [complete example](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)을 확인하세요.
 
 ## API 레퍼런스
 

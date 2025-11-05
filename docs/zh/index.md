@@ -4,31 +4,31 @@ search:
 ---
 # OpenAI Agents SDK
 
-[OpenAI Agents SDK](https://github.com/openai/openai-agents-python) 让你以轻量、易用且极少抽象的方式构建智能体式 AI 应用。它是我们此前面向智能体的试验项目 [Swarm](https://github.com/openai/swarm/tree/main) 的可用于生产的升级版。Agents SDK 仅包含一小组基本组件：
+[OpenAI Agents SDK](https://github.com/openai/openai-agents-python) 让你以轻量、易用且极少抽象的方式构建智能体 AI 应用。它是我们之前用于智能体实验项目 [Swarm](https://github.com/openai/swarm/tree/main) 的面向生产的升级版本。Agents SDK 仅包含一小组基本组件：
 
-- **智能体（Agents）**：配备了 instructions 和 tools 的 LLM
-- **任务转移（Handoffs）**：允许智能体将特定任务委派给其他智能体
-- **安全防护措施（Guardrails）**：支持对智能体输入与输出进行校验
-- **会话（Sessions）**：在多次运行中自动维护对话历史
+- **智能体**：配备指令和工具的 LLM
+- **任务转移**：使智能体能够将特定任务委派给其他智能体
+- **安全防护措施**：支持对智能体的输入与输出进行校验
+- **会话**：在多次运行中自动维护对话历史
 
-结合 Python，这些基本组件足以表达工具与智能体之间的复杂关系，让你无需陡峭的学习曲线即可构建真实应用。此外，SDK 自带 **追踪（tracing）**，可用于可视化和调试你的智能体流程，亦可进行评估，甚至为你的应用微调模型。
+结合 Python，这些基本组件足以表达工具与智能体之间的复杂关系，让你无需陡峭学习曲线就能构建真实世界应用。此外，SDK 内置 **追踪**，用于可视化与调试智能体流程，并能对其进行评估，甚至为你的应用微调模型。
 
 ## 使用 Agents SDK 的理由
 
-该 SDK 的两条核心设计原则：
+该 SDK 的两个核心设计原则：
 
-1. 功能足够有用，但基本组件足够少，便于快速上手。
-2. 开箱即用，同时你可以精确自定义行为。
+1. 功能足够有用，同时保持足够少的基本组件以便快速上手。
+2. 开箱即用表现优秀，同时允许你精细定制执行过程。
 
-主要特性包括：
+SDK 的主要特性如下：
 
-- 智能体循环：内置循环负责调用 tools、将结果反馈给 LLM，并在 LLM 完成前自动迭代。
-- Python 优先：使用语言自带能力编排与串联智能体，无需学习新的抽象。
-- 任务转移：强大的多智能体协作与委派能力。
-- 安全防护措施：与智能体并行执行输入校验与检查，失败即提前终止。
+- 智能体循环：内置循环，负责调用工具、将结果返回给 LLM，并在 LLM 完成前自动循环。
+- Python 优先：使用内置语言特性编排与串联智能体，而无需学习新的抽象。
+- 任务转移：用于在多个智能体之间协调与委派的强大能力。
+- 安全防护措施：与智能体并行运行输入校验与检查，如检查失败则提前中断。
 - 会话：跨多次运行自动管理对话历史，免去手动状态处理。
-- 工具调用：将任意 Python 函数变为工具，自动生成 schema，并通过 Pydantic 驱动的校验。
-- 追踪：内置追踪用于可视化、调试与监控流程，并可使用 OpenAI 的评估、微调与蒸馏工具套件。
+- 工具调用：将任意 Python 函数变为工具，自动生成模式，并由 Pydantic 提供校验。
+- 追踪：内置追踪，便于可视化、调试与监控工作流；还可使用 OpenAI 的评估、微调与蒸馏工具套件。
 
 ## 安装
 
@@ -36,7 +36,7 @@ search:
 pip install openai-agents
 ```
 
-## Hello World 示例
+## Hello world 示例
 
 ```python
 from agents import Agent, Runner
@@ -51,7 +51,7 @@ print(result.final_output)
 # Infinite loop's dance.
 ```
 
-（运行时，请确保已设置环境变量 `OPENAI_API_KEY`）
+(_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)
 
 ```bash
 export OPENAI_API_KEY=sk-...

@@ -4,44 +4,44 @@ search:
 ---
 # 安全防护措施
 
-安全防护措施与您的智能体并行运行，使您能够对用户输入进行检查和验证。举例来说，假设您有一个使用非常智能（因此也较慢/昂贵）的模型来处理客户请求的智能体。您不希望恶意用户让该模型帮助他们完成数学作业。因此，您可以使用一个快速/低成本的模型运行安全防护措施。如果安全防护措施检测到恶意使用，它可以立即抛出错误，从而阻止昂贵模型的运行，为您节省时间/金钱。
+安全防护措施与智能体_并行_运行，使你能够对用户输入进行检查和校验。例如，设想你有一个使用非常智能（因此也慢/昂贵）的模型来处理客户请求的智能体。你不希望恶意用户让该模型帮他们完成数学作业。因此，你可以使用快速/廉价的模型运行一条安全防护措施。如果该安全防护措施检测到恶意使用，它可以立即抛出错误，从而阻止昂贵模型的运行，帮你节省时间/金钱。
 
 安全防护措施有两种类型：
 
-1. 输入安全防护措施运行在初始用户输入上
-2. 输出安全防护措施运行在最终智能体输出上
+1. 输入安全防护措施在初始用户输入上运行
+2. 输出安全防护措施在最终智能体输出上运行
 
 ## 输入安全防护措施
 
-输入安全防护措施分三步运行：
+输入安全防护措施分 3 步运行：
 
 1. 首先，安全防护措施接收与智能体相同的输入。
-2. 接着，安全防护措施函数运行以生成一个[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装成[`InputGuardrailResult`][agents.guardrail.InputGuardrailResult]
-3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered]是否为 true。若为 true，则会抛出[`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered]异常，以便您对用户做出恰当响应或处理该异常。
+2. 接着，运行安全防护函数以生成一个 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，然后将其包装在 [`InputGuardrailResult`][agents.guardrail.InputGuardrailResult] 中
+3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] 是否为 true。若为 true，则会抛出 [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered] 异常，你可以据此适当回应用户或处理该异常。
 
 !!! Note
 
-    输入安全防护措施旨在运行于用户输入上，因此只有当某个智能体是*第一个*智能体时，它的安全防护措施才会运行。您可能会疑惑，为什么 `guardrails` 属性在智能体上，而不是传给 `Runner.run`？这是因为安全防护措施通常与具体的智能体相关——不同的智能体会运行不同的安全防护措施，因此将代码就近放置更有利于可读性。
+    输入安全防护措施旨在处理用户输入，因此只有当智能体是*第一个*智能体时才会运行智能体的安全防护措施。你可能会疑惑，为什么 `guardrails` 属性在智能体上，而不是传给 `Runner.run`？这是因为安全防护措施通常与实际的智能体相关——你会为不同的智能体运行不同的安全防护措施，因此将代码就地放在一起有助于可读性。
 
 ## 输出安全防护措施
 
-输出安全防护措施分三步运行：
+输出安全防护措施分 3 步运行：
 
-1. 首先，安全防护措施接收由智能体产生的输出。
-2. 接着，安全防护措施函数运行以生成一个[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，随后被包装成[`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]
-3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered]是否为 true。若为 true，则会抛出[`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]异常，以便您对用户做出恰当响应或处理该异常。
+1. 首先，安全防护措施接收由智能体生成的输出。
+2. 接着，运行安全防护函数以生成一个 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]，然后将其包装在 [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult] 中
+3. 最后，我们检查[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] 是否为 true。若为 true，则会抛出 [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] 异常，你可以据此适当回应用户或处理该异常。
 
 !!! Note
 
-    输出安全防护措施旨在运行于最终的智能体输出上，因此只有当某个智能体是*最后一个*智能体时，它的安全防护措施才会运行。与输入安全防护措施类似，我们这样设计是因为安全防护措施通常与具体的智能体相关——不同的智能体会运行不同的安全防护措施，因此将代码就近放置更有利于可读性。
+    输出安全防护措施旨在处理最终的智能体输出，因此只有当智能体是*最后一个*智能体时才会运行智能体的安全防护措施。与输入安全防护措施类似，我们这样做是因为安全防护措施通常与实际的智能体相关——你会为不同的智能体运行不同的安全防护措施，因此将代码就地放在一起有助于可读性。
 
 ## 触发线
 
-如果输入或输出未通过安全防护措施，安全防护措施可以通过触发线来发出信号。一旦我们发现某个安全防护措施触发了触发线，就会立即抛出 `{Input,Output}GuardrailTripwireTriggered` 异常并停止智能体执行。
+如果输入或输出未通过安全防护措施，安全防护措施可以通过触发线发出信号。一旦我们发现某个安全防护措施触发了触发线，我们会立即抛出 `{Input,Output}GuardrailTripwireTriggered` 异常，并停止智能体执行。
 
 ## 实现安全防护措施
 
-您需要提供一个接收输入并返回[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput]的函数。此示例中，我们将通过在底层运行一个智能体来实现。
+你需要提供一个接收输入并返回 [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] 的函数。在此示例中，我们将通过在底层运行一个智能体来实现。
 
 ```python
 from pydantic import BaseModel
@@ -94,12 +94,12 @@ async def main():
         print("Math homework guardrail tripped")
 ```
 
-1. 我们将在安全防护措施函数中使用此智能体。
-2. 这是接收智能体输入/上下文并返回结果的安全防护措施函数。
-3. 我们可以在安全防护措施结果中包含额外信息。
+1. 我们将在安全防护函数中使用这个智能体。
+2. 这是接收智能体输入/上下文并返回结果的安全防护函数。
+3. 我们可以在安全防护结果中包含额外信息。
 4. 这是定义工作流的实际智能体。
 
-输出安全防护措施与之类似。
+输出安全防护措施类似。
 
 ```python
 from pydantic import BaseModel
@@ -154,5 +154,5 @@ async def main():
 
 1. 这是实际智能体的输出类型。
 2. 这是安全防护措施的输出类型。
-3. 这是接收智能体输出并返回结果的安全防护措施函数。
+3. 这是接收智能体输出并返回结果的安全防护函数。
 4. 这是定义工作流的实际智能体。

@@ -4,15 +4,15 @@ search:
 ---
 # 高级 SQLite 会话
 
-`AdvancedSQLiteSession` 是基础 `SQLiteSession` 的增强版本，提供包括会话分支、详细用量分析和结构化会话查询在内的高级对话管理能力。
+`AdvancedSQLiteSession` 是基础 `SQLiteSession` 的增强版，提供高级会话管理能力，包括会话分支、详细使用分析以及结构化会话查询。
 
 ## 功能
 
-- **会话分支**: 可从任意用户消息创建替代的对话路径
-- **用量追踪**: 每轮详细的 token 用量分析和完整的 JSON 明细
+- **会话分支**: 可从任意用户消息创建替代会话路径
+- **使用跟踪**: 每轮对话的详细 token 使用分析，并提供完整 JSON 拆解
 - **结构化查询**: 按轮次获取会话、工具使用统计等
 - **分支管理**: 独立的分支切换与管理
-- **消息结构元数据**: 追踪消息类型、工具使用和会话流转
+- **消息结构元数据**: 跟踪消息类型、工具使用和会话流向
 
 ## 快速开始
 
@@ -84,16 +84,16 @@ session = AdvancedSQLiteSession(
 
 ### 参数
 
-- `session_id` (str): 会话会话的唯一标识符
+- `session_id` (str): 会话的唯一标识符
 - `db_path` (str | Path): SQLite 数据库文件路径。默认使用 `:memory:` 进行内存存储
-- `create_tables` (bool): 是否自动创建高级表。默认为 `False`
-- `logger` (logging.Logger | None): 会话的自定义日志记录器。默认使用模块日志记录器
+- `create_tables` (bool): 是否自动创建高级表。默认 `False`
+- `logger` (logging.Logger | None): 会话的自定义日志记录器。默认使用模块日志器
 
-## 用量追踪
+## 使用跟踪
 
-AdvancedSQLiteSession 通过按对话轮次存储 token 用量数据提供详细的用量分析。**这完全依赖在每次智能体运行后调用 `store_run_usage` 方法。**
+AdvancedSQLiteSession 通过按对话轮次存储 token 使用数据来提供详细的使用分析。**这完全依赖于在每次智能体运行后调用 `store_run_usage` 方法。**
 
-### 存储用量数据
+### 存储使用数据
 
 ```python
 # After each agent run, store the usage data
@@ -107,7 +107,7 @@ await session.store_run_usage(result)
 # - Detailed JSON token information (if available)
 ```
 
-### 获取用量统计
+### 获取使用统计
 
 ```python
 # Get session-level usage (all branches)
@@ -137,7 +137,7 @@ turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 
 ## 会话分支
 
-AdvancedSQLiteSession 的关键特性之一是能够从任意用户消息创建会话分支，使你可以探索替代的对话路径。
+AdvancedSQLiteSession 的关键特性之一是能够从任意用户消息创建会话分支，从而探索替代的会话路径。
 
 ### 创建分支
 
@@ -217,7 +217,7 @@ await session.store_run_usage(result)
 
 ## 结构化查询
 
-AdvancedSQLiteSession 提供多种方法来分析会话结构与内容。
+AdvancedSQLiteSession 提供多种方法来分析会话结构和内容。
 
 ### 会话分析
 
@@ -245,17 +245,17 @@ for turn in matching_turns:
 
 ### 消息结构
 
-会话会自动追踪以下消息结构信息：
+会话会自动跟踪消息结构，包括：
 
 - 消息类型（user、assistant、tool_call 等）
 - 工具调用的工具名称
-- 轮次编号与序列编号
+- 轮次编号和序列号
 - 分支关联
 - 时间戳
 
 ## 数据库模式
 
-AdvancedSQLiteSession 在基础的 SQLite 模式上扩展了两个附加表：
+AdvancedSQLiteSession 在基础 SQLite 模式上扩展了两个附加表：
 
 ### message_structure 表
 
