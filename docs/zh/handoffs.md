@@ -4,19 +4,19 @@ search:
 ---
 # 任务转移
 
-任务转移允许一个智能体将任务委派给另一个智能体。这在不同智能体各自专精不同领域的场景中特别有用。例如，一个客户支持应用可能有各自专门处理订单状态、退款、常见问题（FAQ）等任务的智能体。
+任务转移允许一个智能体将任务委托给另一个智能体。这在不同智能体专注于不同领域的场景中特别有用。例如，一个客服应用可能有各自专门处理订单状态、退款、常见问题等任务的智能体。
 
-对 LLM 而言，任务转移被表示为工具。因此，如果要将任务转移给名为 `Refund Agent` 的智能体，则该工具会被命名为 `transfer_to_refund_agent`。
+对 LLM 来说，任务转移会被表示为工具。因此，如果有一个转移到名为 `Refund Agent` 的智能体，工具就会被命名为 `transfer_to_refund_agent`。
 
 ## 创建任务转移
 
-所有智能体都有一个 [`handoffs`][agents.agent.Agent.handoffs] 参数，它既可以直接接收一个 `Agent`，也可以接收一个用于自定义任务转移的 `Handoff` 对象。
+所有智能体都有一个 [`handoffs`][agents.agent.Agent.handoffs] 参数，它可以直接接收一个 `Agent`，或者接收一个可自定义的 `Handoff` 对象。
 
-你可以使用 Agents SDK 提供的 [`handoff()`][agents.handoffs.handoff] 函数来创建任务转移。该函数允许你指定要移交到的智能体，并可选地提供覆盖项和输入过滤器。
+你可以使用 Agents SDK 提供的 [`handoff()`][agents.handoffs.handoff] 函数来创建任务转移。该函数允许你指定转移的目标智能体，以及可选的覆盖项和输入过滤器。
 
-### 基础用法
+### 基本用法
 
-如下是如何创建一个简单的任务转移：
+以下是创建一个简单任务转移的方法：
 
 ```python
 from agents import Agent, handoff
@@ -32,12 +32,12 @@ triage_agent = Agent(name="Triage agent", handoffs=[billing_agent, handoff(refun
 
 ### 通过 `handoff()` 函数自定义任务转移
 
-[`handoff()`][agents.handoffs.handoff] 函数允许你进行自定义。
+[`handoff()`][agents.handoffs.handoff] 函数可用于自定义设置。
 
-- `agent`: 将要接手的智能体。
-- `tool_name_override`: 默认使用 `Handoff.default_tool_name()`，其解析为 `transfer_to_<agent_name>`。你可以覆盖它。
-- `tool_description_override`: 覆盖 `Handoff.default_tool_description()` 提供的默认工具描述。
-- `on_handoff`: 当任务转移被调用时执行的回调函数。这对于在你知道将要进行任务转移时立即启动某些数据获取等操作很有用。该函数接收智能体上下文，并且可选地接收 LLM 生成的输入。输入数据由 `input_type` 参数控制。
+- `agent`: 将要转移到的智能体。
+- `tool_name_override`: 默认使用 `Handoff.default_tool_name()`，其解析为 `transfer_to_<agent_name>`。你可以覆盖此项。
+- `tool_description_override`: 覆盖 `Handoff.default_tool_description()` 的默认工具描述。
+- `on_handoff`: 当任务转移被调用时执行的回调函数。可用于在确定发生任务转移时立即启动一些数据获取等操作。该函数接收智能体上下文，并且可选地接收由 LLM 生成的输入。输入数据由 `input_type` 参数控制。
 - `input_type`: 任务转移期望的输入类型（可选）。
 - `input_filter`: 允许你过滤下一个智能体接收的输入。详见下文。
 - `is_enabled`: 是否启用该任务转移。可以是布尔值或返回布尔值的函数，从而允许你在运行时动态启用或禁用任务转移。
@@ -60,7 +60,7 @@ handoff_obj = handoff(
 
 ## 任务转移输入
 
-在某些情况下，你希望 LLM 在调用任务转移时提供一些数据。例如，设想将任务转移给“升级处理（Escalation）智能体”。你可能希望提供一个原因，以便进行日志记录。
+在某些情况下，你希望 LLM 在调用任务转移时提供一些数据。例如，想象一个转移到“升级智能体”的场景。你可能希望提供一个原因，以便进行日志记录。
 
 ```python
 from pydantic import BaseModel
@@ -84,9 +84,9 @@ handoff_obj = handoff(
 
 ## 输入过滤器
 
-当发生任务转移时，就好像新的智能体接管了对话，并能看到之前的整个对话历史。如果你想改变这一点，可以设置一个 [`input_filter`][agents.handoffs.Handoff.input_filter]。输入过滤器是一个函数，它通过 [`HandoffInputData`][agents.handoffs.HandoffInputData] 接收现有输入，并且必须返回一个新的 `HandoffInputData`。
+当发生任务转移时，就好像新的智能体接管了对话，并能看到之前的全部对话历史。如果你想更改这一点，可以设置一个 [`input_filter`][agents.handoffs.Handoff.input_filter]。输入过滤器是一个函数，它通过 [`HandoffInputData`][agents.handoffs.HandoffInputData] 接收现有输入，并且必须返回一个新的 `HandoffInputData`。
 
-有一些常见模式（例如从历史记录中移除所有工具调用），它们已在 [`agents.extensions.handoff_filters`][] 中为你实现。
+有一些常见模式（例如从历史记录中移除所有工具调用），已经在 [`agents.extensions.handoff_filters`][] 中为你实现。
 
 ```python
 from agents import Agent, handoff
@@ -104,7 +104,7 @@ handoff_obj = handoff(
 
 ## 推荐提示词
 
-为确保 LLM 正确理解任务转移，我们建议在你的智能体中包含有关任务转移的信息。我们在 [`agents.extensions.handoff_prompt.RECOMMENDED_PROMPT_PREFIX`][] 中提供了建议的前缀，或者你也可以调用 [`agents.extensions.handoff_prompt.prompt_with_handoff_instructions`][] 将推荐数据自动添加到你的提示词中。
+为确保 LLM 正确认识任务转移，我们建议在智能体中包含关于任务转移的信息。我们在 [`agents.extensions.handoff_prompt.RECOMMENDED_PROMPT_PREFIX`][] 中提供了一个建议的前缀，或者你可以调用 [`agents.extensions.handoff_prompt.prompt_with_handoff_instructions`][] 将推荐数据自动添加到你的提示词中。
 
 ```python
 from agents import Agent

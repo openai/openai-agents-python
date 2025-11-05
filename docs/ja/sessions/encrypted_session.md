@@ -4,18 +4,18 @@ search:
 ---
 # 暗号化セッション
 
-`EncryptedSession` は、あらゆるセッション実装に対して透過的な暗号化を提供し、古い項目の自動有効期限切れにより会話データを保護します。
+`EncryptedSession` は、あらゆるセッション実装に対して透過的な暗号化を提供し、会話データを保護しつつ古い項目を自動的に期限切れにします。
 
 ## 機能
 
-- **透過的な暗号化**: どのセッションでも  Fernet 暗号化でラップします
-- **セッションごとのキー**: 一意の暗号化を行うために  HKDF キー導出を使用します
-- **自動有効期限**: TTL が切れた古い項目は静かにスキップされます
-- **差し替え可能**: 既存の任意のセッション実装で動作します
+-  **透過的な暗号化**: 任意のセッションを  Fernet  暗号化でラップします
+-  **セッションごとの鍵**:  HKDF  による鍵導出でセッションごとに固有の暗号鍵を使用します
+-  **自動有効期限**:  TTL  超過時は古い項目を黙ってスキップします
+-  **置き換え可能**:  既存の任意のセッション実装で動作します
 
 ## インストール
 
-暗号化セッションには `encrypt` エクストラが必要です:
+暗号化セッションには `encrypt` 追加が必要です:
 
 ```bash
 pip install openai-agents[encrypt]
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 ### 暗号化キー
 
-暗号化キーは  Fernet キーまたは任意の文字列を使用できます:
+暗号化キーは  Fernet  キーまたは任意の文字列にできます:
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -81,7 +81,7 @@ session = EncryptedSession(
 
 ### TTL (Time To Live)
 
-暗号化された項目が有効である期間を設定します:
+暗号化された項目が有効な期間を設定します:
 
 ```python
 # Items expire after 1 hour
@@ -140,30 +140,30 @@ session = EncryptedSession(
 
 !!! warning "高度なセッション機能"
 
-    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合、次の点に注意してください:
+    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合、次にご注意ください:
 
-    - メッセージ内容が暗号化されるため、`find_turns_by_content()` のようなメソッドは効果的に動作しません
-    - コンテンツベースの検索は暗号化データに対して行われるため、その有効性が制限されます
+    - `find_turns_by_content()` のようなメソッドは、メッセージ内容が暗号化されているため効果的に動作しません
+    - 内容に基づく検索は暗号化データに対して行われるため、その有効性は制限されます
 
 
 
-## キー導出
+## 鍵導出
 
-EncryptedSession は  HKDF (HMAC-based Key Derivation Function) を使用して、セッションごとに一意の暗号化キーを導出します:
+EncryptedSession は  HKDF  (HMAC-based Key Derivation Function) を使用して、セッションごとに固有の暗号鍵を導出します:
 
-- **マスターキー**: 提供された暗号化キー
-- **セッションソルト**: セッション ID
-- **Info string**: `"agents.session-store.hkdf.v1"`
-- **出力**: 32 バイト  Fernet キー
+-  **マスターキー**: 提供された暗号化キー
+-  **セッションソルト**: セッション  ID
+-  **情報文字列**: `"agents.session-store.hkdf.v1"`
+-  **出力**: 32 バイトの  Fernet  キー
 
-これにより次のことが保証されます:
-- 各セッションには一意の暗号化キーがあります
-- マスターキーがなければキーを導出できません
-- 異なるセッション間でセッションデータを復号できません
+これにより、次が保証されます:
+-  各セッションは固有の暗号鍵を持ちます
+-  マスターキーなしに鍵を導出できません
+-  異なるセッション間でセッションデータを復号できません
 
 ## 自動有効期限
 
-項目が  TTL を超えた場合、取得時に自動的にスキップされます:
+項目が  TTL  を超えた場合、取得時に自動的にスキップされます:
 
 ```python
 # Items older than TTL are silently ignored
@@ -173,7 +173,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API リファレンス
+## API 参照
 
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - メインクラス
 - [`Session`][agents.memory.session.Session] - ベースセッションプロトコル

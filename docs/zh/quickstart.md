@@ -4,7 +4,7 @@ search:
 ---
 # 快速开始
 
-## 创建项目和虚拟环境
+## 创建项目与虚拟环境
 
 你只需执行一次。
 
@@ -16,7 +16,7 @@ python -m venv .venv
 
 ### 激活虚拟环境
 
-每次开启新的终端会话都要执行。
+每次开启新的终端会话都需要执行。
 
 ```bash
 source .venv/bin/activate
@@ -28,9 +28,9 @@ source .venv/bin/activate
 pip install openai-agents # or `uv add openai-agents`, etc
 ```
 
-### 设置 OpenAI API 密钥
+### 设置 OpenAI API key
 
-如果你还没有，按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建一个 OpenAI API key。
+如果你还没有，请按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建一个 OpenAI API key。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -49,9 +49,9 @@ agent = Agent(
 )
 ```
 
-## 再添加几个智能体
+## 添加更多智能体
 
-其他智能体可以用相同方式定义。`handoff_descriptions` 为确定任务转移路由提供额外上下文。
+可以用相同方式定义其他智能体。`handoff_descriptions` 为确定任务转移路径提供额外上下文。
 
 ```python
 from agents import Agent
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## 定义你的任务转移
 
-在每个智能体上，你可以定义一个外发任务转移选项清单，供智能体选择以决定如何推进其任务。
+在每个智能体上，你可以定义一组可供选择的外发任务转移选项，以决定如何推进其任务。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## 运行智能体编排
 
-让我们检查工作流是否运行，以及分诊智能体是否在两个专家智能体之间正确路由。
+让我们检查工作流是否运行正常，以及分诊智能体是否能在两个专家型智能体之间正确路由。
 
 ```python
 from agents import Runner
@@ -95,7 +95,7 @@ async def main():
 
 ## 添加安全防护措施
 
-你可以在输入或输出上定义自定义安全防护措施。
+你可以定义自定义的安全防护措施，用于输入或输出。
 
 ```python
 from agents import GuardrailFunctionOutput, Agent, Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 整合运行
+## 集成运行
 
-让我们把这些组合起来，运行整个工作流，使用任务转移和输入安全防护措施。
+让我们把以上内容整合起来，运行整个工作流，并启用任务转移与输入安全防护措施。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## 查看追踪
 
-要回顾智能体运行期间发生的事情，请前往 [OpenAI 控制台中的追踪查看器](https://platform.openai.com/traces)查看你的运行追踪。
+要查看智能体运行期间发生的情况，请前往 [OpenAI 仪表盘中的 Trace viewer](https://platform.openai.com/traces) 查看你的运行追踪。
 
 ## 后续步骤
 
-了解如何构建更复杂的智能体流程：
+学习如何构建更复杂的智能体流程：
 
-- 了解如何配置[智能体](agents.md)。
-- 了解[运行智能体](running_agents.md)。
-- 了解[工具](tools.md)、[安全防护措施](guardrails.md)和[模型](models/index.md)。
+- 学习如何配置[智能体](agents.md)。
+- 学习[运行智能体](running_agents.md)。
+- 学习[工具](tools.md)、[安全防护措施](guardrails.md)和[模型](models/index.md)。

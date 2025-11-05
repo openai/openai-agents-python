@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### OpenAI API キーの設定
 
-お持ちでない場合は、[こちらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)に従って OpenAI API キーを作成してください。
+お持ちでない場合は、OpenAI API キーを作成するために [これらの手順](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key) に従ってください。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 最初のエージェントの作成
 
-エージェントは、instructions、名前、任意の設定（`model_config` など）で定義します。
+エージェントは instructions、名前、任意の config（たとえば `model_config`）で定義します。
 
 ```python
 from agents import Agent
@@ -49,7 +49,7 @@ agent = Agent(
 )
 ```
 
-## いくつかのエージェントの追加
+## さらにいくつかのエージェントを追加
 
 追加のエージェントも同様に定義できます。`handoff_descriptions` は、ハンドオフのルーティングを判断するための追加コンテキストを提供します。
 
@@ -71,7 +71,7 @@ math_tutor_agent = Agent(
 
 ## ハンドオフの定義
 
-各エージェントごとに、タスクを進めるために選択できる送信先ハンドオフ オプションの一覧を定義できます。
+各エージェントで、タスクを前進させる方法を決めるために選択できる送信側ハンドオフ オプションの一覧を定義できます。
 
 ```python
 triage_agent = Agent(
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## エージェントのオーケストレーションの実行
 
-ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間を正しくルーティングすることを確認しましょう。
+ワークフローが実行され、トリアージ エージェントが 2 つの専門エージェント間で正しくルーティングすることを確認しましょう。
 
 ```python
 from agents import Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## すべてを組み合わせる
+## すべてを統合
 
-ハンドオフと入力ガードレールを使って、すべてを組み合わせたワークフロー全体を実行しましょう。
+ハンドオフと入力ガードレールを使って、すべてを統合し、ワークフロー全体を実行しましょう。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -192,12 +192,12 @@ if __name__ == "__main__":
 
 ## トレースの表示
 
-エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動し、エージェント実行のトレースを表示します。
+エージェントの実行中に何が起きたかを確認するには、[OpenAI ダッシュボードの Trace viewer](https://platform.openai.com/traces) に移動して、エージェント実行のトレースを表示します。
 
 ## 次のステップ
 
-さらに複雑なエージェント フローの構築方法を学びましょう:
+より複雑なエージェント型フローの作り方を学びましょう:
 
-- [エージェント](agents.md) の設定について学ぶ。
-- [エージェントの実行](running_agents.md) について学ぶ。
-- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学ぶ。
+- エージェントの設定について学ぶ: [Agents](agents.md)
+- [エージェントの実行](running_agents.md) について学ぶ
+- [ツール](tools.md)、[ガードレール](guardrails.md)、[モデル](models/index.md) について学ぶ

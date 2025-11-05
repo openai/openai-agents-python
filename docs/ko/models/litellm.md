@@ -6,13 +6,13 @@ search:
 
 !!! note
 
-    LiteLLM 통합은 베타 상태입니다. 특히 규모가 작은 일부 모델 제공자에서 문제가 발생할 수 있습니다. [Github issues](https://github.com/openai/openai-agents-python/issues)를 통해 이슈를 보고해 주세요. 신속히 수정하겠습니다.
+    LiteLLM 통합은 베타 상태입니다. 특히 소형 모델 제공업체에서 문제가 발생할 수 있습니다. [Github issues](https://github.com/openai/openai-agents-python/issues)로 문제를 보고해 주시면 신속히 수정하겠습니다.
 
-[LiteLLM](https://docs.litellm.ai/docs/) 은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. Agents SDK 에 LiteLLM 통합을 추가하여 어떤 AI 모델이든 사용할 수 있도록 했습니다.
+[LiteLLM](https://docs.litellm.ai/docs/) 은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. 저희는 Agents SDK 에서 어떤 AI 모델이든 사용할 수 있도록 LiteLLM 통합을 추가했습니다.
 
 ## 설정
 
-`litellm` 이 사용 가능해야 합니다. 선택적 `litellm` 의존성 그룹을 설치하면 됩니다:
+`litellm` 이 사용 가능해야 합니다. 선택적 `litellm` 종속성 그룹을 설치하면 됩니다:
 
 ```bash
 pip install "openai-agents[litellm]"
@@ -20,15 +20,15 @@ pip install "openai-agents[litellm]"
 
 설치가 완료되면, 어떤 에이전트에서든 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] 을 사용할 수 있습니다.
 
-## 예제
+## 예시
 
-완전히 동작하는 예제입니다. 실행하면 모델 이름과 API 키를 입력하라는 프롬프트가 표시됩니다. 예를 들어 다음과 같이 입력할 수 있습니다:
+다음은 완전히 동작하는 예시입니다. 실행하면 모델 이름과 API 키를 입력하라는 프롬프트가 표시됩니다. 예를 들어 다음과 같이 입력할 수 있습니다:
 
-- `openai/gpt-4.1` 를 모델로, OpenAI API 키
-- `anthropic/claude-3-5-sonnet-20240620` 를 모델로, Anthropic API 키
-- 등
+-   모델에 `openai/gpt-4.1`, 그리고 OpenAI API 키
+-   모델에 `anthropic/claude-3-5-sonnet-20240620`, 그리고 Anthropic API 키
+-   등
 
-LiteLLM 이 지원하는 전체 모델 목록은 [litellm providers docs](https://docs.litellm.ai/docs/providers) 를 참고하세요.
+LiteLLM 에서 지원하는 전체 모델 목록은 [litellm providers docs](https://docs.litellm.ai/docs/providers) 를 참조하세요.
 
 ```python
 from __future__ import annotations
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
 ## 사용량 데이터 추적
 
-LiteLLM 응답으로 Agents SDK 사용량 메트릭을 채우고 싶다면, 에이전트를 생성할 때 `ModelSettings(include_usage=True)` 를 전달하세요.
+LiteLLM 응답을 Agents SDK 사용량 지표에 반영하려면 에이전트를 생성할 때 `ModelSettings(include_usage=True)` 를 전달하세요.
 
 ```python
 from agents import Agent, ModelSettings
