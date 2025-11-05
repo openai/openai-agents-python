@@ -51,8 +51,10 @@ class TwilioHandler:
 
         # Audio chunking (matches CLI demo)
         self.CHUNK_LENGTH_S = 0.05  # 50ms chunks
-        self.SAMPLE_RATE = 8000     # Twilio g711_ulaw at 8kHz
-        self.BUFFER_SIZE_BYTES = int(self.SAMPLE_RATE * self.CHUNK_LENGTH_S)  # ~400 bytes per 50ms
+        self.SAMPLE_RATE = 8000  # Twilio g711_ulaw at 8kHz
+        self.BUFFER_SIZE_BYTES = int(
+            self.SAMPLE_RATE * self.CHUNK_LENGTH_S
+        )  # ~400 bytes per 50ms
 
         self._stream_sid: str | None = None
         self._audio_buffer: bytearray = bytearray()
@@ -60,17 +62,23 @@ class TwilioHandler:
 
         # Playback tracking for outbound audio
         self._mark_counter = 0
-        self._mark_data: dict[str, tuple[str, int, int]] = {}  # mark_id -> (item_id, content_index, byte_count)
+        self._mark_data: dict[str, tuple[str, int, int]] = (
+            {}
+        )  # mark_id -> (item_id, content_index, byte_count)
 
         # ---- Deterministic startup warm-up (preferred over sleep) ----
         # Buffer the first N chunks before sending to OpenAI; then mark warmed.
         try:
-            self.STARTUP_BUFFER_CHUNKS = max(0, int(os.getenv("TWILIO_STARTUP_BUFFER_CHUNKS", "3")))
+            self.STARTUP_BUFFER_CHUNKS = max(
+                0, int(os.getenv("TWILIO_STARTUP_BUFFER_CHUNKS", "3"))
+            )
         except Exception:
             self.STARTUP_BUFFER_CHUNKS = 3
 
         self._startup_buffer = bytearray()
-        self._startup_warmed = self.STARTUP_BUFFER_CHUNKS == 0  # if 0, considered warmed immediately
+        self._startup_warmed = (
+            self.STARTUP_BUFFER_CHUNKS == 0
+        )  # if 0, considered warmed immediately
 
         # Optional delay (defaults 0.0 because buffering is preferred)
         try:
@@ -235,8 +243,12 @@ class TwilioHandler:
             if mark_id in self._mark_data:
                 item_id, item_content_index, byte_count = self._mark_data[mark_id]
                 audio_bytes = b"\x00" * byte_count  # Placeholder bytes for tracker
-                self.playback_tracker.on_play_bytes(item_id, item_content_index, audio_bytes)
-                print(f"Playback tracker updated: {item_id}, index {item_content_index}, {byte_count} bytes")
+                self.playback_tracker.on_play_bytes(
+                    item_id, item_content_index, audio_bytes
+                )
+                print(
+                    f"Playback tracker updated: {item_id}, index {item_content_index}, {byte_count} bytes"
+                )
                 del self._mark_data[mark_id]
 
         except Exception as e:
@@ -257,7 +269,9 @@ class TwilioHandler:
                 self._startup_buffer.extend(buffer_data)
 
                 # target bytes = N chunks * bytes-per-chunk
-                target_bytes = self.BUFFER_SIZE_BYTES * max(0, self.STARTUP_BUFFER_CHUNKS)
+                target_bytes = self.BUFFER_SIZE_BYTES * max(
+                    0, self.STARTUP_BUFFER_CHUNKS
+                )
 
                 if len(self._startup_buffer) >= target_bytes:
                     # Warm-up complete: flush all buffered data in order
@@ -284,7 +298,8 @@ class TwilioHandler:
                 current_time = time.time()
                 if (
                     self._audio_buffer
-                    and current_time - self._last_buffer_send_time > self.CHUNK_LENGTH_S * 2
+                    and current_time - self._last_buffer_send_time
+                    > self.CHUNK_LENGTH_S * 2
                 ):
                     await self._flush_audio_buffer()
 
