@@ -82,8 +82,8 @@ class MultiProvider(ModelProvider):
             provider_map: A MultiProviderMap that maps prefixes to ModelProviders. If not provided,
                 we will use a default mapping. See the documentation for this class to see the
                 default mapping.
-            openai_api_key: The API key to use for the OpenAI provider. If not provided, we will use
-                the default API key.
+            openai_api_key: The API key to use for the OpenAI provider. If not provided,
+                we will use the default API key.
             openai_base_url: The base URL to use for the OpenAI provider. If not provided, we will
                 use the default base URL.
             openai_client: An optional OpenAI client to use. If not provided, we will create a new
@@ -119,8 +119,9 @@ class MultiProvider(ModelProvider):
                 from ..extensions.models.litellm_provider import LitellmProvider
             except ImportError as e:
                 raise UserError(
-                    "LitellmProvider requires the litellm extension. Install the optional dependency "
-                    "or add a custom provider mapping for the 'litellm' prefix."
+                    "LitellmProvider requires the litellm extension. Install "
+                    "the optional dependency or add a custom provider mapping "
+                    "for the 'litellm' prefix."
                 ) from e
             return LitellmProvider()
         else:
