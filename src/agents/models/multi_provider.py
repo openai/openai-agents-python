@@ -151,7 +151,6 @@ class MultiProvider(ModelProvider):
         # Defensive validation
         if model_name is None or model_name == "":
             raise UserError("Model name must be provided and non-empty.")
-            
         if prefix and self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider.get_model(model_name)
         else:
