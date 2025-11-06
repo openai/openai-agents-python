@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from textwrap import dedent
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem, TResponseInputItem
-    from .run_context import RunContextWrapper
-    from .run import RunConfig
     from .result import RunResult
+    from .run import RunConfig
+    from .run_context import RunContextWrapper
     from .tool_guardrails import (
         ToolGuardrailFunctionOutput,
         ToolInputGuardrail,
@@ -54,14 +54,15 @@ class MaxTurnsExceeded(AgentsException):
 
     _DEFAULT_RESUME_PROMPT = """
     You reached the maximum number of turns.
-    Return a final answer to the query using ONLY the information already gathered in the conversation so far.
+    Return a final answer to the query using ONLY the information already gathered \
+    in the conversation so far.
     """
 
     def __init__(self, message: str):
         self.message = message
         super().__init__(message)
 
-    async def resume(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
+    async def resume(self, prompt: str | None = _DEFAULT_RESUME_PROMPT) -> RunResult:
         """Resume the failed run asynchronously with a final, tool-free turn.
 
         Note:
@@ -87,7 +88,7 @@ class MaxTurnsExceeded(AgentsException):
             run_config=run_config,
         )
 
-    def resume_sync(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
+    def resume_sync(self, prompt: str | None = _DEFAULT_RESUME_PROMPT) -> RunResult:
         """Resume the failed run synchronously with a final, tool-free turn.
 
         Note:
@@ -116,7 +117,7 @@ class MaxTurnsExceeded(AgentsException):
     def _prepare_resume_arguments(
         self,
         run_data: RunErrorDetails,
-        prompt: Optional[str] = None,
+        prompt: str | None = None,
     ) -> tuple[list[TResponseInputItem], RunConfig]:
         from .items import ItemHelpers
         from .model_settings import ModelSettings
@@ -142,7 +143,7 @@ class MaxTurnsExceeded(AgentsException):
             run_config,
         )
 
-    def _normalize_resume_prompt(self, prompt: Optional[str]) -> Optional[str]:
+    def _normalize_resume_prompt(self, prompt: str | None) -> str | None:
         if prompt is None:
             return None
         normalized = dedent(prompt).strip()
@@ -151,7 +152,8 @@ class MaxTurnsExceeded(AgentsException):
     def _require_run_data(self) -> RunErrorDetails:
         if self.run_data is None:
             raise RuntimeError(
-                "Run data is not available; resume() can only be called on exceptions raised by Runner."
+                "Run data is not available; resume() can only be called on\
+                exceptions raised by Runner."
             )
         return self.run_data
 

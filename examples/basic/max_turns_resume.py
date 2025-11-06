@@ -28,9 +28,9 @@ def main():
             input="Give me the main stages of the water cycle.",
             max_turns=1,
         )
-    except MaxTurnsExceeded as exc:
+    except MaxTurnsExceeded as max_turns_exc:
         print("Reached the max turn limit. Asking the agent to finalize without tools...\n")
-        result = exc.resume_sync(
+        result = max_turns_exc.resume_sync(
             "Finish the answer using the gathered information without calling tools again."
         )
         print(result.final_output)

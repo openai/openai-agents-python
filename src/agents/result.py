@@ -70,7 +70,7 @@ class RunResultBase(abc.ABC):
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
 
-    run_config: "RunConfig"
+    run_config: RunConfig
     """The run configuration that was used for the agent run."""
 
     @property

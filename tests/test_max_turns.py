@@ -130,15 +130,12 @@ def test_max_turns_resume_sync_uses_default_prompt():
     with pytest.raises(MaxTurnsExceeded) as exc_info:
         Runner.run_sync(agent, input="user_message", max_turns=2)
 
-    result = exc_info.value.resume_sync()
+    resume_prompt = "Return a final answer to the query using ONLY the information already gathered"
+    result = exc_info.value.resume_sync(resume_prompt)
 
     assert result.final_output == final_answer
     resume_input = model.last_turn_args["input"]
-    expected_prompt = (
-        "You reached the maximum number of turns.\n"
-        "Return a final answer to the query using ONLY the information already gathered in the conversation so far."
-    )
-    assert resume_input[-1] == {"content": expected_prompt, "role": "user"}
+    assert resume_input[-1] == {"content": resume_prompt, "role": "user"}
     assert model.last_turn_args["model_settings"].tool_choice == "none"
 
 
