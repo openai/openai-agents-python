@@ -61,29 +61,13 @@ class MaxTurnsExceeded(AgentsException):
         self.message = message
         super().__init__(message)
 
-    def resume(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
-        """Resume the failed run synchronously with a final, tool-free turn.
-
-        Args:
-            prompt: Optional user instruction to append before rerunning the final turn.
-                Pass ``None`` to skip injecting an extra message; defaults to a reminder
-                to produce a final answer from existing context.
-        """
-        run_data = self._require_run_data()
-        inputs, run_config = self._prepare_resume_arguments(run_data, prompt)
-
-        from .run import Runner
-
-        return Runner.run_sync(
-            starting_agent=run_data.last_agent,
-            input=inputs,
-            context=run_data.context_wrapper.context,
-            max_turns=1,
-            run_config=run_config,
-        )
-
-    async def resume_async(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
+    async def resume(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
         """Resume the failed run asynchronously with a final, tool-free turn.
+
+        Note:
+            This helper does not automatically reuse the original session object.
+            If you need the resumed turn to be persisted in the session,
+            run the follow-up turn manually with that information.
 
         Args:
             prompt: Optional user instruction to append before rerunning the final turn.
@@ -96,6 +80,32 @@ class MaxTurnsExceeded(AgentsException):
         from .run import Runner
 
         return await Runner.run(
+            starting_agent=run_data.last_agent,
+            input=inputs,
+            context=run_data.context_wrapper.context,
+            max_turns=1,
+            run_config=run_config,
+        )
+
+    def resume_sync(self, prompt: Optional[str] = _DEFAULT_RESUME_PROMPT) -> RunResult:
+        """Resume the failed run synchronously with a final, tool-free turn.
+
+        Note:
+            This helper does not automatically reuse the original session object.
+            If you need the resumed turn to be persisted in the session,
+            run the follow-up turn manually with that information.
+
+        Args:
+            prompt: Optional user instruction to append before rerunning the final turn.
+                Pass ``None`` to skip injecting an extra message; defaults to a reminder
+                to produce a final answer from existing context.
+        """
+        run_data = self._require_run_data()
+        inputs, run_config = self._prepare_resume_arguments(run_data, prompt)
+
+        from .run import Runner
+
+        return Runner.run_sync(
             starting_agent=run_data.last_agent,
             input=inputs,
             context=run_data.context_wrapper.context,

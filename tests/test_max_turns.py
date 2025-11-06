@@ -76,7 +76,7 @@ async def test_streamed_max_turns():
 
 
 @pytest.mark.asyncio
-async def test_max_turns_resume_async_runs_final_turn():
+async def test_max_turns_resume_runs_final_turn():
     model = FakeModel()
     agent = Agent(
         name="test_1",
@@ -98,7 +98,7 @@ async def test_max_turns_resume_async_runs_final_turn():
     with pytest.raises(MaxTurnsExceeded) as exc_info:
         await Runner.run(agent, input="user_message", max_turns=2)
 
-    result = await exc_info.value.resume_async("Finish without tools.")
+    result = await exc_info.value.resume("Finish without tools.")
 
     assert result.final_output == final_answer
     resume_input = model.last_turn_args["input"]
@@ -130,7 +130,7 @@ def test_max_turns_resume_sync_uses_default_prompt():
     with pytest.raises(MaxTurnsExceeded) as exc_info:
         Runner.run_sync(agent, input="user_message", max_turns=2)
 
-    result = exc_info.value.resume()
+    result = exc_info.value.resume_sync()
 
     assert result.final_output == final_answer
     resume_input = model.last_turn_args["input"]
@@ -167,7 +167,7 @@ async def test_resume_preserves_run_config_settings():
     with pytest.raises(MaxTurnsExceeded) as exc_info:
         await Runner.run(agent, input="user_message", max_turns=2, run_config=run_config)
 
-    await exc_info.value.resume_async("Finish without tools.")
+    await exc_info.value.resume("Finish without tools.")
 
     final_settings = model.last_turn_args["model_settings"]
     assert final_settings.temperature == 0.25
