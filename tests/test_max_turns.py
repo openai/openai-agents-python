@@ -170,7 +170,9 @@ async def test_resume_preserves_run_config_settings():
     assert final_settings.temperature == 0.25
     assert final_settings.tool_choice == "none"
 
-    stored_settings = exc_info.value.run_data.run_config.model_settings
+    run_data = exc_info.value.run_data
+    assert run_data is not None
+    stored_settings = run_data.run_config.model_settings
     assert stored_settings is not None
     assert stored_settings.temperature == 0.25
     assert stored_settings.tool_choice == "auto"
