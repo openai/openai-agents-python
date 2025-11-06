@@ -17,6 +17,7 @@ from agents.tool import (
     ImageGenerationTool,
     LocalShellCommandRequest,
     LocalShellTool,
+    function_tool,
     Tool,
     WebSearchTool,
 )
@@ -169,6 +170,26 @@ def test_custom_metadata_defaults_to_none(factory: Callable[[bool], Any]) -> Non
 def test_custom_metadata_can_be_provided(factory: Callable[[bool], Any]) -> None:
     tool = factory(True)
     assert tool.custom_metadata == {"key": "value"}
+
+
+def test_function_tool_decorator_allows_custom_metadata() -> None:
+    metadata = {"foo": "bar"}
+
+    @function_tool(custom_metadata=metadata)
+    def _decorated() -> str:
+        return "ok"
+
+    assert _decorated.custom_metadata is metadata
+
+
+def test_function_tool_direct_call_allows_custom_metadata() -> None:
+    metadata = {"alpha": "beta"}
+
+    def _fn() -> str:
+        return "ok"
+
+    tool = function_tool(_fn, custom_metadata=metadata)
+    assert tool.custom_metadata is metadata
 
 
 class _MetadataCapturingHooks(AgentHooks):

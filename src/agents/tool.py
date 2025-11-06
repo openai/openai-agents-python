@@ -429,6 +429,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    custom_metadata: dict[str, Any] | None = None,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -444,6 +445,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    custom_metadata: dict[str, Any] | None = None,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -459,6 +461,7 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    custom_metadata: dict[str, Any] | None = None,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -490,6 +493,7 @@ def function_tool(
         is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the tool is enabled. Disabled tools are hidden
             from the LLM at runtime.
+    custom_metadata: Optional metadata to attach to the resulting tool instance.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -580,6 +584,7 @@ def function_tool(
             on_invoke_tool=_on_invoke_tool,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,
+            custom_metadata=custom_metadata,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
