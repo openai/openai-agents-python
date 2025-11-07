@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Text-to-Video Concept with Voice</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; background-color: #0d1117; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 1rem; }
+    .container-card { background-color: #161b22; box-shadow: 0 10px 20px rgba(0,0,0,0.5); max-width: 900px; width: 100%; border: 1px solid #2f363d; }
+    .ai-button { background-color: #1f6feb; transition: all 0.2s ease; }
+    .ai-button:hover { background-color: #388bfd; box-shadow: 0 4px 10px rgba(31,111,235,0.4); }
+    .spinner { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #388bfd; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0%{transform:rotate(0deg);}100%{transform:rotate(360deg);} }
+  </style>
+</head>
+<body>
+  <div class="container-card p-6 md:p-10 rounded-xl">
+    <h1 class="text-3xl font-bold text-white mb-4 text-center">🎥 แอปสร้างภาพแนวคิดวิดีโอ AI พร้อมเสียงบรรยาย</h1>
+    <p class="text-gray-400 mb-6 text-center">พิมพ์คำอธิบายวิดีโอ (เช่น “หุ่นยนต์เต้นรำในเมืองแห่งอนาคต แสงนีออน”) ระบบจะสร้างภาพแนวคิดพร้อมเสียงพากย์อัตโนมัติ</p>
+
+    <textarea id="prompt-input" class="w-full p-4 text-gray-200 bg-gray-800 border border-gray-700 rounded-lg focus:ring-blue-500 focus:border-blue-500 resize-none h-24" placeholder="ป้อนข้อความบรรยายวิดีโอของคุณที่นี่..."></textarea>
+
+    <button id="generate-button" class="ai-button w-full text-white font-semibold py-3 px-6 rounded-lg flex items-center justify-center space-x-2 mt-4" onclick="generateVideoConcept()">
+      <span id="button-text">สร้างภาพแนวคิดวิดีโอ</span>
+      <div id="loading-spinner" class="spinner hidden"></div>
+    </button>
+
+    <div id="output-area" class="mt-8 pt-6 border-t border-gray-700 hidden">
+      <h2 class="text-xl font-semibold text-white mb-4 text-center">ผลลัพธ์</h2>
+      <div class="bg-gray-800 p-2 rounded-lg text-center">
+        <img id="output-image" class="rounded-lg shadow-xl mx-auto" src="" alt="" style="display:none;">
+        <p id="output-message" class="text-red-400 p-4 hidden"></p>
+        <p id="no-image-text" class="text-gray-500 p-4">ภาพจะปรากฏที่นี่</p>
+      </div>
+
+      <!-- 🔊 ปุ่มเล่นเสียง -->
+      <div id="voice-area" class="text-center mt-4 hidden">
+        <button id="play-voice" class="ai-button px-6 py-2 rounded-lg text-white">🔊 ฟังเสียงบรรยาย</button>
+        <audio id="narration-audio" class="hidden" controls></audio>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // === ตั้งค่า API Keys ===
+    const googleApiKey = "YOUR_GOOGLE_API_KEY";
+    const openaiApiKey = "YOUR_OPENAI_API_KEY";
+
+    const imagenUrl = `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${googleApiKey}`;
+    const openaiUrl = "https://api.openai.com/v1/audio/speech";
+
+    // === อ้างอิง element ===
+    const promptInput = document.getElementById("prompt-input");
+    const generateButton = document.getElementById("generate-button");
+    const buttonText = document.getElementById("button-text");
+    const loadingSpinner = document.getElementById("loading-spinner");
+    const outputArea = document.getElementById("output-area");
+    const outputImage = document.getElementById("output-image");
+    const outputMessage = document.getElementById("output-message");
+    const noImageText = document.getElementById("no-image-text");
+    const voiceArea = document.getElementById("voice-area");
+    const playVoiceButton = document.getElementById("play-voice");
+    const narrationAudio = document.getElementById("narration-audio");
+
+    // === ฟังก์ชันหลัก ===
+    async function generateVideoConcept() {
+      const prompt = promptInput.value.trim();
+      if (!prompt) return alert("กรุณาป้อนข้อความก่อน");
+
+      // แสดงสถานะโหลด
+      generateButton.disabled = true;
+      buttonText.textContent = "กำลังสร้าง...";
+      loadingSpinner.classList.remove("hidden");
+      outputArea.classList.add("hidden");
+      voiceArea.classList.add("hidden");
+
+      try {
+        // เรียก Imagen API
+        const payload = {
+          instances: [{ prompt }],
+          parameters: { sampleCount: 1, aspectRatio: "16:9", outputMimeType: "image/png" }
+        };
+        const response = await fetch(imagenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error?.message || "API Request Failed");
+
+        const base64Data = result?.candidates?.[0]?.content?.parts?.[0]?.inline_data?.data;
+        if (!base64Data) throw new Error("ไม่ได้รับข้อมูลภาพจาก API");
+
+        const imageUrl = `data:image/png;base64,${base64Data}`;
+        outputImage.src = imageUrl;
+        outputImage.style.display = "block";
+        noImageText.classList.add("hidden");
+        outputArea.classList.remove("hidden");
+
+        // 🔊 เรียกเสียงบรรยาย (OpenAI)
+        const ttsResponse = await fetch(openaiUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${openaiApiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini-tts",
+            voice: "alloy",
+            input: prompt
+          })
+        });
+
+        if (!ttsResponse.ok) throw new Error("ไม่สามารถสร้างเสียงได้");
+        const audioBlob = await ttsResponse.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        narrationAudio.src = audioUrl;
+        voiceArea.classList.remove("hidden");
+
+        // ปุ่มเล่นเสียง
+        playVoiceButton.onclick = () => {
+          narrationAudio.play();
+        };
+
+      } catch (error) {
+        outputArea.classList.remove("hidden");
+        outputMessage.classList.remove("hidden");
+        outputMessage.textContent = `❌ เกิดข้อผิดพลาด: ${error.message}`;
+        console.error(error);
+      } finally {
+        generateButton.disabled = false;
+        buttonText.textContent = "สร้างภาพแนวคิดวิดีโอ";
+        loadingSpinner.classList.add("hidden");
+      }
+    }
+  </script>
+</body>
+</html>
