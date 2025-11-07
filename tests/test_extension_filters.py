@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any, cast
 
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -252,16 +253,15 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     nested = nest_handoff_history(data)
 
     assert isinstance(nested.input_history, tuple)
-    developer = _as_message(nested.input_history[0])
-    assert developer["role"] == "developer"
-    developer_content = developer["content"]
-    assert isinstance(developer_content, str)
-    assert "<CONVERSATION HISTORY>" in developer_content
-    assert "</CONVERSATION HISTORY>" in developer_content
-    assert "Assist reply" in developer_content
-    latest_user = _as_message(nested.input_history[1])
-    assert latest_user["role"] == "user"
-    assert latest_user["content"] == "Hello"
+    assert len(nested.input_history) == 1
+    summary = _as_message(nested.input_history[0])
+    assert summary["role"] == "assistant"
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "<CONVERSATION HISTORY>" in summary_content
+    assert "</CONVERSATION HISTORY>" in summary_content
+    assert "Assist reply" in summary_content
+    assert "Hello" in summary_content
     assert len(nested.pre_handoff_items) == 0
     assert nested.new_items == data.new_items
 
@@ -278,11 +278,11 @@ def test_nest_handoff_history_handles_missing_user() -> None:
 
     assert isinstance(nested.input_history, tuple)
     assert len(nested.input_history) == 1
-    developer = _as_message(nested.input_history[0])
-    assert developer["role"] == "developer"
-    developer_content = developer["content"]
-    assert isinstance(developer_content, str)
-    assert "reasoning" in developer_content.lower()
+    summary = _as_message(nested.input_history[0])
+    assert summary["role"] == "assistant"
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "reasoning" in summary_content.lower()
 
 
 def test_nest_handoff_history_appends_existing_history() -> None:
@@ -295,10 +295,10 @@ def test_nest_handoff_history_appends_existing_history() -> None:
 
     first_nested = nest_handoff_history(first)
     assert isinstance(first_nested.input_history, tuple)
-    developer_message = first_nested.input_history[0]
+    summary_message = first_nested.input_history[0]
 
     follow_up_history: tuple[TResponseInputItem, ...] = (
-        developer_message,
+        summary_message,
         _get_user_input_item("Another question"),
     )
 
@@ -312,12 +312,43 @@ def test_nest_handoff_history_appends_existing_history() -> None:
     second_nested = nest_handoff_history(second)
 
     assert isinstance(second_nested.input_history, tuple)
-    developer = _as_message(second_nested.input_history[0])
-    assert developer["role"] == "developer"
-    content = developer["content"]
+    summary = _as_message(second_nested.input_history[0])
+    assert summary["role"] == "assistant"
+    content = summary["content"]
     assert isinstance(content, str)
     assert content.count("<CONVERSATION HISTORY>") == 1
     assert content.count("</CONVERSATION HISTORY>") == 1
     assert "First reply" in content
     assert "Second reply" in content
     assert "Another question" in content
+
+
+def test_nest_handoff_history_supports_custom_mapper() -> None:
+    data = HandoffInputData(
+        input_history=(_get_user_input_item("Hello"),),
+        pre_handoff_items=(_get_message_output_run_item("Assist reply"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    def map_history(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        reversed_items = list(reversed(items))
+        return [deepcopy(item) for item in reversed_items]
+
+    nested = nest_handoff_history(data, history_mapper=map_history)
+
+    assert isinstance(nested.input_history, tuple)
+    assert len(nested.input_history) == 2
+    first = _as_message(nested.input_history[0])
+    second = _as_message(nested.input_history[1])
+    assert first["role"] == "assistant"
+    first_content = first.get("content")
+    assert isinstance(first_content, list)
+    assert any(
+        isinstance(chunk, dict)
+        and chunk.get("type") == "output_text"
+        and chunk.get("text") == "Assist reply"
+        for chunk in first_content
+    )
+    assert second["role"] == "user"
+    assert second["content"] == "Hello"

@@ -1042,7 +1042,10 @@ class RunImpl:
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
             elif run_config.nest_handoff_history and handoff_input_data is not None:
-                nested = nest_handoff_history(handoff_input_data)
+                nested = nest_handoff_history(
+                    handoff_input_data,
+                    history_mapper=run_config.handoff_history_mapper,
+                )
                 original_input = (
                     nested.input_history
                     if isinstance(nested.input_history, str)

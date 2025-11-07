@@ -172,9 +172,9 @@ async def test_handoffs():
 
     assert result.final_output == "done"
     assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 8, (
-        "should have 8 inputs: dev summary, latest user input, tool call, tool result, message, "
-        "handoff, handoff result, and done message"
+    assert len(result.to_input_list()) == 7, (
+        "should have 7 inputs: summary message, tool call, tool result, message, handoff, "
+        "handoff result, and done message"
     )
     assert result.last_agent == agent_1, "should have handed off to agent_1"
 
@@ -301,15 +301,14 @@ async def test_default_handoff_history_nested_and_filters_respected():
     result = await Runner.run(agent_2, input="user_message")
 
     assert isinstance(result.input, list)
-    developer = _as_message(result.input[0])
-    assert developer["role"] == "developer"
-    developer_content = developer["content"]
-    assert isinstance(developer_content, str)
-    assert "<CONVERSATION HISTORY>" in developer_content
-    assert "triage summary" in developer_content
-    latest_user = _as_message(result.input[1])
-    assert latest_user["role"] == "user"
-    assert latest_user["content"] == "user_message"
+    assert len(result.input) == 1
+    summary = _as_message(result.input[0])
+    assert summary["role"] == "assistant"
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "<CONVERSATION HISTORY>" in summary_content
+    assert "triage summary" in summary_content
+    assert "user_message" in summary_content
 
     passthrough_model = FakeModel()
     delegate = Agent(name="delegate", model=passthrough_model)
@@ -360,16 +359,14 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     assert closer_model.first_turn_args is not None
     closer_input = closer_model.first_turn_args["input"]
     assert isinstance(closer_input, list)
-    developer = _as_message(closer_input[0])
-    assert developer["role"] == "developer"
-    developer_content = developer["content"]
-    assert isinstance(developer_content, str)
-    assert developer_content.count("<CONVERSATION HISTORY>") == 1
-    assert "triage summary" in developer_content
-    assert "delegate update" in developer_content
-    latest_user = _as_message(closer_input[1])
-    assert latest_user["role"] == "user"
-    assert latest_user["content"] == "user_question"
+    summary = _as_message(closer_input[0])
+    assert summary["role"] == "assistant"
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert summary_content.count("<CONVERSATION HISTORY>") == 1
+    assert "triage summary" in summary_content
+    assert "delegate update" in summary_content
+    assert "user_question" in summary_content
 
 
 @pytest.mark.asyncio

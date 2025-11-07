@@ -44,7 +44,7 @@ from .guardrail import (
     OutputGuardrail,
     OutputGuardrailResult,
 )
-from .handoffs import Handoff, HandoffInputFilter, handoff
+from .handoffs import Handoff, HandoffHistoryMapper, HandoffInputFilter, handoff
 from .items import (
     HandoffCallItem,
     ItemHelpers,
@@ -197,8 +197,16 @@ class RunConfig:
     """
 
     nest_handoff_history: bool = True
-    """Wrap prior run history in a developer message before handing off when no custom input
-    filter is set. Set to False to preserve the raw transcript behavior from previous releases.
+    """Wrap prior run history in a single assistant message before handing off when no custom
+    input filter is set. Set to False to preserve the raw transcript behavior from previous
+    releases.
+    """
+
+    handoff_history_mapper: HandoffHistoryMapper | None = None
+    """Optional function that receives the normalized transcript (history + handoff items) and
+    returns the input history that should be passed to the next agent. When left as `None`, the
+    runner collapses the transcript into a single assistant message. This function only runs when
+    `nest_handoff_history` is True.
     """
 
     input_guardrails: list[InputGuardrail[Any]] | None = None

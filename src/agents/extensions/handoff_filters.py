@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 from typing import Any, cast
 
-from ..handoffs import HandoffInputData
+from ..handoffs import HandoffHistoryMapper, HandoffInputData
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -43,8 +43,12 @@ _CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
 _CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
 
 
-def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputData:
-    """Summarizes the previous transcript into a developer message for the next agent."""
+def nest_handoff_history(
+    handoff_input_data: HandoffInputData,
+    *,
+    history_mapper: HandoffHistoryMapper | None = None,
+) -> HandoffInputData:
+    """Summarizes the previous transcript for the next agent."""
 
     normalized_history = _normalize_input_history(handoff_input_data.input_history)
     flattened_history = _flatten_nested_history_messages(normalized_history)
@@ -54,12 +58,8 @@ def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputDa
     new_items_as_inputs = [_run_item_to_plain_input(item) for item in handoff_input_data.new_items]
     transcript = flattened_history + pre_items_as_inputs + new_items_as_inputs
 
-    developer_message = _build_developer_message(transcript)
-    latest_user = _find_latest_user_turn(transcript)
-    history_items: list[TResponseInputItem] = [developer_message]
-    if latest_user is not None:
-        history_items.append(latest_user)
-
+    mapper = history_mapper or default_handoff_history_mapper
+    history_items = mapper(transcript)
     filtered_pre_items = tuple(
         item
         for item in handoff_input_data.pre_handoff_items
@@ -67,9 +67,18 @@ def nest_handoff_history(handoff_input_data: HandoffInputData) -> HandoffInputDa
     )
 
     return handoff_input_data.clone(
-        input_history=tuple(history_items),
+        input_history=tuple(deepcopy(item) for item in history_items),
         pre_handoff_items=filtered_pre_items,
     )
+
+
+def default_handoff_history_mapper(
+    transcript: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Returns a single assistant message summarizing the transcript."""
+
+    summary_message = _build_summary_message(transcript)
+    return [summary_message]
 
 
 def _normalize_input_history(
@@ -84,7 +93,7 @@ def _run_item_to_plain_input(run_item: RunItem) -> TResponseInputItem:
     return deepcopy(run_item.to_input_item())
 
 
-def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
+def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
     transcript_copy = [deepcopy(item) for item in transcript]
     if transcript_copy:
         summary_lines = [
@@ -96,11 +105,11 @@ def _build_developer_message(transcript: list[TResponseInputItem]) -> TResponseI
 
     content_lines = [_CONVERSATION_HISTORY_START, *summary_lines, _CONVERSATION_HISTORY_END]
     content = "\n".join(content_lines)
-    developer_message: dict[str, Any] = {
-        "role": "developer",
+    assistant_message: dict[str, Any] = {
+        "role": "assistant",
         "content": content,
     }
-    return cast(TResponseInputItem, developer_message)
+    return cast(TResponseInputItem, assistant_message)
 
 
 def _format_transcript_item(item: TResponseInputItem) -> str:
@@ -133,15 +142,6 @@ def _stringify_content(content: Any) -> str:
         return str(content)
 
 
-def _find_latest_user_turn(
-    transcript: list[TResponseInputItem],
-) -> TResponseInputItem | None:
-    for item in reversed(transcript):
-        if item.get("role") == "user":
-            return deepcopy(item)
-    return None
-
-
 def _flatten_nested_history_messages(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
@@ -158,8 +158,6 @@ def _flatten_nested_history_messages(
 def _extract_nested_history_transcript(
     item: TResponseInputItem,
 ) -> list[TResponseInputItem] | None:
-    if item.get("role") != "developer":
-        return None
     content = item.get("content")
     if not isinstance(content, str):
         return None
