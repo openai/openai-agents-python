@@ -34,7 +34,17 @@ from .guardrail import (
     input_guardrail,
     output_guardrail,
 )
-from .handoffs import Handoff, HandoffInputData, HandoffInputFilter, handoff
+from .handoffs import (
+    Handoff,
+    HandoffInputData,
+    HandoffInputFilter,
+    default_handoff_history_mapper,
+    get_conversation_history_wrappers,
+    handoff,
+    nest_handoff_history,
+    reset_conversation_history_wrappers,
+    set_conversation_history_wrappers,
+)
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -191,6 +201,11 @@ __all__ = [
     "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
+    "default_handoff_history_mapper",
+    "get_conversation_history_wrappers",
+    "nest_handoff_history",
+    "reset_conversation_history_wrappers",
+    "set_conversation_history_wrappers",
     "Runner",
     "run_demo_loop",
     "Model",

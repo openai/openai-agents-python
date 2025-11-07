@@ -51,9 +51,8 @@ from .exceptions import (
     ToolOutputGuardrailTripwireTriggered,
     UserError,
 )
-from .extensions.handoff_filters import nest_handoff_history
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
-from .handoffs import Handoff, HandoffInputData
+from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -999,8 +998,14 @@ class RunImpl:
             input_filter = handoff.input_filter or (
                 run_config.handoff_input_filter if run_config else None
             )
+            handoff_nest_setting = handoff.nest_handoff_history
+            should_nest_history = (
+                handoff_nest_setting
+                if handoff_nest_setting is not None
+                else run_config.nest_handoff_history
+            )
             handoff_input_data: HandoffInputData | None = None
-            if input_filter or run_config.nest_handoff_history:
+            if input_filter or should_nest_history:
                 handoff_input_data = HandoffInputData(
                     input_history=tuple(original_input)
                     if isinstance(original_input, list)
@@ -1011,7 +1016,15 @@ class RunImpl:
                 )
 
             if input_filter and handoff_input_data is not None:
-                logger.debug("Filtering inputs for handoff")
+                filter_name = getattr(input_filter, "__qualname__", repr(input_filter))
+                from_agent = getattr(agent, "name", agent.__class__.__name__)
+                to_agent = getattr(new_agent, "name", new_agent.__class__.__name__)
+                logger.debug(
+                    "Filtering handoff inputs with %s for %s -> %s",
+                    filter_name,
+                    from_agent,
+                    to_agent,
+                )
                 if not callable(input_filter):
                     _error_tracing.attach_error_to_span(
                         span_handoff,
@@ -1041,7 +1054,7 @@ class RunImpl:
                 )
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
-            elif run_config.nest_handoff_history and handoff_input_data is not None:
+            elif should_nest_history and handoff_input_data is not None:
                 nested = nest_handoff_history(
                     handoff_input_data,
                     history_mapper=run_config.handoff_history_mapper,

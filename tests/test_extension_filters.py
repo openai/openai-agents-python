@@ -4,7 +4,14 @@ from typing import Any, cast
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from agents import Agent, HandoffInputData, RunContextWrapper
+from agents import (
+    Agent,
+    HandoffInputData,
+    RunContextWrapper,
+    get_conversation_history_wrappers,
+    reset_conversation_history_wrappers,
+    set_conversation_history_wrappers,
+)
 from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
 from agents.items import (
     HandoffOutputItem,
@@ -260,8 +267,9 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     assert summary["role"] == "assistant"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
-    assert "<CONVERSATION HISTORY>" in summary_content
-    assert "</CONVERSATION HISTORY>" in summary_content
+    start_marker, end_marker = get_conversation_history_wrappers()
+    assert start_marker in summary_content
+    assert end_marker in summary_content
     assert "Assist reply" in summary_content
     assert "Hello" in summary_content
     assert len(nested.pre_handoff_items) == 0
@@ -318,11 +326,43 @@ def test_nest_handoff_history_appends_existing_history() -> None:
     assert summary["role"] == "assistant"
     content = summary["content"]
     assert isinstance(content, str)
-    assert content.count("<CONVERSATION HISTORY>") == 1
-    assert content.count("</CONVERSATION HISTORY>") == 1
+    start_marker, end_marker = get_conversation_history_wrappers()
+    assert content.count(start_marker) == 1
+    assert content.count(end_marker) == 1
     assert "First reply" in content
     assert "Second reply" in content
     assert "Another question" in content
+
+
+def test_nest_handoff_history_honors_custom_wrappers() -> None:
+    data = HandoffInputData(
+        input_history=(_get_user_input_item("Hello"),),
+        pre_handoff_items=(_get_message_output_run_item("First reply"),),
+        new_items=(_get_message_output_run_item("Second reply"),),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    set_conversation_history_wrappers(start="<<START>>", end="<<END>>")
+    try:
+        nested = nest_handoff_history(data)
+        assert isinstance(nested.input_history, tuple)
+        assert len(nested.input_history) == 1
+        summary = _as_message(nested.input_history[0])
+        summary_content = summary["content"]
+        assert isinstance(summary_content, str)
+        assert summary_content.startswith("<<START>>")
+        assert summary_content.endswith("<<END>>")
+
+        # Ensure the custom markers are parsed correctly when nesting again.
+        second_nested = nest_handoff_history(nested)
+        assert isinstance(second_nested.input_history, tuple)
+        second_summary = _as_message(second_nested.input_history[0])
+        content = second_summary["content"]
+        assert isinstance(content, str)
+        assert content.count("<<START>>") == 1
+        assert content.count("<<END>>") == 1
+    finally:
+        reset_conversation_history_wrappers()
 
 
 def test_nest_handoff_history_supports_custom_mapper() -> None:
