@@ -8,6 +8,7 @@ The Agents SDK automatically tracks token usage for every run. You can access it
 - **input_tokens**: total input tokens sent
 - **output_tokens**: total output tokens received
 - **total_tokens**: input + output
+- **request_usage_entries**: list of per-request usage breakdowns
 - **details**:
   - `input_tokens_details.cached_tokens`
   - `output_tokens_details.reasoning_tokens`
@@ -46,6 +47,17 @@ result = await Runner.run(agent, "What's the weather in Tokyo?")
 print(result.context_wrapper.usage.total_tokens)
 ```
 
+## Per-request usage tracking
+
+The SDK automatically tracks usage for each API request in `request_usage_entries`, useful for detailed cost calculation and monitoring context window consumption.
+
+```python
+result = await Runner.run(agent, "What's the weather in Tokyo?")
+
+for request in enumerate(result.context_wrapper.usage.request_usage_entries):
+    print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
+```
+
 ## Accessing usage with sessions
 
 When you use a `Session` (e.g., `SQLiteSession`), each call to `Runner.run(...)` returns usage for that specific run. Sessions maintain conversation history for context, but each run's usage is independent.
@@ -78,5 +90,6 @@ class MyHooks(RunHooks):
 For detailed API documentation, see:
 
 -   [`Usage`][agents.usage.Usage] - Usage tracking data structure
+-   [`RequestUsage`][agents.usage.RequestUsage] - Per-request usage details
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - Access usage from run context
 -   [`RunHooks`][agents.run.RunHooks] - Hook into usage tracking lifecycle

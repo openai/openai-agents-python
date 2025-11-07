@@ -57,8 +57,8 @@ def make_message(
 
 def test_extract_last_content_of_text_message() -> None:
     # Build a message containing two text segments.
-    content1 = ResponseOutputText(annotations=[], text="Hello ", type="output_text")
-    content2 = ResponseOutputText(annotations=[], text="world!", type="output_text")
+    content1 = ResponseOutputText(annotations=[], text="Hello ", type="output_text", logprobs=[])
+    content2 = ResponseOutputText(annotations=[], text="world!", type="output_text", logprobs=[])
     message = make_message([content1, content2])
     # Helpers should yield the last segment's text.
     assert ItemHelpers.extract_last_content(message) == "world!"
@@ -66,7 +66,9 @@ def test_extract_last_content_of_text_message() -> None:
 
 def test_extract_last_content_of_refusal_message() -> None:
     # Build a message whose last content entry is a refusal.
-    content1 = ResponseOutputText(annotations=[], text="Before refusal", type="output_text")
+    content1 = ResponseOutputText(
+        annotations=[], text="Before refusal", type="output_text", logprobs=[]
+    )
     refusal = ResponseOutputRefusal(refusal="I cannot do that", type="refusal")
     message = make_message([content1, refusal])
     # Helpers should extract the refusal string when last content is a refusal.
@@ -87,8 +89,8 @@ def test_extract_last_content_non_message_returns_empty() -> None:
 
 def test_extract_last_text_returns_text_only() -> None:
     # A message whose last segment is text yields the text.
-    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text")
-    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text")
+    first_text = ResponseOutputText(annotations=[], text="part1", type="output_text", logprobs=[])
+    second_text = ResponseOutputText(annotations=[], text="part2", type="output_text", logprobs=[])
     message = make_message([first_text, second_text])
     assert ItemHelpers.extract_last_text(message) == "part2"
     # Whereas when last content is a refusal, extract_last_text returns None.
@@ -116,9 +118,9 @@ def test_input_to_new_input_list_deep_copies_lists() -> None:
 def test_text_message_output_concatenates_text_segments() -> None:
     # Build a message with both text and refusal segments, only text segments are concatenated.
     pieces: list[ResponseOutputText | ResponseOutputRefusal] = []
-    pieces.append(ResponseOutputText(annotations=[], text="a", type="output_text"))
+    pieces.append(ResponseOutputText(annotations=[], text="a", type="output_text", logprobs=[]))
     pieces.append(ResponseOutputRefusal(refusal="denied", type="refusal"))
-    pieces.append(ResponseOutputText(annotations=[], text="b", type="output_text"))
+    pieces.append(ResponseOutputText(annotations=[], text="b", type="output_text", logprobs=[]))
     message = make_message(pieces)
     # Wrap into MessageOutputItem to feed into text_message_output.
     item = MessageOutputItem(agent=Agent(name="test"), raw_item=message)
@@ -131,8 +133,12 @@ def test_text_message_outputs_across_list_of_runitems() -> None:
     that only MessageOutputItem instances contribute any text. The non-message
     (ReasoningItem) should be ignored by Helpers.text_message_outputs.
     """
-    message1 = make_message([ResponseOutputText(annotations=[], text="foo", type="output_text")])
-    message2 = make_message([ResponseOutputText(annotations=[], text="bar", type="output_text")])
+    message1 = make_message(
+        [ResponseOutputText(annotations=[], text="foo", type="output_text", logprobs=[])]
+    )
+    message2 = make_message(
+        [ResponseOutputText(annotations=[], text="bar", type="output_text", logprobs=[])]
+    )
     item1: RunItem = MessageOutputItem(agent=Agent(name="test"), raw_item=message1)
     item2: RunItem = MessageOutputItem(agent=Agent(name="test"), raw_item=message2)
     # Create a non-message run item of a different type, e.g., a reasoning trace.
@@ -171,7 +177,9 @@ def test_tool_call_output_item_constructs_function_call_output_dict():
 
 def test_to_input_items_for_message() -> None:
     """An output message should convert into an input dict matching the message's own structure."""
-    content = ResponseOutputText(annotations=[], text="hello world", type="output_text")
+    content = ResponseOutputText(
+        annotations=[], text="hello world", type="output_text", logprobs=[]
+    )
     message = ResponseOutputMessage(
         id="m1", content=[content], role="assistant", status="completed", type="message"
     )
@@ -184,6 +192,7 @@ def test_to_input_items_for_message() -> None:
         "content": [
             {
                 "annotations": [],
+                "logprobs": [],
                 "text": "hello world",
                 "type": "output_text",
             }
@@ -305,6 +314,7 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
                 type="output_text",
                 text="Hey, what's up?",
                 annotations=[],
+                logprobs=[],
             )
         ],
         role="assistant",

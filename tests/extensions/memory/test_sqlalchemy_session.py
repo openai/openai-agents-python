@@ -36,6 +36,7 @@ def _make_message_item(item_id: str, text_value: str) -> TResponseInputItem:
         "type": "output_text",
         "text": text_value,
         "annotations": [],
+        "logprobs": [],
     }
     message: ResponseOutputMessageParam = {
         "id": item_id,

@@ -986,6 +986,7 @@ class TestToolCallExecution:
         assert isinstance(tool_start_event, RealtimeToolStart)
         assert tool_start_event.tool == mock_function_tool
         assert tool_start_event.agent == mock_agent
+        assert tool_start_event.arguments == '{"param": "value"}'
 
         # Check tool end event
         tool_end_event = await session._event_queue.get()
@@ -993,6 +994,7 @@ class TestToolCallExecution:
         assert tool_end_event.tool == mock_function_tool
         assert tool_end_event.output == "function_result"
         assert tool_end_event.agent == mock_agent
+        assert tool_end_event.arguments == '{"param": "value"}'
 
     @pytest.mark.asyncio
     async def test_function_tool_with_multiple_tools_available(self, mock_model, mock_agent):
@@ -1111,6 +1113,7 @@ class TestToolCallExecution:
         assert session._event_queue.qsize() == 1
         tool_start_event = await session._event_queue.get()
         assert isinstance(tool_start_event, RealtimeToolStart)
+        assert tool_start_event.arguments == "{}"
 
         # But no tool output should have been sent and no end event queued
         assert len(mock_model.sent_tool_outputs) == 0
@@ -1133,9 +1136,19 @@ class TestToolCallExecution:
 
         await session._handle_tool_call(tool_call_event)
 
-        # Verify arguments were passed correctly
+        # Verify arguments were passed correctly to tool
         call_args = mock_function_tool.on_invoke_tool.call_args
         assert call_args[0][1] == complex_args
+
+        # Verify tool_start event includes arguments
+        tool_start_event = await session._event_queue.get()
+        assert isinstance(tool_start_event, RealtimeToolStart)
+        assert tool_start_event.arguments == complex_args
+
+        # Verify tool_end event includes arguments
+        tool_end_event = await session._event_queue.get()
+        assert isinstance(tool_end_event, RealtimeToolEnd)
+        assert tool_end_event.arguments == complex_args
 
     @pytest.mark.asyncio
     async def test_tool_call_with_custom_call_id(self, mock_model, mock_agent, mock_function_tool):

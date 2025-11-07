@@ -139,7 +139,9 @@ async def test_single_agent_workflow(monkeypatch) -> None:
             },
             {
                 "id": "1",
-                "content": [{"annotations": [], "text": "a_message", "type": "output_text"}],
+                "content": [
+                    {"annotations": [], "logprobs": [], "text": "a_message", "type": "output_text"}
+                ],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",
@@ -151,7 +153,9 @@ async def test_single_agent_workflow(monkeypatch) -> None:
             },
             {
                 "id": "1",
-                "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                "content": [
+                    {"annotations": [], "logprobs": [], "text": "done", "type": "output_text"}
+                ],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",
@@ -179,7 +183,9 @@ async def test_single_agent_workflow(monkeypatch) -> None:
             },
             {
                 "id": "1",
-                "content": [{"annotations": [], "text": "a_message", "type": "output_text"}],
+                "content": [
+                    {"annotations": [], "logprobs": [], "text": "a_message", "type": "output_text"}
+                ],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",
@@ -191,7 +197,9 @@ async def test_single_agent_workflow(monkeypatch) -> None:
             },
             {
                 "id": "1",
-                "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                "content": [
+                    {"annotations": [], "logprobs": [], "text": "done", "type": "output_text"}
+                ],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",
@@ -199,7 +207,9 @@ async def test_single_agent_workflow(monkeypatch) -> None:
             {"role": "user", "content": "transcription_2"},
             {
                 "id": "1",
-                "content": [{"annotations": [], "text": "done_2", "type": "output_text"}],
+                "content": [
+                    {"annotations": [], "logprobs": [], "text": "done_2", "type": "output_text"}
+                ],
                 "role": "assistant",
                 "status": "completed",
                 "type": "message",

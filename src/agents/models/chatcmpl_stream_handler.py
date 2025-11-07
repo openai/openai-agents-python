@@ -231,6 +231,7 @@ class ChatCmplStreamHandler:
                             text="",
                             type="output_text",
                             annotations=[],
+                            logprobs=[],
                         ),
                     )
                     # Start a new assistant message stream
@@ -258,6 +259,7 @@ class ChatCmplStreamHandler:
                             text="",
                             type="output_text",
                             annotations=[],
+                            logprobs=[],
                         ),
                         type="response.content_part.added",
                         sequence_number=sequence_number.get_and_increment(),
@@ -309,12 +311,10 @@ class ChatCmplStreamHandler:
                     yield ResponseContentPartAddedEvent(
                         content_index=state.refusal_content_index_and_output[0],
                         item_id=FAKE_RESPONSES_ID,
-                        output_index=state.reasoning_content_index_and_output
-                        is not None,  # fixed 0 -> 0 or 1
-                        part=ResponseOutputText(
-                            text="",
-                            type="output_text",
-                            annotations=[],
+                        output_index=(1 if state.reasoning_content_index_and_output else 0),
+                        part=ResponseOutputRefusal(
+                            refusal="",
+                            type="refusal",
                         ),
                         type="response.content_part.added",
                         sequence_number=sequence_number.get_and_increment(),
