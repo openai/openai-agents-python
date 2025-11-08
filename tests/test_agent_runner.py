@@ -226,9 +226,9 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 11, (
-        "should have input: 2 orig inputs, function call, function call result, message, handoff, "
-        "handoff output, preamble message, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 10, (
+        "should have input: conversation summary, function call, function call result, message, "
+        "handoff, handoff output, preamble message, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"

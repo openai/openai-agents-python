@@ -350,7 +350,11 @@ def test_nest_handoff_history_honors_custom_wrappers() -> None:
         summary = _as_message(nested.input_history[0])
         summary_content = summary["content"]
         assert isinstance(summary_content, str)
-        assert summary_content.startswith("<<START>>")
+        lines = summary_content.splitlines()
+        assert lines[0] == (
+            "For context, here is the conversation so far between the user and the previous agent:"
+        )
+        assert lines[1].startswith("<<START>>")
         assert summary_content.endswith("<<END>>")
 
         # Ensure the custom markers are parsed correctly when nesting again.

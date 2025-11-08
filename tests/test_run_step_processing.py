@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import (
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_computer_tool_call import ActionClick
@@ -30,7 +31,7 @@ from agents import (
     handoff,
 )
 from agents._run_impl import RunImpl, ToolRunHandoff
-from agents.lifecycle import RunHooksBase
+from agents import RunHooks
 from agents.run import AgentRunner
 
 from .test_responses import (
@@ -215,11 +216,11 @@ async def test_handoff_can_disable_run_level_history_nesting(monkeypatch: pytest
     source_agent = Agent(name="source")
     target_agent = Agent(name="target")
     override_handoff = handoff(target_agent, nest_handoff_history=False)
-    tool_call = get_handoff_tool_call(target_agent)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
     run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
     run_config = RunConfig(nest_handoff_history=True)
     context_wrapper = RunContextWrapper(context=None)
-    hooks = RunHooksBase()
+    hooks = RunHooks()
     original_input = [get_text_input_item("hello")]
     pre_step_items: list[RunItem] = []
     new_step_items: list[RunItem] = []
@@ -258,11 +259,11 @@ async def test_handoff_can_enable_history_nesting(monkeypatch: pytest.MonkeyPatc
     source_agent = Agent(name="source")
     target_agent = Agent(name="target")
     override_handoff = handoff(target_agent, nest_handoff_history=True)
-    tool_call = get_handoff_tool_call(target_agent)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
     run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
     run_config = RunConfig(nest_handoff_history=False)
     context_wrapper = RunContextWrapper(context=None)
-    hooks = RunHooksBase()
+    hooks = RunHooks()
     original_input = [get_text_input_item("hello")]
     pre_step_items: list[RunItem] = []
     new_step_items: list[RunItem] = []
