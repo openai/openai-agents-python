@@ -124,7 +124,12 @@ def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInp
         summary_lines = ["(no previous turns recorded)"]
 
     start_marker, end_marker = get_conversation_history_wrappers()
-    content_lines = [start_marker, *summary_lines, end_marker]
+    content_lines = [
+        "For context, here is the conversation so far between the user and the previous agent:",
+        start_marker,
+        *summary_lines,
+        end_marker,
+    ]
     content = "\n".join(content_lines)
     assistant_message: dict[str, Any] = {
         "role": "assistant",
