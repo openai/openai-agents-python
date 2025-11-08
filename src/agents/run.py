@@ -182,7 +182,7 @@ class _ServerConversationTracker:
                     # Check if this is a tool call item
                     if isinstance(output_item, dict):
                         item_type = output_item.get("type")
-                        call_id = output_item.get("call_id") or output_item.get("callId")
+                        call_id = output_item.get("call_id")
                     elif hasattr(output_item, "type") and hasattr(output_item, "call_id"):
                         item_type = output_item.type
                         call_id = output_item.call_id
@@ -197,7 +197,7 @@ class _ServerConversationTracker:
                 # Extract call_id from the output item
                 raw_item = item.raw_item
                 if isinstance(raw_item, dict):
-                    call_id = raw_item.get("call_id") or raw_item.get("callId")
+                    call_id = raw_item.get("call_id")
                 elif hasattr(raw_item, "call_id"):
                     call_id = raw_item.call_id
                 else:
@@ -208,7 +208,7 @@ class _ServerConversationTracker:
                 # Extract call_id from the tool call item and store it for later lookup
                 tool_call_raw_item: Any = item.raw_item
                 if isinstance(tool_call_raw_item, dict):
-                    call_id = tool_call_raw_item.get("call_id") or tool_call_raw_item.get("callId")
+                    call_id = tool_call_raw_item.get("call_id")
                 elif hasattr(tool_call_raw_item, "call_id"):
                     call_id = tool_call_raw_item.call_id
                 else:
@@ -234,7 +234,7 @@ class _ServerConversationTracker:
                 # Extract call_id from the tool call item
                 tool_call_item_raw: Any = item.raw_item
                 if isinstance(tool_call_item_raw, dict):
-                    call_id = tool_call_item_raw.get("call_id") or tool_call_item_raw.get("callId")
+                    call_id = tool_call_item_raw.get("call_id")
                 elif hasattr(tool_call_item_raw, "call_id"):
                     call_id = tool_call_item_raw.call_id
                 else:
@@ -251,7 +251,7 @@ class _ServerConversationTracker:
             if item.type == "tool_call_output_item":
                 raw_item = item.raw_item
                 if isinstance(raw_item, dict):
-                    call_id = raw_item.get("call_id") or raw_item.get("callId")
+                    call_id = raw_item.get("call_id")
                 elif hasattr(raw_item, "call_id"):
                     call_id = raw_item.call_id
                 else:
