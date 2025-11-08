@@ -25,6 +25,9 @@ This version doesn’t introduce any visible breaking changes, but it includes n
 
 - Added support for `RealtimeRunner` to handle [SIP protocol connections](https://platform.openai.com/docs/guides/realtime-sip)
 - Significantly revised the internal logic of `Runner#run_sync` for Python 3.14 compatibility
+- By default handoff history is now packaged into a single assistant message instead of exposing the raw user/assistant turns, giving downstream agents a concise, predictable recap
+- The existing single-message handoff transcript now starts with "For context, here is the conversation so far between the user and the previous agent:" before the `<CONVERSATION HISTORY>` block, so downstream agents get a clearly labeled recap
+- The existing single-message handoff transcript now starts with "For context, here is the conversation so far between the user and the previous agent:" before the `<CONVERSATION HISTORY>` block, so downstream agents get a clearly labeled recap
 
 ### 0.4.0
 
