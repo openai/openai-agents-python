@@ -30,7 +30,7 @@ from .util._pretty_print import (
 )
 
 if TYPE_CHECKING:
-    from ._run_impl import QueueCompleteSentinel
+    from ._run_impl import ProcessedResponse, QueueCompleteSentinel
     from .agent import Agent
     from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 
@@ -151,6 +151,8 @@ class RunResult(RunResultBase):
         repr=False,
         default=None,
     )
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
 
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
@@ -215,6 +217,7 @@ class RunResult(RunResultBase):
         state._model_responses = self.raw_responses
         state._input_guardrail_results = self.input_guardrail_results
         state._output_guardrail_results = self.output_guardrail_results
+        state._last_processed_response = self._last_processed_response
 
         # If there are interruptions, set the current step
         if self.interruptions:
@@ -260,6 +263,8 @@ class RunResultStreaming(RunResultBase):
         repr=False,
         default=None,
     )
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
 
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
@@ -520,6 +525,7 @@ class RunResultStreaming(RunResultBase):
         state._input_guardrail_results = self.input_guardrail_results
         state._output_guardrail_results = self.output_guardrail_results
         state._current_turn = self.current_turn
+        state._last_processed_response = self._last_processed_response
 
         # If there are interruptions, set the current step
         if self.interruptions:

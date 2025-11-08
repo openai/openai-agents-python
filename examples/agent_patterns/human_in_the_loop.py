@@ -104,7 +104,7 @@ async def main():
         with open("result.json") as f:
             stored_state_json = json.load(f)
 
-        state = RunState.from_json(agent, stored_state_json)
+        state = await RunState.from_json(agent, stored_state_json)
 
         # Process each interruption
         for interruption in result.interruptions:

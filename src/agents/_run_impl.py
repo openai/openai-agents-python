@@ -268,6 +268,9 @@ class SingleStepResult:
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from this step."""
 
+    processed_response: ProcessedResponse | None = None
+    """The processed model response. This is needed for resuming from interruptions."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
@@ -376,6 +379,7 @@ class RunImpl:
                 next_step=NextStepInterruption(interruptions=interruptions),
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
             )
 
         new_step_items.extend([result.run_item for result in approved_function_results])

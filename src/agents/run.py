@@ -67,7 +67,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import AgentHookContext, RunContextWrapper, TContext
-from .run_state import RunState
+from .run_state import RunState, _normalize_field_names
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -160,6 +160,7 @@ class _ServerConversationTracker:
         self,
         original_input: str | list[TResponseInputItem],
         generated_items: list[RunItem],
+        model_responses: list[ModelResponse] | None = None,
     ) -> list[TResponseInputItem]:
         input_items: list[TResponseInputItem] = []
 
@@ -167,12 +168,201 @@ class _ServerConversationTracker:
         if not generated_items:
             input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
 
+        # First, collect call_ids from tool_call_output_item items
+        # (completed tool calls with outputs) and build a map of
+        # call_id -> tool_call_item for quick lookup
+        completed_tool_call_ids: set[str] = set()
+        tool_call_items_by_id: dict[str, RunItem] = {}
+
+        # Also look for tool calls in model responses (they might have been sent in previous turns)
+        tool_call_items_from_responses: dict[str, Any] = {}
+        if model_responses:
+            for response in model_responses:
+                for output_item in response.output:
+                    # Check if this is a tool call item
+                    if isinstance(output_item, dict):
+                        item_type = output_item.get("type")
+                        call_id = output_item.get("call_id") or output_item.get("callId")
+                    elif hasattr(output_item, "type") and hasattr(output_item, "call_id"):
+                        item_type = output_item.type
+                        call_id = output_item.call_id
+                    else:
+                        continue
+
+                    if item_type == "function_call" and call_id:
+                        tool_call_items_from_responses[call_id] = output_item
+
+        for item in generated_items:
+            if item.type == "tool_call_output_item":
+                # Extract call_id from the output item
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id") or raw_item.get("callId")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    completed_tool_call_ids.add(call_id)
+            elif item.type == "tool_call_item":
+                # Extract call_id from the tool call item and store it for later lookup
+                tool_call_raw_item: Any = item.raw_item
+                if isinstance(tool_call_raw_item, dict):
+                    call_id = tool_call_raw_item.get("call_id") or tool_call_raw_item.get("callId")
+                elif hasattr(tool_call_raw_item, "call_id"):
+                    call_id = tool_call_raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    tool_call_items_by_id[call_id] = item
+
         # Process generated_items, skip items already sent or from server
         for item in generated_items:
             raw_item_id = id(item.raw_item)
 
             if raw_item_id in self.sent_items or raw_item_id in self.server_items:
                 continue
+
+            # Skip tool_approval_item items - they're metadata about pending approvals
+            if item.type == "tool_approval_item":
+                continue
+
+            # For tool_call_item items, only include them if there's a
+            # corresponding tool_call_output_item (i.e., the tool has been
+            # executed and has an output)
+            if item.type == "tool_call_item":
+                # Extract call_id from the tool call item
+                tool_call_item_raw: Any = item.raw_item
+                if isinstance(tool_call_item_raw, dict):
+                    call_id = tool_call_item_raw.get("call_id") or tool_call_item_raw.get("callId")
+                elif hasattr(tool_call_item_raw, "call_id"):
+                    call_id = tool_call_item_raw.call_id
+                else:
+                    call_id = None
+
+                # Only include if there's a matching tool_call_output_item
+                if call_id and isinstance(call_id, str) and call_id in completed_tool_call_ids:
+                    input_items.append(item.to_input_item())
+                    self.sent_items.add(raw_item_id)
+                continue
+
+            # For tool_call_output_item items, also include the corresponding tool_call_item
+            # even if it's already in sent_items (API requires both)
+            if item.type == "tool_call_output_item":
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id") or raw_item.get("callId")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+
+                # Track which item IDs have been added to avoid duplicates
+                # Include the corresponding tool_call_item if it exists and hasn't been added yet
+                # First check in generatedItems, then in model responses
+                if call_id and isinstance(call_id, str):
+                    if call_id in tool_call_items_by_id:
+                        tool_call_item = tool_call_items_by_id[call_id]
+                        tool_call_raw_item_id = id(tool_call_item.raw_item)
+                        # Include even if already sent (API requires both call and output)
+                        if tool_call_raw_item_id not in self.server_items:
+                            tool_call_input_item = tool_call_item.to_input_item()
+                            # Check if this item has already been added (by ID)
+                            if isinstance(tool_call_input_item, dict):
+                                tool_call_item_id = tool_call_input_item.get("id")
+                            else:
+                                tool_call_item_id = getattr(tool_call_input_item, "id", None)
+                            # Only add if not already in input_items (check by ID)
+                            if tool_call_item_id:
+                                already_added = any(
+                                    (
+                                        isinstance(existing_item, dict)
+                                        and existing_item.get("id") == tool_call_item_id
+                                    )
+                                    or (
+                                        hasattr(existing_item, "id")
+                                        and getattr(existing_item, "id", None) == tool_call_item_id
+                                    )
+                                    for existing_item in input_items
+                                )
+                                if not already_added:
+                                    input_items.append(tool_call_input_item)
+                            else:
+                                input_items.append(tool_call_input_item)
+                    elif call_id in tool_call_items_from_responses:
+                        # Tool call is in model responses (was sent in previous turn)
+                        tool_call_from_response = tool_call_items_from_responses[call_id]
+                        # Normalize field names from JSON (camelCase) to Python (snake_case)
+                        if isinstance(tool_call_from_response, dict):
+                            normalized_tool_call = _normalize_field_names(tool_call_from_response)
+                            tool_call_item_id_raw = normalized_tool_call.get("id")
+                            tool_call_item_id = (
+                                tool_call_item_id_raw
+                                if isinstance(tool_call_item_id_raw, str)
+                                else None
+                            )
+                        else:
+                            # It's already a Pydantic model, convert to dict
+                            normalized_tool_call = (
+                                tool_call_from_response.model_dump(exclude_unset=True)
+                                if hasattr(tool_call_from_response, "model_dump")
+                                else tool_call_from_response
+                            )
+                            tool_call_item_id = (
+                                getattr(tool_call_from_response, "id", None)
+                                if hasattr(tool_call_from_response, "id")
+                                else (
+                                    normalized_tool_call.get("id")
+                                    if isinstance(normalized_tool_call, dict)
+                                    else None
+                                )
+                            )
+                            if not isinstance(tool_call_item_id, str):
+                                tool_call_item_id = None
+                        # Only add if not already in input_items (check by ID)
+                        if tool_call_item_id:
+                            already_added = any(
+                                (
+                                    isinstance(existing_item, dict)
+                                    and existing_item.get("id") == tool_call_item_id
+                                )
+                                or (
+                                    hasattr(existing_item, "id")
+                                    and getattr(existing_item, "id", None) == tool_call_item_id
+                                )
+                                for existing_item in input_items
+                            )
+                            if not already_added:
+                                input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+                        else:
+                            input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+
+                # Include the tool_call_output_item (check for duplicates by ID)
+                output_input_item = item.to_input_item()
+                if isinstance(output_input_item, dict):
+                    output_item_id = output_input_item.get("id")
+                else:
+                    output_item_id = getattr(output_input_item, "id", None)
+                if output_item_id:
+                    already_added = any(
+                        (
+                            isinstance(existing_item, dict)
+                            and existing_item.get("id") == output_item_id
+                        )
+                        or (
+                            hasattr(existing_item, "id")
+                            and getattr(existing_item, "id", None) == output_item_id
+                        )
+                        for existing_item in input_items
+                    )
+                    if not already_added:
+                        input_items.append(output_input_item)
+                        self.sent_items.add(raw_item_id)
+                else:
+                    input_items.append(output_input_item)
+                    self.sent_items.add(raw_item_id)
+                continue
+
             input_items.append(item.to_input_item())
             self.sent_items.add(raw_item_id)
 
@@ -730,6 +920,7 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 server_conversation_tracker=server_conversation_tracker,
+                                model_responses=model_responses,
                             ),
                         )
 
@@ -747,6 +938,7 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             server_conversation_tracker=server_conversation_tracker,
+                            model_responses=model_responses,
                         )
                     should_run_agent_start_hooks = False
 
@@ -805,6 +997,7 @@ class AgentRunner:
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
                                 interruptions=turn_result.next_step.interruptions,
+                                _last_processed_response=turn_result.processed_response,
                             )
                             return result
                         elif isinstance(turn_result.next_step, NextStepHandoff):
@@ -1386,6 +1579,7 @@ class AgentRunner:
                     elif isinstance(turn_result.next_step, NextStepInterruption):
                         # Tool approval is needed - complete the stream with interruptions
                         streamed_result.interruptions = turn_result.next_step.interruptions
+                        streamed_result._last_processed_response = turn_result.processed_response
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
@@ -1509,11 +1703,19 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, streamed_result.new_items, streamed_result.raw_responses
             )
         else:
+            # Filter out tool_approval_item items and include all other items
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            for item in streamed_result.new_items:
+                if item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = item.to_input_item()
+                input.append(input_item)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1588,12 +1790,16 @@ class AgentRunner:
                 output_item = event.item
 
                 if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id: str | None = getattr(
+                    output_call_id: str | None = getattr(
                         output_item, "call_id", getattr(output_item, "id", None)
                     )
 
-                    if call_id and call_id not in emitted_tool_call_ids:
-                        emitted_tool_call_ids.add(call_id)
+                    if (
+                        output_call_id
+                        and isinstance(output_call_id, str)
+                        and output_call_id not in emitted_tool_call_ids
+                    ):
+                        emitted_tool_call_ids.add(output_call_id)
 
                         tool_item = ToolCallItem(
                             raw_item=cast(ToolCallItemTypes, output_item),
@@ -1815,6 +2021,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None = None,
+        model_responses: list[ModelResponse] | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -1840,10 +2047,20 @@ class AgentRunner:
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
         if server_conversation_tracker is not None:
-            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+            input = server_conversation_tracker.prepare_input(
+                original_input, generated_items, model_responses
+            )
         else:
+            # Filter out tool_approval_item items and include all other items
             input = ItemHelpers.input_to_new_input_list(original_input)
-            input.extend([generated_item.to_input_item() for generated_item in generated_items])
+            for generated_item in generated_items:
+                if generated_item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = generated_item.to_input_item()
+                input.append(input_item)
 
         new_response = await cls._get_new_response(
             agent,

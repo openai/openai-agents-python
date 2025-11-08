@@ -61,7 +61,7 @@ class TestRunState:
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
 
-    def test_throws_error_if_schema_version_is_missing_or_invalid(self):
+    async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="Agent1")
@@ -74,7 +74,7 @@ class TestRunState:
 
         str_data = json.dumps(json_data)
         with pytest.raises(Exception, match="Run state is missing schema version"):
-            RunState.from_string(agent, str_data)
+            await RunState.from_string(agent, str_data)
 
         json_data["$schemaVersion"] = "0.1"
         with pytest.raises(
@@ -84,7 +84,7 @@ class TestRunState:
                 f"Please use version {CURRENT_SCHEMA_VERSION}"
             ),
         ):
-            RunState.from_string(agent, json.dumps(json_data))
+            await RunState.from_string(agent, json.dumps(json_data))
 
     def test_approve_updates_context_approvals_correctly(self):
         """Test that approve() correctly updates context approvals."""
@@ -205,7 +205,7 @@ class TestRunState:
         with pytest.raises(Exception, match="Cannot reject tool: RunState has no context"):
             state.reject(approval_item)
 
-    def test_from_string_reconstructs_state_for_simple_agent(self):
+    async def test_from_string_reconstructs_state_for_simple_agent(self):
         """Test that fromString correctly reconstructs state for a simple agent."""
         context = RunContextWrapper(context={"a": 1})
         agent = Agent(name="Solo")
@@ -213,7 +213,7 @@ class TestRunState:
         state._current_turn = 5
 
         str_data = state.to_string()
-        new_state = RunState.from_string(agent, str_data)
+        new_state = await RunState.from_string(agent, str_data)
 
         assert new_state._max_turns == 7
         assert new_state._current_turn == 5
@@ -223,7 +223,7 @@ class TestRunState:
         assert new_state._generated_items == []
         assert new_state._model_responses == []
 
-    def test_from_json_reconstructs_state(self):
+    async def test_from_json_reconstructs_state(self):
         """Test that from_json correctly reconstructs state from dict."""
         context = RunContextWrapper(context={"test": "data"})
         agent = Agent(name="JsonAgent")
@@ -233,7 +233,7 @@ class TestRunState:
         state._current_turn = 2
 
         json_data = state.to_json()
-        new_state = RunState.from_json(agent, json_data)
+        new_state = await RunState.from_json(agent, json_data)
 
         assert new_state._max_turns == 5
         assert new_state._current_turn == 2
@@ -269,7 +269,7 @@ class TestRunState:
         assert len(interruptions) == 1
         assert interruptions[0] == approval_item
 
-    def test_serializes_and_restores_approvals(self):
+    async def test_serializes_and_restores_approvals(self):
         """Test that approval state is preserved through serialization."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="ApprovalAgent")
@@ -299,7 +299,7 @@ class TestRunState:
 
         # Serialize and deserialize
         str_data = state.to_string()
-        new_state = RunState.from_string(agent, str_data)
+        new_state = await RunState.from_string(agent, str_data)
 
         # Check approvals are preserved
         assert new_state._context is not None
@@ -348,7 +348,7 @@ class TestBuildAgentMap:
 class TestSerializationRoundTrip:
     """Test that serialization and deserialization preserve state correctly."""
 
-    def test_preserves_usage_data(self):
+    async def test_preserves_usage_data(self):
         """Test that usage data is preserved through serialization."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         context.usage.requests = 5
@@ -360,7 +360,7 @@ class TestSerializationRoundTrip:
         state = RunState(context=context, original_input="test", starting_agent=agent, max_turns=10)
 
         str_data = state.to_string()
-        new_state = RunState.from_string(agent, str_data)
+        new_state = await RunState.from_string(agent, str_data)
 
         assert new_state._context is not None
         assert new_state._context.usage.requests == 5
@@ -393,7 +393,7 @@ class TestSerializationRoundTrip:
         assert len(json_data["generatedItems"]) == 1
         assert json_data["generatedItems"][0]["type"] == "message_output_item"
 
-    def test_serializes_current_step_interruption(self):
+    async def test_serializes_current_step_interruption(self):
         """Test that current step interruption is serialized correctly."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="InterruptAgent")
@@ -412,17 +412,17 @@ class TestSerializationRoundTrip:
         json_data = state.to_json()
         assert json_data["currentStep"] is not None
         assert json_data["currentStep"]["type"] == "next_step_interruption"
-        assert len(json_data["currentStep"]["interruptions"]) == 1
+        assert len(json_data["currentStep"]["data"]["interruptions"]) == 1
 
         # Deserialize and verify
-        new_state = RunState.from_json(agent, json_data)
+        new_state = await RunState.from_json(agent, json_data)
         assert isinstance(new_state._current_step, NextStepInterruption)
         assert len(new_state._current_step.interruptions) == 1
         restored_item = new_state._current_step.interruptions[0]
         assert isinstance(restored_item, ToolApprovalItem)
         assert restored_item.raw_item.name == "myTool"
 
-    def test_deserializes_various_item_types(self):
+    async def test_deserializes_various_item_types(self):
         """Test that deserialization handles different item types."""
         from agents.items import ToolCallItem, ToolCallOutputItem
 
@@ -463,7 +463,7 @@ class TestSerializationRoundTrip:
 
         # Serialize and deserialize
         json_data = state.to_json()
-        new_state = RunState.from_json(agent, json_data)
+        new_state = await RunState.from_json(agent, json_data)
 
         # Verify all items were restored
         assert len(new_state._generated_items) == 3
@@ -471,7 +471,7 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[1], ToolCallItem)
         assert isinstance(new_state._generated_items[2], ToolCallOutputItem)
 
-    def test_deserialization_handles_unknown_agent_gracefully(self):
+    async def test_deserialization_handles_unknown_agent_gracefully(self):
         """Test that deserialization skips items with unknown agents."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="KnownAgent")
@@ -494,12 +494,12 @@ class TestSerializationRoundTrip:
         json_data["generatedItems"][0]["agent"]["name"] = "UnknownAgent"
 
         # Deserialize - should skip the item with unknown agent
-        new_state = RunState.from_json(agent, json_data)
+        new_state = await RunState.from_json(agent, json_data)
 
         # Item should be skipped
         assert len(new_state._generated_items) == 0
 
-    def test_deserialization_handles_malformed_items_gracefully(self):
+    async def test_deserialization_handles_malformed_items_gracefully(self):
         """Test that deserialization handles malformed items without crashing."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
@@ -521,7 +521,7 @@ class TestSerializationRoundTrip:
         ]
 
         # Should not crash, just skip the malformed item
-        new_state = RunState.from_json(agent, json_data)
+        new_state = await RunState.from_json(agent, json_data)
 
         # Malformed item should be skipped
         assert len(new_state._generated_items) == 0
@@ -601,7 +601,7 @@ class TestRunStateEdgeCases:
 class TestDeserializeHelpers:
     """Test deserialization helper functions and round-trip serialization."""
 
-    def test_serialization_includes_handoff_fields(self):
+    async def test_serialization_includes_handoff_fields(self):
         """Test that handoff items include source and target agent fields."""
         from agents.items import HandoffOutputItem
 
@@ -635,11 +635,11 @@ class TestDeserializeHelpers:
         assert item_data["targetAgent"]["name"] == "AgentB"
 
         # Test round-trip deserialization
-        restored = RunState.from_string(agent_a, state.to_string())
+        restored = await RunState.from_string(agent_a, state.to_string())
         assert len(restored._generated_items) == 1
         assert restored._generated_items[0].type == "handoff_output_item"
 
-    def test_model_response_serialization_roundtrip(self):
+    async def test_model_response_serialization_roundtrip(self):
         """Test that model responses serialize and deserialize correctly."""
         from agents.items import ModelResponse
 
@@ -665,14 +665,14 @@ class TestDeserializeHelpers:
 
         # Round trip
         json_str = state.to_string()
-        restored = RunState.from_string(agent, json_str)
+        restored = await RunState.from_string(agent, json_str)
 
         assert len(restored._model_responses) == 1
         assert restored._model_responses[0].response_id == "resp123"
         assert restored._model_responses[0].usage.requests == 1
         assert restored._model_responses[0].usage.input_tokens == 10
 
-    def test_interruptions_serialization_roundtrip(self):
+    async def test_interruptions_serialization_roundtrip(self):
         """Test that interruptions serialize and deserialize correctly."""
         from agents._run_impl import NextStepInterruption
 
@@ -696,21 +696,21 @@ class TestDeserializeHelpers:
 
         # Round trip
         json_str = state.to_string()
-        restored = RunState.from_string(agent, json_str)
+        restored = await RunState.from_string(agent, json_str)
 
         assert restored._current_step is not None
         assert isinstance(restored._current_step, NextStepInterruption)
         assert len(restored._current_step.interruptions) == 1
         assert restored._current_step.interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
 
-    def test_json_decode_error_handling(self):
+    async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
         agent = Agent(name="TestAgent")
 
         with pytest.raises(Exception, match="Failed to parse run state JSON"):
-            RunState.from_string(agent, "{ invalid json }")
+            await RunState.from_string(agent, "{ invalid json }")
 
-    def test_missing_agent_in_map_error(self):
+    async def test_missing_agent_in_map_error(self):
         """Test error when agent not found in agent map."""
         agent_a = Agent(name="AgentA")
         state: RunState[dict[str, str], Agent[Any]] = RunState(
@@ -726,4 +726,4 @@ class TestDeserializeHelpers:
         # Try to deserialize with a different agent that doesn't have AgentA in handoffs
         agent_b = Agent(name="AgentB")
         with pytest.raises(Exception, match="Agent AgentA not found in agent map"):
-            RunState.from_string(agent_b, json_str)
+            await RunState.from_string(agent_b, json_str)
