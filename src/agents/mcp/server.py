@@ -16,6 +16,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
 from mcp.types import (
+    AnyUrl,
     CallToolResult,
     GetPromptResult,
     InitializeResult,
@@ -91,12 +92,12 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def read_resource(self, uri: str) -> ReadResourceResult:
+    async def read_resource(self, uri:AnyUrl) -> ReadResourceResult:
         """Read the content of a resource by URI."""
         pass
 
     @abc.abstractmethod
-    async def subscribe_resource(self, uri: str, **kwargs) -> AsyncIterator[SessionMessage]:
+    async def subscribe_resource(self, uri:AnyUrl, **kwargs) -> AsyncIterator[SessionMessage]:
         """Subscribe to resource updates."""
         pass
 
@@ -354,19 +355,19 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
         return await session.list_resources()
 
-    async def read_resource(self, uri: str) -> ReadResourceResult:
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
         return await session.read_resource(uri)
 
-    async def subscribe_resource(self, uri: str, **kwargs) -> AsyncIterator[SessionMessage]:
+    async def subscribe_resource(self, uri: AnyUrl, **kwargs) -> AsyncIterator[SessionMessage]:
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
-        async for msg in session.subscribe_resource(uri, **kwargs):
+        async for msg in session.subscribe_resource(uri):
             yield msg
 
     async def list_prompts(
