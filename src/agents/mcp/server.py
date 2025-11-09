@@ -3,12 +3,11 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, AsyncIterator
-
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
