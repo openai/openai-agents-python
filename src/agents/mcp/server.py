@@ -92,12 +92,12 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def read_resource(self, uri:AnyUrl) -> ReadResourceResult:
+    async def read_resource(self, uri: AnyUrl) -> ReadResourceResult:
         """Read the content of a resource by URI."""
         pass
 
     @abc.abstractmethod
-    async def subscribe_resource(self, uri:AnyUrl, **kwargs) -> AsyncIterator[SessionMessage]:
+    async def subscribe_resource(self, uri: AnyUrl, **kwargs) -> AsyncIterator[SessionMessage]:
         """Subscribe to resource updates."""
         pass
 
