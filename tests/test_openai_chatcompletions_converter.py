@@ -393,7 +393,7 @@ def test_tool_call_with_valid_json_arguments():
 
     messages = Converter.items_to_messages([function_call])
     tool_call = messages[0]["tool_calls"][0]  # type: ignore
-    assert tool_call["function"]["arguments"] == '{"key": "value", "number": 42}'  # type: ignore
+    assert tool_call["function"]["arguments"] == '{"key": "value", "number": 42}'
 
 
 def test_tool_call_with_invalid_json_arguments():
@@ -414,7 +414,7 @@ def test_tool_call_with_invalid_json_arguments():
     messages = Converter.items_to_messages([function_call])
     tool_call = messages[0]["tool_calls"][0]  # type: ignore
     # Invalid JSON should be sanitized to "{}"
-    assert tool_call["function"]["arguments"] == "{}"  # type: ignore
+    assert tool_call["function"]["arguments"] == "{}"
 
     # Test with None
     function_call_none = ResponseFunctionToolCallParam(
@@ -427,7 +427,7 @@ def test_tool_call_with_invalid_json_arguments():
 
     messages_none = Converter.items_to_messages([function_call_none])
     tool_call_none = messages_none[0]["tool_calls"][0]  # type: ignore
-    assert tool_call_none["function"]["arguments"] == "{}"  # type: ignore
+    assert tool_call_none["function"]["arguments"] == "{}"
 
     # Test with empty string
     function_call_empty = ResponseFunctionToolCallParam(
@@ -440,7 +440,7 @@ def test_tool_call_with_invalid_json_arguments():
 
     messages_empty = Converter.items_to_messages([function_call_empty])
     tool_call_empty = messages_empty[0]["tool_calls"][0]  # type: ignore
-    assert tool_call_empty["function"]["arguments"] == "{}"  # type: ignore
+    assert tool_call_empty["function"]["arguments"] == "{}"
 
 
 def test_tool_call_with_malformed_json_variants():
@@ -469,7 +469,7 @@ def test_tool_call_with_malformed_json_variants():
         messages = Converter.items_to_messages([function_call])
         tool_call = messages[0]["tool_calls"][0]  # type: ignore
         # All malformed JSON should be sanitized to "{}"
-        assert tool_call["function"]["arguments"] == "{}", (  # type: ignore
+        assert tool_call["function"]["arguments"] == "{}", (
             f"Malformed JSON '{malformed_json}' should be sanitized to '{{}}'"
         )
 
