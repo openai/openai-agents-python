@@ -77,7 +77,10 @@ dev = [
 ]
 
 [tool.uv.workspace]
-members = ["agents"]
+members = [
+    "agents",
+    "checking",
+]
 
 [tool.uv.sources]
 agents = { workspace = true }

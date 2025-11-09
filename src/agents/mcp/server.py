@@ -7,7 +7,8 @@ from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, AsyncIterator
+
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -15,7 +16,7 @@ from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult, ListResourcesResult, ReadResourceResult
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -79,6 +80,19 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def list_resources(self)-> ListResourcesResult:
+        """List resources available on the server."""
+        pass
+    @abc.abstractmethod
+    async def read_resource(self, uri:str)-> ReadResourceResult:
+        """Read the content of a resource by URI."""
+        pass
+    @abc.abstractmethod
+    async def subscribe_resource(self, uri:str, **kwargs) -> AsyncIterator[SessionMessage]:
+        """Subscribe to resource updates."""
+        pass
+
+    @abc.abstractmethod
     async def list_prompts(
         self,
     ) -> ListPromptsResult:
@@ -91,7 +105,7 @@ class MCPServer(abc.ABC):
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
         pass
-
+    
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
@@ -140,7 +154,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self.max_retry_attempts = max_retry_attempts
         self.retry_backoff_seconds_base = retry_backoff_seconds_base
         self.message_handler = message_handler
-
         # The cache is always dirty at startup, so that we fetch tools at least once
         self._cache_dirty = True
         self._tools_list: list[MCPTool] | None = None
@@ -288,6 +301,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             await self.cleanup()
             raise
 
+
+
+
+
     async def list_tools(
         self,
         run_context: RunContextWrapper[Any] | None = None,
@@ -325,6 +342,30 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
 
         return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+
+    async def list_resources(self)-> ListResourcesResult:
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await session.list_resources()
+        
+    async def read_resource(self,uri:str)-> ReadResourceResult:
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        return await session.read_resource(uri)
+    
+    async def subscribe_resource(self, uri:str, **kwargs)-> AsyncIterator[SessionMessage]:
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+        session = self.session
+        assert session is not None
+        async for msg in session.subscribe_resource(uri, **kwargs):
+            yield msg
+        
+
 
     async def list_prompts(
         self,
@@ -591,6 +632,8 @@ class MCPServerStreamableHttpParams(TypedDict):
 
     httpx_client_factory: NotRequired[HttpClientFactory]
     """Custom HTTP client factory for configuring httpx.AsyncClient behavior."""
+
+
 
 
 class MCPServerStreamableHttp(_MCPServerWithClientSession):
