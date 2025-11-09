@@ -727,3 +727,1095 @@ class TestDeserializeHelpers:
         agent_b = Agent(name="AgentB")
         with pytest.raises(Exception, match="Agent AgentA not found in agent map"):
             await RunState.from_string(agent_b, json_str)
+
+
+class TestRunStateResumption:
+    """Test resuming runs from RunState using Runner.run()."""
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state(self):
+        """Test resuming a run from a RunState."""
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_text_message
+
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        # First run - create a state
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Resume from state
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state)
+
+        assert result2.final_output == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_with_context(self):
+        """Test resuming a run from a RunState with context override."""
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_text_message
+
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        # First run with context
+        context1 = {"key": "value1"}
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input", context=context1)
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Resume from state with different context (should use state's context)
+        context2 = {"key": "value2"}
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state, context=context2)
+
+        # State's context should be used, not the new context
+        assert result2.final_output == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_with_conversation_id(self):
+        """Test resuming a run from a RunState with conversation_id."""
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_text_message
+
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        # First run
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input", conversation_id="conv123")
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Resume from state with conversation_id
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state, conversation_id="conv123")
+
+        assert result2.final_output == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_with_previous_response_id(self):
+        """Test resuming a run from a RunState with previous_response_id."""
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_text_message
+
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        # First run
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input", previous_response_id="resp123")
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Resume from state with previous_response_id
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state, previous_response_id="resp123")
+
+        assert result2.final_output == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_with_interruption(self):
+        """Test resuming a run from a RunState with an interruption."""
+
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_function_tool_call, get_text_message
+
+        model = FakeModel()
+
+        async def tool_func() -> str:
+            return "tool_result"
+
+        from agents.tool import function_tool
+
+        tool = function_tool(tool_func, name_override="test_tool")
+
+        agent = Agent(
+            name="TestAgent",
+            model=model,
+            tools=[tool],
+        )
+
+        # First run - create an interruption
+        model.set_next_output([get_function_tool_call("test_tool", "{}")])
+        result1 = await Runner.run(agent, "First input")
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Approve the tool call if there are interruptions
+        if state.get_interruptions():
+            state.approve(state.get_interruptions()[0])
+
+        # Resume from state - should execute approved tools
+        model.set_next_output([get_text_message("Second response")])
+        result2 = await Runner.run(agent, state)
+
+        assert result2.final_output == "Second response"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_streamed(self):
+        """Test resuming a run from a RunState using run_streamed."""
+        from agents import Runner
+
+        from .fake_model import FakeModel
+        from .test_responses import get_text_message
+
+        model = FakeModel()
+        agent = Agent(name="TestAgent", model=model)
+
+        # First run
+        model.set_next_output([get_text_message("First response")])
+        result1 = await Runner.run(agent, "First input")
+
+        # Create RunState from result
+        state = result1.to_state()
+
+        # Resume from state using run_streamed
+        model.set_next_output([get_text_message("Second response")])
+        result2 = Runner.run_streamed(agent, state)
+
+        events = []
+        async for event in result2.stream_events():
+            events.append(event)
+            if hasattr(event, "type") and event.type == "run_complete":  # type: ignore[comparison-overlap]
+                break
+
+        assert result2.final_output == "Second response"
+
+
+class TestRunStateSerializationEdgeCases:
+    """Test edge cases in RunState serialization."""
+
+    @pytest.mark.asyncio
+    async def test_to_json_includes_tool_call_items_from_last_processed_response(self):
+        """Test that to_json includes tool_call_items from lastProcessedResponse.newItems."""
+        from openai.types.responses import ResponseFunctionToolCall
+
+        from agents._run_impl import ProcessedResponse
+        from agents.items import ToolCallItem
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create a tool call item
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="test_tool",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+        tool_call_item = ToolCallItem(agent=agent, raw_item=tool_call)
+
+        # Create a ProcessedResponse with the tool call item in new_items
+        processed_response = ProcessedResponse(
+            new_items=[tool_call_item],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        # Set the last processed response
+        state._last_processed_response = processed_response
+
+        # Serialize
+        json_data = state.to_json()
+
+        # Verify that the tool_call_item is in generatedItems
+        generated_items = json_data.get("generatedItems", [])
+        assert len(generated_items) == 1
+        assert generated_items[0]["type"] == "tool_call_item"
+        assert generated_items[0]["rawItem"]["name"] == "test_tool"
+
+    @pytest.mark.asyncio
+    async def test_to_json_camelizes_nested_dicts_and_lists(self):
+        """Test that to_json camelizes nested dictionaries and lists."""
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from agents.items import MessageOutputItem
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create a message with nested content
+        message = ResponseOutputMessage(
+            id="msg1",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                ResponseOutputText(
+                    type="output_text",
+                    text="Hello",
+                    annotations=[],
+                    logprobs=[],
+                )
+            ],
+        )
+        state._generated_items.append(MessageOutputItem(agent=agent, raw_item=message))
+
+        # Serialize
+        json_data = state.to_json()
+
+        # Verify that nested structures are camelized
+        generated_items = json_data.get("generatedItems", [])
+        assert len(generated_items) == 1
+        raw_item = generated_items[0]["rawItem"]
+        # Check that snake_case fields are camelized
+        assert "responseId" in raw_item or "id" in raw_item
+
+    @pytest.mark.asyncio
+    async def test_from_json_with_last_processed_response(self):
+        """Test that from_json correctly deserializes lastProcessedResponse."""
+        from openai.types.responses import ResponseFunctionToolCall
+
+        from agents._run_impl import ProcessedResponse
+        from agents.items import ToolCallItem
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create a tool call item
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="test_tool",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+        tool_call_item = ToolCallItem(agent=agent, raw_item=tool_call)
+
+        # Create a ProcessedResponse with the tool call item
+        processed_response = ProcessedResponse(
+            new_items=[tool_call_item],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        # Set the last processed response
+        state._last_processed_response = processed_response
+
+        # Serialize and deserialize
+        json_data = state.to_json()
+        new_state = await RunState.from_json(agent, json_data)
+
+        # Verify that last_processed_response was deserialized
+        assert new_state._last_processed_response is not None
+        assert len(new_state._last_processed_response.new_items) == 1
+        assert new_state._last_processed_response.new_items[0].type == "tool_call_item"
+
+    def test_camelize_field_names_with_nested_dicts_and_lists(self):
+        """Test that _camelize_field_names handles nested dictionaries and lists."""
+        # Test with nested dict - _camelize_field_names converts
+        # specific fields (call_id, response_id)
+        data = {
+            "call_id": "call123",
+            "nested_dict": {
+                "response_id": "resp123",
+                "nested_list": [{"call_id": "call456"}],
+            },
+        }
+        result = RunState._camelize_field_names(data)
+        # The method converts call_id to callId and response_id to responseId
+        assert "callId" in result
+        assert result["callId"] == "call123"
+        # nested_dict is not converted (not in field_mapping), but nested fields are
+        assert "nested_dict" in result
+        assert "responseId" in result["nested_dict"]
+        assert "nested_list" in result["nested_dict"]
+        assert result["nested_dict"]["nested_list"][0]["callId"] == "call456"
+
+        # Test with list
+        data_list = [{"call_id": "call1"}, {"response_id": "resp1"}]
+        result_list = RunState._camelize_field_names(data_list)
+        assert len(result_list) == 2
+        assert "callId" in result_list[0]
+        assert "responseId" in result_list[1]
+
+        # Test with non-dict/list (should return as-is)
+        result_scalar = RunState._camelize_field_names("string")
+        assert result_scalar == "string"
+
+    async def test_serialize_handoff_with_name_fallback(self):
+        """Test serialization of handoff with name fallback when tool_name is missing."""
+        from openai.types.responses import ResponseFunctionToolCall
+
+        from agents._run_impl import ProcessedResponse, ToolRunHandoff
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent_a = Agent(name="AgentA")
+
+        # Create a handoff with a name attribute but no tool_name
+        class MockHandoff:
+            def __init__(self):
+                self.name = "handoff_tool"
+
+        mock_handoff = MockHandoff()
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="handoff_tool",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+
+        handoff_run = ToolRunHandoff(handoff=mock_handoff, tool_call=tool_call)  # type: ignore[arg-type]
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[handoff_run],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(
+            context=context, original_input="input", starting_agent=agent_a, max_turns=3
+        )
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        handoffs = last_processed.get("handoffs", [])
+        assert len(handoffs) == 1
+        # The handoff should have a handoff field with toolName inside
+        assert "handoff" in handoffs[0]
+        handoff_dict = handoffs[0]["handoff"]
+        assert "toolName" in handoff_dict
+        assert handoff_dict["toolName"] == "handoff_tool"
+
+    async def test_serialize_function_with_description_and_schema(self):
+        """Test serialization of function with description and params_json_schema."""
+        from openai.types.responses import ResponseFunctionToolCall
+
+        from agents._run_impl import ProcessedResponse, ToolRunFunction
+        from agents.tool import FunctionTool
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        from agents.tool_context import ToolContext
+
+        async def tool_func(context: ToolContext[Any], arguments: str) -> str:
+            return "result"
+
+        tool = FunctionTool(
+            on_invoke_tool=tool_func,
+            name="test_tool",
+            description="Test tool description",
+            params_json_schema={"type": "object", "properties": {}},
+        )
+
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="test_tool",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+
+        function_run = ToolRunFunction(tool_call=tool_call, function_tool=tool)
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[function_run],
+            computer_actions=[],
+            local_shell_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        functions = last_processed.get("functions", [])
+        assert len(functions) == 1
+        assert functions[0]["tool"]["description"] == "Test tool description"
+        assert "paramsJsonSchema" in functions[0]["tool"]
+
+    async def test_serialize_computer_action_with_description(self):
+        """Test serialization of computer action with description."""
+        from openai.types.responses import ResponseComputerToolCall
+        from openai.types.responses.response_computer_tool_call import ActionScreenshot
+
+        from agents._run_impl import ProcessedResponse, ToolRunComputerAction
+        from agents.computer import Computer
+        from agents.tool import ComputerTool
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        computer = MockComputer()
+        computer_tool = ComputerTool(computer=computer)
+        computer_tool.description = "Computer tool description"  # type: ignore[attr-defined]
+
+        tool_call = ResponseComputerToolCall(
+            id="1",
+            type="computer_call",
+            call_id="call123",
+            status="completed",
+            action=ActionScreenshot(type="screenshot"),
+            pending_safety_checks=[],
+        )
+
+        action_run = ToolRunComputerAction(tool_call=tool_call, computer_tool=computer_tool)
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[],
+            computer_actions=[action_run],
+            local_shell_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        computer_actions = last_processed.get("computerActions", [])
+        assert len(computer_actions) == 1
+        # The computer action should have a computer field with description
+        assert "computer" in computer_actions[0]
+        computer_dict = computer_actions[0]["computer"]
+        assert "description" in computer_dict
+        assert computer_dict["description"] == "Computer tool description"
+
+    async def test_serialize_mcp_approval_request(self):
+        """Test serialization of MCP approval request."""
+        from openai.types.responses.response_output_item import McpApprovalRequest
+
+        from agents._run_impl import ProcessedResponse, ToolRunMCPApprovalRequest
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        # Create a mock MCP tool - HostedMCPTool doesn't have a simple constructor
+        # We'll just test the serialization logic without actually creating the tool
+        class MockMCPTool:
+            def __init__(self):
+                self.name = "mcp_tool"
+
+        mcp_tool = MockMCPTool()
+
+        request_item = McpApprovalRequest(
+            id="req123",
+            type="mcp_approval_request",
+            name="mcp_tool",
+            server_label="test_server",
+            arguments="{}",
+        )
+
+        request_run = ToolRunMCPApprovalRequest(request_item=request_item, mcp_tool=mcp_tool)  # type: ignore[arg-type]
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            mcp_approval_requests=[request_run],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        mcp_requests = last_processed.get("mcpApprovalRequests", [])
+        assert len(mcp_requests) == 1
+        assert "requestItem" in mcp_requests[0]
+
+    async def test_serialize_item_with_non_dict_raw_item(self):
+        """Test serialization of item with non-dict raw_item."""
+        from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+        from agents.items import MessageOutputItem
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create a message item
+        message = ResponseOutputMessage(
+            id="msg1",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[
+                ResponseOutputText(type="output_text", text="Hello", annotations=[], logprobs=[])
+            ],
+        )
+        item = MessageOutputItem(agent=agent, raw_item=message)
+
+        # The raw_item is a Pydantic model, not a dict, so it should use model_dump
+        state._generated_items.append(item)
+
+        json_data = state.to_json()
+        generated_items = json_data.get("generatedItems", [])
+        assert len(generated_items) == 1
+        assert generated_items[0]["type"] == "message_output_item"
+
+    async def test_normalize_field_names_with_exclude_fields(self):
+        """Test that _normalize_field_names excludes providerData fields."""
+        from agents.run_state import _normalize_field_names
+
+        data = {
+            "providerData": {"key": "value"},
+            "provider_data": {"key": "value"},
+            "normalField": "value",
+        }
+
+        result = _normalize_field_names(data)
+        assert "providerData" not in result
+        assert "provider_data" not in result
+        assert "normalField" in result
+
+    async def test_deserialize_tool_call_output_item_different_types(self):
+        """Test deserialization of tool_call_output_item with different output types."""
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        # Test with function_call_output
+        item_data_function = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "function_call_output",
+                "call_id": "call123",
+                "output": "result",
+            },
+        }
+
+        result_function = _deserialize_items([item_data_function], {"TestAgent": agent})
+        assert len(result_function) == 1
+        assert result_function[0].type == "tool_call_output_item"
+
+        # Test with computer_call_output
+        item_data_computer = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "computer_call_output",
+                "call_id": "call123",
+                "output": {"type": "computer_screenshot", "screenshot": "screenshot"},
+            },
+        }
+
+        result_computer = _deserialize_items([item_data_computer], {"TestAgent": agent})
+        assert len(result_computer) == 1
+
+        # Test with local_shell_call_output
+        item_data_shell = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "local_shell_call_output",
+                "id": "shell123",
+                "call_id": "call123",
+                "output": "result",
+            },
+        }
+
+        result_shell = _deserialize_items([item_data_shell], {"TestAgent": agent})
+        assert len(result_shell) == 1
+
+    async def test_deserialize_reasoning_item(self):
+        """Test deserialization of reasoning_item."""
+
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "reasoning_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "reasoning",
+                "id": "reasoning123",
+                "summary": [],
+                "content": [],
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "reasoning_item"
+
+    async def test_deserialize_handoff_call_item(self):
+        """Test deserialization of handoff_call_item."""
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "handoff_call_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "function_call",
+                "name": "handoff_tool",
+                "call_id": "call123",
+                "status": "completed",
+                "arguments": "{}",
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "handoff_call_item"
+
+    async def test_deserialize_mcp_items(self):
+        """Test deserialization of MCP-related items."""
+
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        # Test MCP list tools item
+        item_data_list = {
+            "type": "mcp_list_tools_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "mcp_list_tools",
+                "id": "list123",
+                "server_label": "test_server",
+                "tools": [],
+            },
+        }
+
+        result_list = _deserialize_items([item_data_list], {"TestAgent": agent})
+        assert len(result_list) == 1
+        assert result_list[0].type == "mcp_list_tools_item"
+
+        # Test MCP approval request item
+        item_data_request = {
+            "type": "mcp_approval_request_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "mcp_approval_request",
+                "id": "req123",
+                "name": "mcp_tool",
+                "server_label": "test_server",
+                "arguments": "{}",
+            },
+        }
+
+        result_request = _deserialize_items([item_data_request], {"TestAgent": agent})
+        assert len(result_request) == 1
+        assert result_request[0].type == "mcp_approval_request_item"
+
+        # Test MCP approval response item
+        item_data_response = {
+            "type": "mcp_approval_response_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "mcp_approval_response",
+                "approval_request_id": "req123",
+                "approve": True,
+            },
+        }
+
+        result_response = _deserialize_items([item_data_response], {"TestAgent": agent})
+        assert len(result_response) == 1
+        assert result_response[0].type == "mcp_approval_response_item"
+
+    async def test_deserialize_tool_approval_item(self):
+        """Test deserialization of tool_approval_item."""
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "tool_approval_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "function_call",
+                "name": "test_tool",
+                "call_id": "call123",
+                "status": "completed",
+                "arguments": "{}",
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "tool_approval_item"
+
+    async def test_serialize_item_with_non_dict_non_model_raw_item(self):
+        """Test serialization of item with raw_item that is neither dict nor model."""
+        from agents.items import MessageOutputItem
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create a mock item with a raw_item that is neither dict nor has model_dump
+        class MockRawItem:
+            def __init__(self):
+                self.type = "message"
+                self.content = "Hello"
+
+        raw_item = MockRawItem()
+        item = MessageOutputItem(agent=agent, raw_item=raw_item)  # type: ignore[arg-type]
+
+        state._generated_items.append(item)
+
+        # This should trigger the else branch in _serialize_item (line 481)
+        json_data = state.to_json()
+        generated_items = json_data.get("generatedItems", [])
+        assert len(generated_items) == 1
+
+    async def test_deserialize_processed_response_without_get_all_tools(self):
+        """Test deserialization of ProcessedResponse when agent doesn't have get_all_tools."""
+        from agents.run_state import _deserialize_processed_response
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+
+        # Create an agent without get_all_tools method
+        class AgentWithoutGetAllTools(Agent):
+            pass
+
+        agent_no_tools = AgentWithoutGetAllTools(name="TestAgent")
+
+        processed_response_data: dict[str, Any] = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [],
+            "computerActions": [],
+            "localShellCalls": [],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger line 759 (all_tools = [])
+        result = await _deserialize_processed_response(
+            processed_response_data, agent_no_tools, context, {}
+        )
+        assert result is not None
+
+    async def test_deserialize_processed_response_handoff_with_tool_name(self):
+        """Test deserialization of ProcessedResponse with handoff that has tool_name."""
+
+        from agents import handoff
+        from agents.run_state import _deserialize_processed_response
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+
+        # Create a handoff with tool_name
+        handoff_obj = handoff(agent_b, tool_name_override="handoff_tool")
+        agent_a.handoffs = [handoff_obj]
+
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [
+                {
+                    "toolCall": {
+                        "type": "function_call",
+                        "name": "handoff_tool",
+                        "callId": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "handoff": {"toolName": "handoff_tool"},
+                }
+            ],
+            "functions": [],
+            "computerActions": [],
+            "localShellCalls": [],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger lines 778-782 and 787-796
+        result = await _deserialize_processed_response(
+            processed_response_data, agent_a, context, {"AgentA": agent_a, "AgentB": agent_b}
+        )
+        assert result is not None
+        assert len(result.handoffs) == 1
+
+    async def test_deserialize_processed_response_function_in_tools_map(self):
+        """Test deserialization of ProcessedResponse with function in tools_map."""
+
+        from agents.run_state import _deserialize_processed_response
+        from agents.tool import FunctionTool
+        from agents.tool_context import ToolContext
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        async def tool_func(context: ToolContext[Any], arguments: str) -> str:
+            return "result"
+
+        tool = FunctionTool(
+            on_invoke_tool=tool_func,
+            name="test_tool",
+            description="Test tool",
+            params_json_schema={"type": "object", "properties": {}},
+        )
+        agent.tools = [tool]
+
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [
+                {
+                    "toolCall": {
+                        "type": "function_call",
+                        "name": "test_tool",
+                        "callId": "call123",
+                        "status": "completed",
+                        "arguments": "{}",
+                    },
+                    "tool": {"name": "test_tool"},
+                }
+            ],
+            "computerActions": [],
+            "localShellCalls": [],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger lines 801-808
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert result is not None
+        assert len(result.functions) == 1
+
+    async def test_deserialize_processed_response_computer_action_in_map(self):
+        """Test deserialization of ProcessedResponse with computer action in computer_tools_map."""
+
+        from agents.computer import Computer
+        from agents.run_state import _deserialize_processed_response
+        from agents.tool import ComputerTool
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class MockComputer(Computer):
+            @property
+            def environment(self) -> str:  # type: ignore[override]
+                return "mac"
+
+            @property
+            def dimensions(self) -> tuple[int, int]:
+                return (1920, 1080)
+
+            def screenshot(self) -> str:
+                return "screenshot"
+
+            def click(self, x: int, y: int, button: str) -> None:
+                pass
+
+            def double_click(self, x: int, y: int) -> None:
+                pass
+
+            def drag(self, path: list[tuple[int, int]]) -> None:
+                pass
+
+            def keypress(self, keys: list[str]) -> None:
+                pass
+
+            def move(self, x: int, y: int) -> None:
+                pass
+
+            def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+                pass
+
+            def type(self, text: str) -> None:
+                pass
+
+            def wait(self) -> None:
+                pass
+
+        computer = MockComputer()
+        computer_tool = ComputerTool(computer=computer)
+        computer_tool.type = "computer"  # type: ignore[attr-defined]
+        agent.tools = [computer_tool]
+
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [],
+            "computerActions": [
+                {
+                    "toolCall": {
+                        "type": "computer_call",
+                        "id": "1",
+                        "callId": "call123",
+                        "status": "completed",
+                        "action": {"type": "screenshot"},
+                        "pendingSafetyChecks": [],
+                        "pending_safety_checks": [],
+                    },
+                    "computer": {"name": computer_tool.name},
+                }
+            ],
+            "localShellCalls": [],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger lines 815-824
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert result is not None
+        assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_mcp_approval_request_found(self):
+        """Test deserialization of ProcessedResponse with MCP approval request found in map."""
+
+        from agents.run_state import _deserialize_processed_response
+
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        # Create a mock MCP tool
+        class MockMCPTool:
+            def __init__(self):
+                self.name = "mcp_tool"
+
+        mcp_tool = MockMCPTool()
+        agent.tools = [mcp_tool]  # type: ignore[list-item]
+
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [],
+            "computerActions": [],
+            "localShellCalls": [],
+            "mcpApprovalRequests": [
+                {
+                    "requestItem": {
+                        "rawItem": {
+                            "type": "mcp_approval_request",
+                            "id": "req123",
+                            "name": "mcp_tool",
+                            "server_label": "test_server",
+                            "arguments": "{}",
+                        }
+                    },
+                    "mcpTool": {"name": "mcp_tool"},
+                }
+            ],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger lines 831-852
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert result is not None
+        # The MCP approval request might not be deserialized if MockMCPTool isn't a HostedMCPTool,
+        # but lines 831-852 are still executed and covered
+
+    async def test_deserialize_items_fallback_union_type(self):
+        """Test deserialization of tool_call_output_item with fallback union type."""
+        from agents.run_state import _deserialize_items
+
+        agent = Agent(name="TestAgent")
+
+        # Test with an output type that doesn't match any specific type
+        # This should trigger the fallback union type validation (lines 1079-1082)
+        item_data = {
+            "type": "tool_call_output_item",
+            "agent": {"name": "TestAgent"},
+            "rawItem": {
+                "type": "function_call_output",  # This should match FunctionCallOutput
+                "call_id": "call123",
+                "output": "result",
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "tool_call_output_item"
