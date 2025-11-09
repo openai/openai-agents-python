@@ -379,6 +379,101 @@ def test_tool_call_conversion():
     assert tool_call["function"]["arguments"] == function_call["arguments"]  # type: ignore
 
 
+def test_tool_call_with_valid_json_arguments():
+    """
+    Test that valid JSON arguments pass through unchanged.
+    """
+    function_call = ResponseFunctionToolCallParam(
+        id="tool1",
+        call_id="abc",
+        name="test_tool",
+        arguments='{"key": "value", "number": 42}',
+        type="function_call",
+    )
+
+    messages = Converter.items_to_messages([function_call])
+    tool_call = messages[0]["tool_calls"][0]  # type: ignore
+    assert tool_call["function"]["arguments"] == '{"key": "value", "number": 42}'  # type: ignore
+
+
+def test_tool_call_with_invalid_json_arguments():
+    """
+    Test that invalid JSON arguments are sanitized to "{}".
+    This prevents API errors when invalid JSON is stored in session history
+    and later sent to APIs that strictly validate JSON (like Anthropic via litellm).
+    """
+    # Test with missing closing brace (common case)
+    function_call = ResponseFunctionToolCallParam(
+        id="tool1",
+        call_id="abc",
+        name="test_tool",
+        arguments='{"key": "value"',  # Missing closing brace
+        type="function_call",
+    )
+
+    messages = Converter.items_to_messages([function_call])
+    tool_call = messages[0]["tool_calls"][0]  # type: ignore
+    # Invalid JSON should be sanitized to "{}"
+    assert tool_call["function"]["arguments"] == "{}"  # type: ignore
+
+    # Test with None
+    function_call_none = ResponseFunctionToolCallParam(
+        id="tool2",
+        call_id="def",
+        name="test_tool",
+        arguments=None,  # type: ignore
+        type="function_call",
+    )
+
+    messages_none = Converter.items_to_messages([function_call_none])
+    tool_call_none = messages_none[0]["tool_calls"][0]  # type: ignore
+    assert tool_call_none["function"]["arguments"] == "{}"  # type: ignore
+
+    # Test with empty string
+    function_call_empty = ResponseFunctionToolCallParam(
+        id="tool3",
+        call_id="ghi",
+        name="test_tool",
+        arguments="",
+        type="function_call",
+    )
+
+    messages_empty = Converter.items_to_messages([function_call_empty])
+    tool_call_empty = messages_empty[0]["tool_calls"][0]  # type: ignore
+    assert tool_call_empty["function"]["arguments"] == "{}"  # type: ignore
+
+
+def test_tool_call_with_malformed_json_variants():
+    """
+    Test various malformed JSON cases are all sanitized correctly.
+    """
+    malformed_cases = [
+        '{"key": "value"',  # Missing closing brace
+        '{"key": "value"}}',  # Extra closing brace
+        '{"key": "value",}',  # Trailing comma
+        '{"key":}',  # Missing value
+        '{key: "value"}',  # Unquoted key
+        '{"key": "value"',  # Missing closing brace (different position)
+        "not json at all",  # Not JSON at all
+    ]
+
+    for i, malformed_json in enumerate(malformed_cases):
+        function_call = ResponseFunctionToolCallParam(
+            id=f"tool{i}",
+            call_id=f"call{i}",
+            name="test_tool",
+            arguments=malformed_json,
+            type="function_call",
+        )
+
+        messages = Converter.items_to_messages([function_call])
+        tool_call = messages[0]["tool_calls"][0]  # type: ignore
+        # All malformed JSON should be sanitized to "{}"
+        assert tool_call["function"]["arguments"] == "{}", (  # type: ignore
+            f"Malformed JSON '{malformed_json}' should be sanitized to '{{}}'"
+        )
+
+
 @pytest.mark.parametrize("role", ["user", "system", "developer"])
 def test_input_message_with_all_roles(role: str):
     """
