@@ -815,7 +815,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                             ms.tool_name
                         FROM message_structure ms
                         WHERE ms.session_id = ? AND ms.branch_id = ?
-                        AND ms.branch_turn_number < ?
+                        AND ms.branch_turn_number <= ?
                         ORDER BY ms.sequence_number
                     """,
                         (self.session_id, self._current_branch_id, from_turn_number),
