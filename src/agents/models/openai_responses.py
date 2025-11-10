@@ -84,6 +84,7 @@ class OpenAIResponsesModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         with response_span(disabled=tracing.is_disabled()) as span_response:
             try:
@@ -161,6 +162,7 @@ class OpenAIResponsesModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[ResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.

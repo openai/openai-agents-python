@@ -26,6 +26,7 @@ class PromptCaptureFakeModel(FakeModel):
         previous_response_id,
         conversation_id,
         prompt,
+        enable_structured_output_with_tools: bool = False,
     ):
         # Record the prompt that the agent resolved and passed in.
         self.last_prompt = prompt

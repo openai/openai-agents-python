@@ -59,6 +59,7 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -76,6 +77,7 @@ class OpenAIChatCompletionsModel(Model):
                 tracing,
                 stream=False,
                 prompt=prompt,
+                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             message: ChatCompletionMessage | None = None
@@ -147,6 +149,7 @@ class OpenAIChatCompletionsModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Yields a partial message as it is generated, as well as the usage information.
@@ -167,6 +170,7 @@ class OpenAIChatCompletionsModel(Model):
                 tracing,
                 stream=True,
                 prompt=prompt,
+                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             final_response: Response | None = None
@@ -198,6 +202,7 @@ class OpenAIChatCompletionsModel(Model):
         tracing: ModelTracing,
         stream: Literal[True],
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
@@ -213,6 +218,7 @@ class OpenAIChatCompletionsModel(Model):
         tracing: ModelTracing,
         stream: Literal[False],
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ChatCompletion: ...
 
     async def _fetch_response(
@@ -227,7 +233,12 @@ class OpenAIChatCompletionsModel(Model):
         tracing: ModelTracing,
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
+        # Note: enable_structured_output_with_tools parameter is accepted for interface consistency
+        # but not used for OpenAI models since they have native support for
+        # tools + structured outputs simultaneously
+
         converted_messages = Converter.items_to_messages(input)
 
         if system_instructions:

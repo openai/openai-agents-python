@@ -76,6 +76,7 @@ plugins:
                 - Models:
                     - models/index.md
                     - models/litellm.md
+                    - models/structured_output_with_tools.md
                 - config.md
                 - visualization.md
                 - release.md

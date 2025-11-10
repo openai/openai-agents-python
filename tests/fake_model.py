@@ -90,6 +90,7 @@ class FakeModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         turn_args = {
             "system_instructions": system_instructions,
@@ -140,6 +141,7 @@ class FakeModel(Model):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         turn_args = {
             "system_instructions": system_instructions,

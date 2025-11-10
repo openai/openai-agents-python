@@ -51,6 +51,7 @@ from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
 from ...util._json import _to_dump_compatible
+from ...util._prompts import get_json_output_prompt, should_inject_json_prompt
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
@@ -90,6 +91,7 @@ class LitellmModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -108,6 +110,7 @@ class LitellmModel(Model):
                 tracing,
                 stream=False,
                 prompt=prompt,
+                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             message: litellm.types.utils.Message | None = None
@@ -194,6 +197,7 @@ class LitellmModel(Model):
         previous_response_id: str | None = None,  # unused
         conversation_id: str | None = None,  # unused
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
@@ -212,6 +216,7 @@ class LitellmModel(Model):
                 tracing,
                 stream=True,
                 prompt=prompt,
+                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             final_response: Response | None = None
@@ -243,6 +248,7 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: Literal[True],
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
@@ -258,6 +264,7 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: Literal[False],
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> litellm.types.utils.ModelResponse: ...
 
     async def _fetch_response(
@@ -272,6 +279,7 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: bool = False,
         prompt: Any | None = None,
+        enable_structured_output_with_tools: bool = False,
     ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         # Preserve reasoning messages for tool calls when reasoning is on
         # This is needed for models like Claude 4 Sonnet/Opus which support interleaved thinking
@@ -286,6 +294,19 @@ class LitellmModel(Model):
         # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
         if "anthropic" in self.model.lower() or "claude" in self.model.lower():
             converted_messages = self._fix_tool_message_ordering(converted_messages)
+
+        # Check if we need to inject JSON output prompt for models that don't support
+        # tools + structured output simultaneously (like Gemini)
+        inject_json_prompt = should_inject_json_prompt(
+            output_schema, tools, enable_structured_output_with_tools
+        )
+        if inject_json_prompt and output_schema:
+            json_prompt = get_json_output_prompt(output_schema)
+            if system_instructions:
+                system_instructions = f"{system_instructions}\n\n{json_prompt}"
+            else:
+                system_instructions = json_prompt
+            logger.debug("Injected JSON output prompt for structured output with tools")
 
         if system_instructions:
             converted_messages.insert(
@@ -308,7 +329,12 @@ class LitellmModel(Model):
             else None
         )
         tool_choice = Converter.convert_tool_choice(model_settings.tool_choice)
-        response_format = Converter.convert_response_format(output_schema)
+        # Don't use response_format if we injected JSON prompt (avoids API errors)
+        response_format = (
+            Converter.convert_response_format(None)
+            if inject_json_prompt
+            else Converter.convert_response_format(output_schema)
+        )
 
         converted_tools = [Converter.tool_to_openai(tool) for tool in tools] if tools else []
 

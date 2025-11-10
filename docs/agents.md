@@ -71,6 +71,27 @@ agent = Agent(
 
     When you pass an `output_type`, that tells the model to use [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) instead of regular plain text responses.
 
+### Using structured outputs with tools
+
+Some models (like Google Gemini) don't natively support using tools and structured outputs together. For these cases, you can enable prompt injection:
+
+```python
+from agents import Agent
+from agents.extensions.models.litellm_model import LitellmModel
+
+agent = Agent(
+    name="Weather assistant",
+    model=LitellmModel("gemini/gemini-1.5-flash"),
+    tools=[get_weather],
+    output_type=WeatherReport,
+    enable_structured_output_with_tools=True,  # Required for Gemini
+)
+```
+
+The `enable_structured_output_with_tools` parameter injects JSON formatting instructions into the system prompt as a workaround. This is only needed for models accessed via [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] that lack native support. OpenAI models ignore this parameter.
+
+See the [prompt injection documentation](models/structured_output_with_tools.md) for more details.
+
 ## Multi-agent system design patterns
 
 There are many ways to design multi‑agent systems, but we commonly see two broadly applicable patterns:

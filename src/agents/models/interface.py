@@ -50,6 +50,7 @@ class Model(abc.ABC):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         """Get a response from the model.
 
@@ -65,6 +66,9 @@ class Model(abc.ABC):
                 except for the OpenAI Responses API.
             conversation_id: The ID of the stored conversation, if any.
             prompt: The prompt config to use for the model.
+            enable_structured_output_with_tools: Whether to inject JSON formatting instructions
+                into the system prompt when using structured outputs with tools. Required for
+                models that don't support both features natively (like Gemini).
 
         Returns:
             The full model response.
@@ -85,6 +89,7 @@ class Model(abc.ABC):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
+        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream a response from the model.
 
@@ -100,6 +105,9 @@ class Model(abc.ABC):
                 except for the OpenAI Responses API.
             conversation_id: The ID of the stored conversation, if any.
             prompt: The prompt config to use for the model.
+            enable_structured_output_with_tools: Whether to inject JSON formatting instructions
+                into the system prompt when using structured outputs with tools. Required for
+                models that don't support both features natively (like Gemini).
 
         Returns:
             An iterator of response stream events, in OpenAI Responses format.

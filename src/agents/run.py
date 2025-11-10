@@ -1300,6 +1300,7 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt_config,
+            enable_structured_output_with_tools=agent.enable_structured_output_with_tools,
         ):
             # Emit the raw event ASAP
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
@@ -1735,6 +1736,7 @@ class AgentRunner:
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             prompt=prompt_config,
+            enable_structured_output_with_tools=agent.enable_structured_output_with_tools,
         )
 
         context_wrapper.usage.add(new_response.usage)

@@ -88,3 +88,36 @@ agent = Agent(
 ```
 
 With `include_usage=True`, LiteLLM requests report token and request counts through `result.context_wrapper.usage` just like the built-in OpenAI models.
+
+## Using tools with structured outputs
+
+Some models accessed via LiteLLM (particularly Google Gemini) don't natively support using tools and structured outputs simultaneously. For these models, enable prompt injection:
+
+```python
+from pydantic import BaseModel
+from agents import Agent, function_tool
+from agents.extensions.models.litellm_model import LitellmModel
+
+
+class Report(BaseModel):
+    summary: str
+    confidence: float
+
+
+@function_tool
+def analyze_data(query: str) -> dict:
+    return {"result": f"Analysis of {query}"}
+
+
+agent = Agent(
+    name="Analyst",
+    model=LitellmModel("gemini/gemini-1.5-flash"),
+    tools=[analyze_data],
+    output_type=Report,
+    enable_structured_output_with_tools=True,  # Required for Gemini
+)
+```
+
+The `enable_structured_output_with_tools` parameter enables a workaround that injects JSON formatting instructions into the system prompt instead of using the native API. This allows models like Gemini to return structured outputs even when using tools.
+
+See the [prompt injection documentation](structured_output_with_tools.md) for complete details.
