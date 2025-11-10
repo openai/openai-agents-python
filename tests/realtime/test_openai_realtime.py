@@ -443,7 +443,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Prepare tracker state to simulate ongoing audio
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("i1", 0, b"aaaa")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48)
         model._ongoing_response = True
 
         # Patch sending to avoid websocket dependency
@@ -463,6 +463,17 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "audio_end_ms": 1,
             }
         )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        truncate_event = truncate_events[0]
+        assert truncate_event.item_id == "i1"
+        assert truncate_event.content_index == 0
+        assert truncate_event.audio_end_ms == 1
 
         # Output transcript delta
         await model._handle_ws_event(

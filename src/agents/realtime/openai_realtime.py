@@ -621,9 +621,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             last_audio = self._audio_state_tracker.get_last_audio_item()
             if last_audio is not None:
                 item_id, content_index = last_audio
+                playback_state = self._get_playback_state()
+                playback_item_id = playback_state.get("current_item_id")
+                playback_content_index = playback_state.get("current_item_content_index") or 0
+                playback_elapsed_ms = playback_state.get("elapsed_ms")
                 await self._emit_event(
                     RealtimeModelAudioInterruptedEvent(item_id=item_id, content_index=content_index)
                 )
+
+                elapsed_override = getattr(parsed, "audio_end_ms", None)
+                if elapsed_override is None or elapsed_override <= 0:
+                    effective_elapsed_ms = playback_elapsed_ms
+                else:
+                    effective_elapsed_ms = float(elapsed_override)
+
+                if playback_item_id and effective_elapsed_ms is not None:
+                    truncated_ms = max(int(round(effective_elapsed_ms)), 0)
+                    await self._send_raw_message(
+                        _ConversionHelper.convert_interrupt(
+                            playback_item_id,
+                            playback_content_index,
+                            truncated_ms,
+                        )
+                    )
 
                 # Reset trackers so subsequent playback state queries don't
                 # reference audio that has been interrupted client‑side.
@@ -643,9 +663,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
-            # Avoid sending conversation.item.truncate here. When the session's
-            # turn_detection.interrupt_response is enabled (GA default), the server emits
-            # conversation.item.truncated after the VAD start and takes care of history updates.
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())
