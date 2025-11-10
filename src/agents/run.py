@@ -1866,7 +1866,7 @@ class AgentRunner:
             if isinstance(input_item, dict) and input_item.get("type") == "reasoning":
                 # Check if store is explicitly set to False (ZDR mode)
                 store_setting = item.agent.model_settings.store
-                if not store_setting and "id" in input_item:
+                if store_setting is False and "id" in input_item:
                     # Remove the instance-specific IDs to enable load balancing
                     input_item = {k: v for k, v in input_item.items() if k != "id"}
             new_items_as_input.append(input_item)
