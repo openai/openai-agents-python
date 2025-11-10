@@ -1868,7 +1868,7 @@ class AgentRunner:
                 store_setting = item.agent.model_settings.store
                 if store_setting is False and "id" in input_item:
                     # Remove the instance-specific IDs to enable load balancing
-                    input_item = {k: v for k, v in input_item.items() if k != "id"} # type: ignore[assignment]
+                    input_item = {k: v for k, v in input_item.items() if k != "id"}  # type: ignore[assignment]
             new_items_as_input.append(input_item)
 
         # Save all items from this turn
