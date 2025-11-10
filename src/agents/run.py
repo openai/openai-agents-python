@@ -1860,7 +1860,16 @@ class AgentRunner:
         input_list = ItemHelpers.input_to_new_input_list(original_input)
 
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in new_items]
+        new_items_as_input = []
+        for item in new_items:
+            input_item = item.to_input_item()
+            if isinstance(input_item, dict) and input_item.get("type") == "reasoning":
+                # Check if store is explicitly set to False (ZDR mode)
+                store_setting = item.agent.model_settings.store
+                if not store_setting and "id" in input_item:
+                    # Remove the instance-specific IDs to enable load balancing
+                    input_item = {k: v for k, v in input_item.items() if k != "id"}
+            new_items_as_input.append(input_item)
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
