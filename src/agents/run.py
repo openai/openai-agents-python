@@ -1287,6 +1287,18 @@ class AgentRunner:
         )
 
         # 1. Stream the output events
+        # Build kwargs for model call
+        model_kwargs: dict[str, Any] = {
+            "previous_response_id": previous_response_id,
+            "conversation_id": conversation_id,
+            "prompt": prompt_config,
+        }
+
+        # Only pass enable_structured_output_with_tools when enabled
+        # to maintain backward compatibility with third-party Model implementations
+        if agent.enable_structured_output_with_tools:
+            model_kwargs["enable_structured_output_with_tools"] = True
+
         async for event in model.stream_response(
             filtered.instructions,
             filtered.input,
@@ -1297,10 +1309,7 @@ class AgentRunner:
             get_model_tracing_impl(
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-            enable_structured_output_with_tools=agent.enable_structured_output_with_tools,
+            **model_kwargs,
         ):
             # Emit the raw event ASAP
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
@@ -1723,6 +1732,18 @@ class AgentRunner:
             server_conversation_tracker.conversation_id if server_conversation_tracker else None
         )
 
+        # Build kwargs for model call
+        model_kwargs: dict[str, Any] = {
+            "previous_response_id": previous_response_id,
+            "conversation_id": conversation_id,
+            "prompt": prompt_config,
+        }
+
+        # Only pass enable_structured_output_with_tools when enabled
+        # to maintain backward compatibility with third-party Model implementations
+        if agent.enable_structured_output_with_tools:
+            model_kwargs["enable_structured_output_with_tools"] = True
+
         new_response = await model.get_response(
             system_instructions=filtered.instructions,
             input=filtered.input,
@@ -1733,10 +1754,7 @@ class AgentRunner:
             tracing=get_model_tracing_impl(
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-            enable_structured_output_with_tools=agent.enable_structured_output_with_tools,
+            **model_kwargs,
         )
 
         context_wrapper.usage.add(new_response.usage)
