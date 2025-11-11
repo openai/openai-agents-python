@@ -105,3 +105,14 @@ def test_should_inject_json_prompt_multiple_tools():
     ]
     result = should_inject_json_prompt(schema, tools, enable_structured_output_with_tools=True)
     assert result is True
+
+
+def test_should_inject_json_prompt_with_handoffs_as_tools():
+    """Test that handoffs (passed as tools) trigger injection when enabled."""
+    schema = AgentOutputSchema(SimpleModel)
+    # Simulate handoffs being passed in the tools list
+    handoffs_as_tools = [{"type": "function", "name": "handoff_to_agent"}]
+    result = should_inject_json_prompt(
+        schema, handoffs_as_tools, enable_structured_output_with_tools=True
+    )
+    assert result is True

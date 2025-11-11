@@ -292,8 +292,12 @@ class LitellmModel(Model):
 
         # Check if we need to inject JSON output prompt for models that don't support
         # tools + structured output simultaneously (like Gemini)
+        # Note: handoffs are converted to function tools, so we need to include them in the check
+        tools_and_handoffs = list(tools) if tools else []
+        if handoffs:
+            tools_and_handoffs.extend(handoffs)
         inject_json_prompt = should_inject_json_prompt(
-            output_schema, tools, self.enable_structured_output_with_tools
+            output_schema, tools_and_handoffs, self.enable_structured_output_with_tools
         )
         if inject_json_prompt and output_schema:
             json_prompt = get_json_output_prompt(output_schema)
