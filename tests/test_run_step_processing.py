@@ -25,13 +25,13 @@ from agents import (
     ReasoningItem,
     RunConfig,
     RunContextWrapper,
+    RunHooks,
     RunItem,
     ToolCallItem,
     Usage,
     handoff,
 )
 from agents._run_impl import RunImpl, ToolRunHandoff
-from agents import RunHooks
 from agents.run import AgentRunner
 
 from .test_responses import (

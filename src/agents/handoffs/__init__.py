@@ -81,20 +81,20 @@ class Handoff(Generic[TContext, TAgent]):
 
 @overload
 def handoff(
-    agent: "Agent[TContext]",
+    agent: Agent[TContext],
     *,
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], "Agent[Any]"], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext, "Agent[TContext]"]: ...
+    | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 @overload
 def handoff(
-    agent: "Agent[TContext]",
+    agent: Agent[TContext],
     *,
     on_handoff: OnHandoffWithInput[THandoffInput],
     input_type: type[THandoffInput],
@@ -103,13 +103,13 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], "Agent[Any]"], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext, "Agent[TContext]"]: ...
+    | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 @overload
 def handoff(
-    agent: "Agent[TContext]",
+    agent: Agent[TContext],
     *,
     on_handoff: OnHandoffWithoutInput,
     tool_description_override: str | None = None,
@@ -117,12 +117,12 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], "Agent[Any]"], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext, "Agent[TContext]"]: ...
+    | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]: ...
 
 
 def handoff(
-    agent: "Agent[TContext]",
+    agent: Agent[TContext],
     tool_name_override: str | None = None,
     tool_description_override: str | None = None,
     on_handoff: OnHandoffWithInput[THandoffInput] | OnHandoffWithoutInput | None = None,
@@ -130,8 +130,8 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool
-    | Callable[[RunContextWrapper[Any], "Agent[TContext]"], MaybeAwaitable[bool]] = True,
-) -> Handoff[TContext, "Agent[TContext]"]:
+    | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
+) -> Handoff[TContext, Agent[TContext]]:
     assert (on_handoff and input_type) or not (on_handoff and input_type), (
         "You must provide either both on_handoff and input_type, or neither"
     )
@@ -154,7 +154,7 @@ def handoff(
 
     async def _invoke_handoff(
         ctx: RunContextWrapper[Any], input_json: str | None = None
-    ) -> "Agent[TContext]":
+    ) -> Agent[TContext]:
         if input_type is not None and type_adapter is not None:
             if input_json is None:
                 _error_tracing.attach_error_to_current_span(
@@ -188,7 +188,7 @@ def handoff(
     tool_description = tool_description_override or Handoff.default_tool_description(agent)
     input_json_schema = ensure_strict_json_schema(input_json_schema)
 
-    async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: "AgentBase[Any]") -> bool:
+    async def _is_enabled(ctx: RunContextWrapper[Any], agent_base: AgentBase[Any]) -> bool:
         from ..agent import Agent
 
         assert callable(is_enabled), "is_enabled must be callable here"
