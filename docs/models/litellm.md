@@ -111,13 +111,15 @@ def analyze_data(query: str) -> dict:
 
 agent = Agent(
     name="Analyst",
-    model=LitellmModel("gemini/gemini-1.5-flash"),
+    model=LitellmModel(
+        "gemini/gemini-2.5-flash",
+        enable_structured_output_with_tools=True,  # Required for Gemini
+    ),
     tools=[analyze_data],
     output_type=Report,
-    enable_structured_output_with_tools=True,  # Required for Gemini
 )
 ```
 
-The `enable_structured_output_with_tools` parameter enables a workaround that injects JSON formatting instructions into the system prompt instead of using the native API. This allows models like Gemini to return structured outputs even when using tools.
+The `enable_structured_output_with_tools` parameter on `LitellmModel` enables a workaround that injects JSON formatting instructions into the system prompt instead of using the native API. This allows models like Gemini to return structured outputs even when using tools.
 
 See the [prompt injection documentation](structured_output_with_tools.md) for complete details.

@@ -59,7 +59,6 @@ class StreamingFakeModel(Model):
         previous_response_id: Optional[str],
         conversation_id: Optional[str],
         prompt: Optional[Any],
-        enable_structured_output_with_tools: bool = False,
     ):
         raise NotImplementedError("Use stream_response instead")
 
@@ -76,7 +75,6 @@ class StreamingFakeModel(Model):
         previous_response_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         prompt: Optional[Any] = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """Stream events that simulate real OpenAI streaming behavior for tool calls."""
         self.last_turn_args = {

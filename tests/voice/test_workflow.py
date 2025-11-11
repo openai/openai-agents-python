@@ -57,7 +57,6 @@ class FakeStreamingModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
-        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         raise NotImplementedError("Not implemented")
 
@@ -74,7 +73,6 @@ class FakeStreamingModel(Model):
         previous_response_id: str | None,
         conversation_id: str | None,
         prompt: Any | None,
-        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         output = self.get_next_output()
         for item in output:

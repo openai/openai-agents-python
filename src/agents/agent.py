@@ -231,16 +231,6 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
-    enable_structured_output_with_tools: bool = False
-    """Enable structured outputs when using tools on models that don't natively support both
-    simultaneously (e.g., Gemini). When enabled, injects JSON formatting instructions into the
-    system prompt as a workaround instead of using the native API. Defaults to False (use native
-    API support when available).
-
-    Set to True when using models that don't support both features natively (e.g., Gemini via
-    LiteLLM).
-    """
-
     def __post_init__(self):
         from typing import get_origin
 
@@ -372,12 +362,6 @@ class Agent(AgentBase, Generic[TContext]):
             raise TypeError(
                 f"Agent reset_tool_choice must be a boolean, "
                 f"got {type(self.reset_tool_choice).__name__}"
-            )
-
-        if not isinstance(self.enable_structured_output_with_tools, bool):
-            raise TypeError(
-                f"Agent enable_structured_output_with_tools must be a boolean, "
-                f"got {type(self.enable_structured_output_with_tools).__name__}"
             )
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:

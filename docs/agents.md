@@ -81,14 +81,16 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 agent = Agent(
     name="Weather assistant",
-    model=LitellmModel("gemini/gemini-1.5-flash"),
+    model=LitellmModel(
+        "gemini/gemini-2.5-flash",
+        enable_structured_output_with_tools=True,  # Required for Gemini
+    ),
     tools=[get_weather],
     output_type=WeatherReport,
-    enable_structured_output_with_tools=True,  # Required for Gemini
 )
 ```
 
-The `enable_structured_output_with_tools` parameter injects JSON formatting instructions into the system prompt as a workaround. This is only needed for models accessed via [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] that lack native support. OpenAI models ignore this parameter.
+The `enable_structured_output_with_tools` parameter on [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] injects JSON formatting instructions into the system prompt as a workaround. This is only needed for models that lack native support for using tools and structured outputs simultaneously (like Gemini).
 
 See the [prompt injection documentation](models/structured_output_with_tools.md) for more details.
 

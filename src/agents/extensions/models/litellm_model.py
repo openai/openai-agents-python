@@ -74,10 +74,12 @@ class LitellmModel(Model):
         model: str,
         base_url: str | None = None,
         api_key: str | None = None,
+        enable_structured_output_with_tools: bool = False,
     ):
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
+        self.enable_structured_output_with_tools = enable_structured_output_with_tools
 
     async def get_response(
         self,
@@ -89,9 +91,8 @@ class LitellmModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        conversation_id: str | None = None,
         prompt: Any | None = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> ModelResponse:
         with generation_span(
             model=str(self.model),
@@ -110,7 +111,6 @@ class LitellmModel(Model):
                 tracing,
                 stream=False,
                 prompt=prompt,
-                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             message: litellm.types.utils.Message | None = None
@@ -195,9 +195,8 @@ class LitellmModel(Model):
         handoffs: list[Handoff],
         tracing: ModelTracing,
         previous_response_id: str | None = None,  # unused
-        conversation_id: str | None = None,  # unused
+        conversation_id: str | None = None,
         prompt: Any | None = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         with generation_span(
             model=str(self.model),
@@ -216,7 +215,6 @@ class LitellmModel(Model):
                 tracing,
                 stream=True,
                 prompt=prompt,
-                enable_structured_output_with_tools=enable_structured_output_with_tools,
             )
 
             final_response: Response | None = None
@@ -248,7 +246,6 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: Literal[True],
         prompt: Any | None = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> tuple[Response, AsyncStream[ChatCompletionChunk]]: ...
 
     @overload
@@ -264,7 +261,6 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: Literal[False],
         prompt: Any | None = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> litellm.types.utils.ModelResponse: ...
 
     async def _fetch_response(
@@ -279,7 +275,6 @@ class LitellmModel(Model):
         tracing: ModelTracing,
         stream: bool = False,
         prompt: Any | None = None,
-        enable_structured_output_with_tools: bool = False,
     ) -> litellm.types.utils.ModelResponse | tuple[Response, AsyncStream[ChatCompletionChunk]]:
         # Preserve reasoning messages for tool calls when reasoning is on
         # This is needed for models like Claude 4 Sonnet/Opus which support interleaved thinking
@@ -298,7 +293,7 @@ class LitellmModel(Model):
         # Check if we need to inject JSON output prompt for models that don't support
         # tools + structured output simultaneously (like Gemini)
         inject_json_prompt = should_inject_json_prompt(
-            output_schema, tools, enable_structured_output_with_tools
+            output_schema, tools, self.enable_structured_output_with_tools
         )
         if inject_json_prompt and output_schema:
             json_prompt = get_json_output_prompt(output_schema)

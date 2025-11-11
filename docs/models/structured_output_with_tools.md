@@ -25,7 +25,7 @@ def get_weather(city: str) -> dict:
 
 # This causes an error with Gemini
 agent = Agent(
-    model=LitellmModel("gemini/gemini-1.5-flash"),
+    model=LitellmModel("gemini/gemini-2.5-flash"),
     tools=[get_weather],
     output_type=WeatherReport,  # Error: can't use both!
 )
@@ -40,14 +40,16 @@ GeminiException BadRequestError - Function calling with a response mime type
 
 ## The Solution
 
-Enable prompt injection by setting `enable_structured_output_with_tools=True` on your agent:
+Enable prompt injection by setting `enable_structured_output_with_tools=True` on the `LitellmModel`:
 
 ```python
 agent = Agent(
-    model=LitellmModel("gemini/gemini-1.5-flash"),
+    model=LitellmModel(
+        "gemini/gemini-2.5-flash",
+        enable_structured_output_with_tools=True,  # ← Enables the workaround
+    ),
     tools=[get_weather],
     output_type=WeatherReport,
-    enable_structured_output_with_tools=True,  # ← Enables the workaround
 )
 ```
 
@@ -90,10 +92,12 @@ async def main():
     agent = Agent(
         name="WeatherBot",
         instructions="Use the get_weather tool, then provide a structured report.",
-        model=LitellmModel("gemini/gemini-1.5-flash"),
+        model=LitellmModel(
+            "gemini/gemini-2.5-flash",
+            enable_structured_output_with_tools=True,  # Required for Gemini
+        ),
         tools=[get_weather],
         output_type=WeatherReport,
-        enable_structured_output_with_tools=True,  # Required for Gemini
     )
 
     result = await Runner.run(agent, "What's the weather in Tokyo?")

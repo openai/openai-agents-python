@@ -65,24 +65,31 @@ async def main():
     print("\n🔍 The final system prompt sent to Gemini will be shown below")
     print("=" * 80)
 
-    # Create agent with prompt injection enabled
+    # Create agent with prompt injection enabled on the model
     agent = Agent(
         name="weather_assistant",
         instructions=(
             "You are a helpful weather assistant. Use the get_weather tool to "
             "fetch weather information, then provide a structured report."
         ),
-        model=LitellmModel("gemini/gemini-2.5-flash"),
+        model=LitellmModel(
+            "gemini/gemini-2.5-flash",
+            enable_structured_output_with_tools=True,  # CRITICAL: Enable for Gemini!
+        ),
         tools=[get_weather],
         output_type=WeatherReport,
-        enable_structured_output_with_tools=True,  # CRITICAL: Enable for Gemini!
     )
 
     print("\nAgent Configuration:")
     print("  Model: gemini/gemini-2.5-flash")
     print(f"  Tools: {[tool.name for tool in agent.tools]}")
     print("  Output Type: WeatherReport")
-    print(f"  enable_structured_output_with_tools: {agent.enable_structured_output_with_tools}")
+    # Type check: ensure agent.model is LitellmModel
+    if isinstance(agent.model, LitellmModel):
+        print(
+            f"  enable_structured_output_with_tools: "
+            f"{agent.model.enable_structured_output_with_tools}"
+        )
 
     print(f"\n{'=' * 80}")
     print("Running agent with input: 'What's the weather in Tokyo?'")
