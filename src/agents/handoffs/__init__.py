@@ -129,9 +129,9 @@ def handoff(
     is_enabled: bool
     | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
 ) -> Handoff[TContext, Agent[TContext]]:
-    assert (on_handoff and input_type) or not (
-        on_handoff and input_type
-    ), "You must provide either both on_handoff and input_type, or neither"
+    assert (on_handoff and input_type) or not (on_handoff and input_type), (
+        "You must provide either both on_handoff and input_type, or neither"
+    )
     type_adapter: TypeAdapter[Any] | None
     if input_type is not None:
         assert callable(on_handoff), "on_handoff must be callable"
