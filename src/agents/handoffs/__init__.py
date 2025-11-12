@@ -193,7 +193,7 @@ def handoff(
         result = is_enabled(ctx, agent_base)
         if inspect.isawaitable(result):
             return await result
-        return bool(result)
+        return result
 
     return Handoff(
         tool_name=tool_name,
