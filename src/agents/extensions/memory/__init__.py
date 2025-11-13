@@ -8,7 +8,18 @@ used as a drop-in replacement for :class:`agents.memory.session.SQLiteSession`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .advanced_sqlite_session import AdvancedSQLiteSession
+    from .dapr_session import (
+        DAPR_CONSISTENCY_EVENTUAL,
+        DAPR_CONSISTENCY_STRONG,
+        DaprSession,
+    )
+    from .encrypt_session import EncryptedSession
+    from .redis_session import RedisSession
+    from .sqlalchemy_session import SQLAlchemySession
 
 __all__: list[str] = [
     "AdvancedSQLiteSession",

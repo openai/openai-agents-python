@@ -132,7 +132,7 @@ async def main():
     # Show current conversation
     print("Current conversation:")
     current_items = await session.get_items()
-    for i, item in enumerate(current_items, 1):
+    for i, item in enumerate(current_items, 1):  # type: ignore[assignment]
         role = str(item.get("role", item.get("type", "unknown")))
         if item.get("type") == "function_call":
             content = f"{item.get('name', 'unknown')}({item.get('arguments', '{}')})"
@@ -151,8 +151,8 @@ async def main():
     # Show available turns for branching
     print("\nAvailable turns for branching:")
     turns = await session.get_conversation_turns()
-    for turn in turns:
-        print(f"  Turn {turn['turn']}: {turn['content']}")
+    for turn in turns:  # type: ignore[assignment]
+        print(f"  Turn {turn['turn']}: {turn['content']}")  # type: ignore[index]
 
     # Create a branch from turn 2
     print("\nCreating new branch from turn 2...")
@@ -163,7 +163,7 @@ async def main():
     branch_items = await session.get_items()
     print(f"Items copied to new branch: {len(branch_items)}")
     print("New branch contains:")
-    for i, item in enumerate(branch_items, 1):
+    for i, item in enumerate(branch_items, 1):  # type: ignore[assignment]
         role = str(item.get("role", item.get("type", "unknown")))
         if item.get("type") == "function_call":
             content = f"{item.get('name', 'unknown')}({item.get('arguments', '{}')})"
@@ -198,7 +198,7 @@ async def main():
     print("\n=== New Conversation Branch ===")
     new_conversation = await session.get_items()
     print("New conversation with branch:")
-    for i, item in enumerate(new_conversation, 1):
+    for i, item in enumerate(new_conversation, 1):  # type: ignore[assignment]
         role = str(item.get("role", item.get("type", "unknown")))
         if item.get("type") == "function_call":
             content = f"{item.get('name', 'unknown')}({item.get('arguments', '{}')})"
@@ -224,8 +224,8 @@ async def main():
     # Show conversation turns in current branch
     print("\nConversation turns in current branch:")
     current_turns = await session.get_conversation_turns()
-    for turn in current_turns:
-        print(f"  Turn {turn['turn']}: {turn['content']}")
+    for turn in current_turns:  # type: ignore[assignment]
+        print(f"  Turn {turn['turn']}: {turn['content']}")  # type: ignore[index]
 
     print("\n=== Branch Switching Demo ===")
     print("We can switch back to the main branch...")
