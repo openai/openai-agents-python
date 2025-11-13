@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
 
 import pydantic
 from openai.types.responses import (
@@ -141,12 +141,13 @@ ToolCallItemTypes: TypeAlias = Union[
     ResponseCodeInterpreterToolCall,
     ImageGenerationCall,
     LocalShellCall,
+    dict[str, Any],
 ]
 """A type that represents a tool call item."""
 
 
 @dataclass
-class ToolCallItem(RunItemBase[ToolCallItemTypes]):
+class ToolCallItem(RunItemBase[Any]):
     """Represents a tool call e.g. a function call or computer action call."""
 
     raw_item: ToolCallItemTypes
@@ -155,13 +156,19 @@ class ToolCallItem(RunItemBase[ToolCallItemTypes]):
     type: Literal["tool_call_item"] = "tool_call_item"
 
 
+ToolCallOutputTypes: TypeAlias = Union[
+    FunctionCallOutput,
+    ComputerCallOutput,
+    LocalShellCallOutput,
+    dict[str, Any],
+]
+
+
 @dataclass
-class ToolCallOutputItem(
-    RunItemBase[Union[FunctionCallOutput, ComputerCallOutput, LocalShellCallOutput]]
-):
+class ToolCallOutputItem(RunItemBase[Any]):
     """Represents the output of a tool call."""
 
-    raw_item: FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
+    raw_item: ToolCallOutputTypes
     """The raw item from the model."""
 
     output: Any
@@ -170,6 +177,25 @@ class ToolCallOutputItem(
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Converts the tool output into an input item for the next model turn.
+
+        Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
+        book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
+        payload we send back to the model while keeping the original raw item intact.
+        """
+
+        if isinstance(self.raw_item, dict):
+            payload = dict(self.raw_item)
+            payload_type = payload.get("type")
+            if payload_type == "shell_call_output":
+                payload.pop("status", None)
+                payload.pop("shell_output", None)
+                payload.pop("provider_data", None)
+            return cast(TResponseInputItem, payload)
+
+        return super().to_input_item()
 
 
 @dataclass

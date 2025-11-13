@@ -344,3 +344,18 @@ async def test_is_enabled_bool_and_callable():
     assert len(tools_with_ctx) == 2
     assert tools_with_ctx[0].name == "another_tool"
     assert tools_with_ctx[1].name == "third_tool"
+
+
+@pytest.mark.asyncio
+async def test_async_failure_error_function_is_awaited() -> None:
+    async def failure_handler(ctx: RunContextWrapper[Any], exc: Exception) -> str:
+        return f"handled:{exc}"
+
+    @function_tool(failure_error_function=lambda ctx, exc: failure_handler(ctx, exc))
+    def boom() -> None:
+        """Always raises to trigger the failure handler."""
+        raise RuntimeError("kapow")
+
+    ctx = ToolContext(None, tool_name=boom.name, tool_call_id="boom", tool_arguments="{}")
+    result = await boom.on_invoke_tool(ctx, "{}")
+    assert result.startswith("handled:")
