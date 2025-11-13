@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("sqlalchemy")  # Skip tests if SQLAlchemy is not installed
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
-from agents import Agent, Runner, TResponseInputItem, function_tool
+from agents import Agent, RunConfig, Runner, TResponseInputItem, function_tool
 from agents.extensions.memory import AdvancedSQLiteSession
 from agents.result import RunResult
 from agents.run_context import RunContextWrapper
@@ -74,6 +74,7 @@ def create_mock_run_result(
         tool_output_guardrail_results=[],
         context_wrapper=context_wrapper,
         _last_agent=agent,
+        run_config=RunConfig(),
     )
 
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from textwrap import dedent
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem, TResponseInputItem
+    from .result import RunResult
+    from .run import RunConfig
     from .run_context import RunContextWrapper
     from .tool_guardrails import (
         ToolGuardrailFunctionOutput,
@@ -28,6 +31,7 @@ class RunErrorDetails:
     context_wrapper: RunContextWrapper[Any]
     input_guardrail_results: list[InputGuardrailResult]
     output_guardrail_results: list[OutputGuardrailResult]
+    run_config: RunConfig
 
     def __str__(self) -> str:
         return pretty_print_run_error_details(self)
@@ -48,9 +52,110 @@ class MaxTurnsExceeded(AgentsException):
 
     message: str
 
+    _DEFAULT_RESUME_PROMPT = """
+    You reached the maximum number of turns.
+    Return a final answer to the query using ONLY the information already gathered \
+    in the conversation so far.
+    """
+
     def __init__(self, message: str):
         self.message = message
         super().__init__(message)
+
+    async def resume(self, prompt: str | None = _DEFAULT_RESUME_PROMPT) -> RunResult:
+        """Resume the failed run asynchronously with a final, tool-free turn.
+
+        Note:
+            This helper does not automatically reuse the original session object.
+            If you need the resumed turn to be persisted in the session,
+            run the follow-up turn manually with that information.
+
+        Args:
+            prompt: Optional user instruction to append before rerunning the final turn.
+                Pass ``None`` to skip injecting an extra message; defaults to a reminder
+                to produce a final answer from existing context.
+        """
+        run_data = self._require_run_data()
+        inputs, run_config = self._prepare_resume_arguments(run_data, prompt)
+
+        from .run import Runner
+
+        return await Runner.run(
+            starting_agent=run_data.last_agent,
+            input=inputs,
+            context=run_data.context_wrapper.context,
+            max_turns=1,
+            run_config=run_config,
+        )
+
+    def resume_sync(self, prompt: str | None = _DEFAULT_RESUME_PROMPT) -> RunResult:
+        """Resume the failed run synchronously with a final, tool-free turn.
+
+        Note:
+            This helper does not automatically reuse the original session object.
+            If you need the resumed turn to be persisted in the session,
+            run the follow-up turn manually with that information.
+
+        Args:
+            prompt: Optional user instruction to append before rerunning the final turn.
+                Pass ``None`` to skip injecting an extra message; defaults to a reminder
+                to produce a final answer from existing context.
+        """
+        run_data = self._require_run_data()
+        inputs, run_config = self._prepare_resume_arguments(run_data, prompt)
+
+        from .run import Runner
+
+        return Runner.run_sync(
+            starting_agent=run_data.last_agent,
+            input=inputs,
+            context=run_data.context_wrapper.context,
+            max_turns=1,
+            run_config=run_config,
+        )
+
+    def _prepare_resume_arguments(
+        self,
+        run_data: RunErrorDetails,
+        prompt: str | None = None,
+    ) -> tuple[list[TResponseInputItem], RunConfig]:
+        from .items import ItemHelpers
+        from .model_settings import ModelSettings
+
+        history: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(run_data.input)
+        for item in run_data.new_items:
+            history.append(item.to_input_item())
+
+        normalized_prompt = self._normalize_resume_prompt(prompt)
+        if normalized_prompt is not None:
+            history.append({"content": normalized_prompt, "role": "user"})
+
+        run_config = replace(run_data.run_config)
+        if run_config.model_settings is None:
+            run_config.model_settings = ModelSettings(tool_choice="none")
+        else:
+            run_config.model_settings = run_config.model_settings.resolve(
+                ModelSettings(tool_choice="none")
+            )
+
+        return (
+            history,
+            run_config,
+        )
+
+    def _normalize_resume_prompt(self, prompt: str | None) -> str | None:
+        if prompt is None:
+            return None
+        normalized = dedent(prompt).strip()
+        return normalized or None
+
+    def _require_run_data(self) -> RunErrorDetails:
+        if self.run_data is None:
+            raise RuntimeError(
+                "Run data is not available; resume() can only be called on\
+                exceptions raised by Runner."
+            )
+        return self.run_data
 
 
 class ModelBehaviorError(AgentsException):

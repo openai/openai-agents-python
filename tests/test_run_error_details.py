@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from agents import Agent, MaxTurnsExceeded, RunErrorDetails, Runner
+from agents import Agent, MaxTurnsExceeded, RunConfig, RunErrorDetails, Runner
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
@@ -25,6 +25,7 @@ async def test_run_error_includes_data():
     assert data.last_agent == agent
     assert len(data.raw_responses) == 1
     assert len(data.new_items) > 0
+    assert isinstance(data.run_config, RunConfig)
 
 
 @pytest.mark.asyncio
@@ -46,3 +47,4 @@ async def test_streamed_run_error_includes_data():
     assert data.last_agent == agent
     assert len(data.raw_responses) == 1
     assert len(data.new_items) > 0
+    assert isinstance(data.run_config, RunConfig)
