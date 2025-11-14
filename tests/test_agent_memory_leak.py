@@ -23,9 +23,10 @@ def _make_message(text: str) -> ResponseOutputMessage:
 @pytest.mark.asyncio
 async def test_agent_is_released_after_run() -> None:
     fake_model = FakeModel(initial_output=[_make_message("Paris")])
-    agent = Agent(name="leaker", instructions="Answer questions.", model=fake_model)
+    agent = Agent(name="leak-test-agent", instructions="Answer questions.", model=fake_model)
     agent_ref = weakref.ref(agent)
 
+    # Running the agent should not leave behind strong references once the result goes out of scope.
     await Runner.run(agent, "What is the capital of France?")
 
     del agent
