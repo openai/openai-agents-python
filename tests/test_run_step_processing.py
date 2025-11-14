@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 from openai.types.responses import (
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
 )
 from openai.types.responses.response_computer_tool_call import ActionClick
@@ -16,14 +19,19 @@ from agents import (
     Computer,
     ComputerTool,
     Handoff,
+    HandoffInputData,
     ModelBehaviorError,
     ModelResponse,
     ReasoningItem,
+    RunConfig,
     RunContextWrapper,
+    RunHooks,
+    RunItem,
     ToolCallItem,
     Usage,
+    handoff,
 )
-from agents._run_impl import RunImpl
+from agents._run_impl import RunImpl, ToolRunHandoff
 from agents.run import AgentRunner
 
 from .test_responses import (
@@ -31,6 +39,7 @@ from .test_responses import (
     get_function_tool,
     get_function_tool_call,
     get_handoff_tool_call,
+    get_text_input_item,
     get_text_message,
 )
 
@@ -200,6 +209,100 @@ async def test_handoffs_parsed_correctly():
         RunContextWrapper(None), handoff.tool_call.arguments
     )
     assert handoff_agent == agent_1
+
+
+@pytest.mark.asyncio
+async def test_handoff_can_disable_run_level_history_nesting(monkeypatch: pytest.MonkeyPatch):
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    override_handoff = handoff(target_agent, nest_handoff_history=False)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
+    run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
+    run_config = RunConfig(nest_handoff_history=True)
+    context_wrapper = RunContextWrapper(context=None)
+    hooks = RunHooks()
+    original_input = [get_text_input_item("hello")]
+    pre_step_items: list[RunItem] = []
+    new_step_items: list[RunItem] = []
+    new_response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    calls: list[HandoffInputData] = []
+
+    def fake_nest(
+        handoff_input_data: HandoffInputData,
+        *,
+        history_mapper: Any,
+    ) -> HandoffInputData:
+        calls.append(handoff_input_data)
+        return handoff_input_data
+
+    monkeypatch.setattr("agents._run_impl.nest_handoff_history", fake_nest)
+
+    result = await RunImpl.execute_handoffs(
+        agent=source_agent,
+        original_input=list(original_input),
+        pre_step_items=pre_step_items,
+        new_step_items=new_step_items,
+        new_response=new_response,
+        run_handoffs=run_handoffs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
+    )
+
+    assert calls == []
+    assert result.original_input == original_input
+
+
+@pytest.mark.asyncio
+async def test_handoff_can_enable_history_nesting(monkeypatch: pytest.MonkeyPatch):
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    override_handoff = handoff(target_agent, nest_handoff_history=True)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
+    run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
+    run_config = RunConfig(nest_handoff_history=False)
+    context_wrapper = RunContextWrapper(context=None)
+    hooks = RunHooks()
+    original_input = [get_text_input_item("hello")]
+    pre_step_items: list[RunItem] = []
+    new_step_items: list[RunItem] = []
+    new_response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    def fake_nest(
+        handoff_input_data: HandoffInputData,
+        *,
+        history_mapper: Any,
+    ) -> HandoffInputData:
+        return handoff_input_data.clone(
+            input_history=(
+                {
+                    "role": "assistant",
+                    "content": "nested",
+                },
+            )
+        )
+
+    monkeypatch.setattr("agents._run_impl.nest_handoff_history", fake_nest)
+
+    result = await RunImpl.execute_handoffs(
+        agent=source_agent,
+        original_input=list(original_input),
+        pre_step_items=pre_step_items,
+        new_step_items=new_step_items,
+        new_response=new_response,
+        run_handoffs=run_handoffs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
+    )
+
+    assert result.original_input == [
+        {
+            "role": "assistant",
+            "content": "nested",
+        }
+    ]
 
 
 @pytest.mark.asyncio
