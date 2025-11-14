@@ -4,6 +4,7 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from agents import (
@@ -14,6 +15,7 @@ from agents import (
     RunContextWrapper,
     RunHooks,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -22,14 +24,18 @@ from agents import (
 from agents._run_impl import (
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepInterruption,
     NextStepRunAgain,
+    ProcessedResponse,
     RunImpl,
     SingleStepResult,
+    ToolRunFunction,
 )
 from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
 
+from .fake_model import FakeModel
 from .test_responses import (
     get_final_output_message,
     get_function_tool,
@@ -348,3 +354,56 @@ async def get_execute_result(
         context_wrapper=context_wrapper or RunContextWrapper(None),
         run_config=run_config or RunConfig(),
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_handles_tool_approval_item():
+    """Test that execute_tools_and_side_effects handles ToolApprovalItem."""
+    model = FakeModel()
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    # Create a tool that requires approval
+    async def needs_approval(_ctx, _params, _call_id) -> bool:
+        return True
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=needs_approval)
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Create a tool call
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    # Create a ProcessedResponse with the function
+    tool_run = ToolRunFunction(function_tool=tool, tool_call=tool_call)
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[tool_run],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        mcp_approval_requests=[],
+        tools_used=[],
+        interruptions=[],
+    )
+
+    # Execute tools - should handle ToolApprovalItem
+    result = await RunImpl.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=None,  # type: ignore[arg-type]
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+    )
+
+    # Should have interruptions since tool needs approval and hasn't been approved
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert len(result.next_step.interruptions) == 1
+    assert isinstance(result.next_step.interruptions[0], ToolApprovalItem)

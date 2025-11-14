@@ -862,6 +862,8 @@ async def _deserialize_processed_response(
         functions=functions,
         computer_actions=computer_actions,
         local_shell_calls=[],  # Not serialized in JSON schema
+        shell_calls=[],  # Not serialized in JSON schema
+        apply_patch_calls=[],  # Not serialized in JSON schema
         tools_used=processed_response_data.get("toolsUsed", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],  # Not serialized in ProcessedResponse

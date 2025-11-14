@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from typing_extensions import TypedDict
 
 from agents import (
@@ -29,7 +30,12 @@ from agents import (
     handoff,
 )
 from agents.agent import ToolsToFinalOutputResult
-from agents.tool import FunctionToolResult, function_tool
+from agents.computer import Computer
+from agents.items import RunItem, ToolApprovalItem, ToolCallOutputItem
+from agents.lifecycle import RunHooks
+from agents.run import AgentRunner
+from agents.run_state import RunState
+from agents.tool import ComputerTool, FunctionToolResult, function_tool
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -697,6 +703,58 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_no_tripwire_continues_execution():
+    """Test input guardrail that doesn't trigger tripwire continues execution."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,  # Doesn't trigger tripwire
+        )
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("response")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    # Should complete successfully without raising exception
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output == "response"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_no_tripwire_continues_execution():
+    """Test output guardrail that doesn't trigger tripwire continues execution."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,  # Doesn't trigger tripwire
+        )
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("response")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    # Should complete successfully without raising exception
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output == "response"
 
 
 @function_tool
@@ -1519,3 +1577,259 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
             assert (await session.get_items()) == expected_items
 
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_non_function_tool():
+    """Test _execute_approved_tools handles non-FunctionTool."""
+    model = FakeModel()
+
+    # Create a computer tool (not a FunctionTool)
+    class MockComputer(Computer):
+        @property
+        def environment(self) -> str:  # type: ignore[override]
+            return "mac"
+
+        @property
+        def dimensions(self) -> tuple[int, int]:
+            return (1920, 1080)
+
+        def screenshot(self) -> str:
+            return "screenshot"
+
+        def click(self, x: int, y: int, button: str) -> None:
+            pass
+
+        def double_click(self, x: int, y: int) -> None:
+            pass
+
+        def drag(self, path: list[tuple[int, int]]) -> None:
+            pass
+
+        def keypress(self, keys: list[str]) -> None:
+            pass
+
+        def move(self, x: int, y: int) -> None:
+            pass
+
+        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+            pass
+
+        def type(self, text: str) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    computer = MockComputer()
+    computer_tool = ComputerTool(computer=computer)
+
+    agent = Agent(name="TestAgent", model=model, tools=[computer_tool])
+
+    # Create an approved tool call for the computer tool
+    # ComputerTool has name "computer_use_preview"
+    tool_call = get_function_tool_call("computer_use_preview", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add error message about tool not being a function tool
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "not a function tool" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool():
+    """Test _execute_approved_tools handles rejected tools."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Create a rejected tool call
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Reject via RunState
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.reject(approval_item)
+
+    generated_items: list[Any] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add rejection message
+    assert len(generated_items) == 1
+    assert "not approved" in generated_items[0].output.lower()
+    assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_unclear_status():
+    """Test _execute_approved_tools handles unclear approval status."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Create a tool call with unclear status (neither approved nor rejected)
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Don't approve or reject - status will be None
+
+    generated_items: list[Any] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add unclear status message
+    assert len(generated_items) == 1
+    assert "unclear" in generated_items[0].output.lower()
+    assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_missing_tool():
+    """Test _execute_approved_tools handles missing tools."""
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model)
+    # Agent has no tools
+
+    # Create an approved tool call for a tool that doesn't exist
+    tool_call = get_function_tool_call("nonexistent_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Approve via RunState
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add error message about tool not found
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "not found" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_instance_method():
+    """Test the instance method wrapper for _execute_approved_tools."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Create an AgentRunner instance and use the instance method
+    runner = AgentRunner()
+    await runner._execute_approved_tools(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Tool should have been called
+    assert tool_called is True
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "tool_result"

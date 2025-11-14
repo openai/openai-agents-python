@@ -5,6 +5,7 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from typing_extensions import TypedDict
 
 from agents import (
@@ -22,9 +23,10 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents.items import RunItem
+from agents._run_impl import QueueCompleteSentinel, RunImpl
+from agents.items import RunItem, ToolApprovalItem
 from agents.run import RunConfig
-from agents.stream_events import AgentUpdatedStreamEvent
+from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -789,3 +791,98 @@ async def test_dynamic_tool_addition_run_streamed() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_step_items_to_queue_handles_tool_approval_item():
+    """Test that stream_step_items_to_queue handles ToolApprovalItem."""
+    agent = Agent(name="test")
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = asyncio.Queue()
+
+    # ToolApprovalItem should not be streamed
+    RunImpl.stream_step_items_to_queue([approval_item], queue)
+
+    # Queue should be empty since ToolApprovalItem is not streamed
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_resume_with_approved_tools():
+    """Test resuming streaming run from RunState with approved tools executes them."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    # Create a tool that requires approval
+    async def needs_approval(_ctx, _params, _call_id) -> bool:
+        return True
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=needs_approval)
+    agent = Agent(name="test", model=model, tools=[tool])
+
+    # First run - tool call that requires approval
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("test_tool", json.dumps({}))],
+            [get_text_message("done")],
+        ]
+    )
+
+    result1 = Runner.run_streamed(agent, input="Use test_tool")
+    async for _ in result1.stream_events():
+        pass
+
+    # Should have interruption
+    assert len(result1.interruptions) > 0
+    approval_item = result1.interruptions[0]
+
+    # Create state and approve the tool
+    state = result1.to_state()
+    state.approve(approval_item)
+
+    # Resume from state - should execute approved tool
+    result2 = Runner.run_streamed(agent, state)
+    async for _ in result2.stream_events():
+        pass
+
+    # Tool should have been called
+    assert tool_called is True
+    assert result2.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_server_conversation_tracker_priming():
+    """Test that resuming streaming run from RunState primes server conversation tracker."""
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+
+    # First run with conversation_id
+    model.set_next_output([get_text_message("First response")])
+    result1 = Runner.run_streamed(
+        agent, input="test", conversation_id="conv123", previous_response_id="resp123"
+    )
+    async for _ in result1.stream_events():
+        pass
+
+    # Create state from result
+    state = result1.to_state()
+
+    # Resume with same conversation_id - should not duplicate messages
+    model.set_next_output([get_text_message("Second response")])
+    result2 = Runner.run_streamed(
+        agent, state, conversation_id="conv123", previous_response_id="resp123"
+    )
+    async for _ in result2.stream_events():
+        pass
+
+    # Should complete successfully without message duplication
+    assert result2.final_output == "Second response"
+    assert len(result2.new_items) >= 1
