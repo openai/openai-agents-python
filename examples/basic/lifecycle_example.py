@@ -70,6 +70,10 @@ class ExampleHooks(RunHooks):
             f"### {self.event_counter}: Agent {agent.name} ended with output {output}. Usage: {self._usage_to_str(context.usage)}"
         )
 
+    # Note: The on_tool_start and on_tool_end hooks apply only to local tools.
+    # They do not include hosted tools that run on the OpenAI server side,
+    # such as WebSearchTool, FileSearchTool, CodeInterpreterTool, HostedMCPTool,
+    # or other built-in hosted tools.
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
         # While this type cast is not ideal,

@@ -1,6 +1,14 @@
 import asyncio
+from collections.abc import Mapping
+from typing import Any
 
 from agents import Agent, CodeInterpreterTool, Runner, trace
+
+
+def _get_field(obj: Any, key: str) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(key)
+    return getattr(obj, key, None)
 
 
 async def main():
@@ -21,14 +29,19 @@ async def main():
         print("Solving math problem...")
         result = Runner.run_streamed(agent, "What is the square root of273 * 312821 plus 1782?")
         async for event in result.stream_events():
-            if (
-                event.type == "run_item_stream_event"
-                and event.item.type == "tool_call_item"
-                and event.item.raw_item.type == "code_interpreter_call"
-            ):
-                print(f"Code interpreter code:\n```\n{event.item.raw_item.code}\n```\n")
-            elif event.type == "run_item_stream_event":
-                print(f"Other event: {event.item.type}")
+            if event.type != "run_item_stream_event":
+                continue
+
+            item = event.item
+            if item.type == "tool_call_item":
+                raw_call = item.raw_item
+                if _get_field(raw_call, "type") == "code_interpreter_call":
+                    code = _get_field(raw_call, "code")
+                    if isinstance(code, str):
+                        print(f"Code interpreter code:\n```\n{code}\n```\n")
+                        continue
+
+            print(f"Other event: {event.item.type}")
 
         print(f"Final output: {result.final_output}")
 

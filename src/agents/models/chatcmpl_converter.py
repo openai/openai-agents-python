@@ -51,6 +51,8 @@ from ..model_settings import MCPToolChoice
 from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
+ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
+
 
 class Converter:
     @classmethod
@@ -136,7 +138,9 @@ class Converter:
         )
         if message.content:
             message_item.content.append(
-                ResponseOutputText(text=message.content, type="output_text", annotations=[])
+                ResponseOutputText(
+                    text=message.content, type="output_text", annotations=[], logprobs=[]
+                )
             )
         if message.refusal:
             message_item.content.append(
@@ -246,7 +250,7 @@ class Converter:
 
     @classmethod
     def extract_text_content(
-        cls, content: str | Iterable[ResponseInputContentParam]
+        cls, content: str | Iterable[ResponseInputContentWithAudioParam]
     ) -> str | list[ChatCompletionContentPartTextParam]:
         all_content = cls.extract_all_content(content)
         if isinstance(all_content, str):
@@ -259,7 +263,7 @@ class Converter:
 
     @classmethod
     def extract_all_content(
-        cls, content: str | Iterable[ResponseInputContentParam]
+        cls, content: str | Iterable[ResponseInputContentWithAudioParam]
     ) -> str | list[ChatCompletionContentPartParam]:
         if isinstance(content, str):
             return content
@@ -535,7 +539,7 @@ class Converter:
             elif func_output := cls.maybe_function_tool_call_output(item):
                 flush_assistant_message()
                 output_content = cast(
-                    Union[str, Iterable[ResponseInputContentParam]], func_output["output"]
+                    Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
                 )
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",

@@ -8,13 +8,27 @@ used as a drop-in replacement for :class:`agents.memory.session.SQLiteSession`.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .advanced_sqlite_session import AdvancedSQLiteSession
+    from .dapr_session import (
+        DAPR_CONSISTENCY_EVENTUAL,
+        DAPR_CONSISTENCY_STRONG,
+        DaprSession,
+    )
+    from .encrypt_session import EncryptedSession
+    from .redis_session import RedisSession
+    from .sqlalchemy_session import SQLAlchemySession
 
 __all__: list[str] = [
+    "AdvancedSQLiteSession",
+    "DAPR_CONSISTENCY_EVENTUAL",
+    "DAPR_CONSISTENCY_STRONG",
+    "DaprSession",
     "EncryptedSession",
     "RedisSession",
     "SQLAlchemySession",
-    "AdvancedSQLiteSession",
 ]
 
 
@@ -59,5 +73,38 @@ def __getattr__(name: str) -> Any:
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
             raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
+
+    if name == "DaprSession":
+        try:
+            from .dapr_session import DaprSession  # noqa: F401
+
+            return DaprSession
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "DaprSession requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
+
+    if name == "DAPR_CONSISTENCY_EVENTUAL":
+        try:
+            from .dapr_session import DAPR_CONSISTENCY_EVENTUAL  # noqa: F401
+
+            return DAPR_CONSISTENCY_EVENTUAL
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "DAPR_CONSISTENCY_EVENTUAL requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
+
+    if name == "DAPR_CONSISTENCY_STRONG":
+        try:
+            from .dapr_session import DAPR_CONSISTENCY_STRONG  # noqa: F401
+
+            return DAPR_CONSISTENCY_STRONG
+        except ModuleNotFoundError as e:
+            raise ImportError(
+                "DAPR_CONSISTENCY_STRONG requires the 'dapr' extra. "
+                "Install it with: pip install openai-agents[dapr]"
+            ) from e
 
     raise AttributeError(f"module {__name__} has no attribute {name}")

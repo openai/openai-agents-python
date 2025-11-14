@@ -4,8 +4,16 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
+from typing import Any
 
 from agents import Agent, ImageGenerationTool, Runner, trace
+
+
+def _get_field(obj: Any, key: str) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(key)
+    return getattr(obj, key, None)
 
 
 def open_file(path: str) -> None:
@@ -37,17 +45,23 @@ async def main():
         )
         print(result.final_output)
         for item in result.new_items:
-            if (
-                item.type == "tool_call_item"
-                and item.raw_item.type == "image_generation_call"
-                and (img_result := item.raw_item.result)
-            ):
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    tmp.write(base64.b64decode(img_result))
-                    temp_path = tmp.name
+            if item.type != "tool_call_item":
+                continue
 
-                # Open the image
-                open_file(temp_path)
+            raw_call = item.raw_item
+            call_type = _get_field(raw_call, "type")
+            if call_type != "image_generation_call":
+                continue
+
+            img_result = _get_field(raw_call, "result")
+            if not isinstance(img_result, str):
+                continue
+
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(base64.b64decode(img_result))
+                temp_path = tmp.name
+
+            open_file(temp_path)
 
 
 if __name__ == "__main__":

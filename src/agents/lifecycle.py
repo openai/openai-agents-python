@@ -62,7 +62,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called concurrently with tool invocation."""
+        """Called immediately before a local tool is invoked."""
         pass
 
     async def on_tool_end(
@@ -72,7 +72,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         tool: Tool,
         result: str,
     ) -> None:
-        """Called after a tool is invoked."""
+        """Called immediately after a local tool is invoked."""
         pass
 
 
@@ -113,7 +113,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
     ) -> None:
-        """Called concurrently with tool invocation."""
+        """Called immediately before a local tool is invoked."""
         pass
 
     async def on_tool_end(
@@ -123,7 +123,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         tool: Tool,
         result: str,
     ) -> None:
-        """Called after a tool is invoked."""
+        """Called immediately after a local tool is invoked."""
         pass
 
     async def on_llm_start(
