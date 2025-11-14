@@ -6,7 +6,7 @@ import inspect
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast, get_args, get_origin
+from typing import Any, Callable, Generic, Union, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -22,10 +22,12 @@ from ._run_impl import (
     AgentToolUseTracker,
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepInterruption,
     NextStepRunAgain,
     QueueCompleteSentinel,
     RunImpl,
     SingleStepResult,
+    ToolRunFunction,
     TraceCtxManager,
     get_model_tracing_impl,
 )
@@ -65,6 +67,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
+from .run_state import RunState, _normalize_field_names
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -152,6 +155,7 @@ class _ServerConversationTracker:
         self,
         original_input: str | list[TResponseInputItem],
         generated_items: list[RunItem],
+        model_responses: list[ModelResponse] | None = None,
     ) -> list[TResponseInputItem]:
         input_items: list[TResponseInputItem] = []
 
@@ -159,12 +163,201 @@ class _ServerConversationTracker:
         if not generated_items:
             input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
 
+        # First, collect call_ids from tool_call_output_item items
+        # (completed tool calls with outputs) and build a map of
+        # call_id -> tool_call_item for quick lookup
+        completed_tool_call_ids: set[str] = set()
+        tool_call_items_by_id: dict[str, RunItem] = {}
+
+        # Also look for tool calls in model responses (they might have been sent in previous turns)
+        tool_call_items_from_responses: dict[str, Any] = {}
+        if model_responses:
+            for response in model_responses:
+                for output_item in response.output:
+                    # Check if this is a tool call item
+                    if isinstance(output_item, dict):
+                        item_type = output_item.get("type")
+                        call_id = output_item.get("call_id")
+                    elif hasattr(output_item, "type") and hasattr(output_item, "call_id"):
+                        item_type = output_item.type
+                        call_id = output_item.call_id
+                    else:
+                        continue
+
+                    if item_type == "function_call" and call_id:
+                        tool_call_items_from_responses[call_id] = output_item
+
+        for item in generated_items:
+            if item.type == "tool_call_output_item":
+                # Extract call_id from the output item
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    completed_tool_call_ids.add(call_id)
+            elif item.type == "tool_call_item":
+                # Extract call_id from the tool call item and store it for later lookup
+                tool_call_raw_item: Any = item.raw_item
+                if isinstance(tool_call_raw_item, dict):
+                    call_id = tool_call_raw_item.get("call_id")
+                elif hasattr(tool_call_raw_item, "call_id"):
+                    call_id = tool_call_raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    tool_call_items_by_id[call_id] = item
+
         # Process generated_items, skip items already sent or from server
         for item in generated_items:
             raw_item_id = id(item.raw_item)
 
             if raw_item_id in self.sent_items or raw_item_id in self.server_items:
                 continue
+
+            # Skip tool_approval_item items - they're metadata about pending approvals
+            if item.type == "tool_approval_item":
+                continue
+
+            # For tool_call_item items, only include them if there's a
+            # corresponding tool_call_output_item (i.e., the tool has been
+            # executed and has an output)
+            if item.type == "tool_call_item":
+                # Extract call_id from the tool call item
+                tool_call_item_raw: Any = item.raw_item
+                if isinstance(tool_call_item_raw, dict):
+                    call_id = tool_call_item_raw.get("call_id")
+                elif hasattr(tool_call_item_raw, "call_id"):
+                    call_id = tool_call_item_raw.call_id
+                else:
+                    call_id = None
+
+                # Only include if there's a matching tool_call_output_item
+                if call_id and isinstance(call_id, str) and call_id in completed_tool_call_ids:
+                    input_items.append(item.to_input_item())
+                    self.sent_items.add(raw_item_id)
+                continue
+
+            # For tool_call_output_item items, also include the corresponding tool_call_item
+            # even if it's already in sent_items (API requires both)
+            if item.type == "tool_call_output_item":
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+
+                # Track which item IDs have been added to avoid duplicates
+                # Include the corresponding tool_call_item if it exists and hasn't been added yet
+                # First check in generatedItems, then in model responses
+                if call_id and isinstance(call_id, str):
+                    if call_id in tool_call_items_by_id:
+                        tool_call_item = tool_call_items_by_id[call_id]
+                        tool_call_raw_item_id = id(tool_call_item.raw_item)
+                        # Include even if already sent (API requires both call and output)
+                        if tool_call_raw_item_id not in self.server_items:
+                            tool_call_input_item = tool_call_item.to_input_item()
+                            # Check if this item has already been added (by ID)
+                            if isinstance(tool_call_input_item, dict):
+                                tool_call_item_id = tool_call_input_item.get("id")
+                            else:
+                                tool_call_item_id = getattr(tool_call_input_item, "id", None)
+                            # Only add if not already in input_items (check by ID)
+                            if tool_call_item_id:
+                                already_added = any(
+                                    (
+                                        isinstance(existing_item, dict)
+                                        and existing_item.get("id") == tool_call_item_id
+                                    )
+                                    or (
+                                        hasattr(existing_item, "id")
+                                        and getattr(existing_item, "id", None) == tool_call_item_id
+                                    )
+                                    for existing_item in input_items
+                                )
+                                if not already_added:
+                                    input_items.append(tool_call_input_item)
+                            else:
+                                input_items.append(tool_call_input_item)
+                    elif call_id in tool_call_items_from_responses:
+                        # Tool call is in model responses (was sent in previous turn)
+                        tool_call_from_response = tool_call_items_from_responses[call_id]
+                        # Normalize field names from JSON (camelCase) to Python (snake_case)
+                        if isinstance(tool_call_from_response, dict):
+                            normalized_tool_call = _normalize_field_names(tool_call_from_response)
+                            tool_call_item_id_raw = normalized_tool_call.get("id")
+                            tool_call_item_id = (
+                                tool_call_item_id_raw
+                                if isinstance(tool_call_item_id_raw, str)
+                                else None
+                            )
+                        else:
+                            # It's already a Pydantic model, convert to dict
+                            normalized_tool_call = (
+                                tool_call_from_response.model_dump(exclude_unset=True)
+                                if hasattr(tool_call_from_response, "model_dump")
+                                else tool_call_from_response
+                            )
+                            tool_call_item_id = (
+                                getattr(tool_call_from_response, "id", None)
+                                if hasattr(tool_call_from_response, "id")
+                                else (
+                                    normalized_tool_call.get("id")
+                                    if isinstance(normalized_tool_call, dict)
+                                    else None
+                                )
+                            )
+                            if not isinstance(tool_call_item_id, str):
+                                tool_call_item_id = None
+                        # Only add if not already in input_items (check by ID)
+                        if tool_call_item_id:
+                            already_added = any(
+                                (
+                                    isinstance(existing_item, dict)
+                                    and existing_item.get("id") == tool_call_item_id
+                                )
+                                or (
+                                    hasattr(existing_item, "id")
+                                    and getattr(existing_item, "id", None) == tool_call_item_id
+                                )
+                                for existing_item in input_items
+                            )
+                            if not already_added:
+                                input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+                        else:
+                            input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+
+                # Include the tool_call_output_item (check for duplicates by ID)
+                output_input_item = item.to_input_item()
+                if isinstance(output_input_item, dict):
+                    output_item_id = output_input_item.get("id")
+                else:
+                    output_item_id = getattr(output_input_item, "id", None)
+                if output_item_id:
+                    already_added = any(
+                        (
+                            isinstance(existing_item, dict)
+                            and existing_item.get("id") == output_item_id
+                        )
+                        or (
+                            hasattr(existing_item, "id")
+                            and getattr(existing_item, "id", None) == output_item_id
+                        )
+                        for existing_item in input_items
+                    )
+                    if not already_added:
+                        input_items.append(output_input_item)
+                        self.sent_items.add(raw_item_id)
+                else:
+                    input_items.append(output_input_item)
+                    self.sent_items.add(raw_item_id)
+                continue
+
             input_items.append(item.to_input_item())
             self.sent_items.add(raw_item_id)
 
@@ -283,7 +476,7 @@ class Runner:
     async def run(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -358,7 +551,7 @@ class Runner:
     def run_sync(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -431,7 +624,7 @@ class Runner:
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
@@ -506,7 +699,7 @@ class AgentRunner:
     async def run(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -519,6 +712,27 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
+        # Check if we're resuming from a RunState
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+
+        if is_resumed_state:
+            # Resuming from a saved state
+            run_state = cast(RunState[TContext], input)
+            original_user_input = run_state._original_input
+            prepared_input = run_state._original_input
+
+            # Override context with the state's context if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+        else:
+            # Keep original user input separate from session-prepared input
+            raw_input = cast(Union[str, list[TResponseInputItem]], input)
+            original_user_input = raw_input
+            prepared_input = await self._prepare_input_with_session(
+                raw_input, session, run_config.session_input_callback
+            )
+
         if conversation_id is not None or previous_response_id is not None:
             server_conversation_tracker = _ServerConversationTracker(
                 conversation_id=conversation_id, previous_response_id=previous_response_id
@@ -526,12 +740,13 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
-        # Keep original user input separate from session-prepared input
-        original_user_input = input
-        prepared_input = await self._prepare_input_with_session(
-            input, session, run_config.session_input_callback
-        )
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
 
+        # Always create a fresh tool_use_tracker
+        # (it's rebuilt from the run state if needed during execution)
         tool_use_tracker = AgentToolUseTracker()
 
         with TraceCtxManager(
@@ -541,14 +756,23 @@ class AgentRunner:
             metadata=run_config.trace_metadata,
             disabled=run_config.tracing_disabled,
         ):
-            current_turn = 0
-            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
-            generated_items: list[RunItem] = []
-            model_responses: list[ModelResponse] = []
-
-            context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-                context=context,  # type: ignore
-            )
+            if is_resumed_state and run_state is not None:
+                # Restore state from RunState
+                current_turn = run_state._current_turn
+                original_input = run_state._original_input
+                generated_items = run_state._generated_items
+                model_responses = run_state._model_responses
+                # Cast to the correct type since we know this is TContext
+                context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+            else:
+                # Fresh run
+                current_turn = 0
+                original_input = _copy_str_or_list(prepared_input)
+                generated_items = []
+                model_responses = []
+                context_wrapper = RunContextWrapper(
+                    context=context,  # type: ignore
+                )
 
             input_guardrail_results: list[InputGuardrailResult] = []
             tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
@@ -559,7 +783,24 @@ class AgentRunner:
             should_run_agent_start_hooks = True
 
             # save only the new user input to the session, not the combined history
-            await self._save_result_to_session(session, original_user_input, [])
+            # Skip saving if resuming from state - input is already in session
+            if not is_resumed_state:
+                await self._save_result_to_session(session, original_user_input, [])
+
+            # If resuming from an interrupted state, execute approved tools first
+            if is_resumed_state and run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await self._execute_approved_tools(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=generated_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
 
             try:
                 while True:
@@ -620,6 +861,7 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 server_conversation_tracker=server_conversation_tracker,
+                                model_responses=model_responses,
                             ),
                         )
                     else:
@@ -634,6 +876,7 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             server_conversation_tracker=server_conversation_tracker,
+                            model_responses=model_responses,
                         )
                     should_run_agent_start_hooks = False
 
@@ -666,6 +909,7 @@ class AgentRunner:
                             tool_input_guardrail_results=tool_input_guardrail_results,
                             tool_output_guardrail_results=tool_output_guardrail_results,
                             context_wrapper=context_wrapper,
+                            interruptions=[],
                         )
                         if not any(
                             guardrail_result.output.tripwire_triggered
@@ -675,6 +919,23 @@ class AgentRunner:
                                 session, [], turn_result.new_step_items
                             )
 
+                        return result
+                    elif isinstance(turn_result.next_step, NextStepInterruption):
+                        # Tool approval is needed - return a result with interruptions
+                        result = RunResult(
+                            input=original_input,
+                            new_items=generated_items,
+                            raw_responses=model_responses,
+                            final_output=None,
+                            _last_agent=current_agent,
+                            input_guardrail_results=input_guardrail_results,
+                            output_guardrail_results=[],
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            context_wrapper=context_wrapper,
+                            interruptions=turn_result.next_step.interruptions,
+                            _last_processed_response=turn_result.processed_response,
+                        )
                         return result
                     elif isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -711,7 +972,7 @@ class AgentRunner:
     def run_sync(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -790,7 +1051,7 @@ class AgentRunner:
     def run_streamed(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
@@ -820,18 +1081,32 @@ class AgentRunner:
         )
 
         output_schema = AgentRunner._get_output_schema(starting_agent)
-        context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-            context=context  # type: ignore
-        )
+
+        # Handle RunState input
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+        input_for_result: str | list[TResponseInputItem]
+
+        if is_resumed_state:
+            run_state = cast(RunState[TContext], input)
+            input_for_result = run_state._original_input
+            # Use context from RunState if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+            # Use context wrapper from RunState
+            context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+        else:
+            input_for_result = cast(Union[str, list[TResponseInputItem]], input)
+            context_wrapper = RunContextWrapper(context=context)  # type: ignore
 
         streamed_result = RunResultStreaming(
-            input=_copy_str_or_list(input),
-            new_items=[],
+            input=_copy_str_or_list(input_for_result),
+            new_items=run_state._generated_items if run_state else [],
             current_agent=starting_agent,
-            raw_responses=[],
+            raw_responses=run_state._model_responses if run_state else [],
             final_output=None,
             is_complete=False,
-            current_turn=0,
+            current_turn=run_state._current_turn if run_state else 0,
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
@@ -840,12 +1115,13 @@ class AgentRunner:
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
+            interruptions=[],
         )
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
             self._start_streaming(
-                starting_input=input,
+                starting_input=input_for_result,
                 streamed_result=streamed_result,
                 starting_agent=starting_agent,
                 max_turns=max_turns,
@@ -855,6 +1131,7 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 session=session,
+                run_state=run_state,
             )
         )
         return streamed_result
@@ -973,6 +1250,7 @@ class AgentRunner:
         previous_response_id: str | None,
         conversation_id: str | None,
         session: Session | None,
+        run_state: RunState[TContext] | None = None,
     ):
         if streamed_result.trace:
             streamed_result.trace.start(mark_as_current=True)
@@ -990,6 +1268,11 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
+
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
@@ -1002,6 +1285,21 @@ class AgentRunner:
             streamed_result.input = prepared_input
 
             await AgentRunner._save_result_to_session(session, starting_input, [])
+
+            # If resuming from an interrupted state, execute approved tools first
+            if run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await cls._execute_approved_tools_static(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=streamed_result.new_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
 
             while True:
                 # Check for soft cancel before starting new turn
@@ -1146,6 +1444,12 @@ class AgentRunner:
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    elif isinstance(turn_result.next_step, NextStepInterruption):
+                        # Tool approval is needed - complete the stream with interruptions
+                        streamed_result.interruptions = turn_result.next_step.interruptions
+                        streamed_result._last_processed_response = turn_result.processed_response
+                        streamed_result.is_complete = True
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
                         if session is not None:
                             should_skip_session_save = (
@@ -1250,11 +1554,19 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, streamed_result.new_items, streamed_result.raw_responses
             )
         else:
+            # Filter out tool_approval_item items and include all other items
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            for item in streamed_result.new_items:
+                if item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = item.to_input_item()
+                input.append(input_item)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1328,12 +1640,16 @@ class AgentRunner:
                 output_item = event.item
 
                 if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id: str | None = getattr(
+                    output_call_id: str | None = getattr(
                         output_item, "call_id", getattr(output_item, "id", None)
                     )
 
-                    if call_id and call_id not in emitted_tool_call_ids:
-                        emitted_tool_call_ids.add(call_id)
+                    if (
+                        output_call_id
+                        and isinstance(output_call_id, str)
+                        and output_call_id not in emitted_tool_call_ids
+                    ):
+                        emitted_tool_call_ids.add(output_call_id)
 
                         tool_item = ToolCallItem(
                             raw_item=cast(ToolCallItemTypes, output_item),
@@ -1428,6 +1744,119 @@ class AgentRunner:
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
+    async def _execute_approved_tools(
+        self,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (instance method version).
+
+        This is a thin wrapper around the classmethod version for use in non-streaming mode.
+        """
+        await AgentRunner._execute_approved_tools_static(
+            agent=agent,
+            interruptions=interruptions,
+            context_wrapper=context_wrapper,
+            generated_items=generated_items,
+            run_config=run_config,
+            hooks=hooks,
+        )
+
+    @classmethod
+    async def _execute_approved_tools_static(
+        cls,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (classmethod version)."""
+        from .items import ToolApprovalItem, ToolCallOutputItem
+
+        tool_runs: list[ToolRunFunction] = []
+
+        # Find all tools from the agent
+        all_tools = await AgentRunner._get_all_tools(agent, context_wrapper)
+        tool_map = {tool.name: tool for tool in all_tools}
+
+        for interruption in interruptions:
+            if not isinstance(interruption, ToolApprovalItem):
+                continue
+
+            tool_call = interruption.raw_item
+            tool_name = tool_call.name
+
+            # Check if this tool was approved
+            approval_status = context_wrapper.is_tool_approved(tool_name, tool_call.call_id)
+            if approval_status is not True:
+                # Not approved or rejected - add rejection message
+                if approval_status is False:
+                    output = "Tool execution was not approved."
+                else:
+                    output = "Tool approval status unclear."
+
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Tool was approved - find it and prepare for execution
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                # Tool not found - add error output
+                output = f"Tool '{tool_name}' not found."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Only function tools can be executed via ToolRunFunction
+            from .tool import FunctionTool
+
+            if not isinstance(tool, FunctionTool):
+                output = f"Tool '{tool_name}' is not a function tool."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            tool_runs.append(ToolRunFunction(function_tool=tool, tool_call=tool_call))
+
+        # Execute approved tools
+        if tool_runs:
+            (
+                function_results,
+                tool_input_guardrail_results,
+                tool_output_guardrail_results,
+            ) = await RunImpl.execute_function_tool_calls(
+                agent=agent,
+                tool_runs=tool_runs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            )
+
+            # Add tool outputs to generated_items
+            for result in function_results:
+                generated_items.append(result.run_item)
+
     @classmethod
     async def _run_single_turn(
         cls,
@@ -1442,6 +1871,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None = None,
+        model_responses: list[ModelResponse] | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -1462,10 +1892,20 @@ class AgentRunner:
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
         if server_conversation_tracker is not None:
-            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+            input = server_conversation_tracker.prepare_input(
+                original_input, generated_items, model_responses
+            )
         else:
+            # Filter out tool_approval_item items and include all other items
             input = ItemHelpers.input_to_new_input_list(original_input)
-            input.extend([generated_item.to_input_item() for generated_item in generated_items])
+            for generated_item in generated_items:
+                if generated_item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = generated_item.to_input_item()
+                input.append(input_item)
 
         new_response = await cls._get_new_response(
             agent,

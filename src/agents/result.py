@@ -29,7 +29,7 @@ from .util._pretty_print import (
 )
 
 if TYPE_CHECKING:
-    from ._run_impl import QueueCompleteSentinel
+    from ._run_impl import ProcessedResponse, QueueCompleteSentinel
     from .agent import Agent
     from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 
@@ -68,6 +68,11 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    interruptions: list[RunItem]
+    """Any interruptions (e.g., tool approval requests) that occurred during the run.
+    If non-empty, the run was paused waiting for user action (e.g., approve/reject tool calls).
+    """
 
     @property
     @abc.abstractmethod
@@ -111,11 +116,61 @@ class RunResultBase(abc.ABC):
 @dataclass
 class RunResult(RunResultBase):
     _last_agent: Agent[Any]
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
 
     @property
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
         return self._last_agent
+
+    def to_state(self) -> Any:
+        """Create a RunState from this result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = await Runner.run(agent, "Use the delete_file tool")
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = await Runner.run(agent, state)
+            ```
+        """
+        from ._run_impl import NextStepInterruption
+        from .run_state import RunState
+
+        # Create a RunState from the current result
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=self.input,
+            starting_agent=self.last_agent,
+            max_turns=10,  # This will be overridden by the runner
+        )
+
+        # Populate the state with data from the result
+        state._generated_items = self.new_items
+        state._model_responses = self.raw_responses
+        state._input_guardrail_results = self.input_guardrail_results
+        state._output_guardrail_results = self.output_guardrail_results
+        state._last_processed_response = self._last_processed_response
+
+        # If there are interruptions, set the current step
+        if self.interruptions:
+            state._current_step = NextStepInterruption(interruptions=self.interruptions)
+
+        return state
 
     def __str__(self) -> str:
         return pretty_print_result(self)
@@ -149,6 +204,9 @@ class RunResultStreaming(RunResultBase):
 
     is_complete: bool = False
     """Whether the agent has finished running."""
+
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
 
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
@@ -345,3 +403,56 @@ class RunResultStreaming(RunResultBase):
             except Exception:
                 # The exception will be surfaced via _check_errors() if needed.
                 pass
+
+    def to_state(self) -> Any:
+        """Create a RunState from this streaming result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run_streamed()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = Runner.run_streamed(agent, "Use the delete_file tool")
+            async for event in result.stream_events():
+                pass
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = Runner.run_streamed(agent, state)
+                async for event in result.stream_events():
+                    pass
+            ```
+        """
+        from ._run_impl import NextStepInterruption
+        from .run_state import RunState
+
+        # Create a RunState from the current result
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=self.input,
+            starting_agent=self.last_agent,
+            max_turns=self.max_turns,
+        )
+
+        # Populate the state with data from the result
+        state._generated_items = self.new_items
+        state._model_responses = self.raw_responses
+        state._input_guardrail_results = self.input_guardrail_results
+        state._output_guardrail_results = self.output_guardrail_results
+        state._current_turn = self.current_turn
+        state._last_processed_response = self._last_processed_response
+
+        # If there are interruptions, set the current step
+        if self.interruptions:
+            state._current_step = NextStepInterruption(interruptions=self.interruptions)
+
+        return state
