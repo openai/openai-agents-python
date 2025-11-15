@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+import weakref
 
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -30,6 +31,7 @@ from pydantic import TypeAdapter
 
 from agents import (
     Agent,
+    HandoffOutputItem,
     ItemHelpers,
     MessageOutputItem,
     ModelResponse,
@@ -152,14 +154,59 @@ def test_text_message_outputs_across_list_of_runitems() -> None:
 def test_message_output_item_retains_agent_until_release() -> None:
     # Construct the run item with an inline agent to ensure the run item keeps a strong reference.
     message = make_message([ResponseOutputText(annotations=[], text="hello", type="output_text")])
-    item = MessageOutputItem(agent=Agent(name="inline"), raw_item=message)
-    assert item.agent is not None
+    agent = Agent(name="inline")
+    item = MessageOutputItem(agent=agent, raw_item=message)
+    assert item.agent is agent
     assert item.agent.name == "inline"
 
-    # After explicitly releasing, the weak reference should drop once GC runs.
+    # Releasing the agent should keep the weak reference alive while strong refs remain.
     item.release_agent()
+    assert item.agent is agent
+
+    agent_ref = weakref.ref(agent)
+    del agent
     gc.collect()
+
+    # Once the original agent is collected, the weak reference should drop.
+    assert agent_ref() is None
     assert item.agent is None
+
+
+def test_handoff_output_item_retains_agents_until_gc() -> None:
+    raw_item: TResponseInputItem = {
+        "call_id": "call1",
+        "output": "handoff",
+        "type": "function_call_output",
+    }
+    owner_agent = Agent(name="owner")
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    item = HandoffOutputItem(
+        agent=owner_agent,
+        raw_item=raw_item,
+        source_agent=source_agent,
+        target_agent=target_agent,
+    )
+
+    item.release_agent()
+    assert item.agent is owner_agent
+    assert item.source_agent is source_agent
+    assert item.target_agent is target_agent
+
+    owner_ref = weakref.ref(owner_agent)
+    source_ref = weakref.ref(source_agent)
+    target_ref = weakref.ref(target_agent)
+    del owner_agent
+    del source_agent
+    del target_agent
+    gc.collect()
+
+    assert owner_ref() is None
+    assert source_ref() is None
+    assert target_ref() is None
+    assert item.agent is None
+    assert item.source_agent is None
+    assert item.target_agent is None
 
 
 def test_tool_call_output_item_constructs_function_call_output_dict():

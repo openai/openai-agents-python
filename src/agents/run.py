@@ -648,51 +648,60 @@ class AgentRunner:
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
                     tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
-                    if isinstance(turn_result.next_step, NextStepFinalOutput):
-                        output_guardrail_results = await self._run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            turn_result.next_step.output,
-                            context_wrapper,
-                        )
-                        result = RunResult(
-                            input=original_input,
-                            new_items=generated_items,
-                            raw_responses=model_responses,
-                            final_output=turn_result.next_step.output,
-                            _last_agent=current_agent,
-                            input_guardrail_results=input_guardrail_results,
-                            output_guardrail_results=output_guardrail_results,
-                            tool_input_guardrail_results=tool_input_guardrail_results,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                        )
-                        if not any(
-                            guardrail_result.output.tripwire_triggered
-                            for guardrail_result in input_guardrail_results
-                        ):
-                            await self._save_result_to_session(
-                                session, [], turn_result.new_step_items
+                    try:
+                        if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            output_guardrail_results = await self._run_output_guardrails(
+                                current_agent.output_guardrails
+                                + (run_config.output_guardrails or []),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
                             )
+                            result = RunResult(
+                                input=original_input,
+                                new_items=generated_items,
+                                raw_responses=model_responses,
+                                final_output=turn_result.next_step.output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                            )
+                            if not any(
+                                guardrail_result.output.tripwire_triggered
+                                for guardrail_result in input_guardrail_results
+                            ):
+                                await self._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
 
-                        return result
-                    elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
-                        current_span.finish(reset_current=True)
-                        current_span = None
-                        should_run_agent_start_hooks = True
-                    elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        if not any(
-                            guardrail_result.output.tripwire_triggered
-                            for guardrail_result in input_guardrail_results
-                        ):
-                            await self._save_result_to_session(
-                                session, [], turn_result.new_step_items
+                            return result
+                        elif isinstance(turn_result.next_step, NextStepHandoff):
+                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            current_span.finish(reset_current=True)
+                            current_span = None
+                            should_run_agent_start_hooks = True
+                        elif isinstance(turn_result.next_step, NextStepRunAgain):
+                            if not any(
+                                guardrail_result.output.tripwire_triggered
+                                for guardrail_result in input_guardrail_results
+                            ):
+                                await self._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+                        else:
+                            raise AgentsException(
+                                f"Unknown next step type: {type(turn_result.next_step)}"
                             )
-                    else:
-                        raise AgentsException(
-                            f"Unknown next step type: {type(turn_result.next_step)}"
-                        )
+                    finally:
+                        # RunImpl.execute_tools_and_side_effects returns a SingleStepResult that
+                        # stores direct references to the `pre_step_items` and `new_step_items`
+                        # lists it manages internally. Clear them here so the next turn does not
+                        # hold on to items from previous turns and to avoid leaking agent refs.
+                        turn_result.pre_step_items.clear()
+                        turn_result.new_step_items.clear()
             except AgentsException as exc:
                 exc.run_data = RunErrorDetails(
                     input=original_input,

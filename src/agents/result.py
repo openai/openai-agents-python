@@ -75,24 +75,27 @@ class RunResultBase(abc.ABC):
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
 
-    def release_agents(self) -> None:
+    def release_agents(self, *, release_new_items: bool = True) -> None:
         """
         Release strong references to agents held by this result. After calling this method,
         accessing `item.agent` or `last_agent` may return `None` if the agent has been garbage
         collected. Callers can use this when they are done inspecting the result and want to
         eagerly drop any associated agent graph.
         """
-        for item in self.new_items:
-            release = getattr(item, "release_agent", None)
-            if callable(release):
-                release()
+        if release_new_items:
+            for item in self.new_items:
+                release = getattr(item, "release_agent", None)
+                if callable(release):
+                    release()
         self._release_last_agent_reference()
 
     def __del__(self) -> None:
         try:
             # Fall back to releasing agents automatically in case the caller never invoked
-            # `release_agents()` explicitly. This keeps the no-leak guarantee confirmed by tests.
-            self.release_agents()
+            # `release_agents()` explicitly so GC of the RunResult drops the last strong reference.
+            # We pass `release_new_items=False` so RunItems that the user intentionally keeps
+            # continue exposing their originating agent until that agent itself is collected.
+            self.release_agents(release_new_items=False)
         except Exception:
             # Avoid raising from __del__.
             pass
@@ -164,7 +167,8 @@ class RunResult(RunResultBase):
         if agent is None:
             return
         self._last_agent_ref = weakref.ref(agent)
-        object.__delattr__(self, "_last_agent")
+        # Preserve dataclass field so repr/asdict continue to succeed.
+        self.__dict__["_last_agent"] = None
 
     def __str__(self) -> str:
         return pretty_print_result(self)
@@ -244,7 +248,8 @@ class RunResultStreaming(RunResultBase):
         if agent is None:
             return
         self._current_agent_ref = weakref.ref(agent)
-        object.__delattr__(self, "current_agent")
+        # Preserve dataclass field so repr/asdict continue to succeed.
+        self.__dict__["current_agent"] = None
 
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.

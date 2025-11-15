@@ -1,3 +1,4 @@
+import dataclasses
 import gc
 import weakref
 from typing import Any
@@ -6,7 +7,7 @@ import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from pydantic import BaseModel
 
-from agents import Agent, MessageOutputItem, RunContextWrapper, RunResult
+from agents import Agent, MessageOutputItem, RunContextWrapper, RunResult, RunResultStreaming
 from agents.exceptions import AgentsException
 
 
@@ -27,6 +28,16 @@ def create_run_result(final_output: Any) -> RunResult:
 
 class Foo(BaseModel):
     bar: int
+
+
+def _create_message(text: str) -> ResponseOutputMessage:
+    return ResponseOutputMessage(
+        id="msg",
+        content=[ResponseOutputText(annotations=[], text=text, type="output_text")],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
 
 
 def test_result_cast_typechecks():
@@ -66,13 +77,7 @@ def test_bad_cast_with_param_raises():
 
 
 def test_run_result_release_agents_breaks_strong_refs() -> None:
-    message = ResponseOutputMessage(
-        id="msg",
-        content=[ResponseOutputText(annotations=[], text="hello", type="output_text")],
-        role="assistant",
-        status="completed",
-        type="message",
-    )
+    message = _create_message("hello")
     agent = Agent(name="leak-test-agent")
     item = MessageOutputItem(agent=agent, raw_item=message)
     result = RunResult(
@@ -99,3 +104,173 @@ def test_run_result_release_agents_breaks_strong_refs() -> None:
     assert item.agent is None
     with pytest.raises(AgentsException):
         _ = result.last_agent
+
+
+def test_run_item_retains_agent_when_result_is_garbage_collected() -> None:
+    def build_item() -> tuple[MessageOutputItem, weakref.ReferenceType[RunResult]]:
+        message = _create_message("persist")
+        agent = Agent(name="persisted-agent")
+        item = MessageOutputItem(agent=agent, raw_item=message)
+        result = RunResult(
+            input="test",
+            new_items=[item],
+            raw_responses=[],
+            final_output=None,
+            input_guardrail_results=[],
+            output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+            _last_agent=agent,
+            context_wrapper=RunContextWrapper(context=None),
+        )
+        return item, weakref.ref(result)
+
+    item, result_ref = build_item()
+    gc.collect()
+
+    assert result_ref() is None
+    assert item.agent is not None
+    assert item.agent.name == "persisted-agent"
+
+
+def test_run_item_repr_and_asdict_after_release() -> None:
+    message = _create_message("repr")
+    agent = Agent(name="repr-agent")
+    item = MessageOutputItem(agent=agent, raw_item=message)
+
+    item.release_agent()
+    assert item.agent is agent
+
+    text = repr(item)
+    assert "MessageOutputItem" in text
+
+    serialized = dataclasses.asdict(item)
+    assert isinstance(serialized["agent"], dict)
+    assert serialized["agent"]["name"] == "repr-agent"
+
+    agent_ref = weakref.ref(agent)
+    del agent
+    gc.collect()
+
+    assert agent_ref() is None
+    assert item.agent is None
+
+    serialized_after_gc = dataclasses.asdict(item)
+    assert serialized_after_gc["agent"] is None
+
+
+def test_run_result_repr_and_asdict_after_release_agents() -> None:
+    agent = Agent(name="repr-result-agent")
+    result = RunResult(
+        input="test",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=agent,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+
+    result.release_agents()
+
+    text = repr(result)
+    assert "RunResult" in text
+
+    serialized = dataclasses.asdict(result)
+    assert serialized["_last_agent"] is None
+
+
+def test_run_result_release_agents_without_releasing_new_items() -> None:
+    message = _create_message("keep")
+    item_agent = Agent(name="item-agent")
+    last_agent = Agent(name="last-agent")
+    item = MessageOutputItem(agent=item_agent, raw_item=message)
+    result = RunResult(
+        input="test",
+        new_items=[item],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=last_agent,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+
+    result.release_agents(release_new_items=False)
+
+    assert item.agent is item_agent
+
+    last_agent_ref = weakref.ref(last_agent)
+    del last_agent
+    gc.collect()
+
+    assert last_agent_ref() is None
+    with pytest.raises(AgentsException):
+        _ = result.last_agent
+
+
+def test_run_result_release_agents_is_idempotent() -> None:
+    message = _create_message("idempotent")
+    agent = Agent(name="idempotent-agent")
+    item = MessageOutputItem(agent=agent, raw_item=message)
+    result = RunResult(
+        input="test",
+        new_items=[item],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=agent,
+        context_wrapper=RunContextWrapper(context=None),
+    )
+
+    result.release_agents()
+    result.release_agents()
+
+    assert item.agent is agent
+
+    agent_ref = weakref.ref(agent)
+    del agent
+    gc.collect()
+
+    assert agent_ref() is None
+    assert item.agent is None
+    with pytest.raises(AgentsException):
+        _ = result.last_agent
+
+
+def test_run_result_streaming_release_agents_releases_current_agent() -> None:
+    agent = Agent(name="streaming-agent")
+    streaming_result = RunResultStreaming(
+        input="stream",
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+    )
+
+    streaming_result.release_agents(release_new_items=False)
+
+    agent_ref = weakref.ref(agent)
+    del agent
+    gc.collect()
+
+    assert agent_ref() is None
+    with pytest.raises(AgentsException):
+        _ = streaming_result.last_agent

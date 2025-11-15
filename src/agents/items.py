@@ -73,6 +73,9 @@ TResponseStreamEvent = ResponseStreamEvent
 
 T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
+# Distinguish a missing dict entry from an explicit None value.
+_MISSING_ATTR_SENTINEL = object()
+
 
 @dataclass
 class RunItemBase(Generic[T], abc.ABC):
@@ -95,18 +98,38 @@ class RunItemBase(Generic[T], abc.ABC):
         # Store a weak reference so we can release the strong reference later if desired.
         self._agent_ref = weakref.ref(self.agent)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattribute__(self, name: str) -> Any:
         if name == "agent":
-            return self._agent_ref() if self._agent_ref else None
-        raise AttributeError(name)
+            return self._get_agent_via_weakref("agent", "_agent_ref")
+        return super().__getattribute__(name)
 
     def release_agent(self) -> None:
         """Release the strong reference to the agent while keeping a weak reference."""
         if "agent" not in self.__dict__:
             return
         agent = self.__dict__["agent"]
+        if agent is None:
+            return
         self._agent_ref = weakref.ref(agent) if agent is not None else None
-        object.__delattr__(self, "agent")
+        # Set to None instead of deleting so dataclass repr/asdict keep working.
+        self.__dict__["agent"] = None
+
+    def _get_agent_via_weakref(self, attr_name: str, ref_name: str) -> Any:
+        # Preserve the dataclass field so repr/asdict still read it, but lazily resolve the weakref
+        # when the stored value is None (meaning release_agent already dropped the strong ref).
+        # If the attribute was never overridden we fall back to the default descriptor chain.
+        data = object.__getattribute__(self, "__dict__")
+        value = data.get(attr_name, _MISSING_ATTR_SENTINEL)
+        if value is _MISSING_ATTR_SENTINEL:
+            return object.__getattribute__(self, attr_name)
+        if value is not None:
+            return value
+        ref = object.__getattribute__(self, ref_name)
+        if ref is not None:
+            agent = ref()
+            if agent is not None:
+                return agent
+        return None
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
@@ -172,23 +195,30 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
         self._source_agent_ref = weakref.ref(self.source_agent)
         self._target_agent_ref = weakref.ref(self.target_agent)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattribute__(self, name: str) -> Any:
         if name == "source_agent":
-            return self._source_agent_ref() if self._source_agent_ref else None
+            # Provide lazy weakref access like the base `agent` field so HandoffOutputItem
+            # callers keep seeing the original agent until GC occurs.
+            return self._get_agent_via_weakref("source_agent", "_source_agent_ref")
         if name == "target_agent":
-            return self._target_agent_ref() if self._target_agent_ref else None
-        return super().__getattr__(name)
+            # Same as above but for the target of the handoff.
+            return self._get_agent_via_weakref("target_agent", "_target_agent_ref")
+        return super().__getattribute__(name)
 
     def release_agent(self) -> None:
         super().release_agent()
         if "source_agent" in self.__dict__:
             source_agent = self.__dict__["source_agent"]
-            self._source_agent_ref = weakref.ref(source_agent) if source_agent is not None else None
-            object.__delattr__(self, "source_agent")
+            if source_agent is not None:
+                self._source_agent_ref = weakref.ref(source_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["source_agent"] = None
         if "target_agent" in self.__dict__:
             target_agent = self.__dict__["target_agent"]
-            self._target_agent_ref = weakref.ref(target_agent) if target_agent is not None else None
-            object.__delattr__(self, "target_agent")
+            if target_agent is not None:
+                self._target_agent_ref = weakref.ref(target_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["target_agent"] = None
 
 
 ToolCallItemTypes: TypeAlias = Union[
