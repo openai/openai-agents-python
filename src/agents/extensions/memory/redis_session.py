@@ -255,7 +255,7 @@ class RedisSession(SessionABC):
             True if Redis is reachable, False otherwise.
         """
         try:
-            await self._redis.ping()
+            await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
             return True
         except Exception:
             return False
