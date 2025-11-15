@@ -1097,6 +1097,7 @@ class AgentRunner:
                         # Check if any blocking guardrail triggered and raise before starting agent.
                         for result in streamed_result.input_guardrail_results:
                             if result.output.tripwire_triggered:
+                                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                                 raise InputGuardrailTripwireTriggered(result)
 
                     # Run parallel guardrails in background.
