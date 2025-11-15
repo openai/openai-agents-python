@@ -492,14 +492,14 @@ async def test_external_client_not_closed():
         assert len(items) == 1
 
         # Verify client is working before close
-        assert await shared_client.ping() is True
+        assert await shared_client.ping() is True  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
         # Close the session
         await session.close()
 
         # Verify the shared client is still usable after session.close()
         # This would fail if we incorrectly closed the external client
-        assert await shared_client.ping() is True
+        assert await shared_client.ping() is True  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
         # Should still be able to use the client for other operations
         await shared_client.set("test_key", "test_value")
@@ -781,7 +781,7 @@ async def test_close_method_coverage():
     await session1.close()
 
     # Verify external client is still usable
-    assert await external_client.ping() is True
+    assert await external_client.ping() is True  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
     # Test 2: Internal client (should be closed)
     # Create a session that owns its client
