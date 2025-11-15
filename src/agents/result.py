@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -74,6 +75,35 @@ class RunResultBase(abc.ABC):
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
 
+    def release_agents(self, *, release_new_items: bool = True) -> None:
+        """
+        Release strong references to agents held by this result. After calling this method,
+        accessing `item.agent` or `last_agent` may return `None` if the agent has been garbage
+        collected. Callers can use this when they are done inspecting the result and want to
+        eagerly drop any associated agent graph.
+        """
+        if release_new_items:
+            for item in self.new_items:
+                release = getattr(item, "release_agent", None)
+                if callable(release):
+                    release()
+        self._release_last_agent_reference()
+
+    def __del__(self) -> None:
+        try:
+            # Fall back to releasing agents automatically in case the caller never invoked
+            # `release_agents()` explicitly so GC of the RunResult drops the last strong reference.
+            # We pass `release_new_items=False` so RunItems that the user intentionally keeps
+            # continue exposing their originating agent until that agent itself is collected.
+            self.release_agents(release_new_items=False)
+        except Exception:
+            # Avoid raising from __del__.
+            pass
+
+    @abc.abstractmethod
+    def _release_last_agent_reference(self) -> None:
+        """Release stored agent reference specific to the concrete result type."""
+
     def final_output_as(self, cls: type[T], raise_if_incorrect_type: bool = False) -> T:
         """A convenience method to cast the final output to a specific type. By default, the cast
         is only for the typechecker. If you set `raise_if_incorrect_type` to True, we'll raise a
@@ -111,11 +141,34 @@ class RunResultBase(abc.ABC):
 @dataclass
 class RunResult(RunResultBase):
     _last_agent: Agent[Any]
+    _last_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        self._last_agent_ref = weakref.ref(self._last_agent)
 
     @property
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run."""
-        return self._last_agent
+        agent = cast("Agent[Any] | None", self.__dict__.get("_last_agent"))
+        if agent is not None:
+            return agent
+        if self._last_agent_ref:
+            agent = self._last_agent_ref()
+            if agent is not None:
+                return agent
+        raise AgentsException("Last agent reference is no longer available.")
+
+    def _release_last_agent_reference(self) -> None:
+        agent = cast("Agent[Any] | None", self.__dict__.get("_last_agent"))
+        if agent is None:
+            return
+        self._last_agent_ref = weakref.ref(agent)
+        # Preserve dataclass field so repr/asdict continue to succeed.
+        self.__dict__["_last_agent"] = None
 
     def __str__(self) -> str:
         return pretty_print_result(self)
@@ -150,6 +203,12 @@ class RunResultStreaming(RunResultBase):
     is_complete: bool = False
     """Whether the agent has finished running."""
 
+    _current_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
         default_factory=asyncio.Queue, repr=False
@@ -167,12 +226,30 @@ class RunResultStreaming(RunResultBase):
     # Soft cancel state
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
 
+    def __post_init__(self) -> None:
+        self._current_agent_ref = weakref.ref(self.current_agent)
+
     @property
     def last_agent(self) -> Agent[Any]:
         """The last agent that was run. Updates as the agent run progresses, so the true last agent
         is only available after the agent run is complete.
         """
-        return self.current_agent
+        agent = cast("Agent[Any] | None", self.__dict__.get("current_agent"))
+        if agent is not None:
+            return agent
+        if self._current_agent_ref:
+            agent = self._current_agent_ref()
+            if agent is not None:
+                return agent
+        raise AgentsException("Last agent reference is no longer available.")
+
+    def _release_last_agent_reference(self) -> None:
+        agent = cast("Agent[Any] | None", self.__dict__.get("current_agent"))
+        if agent is None:
+            return
+        self._current_agent_ref = weakref.ref(agent)
+        # Preserve dataclass field so repr/asdict continue to succeed.
+        self.__dict__["current_agent"] = None
 
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
