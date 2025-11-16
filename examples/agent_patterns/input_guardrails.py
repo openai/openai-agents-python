@@ -17,7 +17,7 @@ from agents import (
 """
 This example shows how to use guardrails.
 
-Guardrails are checks that run either in parallel with the agent or before the agent starts.
+Guardrails are checks that run in parallel to the agent's execution.
 They can be used to do things like:
 - Check if input messages are off-topic
 - Check that input messages don't violate any policies
@@ -25,10 +25,6 @@ They can be used to do things like:
 
 In this example, we'll setup an input guardrail that trips if the user is asking to do math homework.
 If the guardrail trips, we'll respond with a refusal message.
-
-By default, guardrails run in parallel with the agent for better latency.
-You can set run_in_parallel=False to run the guardrail before the agent starts,
-which saves token costs if the guardrail fails (the agent never starts).
 """
 
 
