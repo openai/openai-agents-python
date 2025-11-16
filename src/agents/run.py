@@ -964,6 +964,11 @@ class AgentRunner:
             for done in asyncio.as_completed(guardrail_tasks):
                 result = await done
                 if result.output.tripwire_triggered:
+                    # Cancel all remaining guardrail tasks if a tripwire is triggered.
+                    for t in guardrail_tasks:
+                        t.cancel()
+                    # Wait for cancellations to propagate by awaiting the cancelled tasks.
+                    await asyncio.gather(*guardrail_tasks, return_exceptions=True)
                     _error_tracing.attach_error_to_span(
                         parent_span,
                         SpanError(
@@ -974,6 +979,9 @@ class AgentRunner:
                             },
                         ),
                     )
+                    queue.put_nowait(result)
+                    guardrail_results.append(result)
+                    break
                 queue.put_nowait(result)
                 guardrail_results.append(result)
         except Exception:
@@ -1669,6 +1677,8 @@ class AgentRunner:
                 # Cancel all guardrail tasks if a tripwire is triggered.
                 for t in guardrail_tasks:
                     t.cancel()
+                # Wait for cancellations to propagate by awaiting the cancelled tasks.
+                await asyncio.gather(*guardrail_tasks, return_exceptions=True)
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Guardrail tripwire triggered",
