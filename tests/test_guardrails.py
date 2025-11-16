@@ -1232,3 +1232,170 @@ async def test_guardrail_via_agent_and_run_config_equivalent():
     assert result2.final_output is not None
     assert model1.first_turn_args is not None
     assert model2.first_turn_args is not None
+
+
+@pytest.mark.asyncio
+async def test_blocking_guardrail_cancels_remaining_on_trigger():
+    """
+    Test that when one blocking guardrail triggers, remaining guardrails
+    are cancelled (non-streaming).
+    """
+    fast_guardrail_executed = False
+    slow_guardrail_executed = False
+    slow_guardrail_cancelled = False
+    timestamps = {}
+
+    @input_guardrail(run_in_parallel=False)
+    async def fast_guardrail_that_triggers(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal fast_guardrail_executed
+        timestamps["fast_start"] = time.time()
+        await asyncio.sleep(0.1)
+        fast_guardrail_executed = True
+        timestamps["fast_end"] = time.time()
+        return GuardrailFunctionOutput(
+            output_info="fast_triggered",
+            tripwire_triggered=True,
+        )
+
+    @input_guardrail(run_in_parallel=False)
+    async def slow_guardrail_that_should_be_cancelled(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal slow_guardrail_executed, slow_guardrail_cancelled
+        timestamps["slow_start"] = time.time()
+        try:
+            await asyncio.sleep(0.3)
+            slow_guardrail_executed = True
+            timestamps["slow_end"] = time.time()
+            return GuardrailFunctionOutput(
+                output_info="slow_completed",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            slow_guardrail_cancelled = True
+            timestamps["slow_cancelled"] = time.time()
+            raise
+
+    model = FakeModel()
+    agent = Agent(
+        name="test_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[fast_guardrail_that_triggers, slow_guardrail_that_should_be_cancelled],
+        model=model,
+    )
+    model.set_next_output([get_text_message("hello")])
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        await Runner.run(agent, "test input")
+
+    # Verify the fast guardrail executed
+    assert fast_guardrail_executed is True, "Fast guardrail should have executed"
+
+    # Verify the slow guardrail was cancelled, not completed
+    assert slow_guardrail_cancelled is True, "Slow guardrail should have been cancelled"
+    assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
+
+    # Verify timing: cancellation happened shortly after fast guardrail triggered
+    assert "fast_end" in timestamps
+    assert "slow_cancelled" in timestamps
+    cancellation_delay = timestamps["slow_cancelled"] - timestamps["fast_end"]
+    assert cancellation_delay >= 0, (
+        f"Slow guardrail should be cancelled after fast one completes, "
+        f"but was {cancellation_delay:.2f}s"
+    )
+    assert cancellation_delay < 0.2, (
+        f"Cancellation should happen before the slow guardrail completes, "
+        f"but took {cancellation_delay:.2f}s"
+    )
+
+    # Verify agent never started
+    assert model.first_turn_args is None, (
+        "Model should not have been called when guardrail triggered"
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocking_guardrail_cancels_remaining_on_trigger_streaming():
+    """
+    Test that when one blocking guardrail triggers, remaining guardrails
+    are cancelled (streaming).
+    """
+    fast_guardrail_executed = False
+    slow_guardrail_executed = False
+    slow_guardrail_cancelled = False
+    timestamps = {}
+
+    @input_guardrail(run_in_parallel=False)
+    async def fast_guardrail_that_triggers(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal fast_guardrail_executed
+        timestamps["fast_start"] = time.time()
+        await asyncio.sleep(0.1)
+        fast_guardrail_executed = True
+        timestamps["fast_end"] = time.time()
+        return GuardrailFunctionOutput(
+            output_info="fast_triggered",
+            tripwire_triggered=True,
+        )
+
+    @input_guardrail(run_in_parallel=False)
+    async def slow_guardrail_that_should_be_cancelled(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        nonlocal slow_guardrail_executed, slow_guardrail_cancelled
+        timestamps["slow_start"] = time.time()
+        try:
+            await asyncio.sleep(0.3)
+            slow_guardrail_executed = True
+            timestamps["slow_end"] = time.time()
+            return GuardrailFunctionOutput(
+                output_info="slow_completed",
+                tripwire_triggered=False,
+            )
+        except asyncio.CancelledError:
+            slow_guardrail_cancelled = True
+            timestamps["slow_cancelled"] = time.time()
+            raise
+
+    model = FakeModel()
+    agent = Agent(
+        name="test_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[fast_guardrail_that_triggers, slow_guardrail_that_should_be_cancelled],
+        model=model,
+    )
+    model.set_next_output([get_text_message("hello")])
+
+    result = Runner.run_streamed(agent, "test input")
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        async for _event in result.stream_events():
+            pass
+
+    # Verify the fast guardrail executed
+    assert fast_guardrail_executed is True, "Fast guardrail should have executed"
+
+    # Verify the slow guardrail was cancelled, not completed
+    assert slow_guardrail_cancelled is True, "Slow guardrail should have been cancelled"
+    assert slow_guardrail_executed is False, "Slow guardrail should NOT have completed execution"
+
+    # Verify timing: cancellation happened shortly after fast guardrail triggered
+    assert "fast_end" in timestamps
+    assert "slow_cancelled" in timestamps
+    cancellation_delay = timestamps["slow_cancelled"] - timestamps["fast_end"]
+    assert cancellation_delay >= 0, (
+        f"Slow guardrail should be cancelled after fast one completes, "
+        f"but was {cancellation_delay:.2f}s"
+    )
+    assert cancellation_delay < 0.2, (
+        f"Cancellation should happen before the slow guardrail completes, "
+        f"but took {cancellation_delay:.2f}s"
+    )
+
+    # Verify agent never started
+    assert model.first_turn_args is None, (
+        "Model should not have been called when guardrail triggered"
+    )
