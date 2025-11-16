@@ -1,0 +1,10 @@
+# Core dependencies for P&ID to DEXPI converter
+ezdxf>=1.1.0
+networkx>=3.2
+lxml>=4.9.0
+
+# Development dependencies
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.0.0
+mypy>=1.5.0
