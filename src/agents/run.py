@@ -1406,15 +1406,19 @@ class AgentRunner:
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
-            # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(
-                starting_input, session, run_config.session_input_callback
-            )
+            # Prepare input with session if enabled (skip if resuming from state)
+            if run_state is None:
+                prepared_input = await AgentRunner._prepare_input_with_session(
+                    starting_input, session, run_config.session_input_callback
+                )
 
-            # Update the streamed result with the prepared input
-            streamed_result.input = prepared_input
+                # Update the streamed result with the prepared input
+                streamed_result.input = prepared_input
 
-            await AgentRunner._save_result_to_session(session, starting_input, [])
+                await AgentRunner._save_result_to_session(session, starting_input, [])
+            else:
+                # When resuming, starting_input is already prepared from RunState
+                prepared_input = starting_input
 
             # If resuming from an interrupted state, execute approved tools first
             if run_state is not None and run_state._current_step is not None:
