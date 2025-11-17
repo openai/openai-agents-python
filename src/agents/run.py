@@ -366,7 +366,9 @@ class _ServerConversationTracker:
             input_items.append(item.to_input_item())
             self.sent_items.add(raw_item_id)
 
-        return input_items
+        # Normalize items to remove top-level providerData before returning
+        # The API doesn't accept providerData at the top level of input items
+        return AgentRunner._normalize_input_items(input_items)
 
 
 # Type alias for the optional input filter callback
@@ -744,17 +746,18 @@ class AgentRunner:
         # Check if we're resuming from a RunState
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = None
-        prepared_input: str | list[TResponseInputItem]
 
         if is_resumed_state:
             # Resuming from a saved state
             run_state = cast(RunState[TContext], input)
             original_user_input = run_state._original_input
-
-            if isinstance(run_state._original_input, list):
-                prepared_input = self._merge_provider_data_in_items(run_state._original_input)
+            # Normalize items to remove top-level providerData (API doesn't accept it there)
+            if isinstance(original_user_input, list):
+                prepared_input: str | list[TResponseInputItem] = (
+                    AgentRunner._normalize_input_items(original_user_input)
+                )
             else:
-                prepared_input = run_state._original_input
+                prepared_input = original_user_input
 
             # Override context with the state's context if not provided
             if context is None and run_state._context is not None:
@@ -800,7 +803,15 @@ class AgentRunner:
             if is_resumed_state and run_state is not None:
                 # Restore state from RunState
                 current_turn = run_state._current_turn
-                original_input = run_state._original_input
+                # Normalize original_input to remove top-level providerData
+                # (API doesn't accept it there)
+                raw_original_input = run_state._original_input
+                if isinstance(raw_original_input, list):
+                    original_input: str | list[TResponseInputItem] = (
+                        AgentRunner._normalize_input_items(raw_original_input)
+                    )
+                else:
+                    original_input = raw_original_input
                 generated_items = run_state._generated_items
                 model_responses = run_state._model_responses
                 # Cast to the correct type since we know this is TContext
@@ -840,11 +851,37 @@ class AgentRunner:
                         run_config=run_config,
                         hooks=hooks,
                     )
-
-                    # Save new items (counter tracks what's already saved)
-                    if session is not None:
-                        await self._save_result_to_session(session, [], generated_items, run_state)
-
+                    # Save tool outputs to session immediately after approval
+                    # This ensures incomplete function calls in the session are completed
+                    if session is not None and generated_items:
+                        # Save tool_call_output_item items (the outputs)
+                        tool_output_items: list[RunItem] = [
+                            item for item in generated_items
+                            if item.type == "tool_call_output_item"
+                        ]
+                        # Also find and save the corresponding function_call items
+                        # (they might not be in session if the run was interrupted before saving)
+                        output_call_ids = {
+                            item.raw_item.get("call_id")
+                            if isinstance(item.raw_item, dict)
+                            else getattr(item.raw_item, "call_id", None)
+                            for item in tool_output_items
+                        }
+                        tool_call_items: list[RunItem] = [
+                            item
+                            for item in generated_items
+                            if item.type == "tool_call_item"
+                            and (
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                            )
+                            in output_call_ids
+                        ]
+                        # Save both function_call and function_call_output together
+                        items_to_save = tool_call_items + tool_output_items
+                        if items_to_save:
+                            await self._save_result_to_session(session, [], items_to_save)
                     # Clear the current step since we've handled it
                     run_state._current_step = None
 
@@ -876,9 +913,6 @@ class AgentRunner:
                         current_span.span_data.tools = [t.name for t in all_tools]
 
                     current_turn += 1
-                    if run_state is not None:
-                        run_state._current_turn_persisted_item_count = 0
-
                     if current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
@@ -988,13 +1022,34 @@ class AgentRunner:
                                 context_wrapper=context_wrapper,
                                 interruptions=[],
                             )
-                            if not any(
-                                guardrail_result.output.tripwire_triggered
-                                for guardrail_result in input_guardrail_results
-                            ):
-                                await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items, run_state
-                                )
+                            # Save items from this final step
+                            # (original_user_input was already saved at the start,
+                            # and items from previous turns were saved incrementally)
+                            # We also need to ensure any function_call items that correspond to
+                            # function_call_output items in new_step_items are included
+                            items_to_save = list(turn_result.new_step_items)
+                            # Find any function_call_output items and ensure their function_calls
+                            # are included if they're in generated_items but not in new_step_items
+                            output_call_ids = {
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                                for item in turn_result.new_step_items
+                                if item.type == "tool_call_output_item"
+                            }
+                            for item in generated_items:
+                                if item.type == "tool_call_item":
+                                    call_id = (
+                                        item.raw_item.get("call_id")
+                                        if isinstance(item.raw_item, dict)
+                                        else getattr(item.raw_item, "call_id", None)
+                                    )
+                                    if call_id in output_call_ids and item not in items_to_save:
+                                        items_to_save.append(item)
+                            
+                            # Don't save original_user_input again - it was already saved at the start
+                            await self._save_result_to_session(session, [], items_to_save, run_state)
+
                             return result
                         elif isinstance(turn_result.next_step, NextStepInterruption):
                             # Tool approval is needed - return a result with interruptions
@@ -1188,14 +1243,13 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
-
-            if isinstance(run_state._original_input, list):
-                input_for_result = AgentRunner._merge_provider_data_in_items(
-                    run_state._original_input
-                )
+            # Normalize input_for_result to remove top-level providerData
+            # (API doesn't accept it there)
+            raw_input_for_result = run_state._original_input
+            if isinstance(raw_input_for_result, list):
+                input_for_result = AgentRunner._normalize_input_items(raw_input_for_result)
             else:
-                input_for_result = run_state._original_input
-
+                input_for_result = raw_input_for_result
             # Use context from RunState if not provided
             if context is None and run_state._context is not None:
                 context = run_state._context.context
@@ -1401,19 +1455,32 @@ class AgentRunner:
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
-            # Prepare input with session if enabled (skip if resuming from state)
-            if run_state is None:
+            # Prepare input with session if enabled
+            # When resuming from a RunState, skip _prepare_input_with_session because
+            # the state's _original_input already contains the full conversation history.
+            # Calling _prepare_input_with_session would merge session history with the
+            # state's input, causing duplicate items.
+            if run_state is not None:
+                # Resuming from state - normalize items to remove top-level providerData
+                if isinstance(starting_input, list):
+                    prepared_input: str | list[TResponseInputItem] = (
+                        AgentRunner._normalize_input_items(starting_input)
+                    )
+                else:
+                    prepared_input = starting_input
+            else:
+                # Fresh run - prepare input with session history
                 prepared_input = await AgentRunner._prepare_input_with_session(
                     starting_input, session, run_config.session_input_callback
                 )
 
-                # Update the streamed result with the prepared input
-                streamed_result.input = prepared_input
+            # Update the streamed result with the prepared input
+            streamed_result.input = prepared_input
 
+            # Save only the new user input to the session, not the combined history
+            # Skip saving if resuming from state - input is already in session
+            if run_state is None:
                 await AgentRunner._save_result_to_session(session, starting_input, [])
-            else:
-                # When resuming, starting_input is already prepared from RunState
-                prepared_input = starting_input
 
             # If resuming from an interrupted state, execute approved tools first
             if run_state is not None and run_state._current_step is not None:
@@ -1427,13 +1494,6 @@ class AgentRunner:
                         run_config=run_config,
                         hooks=hooks,
                     )
-
-                    # Save new items (counter tracks what's already saved)
-                    if session is not None:
-                        await cls._save_result_to_session(
-                            session, [], streamed_result.new_items, run_state
-                        )
-
                     # Clear the current step since we've handled it
                     run_state._current_step = None
 
@@ -1474,8 +1534,6 @@ class AgentRunner:
                     current_span.span_data.tools = tool_names
                 current_turn += 1
                 streamed_result.current_turn = current_turn
-                if run_state is not None:
-                    run_state._current_turn_persisted_item_count = 0
 
                 if current_turn > max_turns:
                     _error_tracing.attach_error_to_span(
@@ -1605,7 +1663,7 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items, run_state
+                                    session, [], turn_result.new_step_items
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1624,7 +1682,7 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items, run_state
+                                    session, [], turn_result.new_step_items
                                 )
 
                         # Check for soft cancel after turn completion
@@ -1749,8 +1807,6 @@ class AgentRunner:
                 # Include all other items
                 input_item = item.to_input_item()
                 input.append(input_item)
-
-        input = cls._merge_provider_data_in_items(input)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -2087,6 +2143,7 @@ class AgentRunner:
             )
         else:
             # Filter out tool_approval_item items and include all other items
+            # Combine originalInput and generatedItems
             input = ItemHelpers.input_to_new_input_list(original_input)
             for generated_item in generated_items:
                 if generated_item.type == "tool_approval_item":
@@ -2096,8 +2153,6 @@ class AgentRunner:
                 # Include all other items
                 input_item = generated_item.to_input_item()
                 input.append(input_item)
-
-        input = cls._merge_provider_data_in_items(input)
 
         new_response = await cls._get_new_response(
             agent,
@@ -2436,29 +2491,34 @@ class AgentRunner:
 
         return run_config.model_provider.get_model(agent.model)
 
-    @classmethod
-    def _merge_provider_data_in_items(
-        cls, items: list[TResponseInputItem]
-    ) -> list[TResponseInputItem]:
-        """Remove providerData fields from items."""
-        result = []
+    @staticmethod
+    def _normalize_input_items(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        """Normalize input items by removing top-level providerData/provider_data.
+        
+        The OpenAI API doesn't accept providerData at the top level of input items.
+        providerData should only be in content where it belongs. This function removes
+        top-level providerData while preserving it in content.
+        
+        Args:
+            items: List of input items to normalize
+            
+        Returns:
+            Normalized list of input items
+        """
+        normalized: list[TResponseInputItem] = []
         for item in items:
             if isinstance(item, dict):
-                merged_item = dict(item)
-                # Pop both possible keys (providerData and provider_data)
-                provider_data = merged_item.pop("providerData", None)
-                if provider_data is None:
-                    provider_data = merged_item.pop("provider_data", None)
-                # Merge contents if providerData exists and is a dict
-                if isinstance(provider_data, dict):
-                    # Merge provider_data contents, with existing fields taking precedence
-                    for key, value in provider_data.items():
-                        if key not in merged_item:
-                            merged_item[key] = value
-                result.append(cast(TResponseInputItem, merged_item))
+                # Create a copy to avoid modifying the original
+                normalized_item = dict(item)
+                # Remove top-level providerData/provider_data - these should only be in content
+                # The API doesn't accept providerData at the top level of input items
+                normalized_item.pop("providerData", None)
+                normalized_item.pop("provider_data", None)
+                normalized.append(cast(TResponseInputItem, normalized_item))
             else:
-                result.append(item)
-        return result
+                # For non-dict items, keep as-is (they should already be in correct format)
+                normalized.append(item)
+        return normalized
 
     @classmethod
     async def _prepare_input_with_session(
@@ -2483,25 +2543,46 @@ class AgentRunner:
 
         # Get previous conversation history
         history = await session.get_items()
-        history = cls._merge_provider_data_in_items(history)
 
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
         if session_input_callback is None:
-            return history + new_input_list
+            merged = history + new_input_list
         elif callable(session_input_callback):
             res = session_input_callback(history, new_input_list)
             if inspect.isawaitable(res):
-                res = await res
-            if isinstance(res, list):
-                res = cls._merge_provider_data_in_items(res)
-            return res
+                merged = await res
+            else:
+                merged = res
         else:
             raise UserError(
                 f"Invalid `session_input_callback` value: {session_input_callback}. "
                 "Choose between `None` or a custom callable function."
             )
+        
+        # Normalize items to remove top-level providerData and deduplicate by ID
+        normalized = cls._normalize_input_items(merged)
+        
+        # Deduplicate items by ID to prevent sending duplicate items to the API
+        # This can happen when resuming from state and items are already in the session
+        seen_ids: set[str] = set()
+        deduplicated: list[TResponseInputItem] = []
+        for item in normalized:
+            # Extract ID from item
+            item_id: str | None = None
+            if isinstance(item, dict):
+                item_id = cast(str | None, item.get("id"))
+            elif hasattr(item, "id"):
+                item_id = cast(str | None, getattr(item, "id", None))
+            
+            # Only add items we haven't seen before (or items without IDs)
+            if item_id is None or item_id not in seen_ids:
+                deduplicated.append(item)
+                if item_id:
+                    seen_ids.add(item_id)
+        
+        return deduplicated
 
     @classmethod
     async def _save_result_to_session(
@@ -2509,14 +2590,9 @@ class AgentRunner:
         session: Session | None,
         original_input: str | list[TResponseInputItem],
         new_items: list[RunItem],
-        run_state: RunState[Any] | None = None,
     ) -> None:
         """
-        Save the conversation turn to session with incremental tracking.
-
-        Uses run_state._current_turn_persisted_item_count to track which items
-        have already been persisted, allowing partial saves within a turn.
-
+        Save the conversation turn to session.
         It does not account for any filtering or modification performed by
         `RunConfig.session_input_callback`.
         """
@@ -2526,33 +2602,13 @@ class AgentRunner:
         # Convert original input to list format if needed
         input_list = ItemHelpers.input_to_new_input_list(original_input)
 
-        # Track which items have already been persisted this turn
-        already_persisted = 0
-        if run_state is not None:
-            already_persisted = run_state._current_turn_persisted_item_count
-
-        # Only save items that haven't been persisted yet
-        new_run_items = new_items[already_persisted:]
-
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in new_run_items]
+        new_items_as_input = [item.to_input_item() for item in new_items]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
 
-        if len(items_to_save) == 0:
-            # Update counter even if nothing to save
-            if run_state is not None:
-                run_state._current_turn_persisted_item_count = already_persisted + len(
-                    new_run_items
-                )
-            return
-
         await session.add_items(items_to_save)
-
-        # Update the counter after successful save
-        if run_state is not None:
-            run_state._current_turn_persisted_item_count = already_persisted + len(new_run_items)
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(
