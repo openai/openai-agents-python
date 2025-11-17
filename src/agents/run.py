@@ -831,9 +831,6 @@ class AgentRunner:
             # If resuming from an interrupted state, execute approved tools first
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
-                    # Track items before executing approved tools
-                    items_before_execution = len(generated_items)
-
                     # We're resuming from an interruption - execute approved tools
                     await self._execute_approved_tools(
                         agent=current_agent,
@@ -844,14 +841,9 @@ class AgentRunner:
                         hooks=hooks,
                     )
 
-                    # Save the newly executed tool outputs to the session
-                    new_tool_outputs: list[RunItem] = [
-                        item
-                        for item in generated_items[items_before_execution:]
-                        if item.type == "tool_call_output_item"
-                    ]
-                    if new_tool_outputs and session is not None:
-                        await self._save_result_to_session(session, [], new_tool_outputs)
+                    # Save new items (counter tracks what's already saved)
+                    if session is not None:
+                        await self._save_result_to_session(session, [], generated_items, run_state)
 
                     # Clear the current step since we've handled it
                     run_state._current_step = None
@@ -884,6 +876,9 @@ class AgentRunner:
                         current_span.span_data.tools = [t.name for t in all_tools]
 
                     current_turn += 1
+                    if run_state is not None:
+                        run_state._current_turn_persisted_item_count = 0
+
                     if current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
@@ -998,7 +993,7 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session, [], turn_result.new_step_items, run_state
                                 )
                             return result
                         elif isinstance(turn_result.next_step, NextStepInterruption):
@@ -1038,7 +1033,7 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session, [], turn_result.new_step_items, run_state
                                 )
                         else:
                             raise AgentsException(
@@ -1423,9 +1418,6 @@ class AgentRunner:
             # If resuming from an interrupted state, execute approved tools first
             if run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
-                    # Track items before executing approved tools
-                    items_before_execution = len(streamed_result.new_items)
-
                     # We're resuming from an interruption - execute approved tools
                     await cls._execute_approved_tools_static(
                         agent=current_agent,
@@ -1436,14 +1428,11 @@ class AgentRunner:
                         hooks=hooks,
                     )
 
-                    # Save the newly executed tool outputs to the session
-                    new_tool_outputs: list[RunItem] = [
-                        item
-                        for item in streamed_result.new_items[items_before_execution:]
-                        if item.type == "tool_call_output_item"
-                    ]
-                    if new_tool_outputs and session is not None:
-                        await cls._save_result_to_session(session, [], new_tool_outputs)
+                    # Save new items (counter tracks what's already saved)
+                    if session is not None:
+                        await cls._save_result_to_session(
+                            session, [], streamed_result.new_items, run_state
+                        )
 
                     # Clear the current step since we've handled it
                     run_state._current_step = None
@@ -1485,6 +1474,8 @@ class AgentRunner:
                     current_span.span_data.tools = tool_names
                 current_turn += 1
                 streamed_result.current_turn = current_turn
+                if run_state is not None:
+                    run_state._current_turn_persisted_item_count = 0
 
                 if current_turn > max_turns:
                     _error_tracing.attach_error_to_span(
@@ -1614,7 +1605,7 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session, [], turn_result.new_step_items, run_state
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1633,7 +1624,7 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session, [], turn_result.new_step_items, run_state
                                 )
 
                         # Check for soft cancel after turn completion
@@ -2518,9 +2509,14 @@ class AgentRunner:
         session: Session | None,
         original_input: str | list[TResponseInputItem],
         new_items: list[RunItem],
+        run_state: RunState[Any] | None = None,
     ) -> None:
         """
-        Save the conversation turn to session.
+        Save the conversation turn to session with incremental tracking.
+
+        Uses run_state._current_turn_persisted_item_count to track which items
+        have already been persisted, allowing partial saves within a turn.
+
         It does not account for any filtering or modification performed by
         `RunConfig.session_input_callback`.
         """
@@ -2530,12 +2526,33 @@ class AgentRunner:
         # Convert original input to list format if needed
         input_list = ItemHelpers.input_to_new_input_list(original_input)
 
+        # Track which items have already been persisted this turn
+        already_persisted = 0
+        if run_state is not None:
+            already_persisted = run_state._current_turn_persisted_item_count
+
+        # Only save items that haven't been persisted yet
+        new_run_items = new_items[already_persisted:]
+
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in new_items]
+        new_items_as_input = [item.to_input_item() for item in new_run_items]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
+
+        if len(items_to_save) == 0:
+            # Update counter even if nothing to save
+            if run_state is not None:
+                run_state._current_turn_persisted_item_count = already_persisted + len(
+                    new_run_items
+                )
+            return
+
         await session.add_items(items_to_save)
+
+        # Update the counter after successful save
+        if run_state is not None:
+            run_state._current_turn_persisted_item_count = already_persisted + len(new_run_items)
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(
