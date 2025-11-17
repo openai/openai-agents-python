@@ -48,6 +48,14 @@ class RunState(Generic[TContext, TAgent]):
     _current_turn: int = 0
     """Current turn number in the conversation."""
 
+    _current_turn_persisted_item_count: int = 0
+    """Tracks how many generated run items from this turn were already persisted to session.
+
+    When saving to session, we slice off only new entries. When a turn is interrupted
+    (e.g., awaiting tool approval) and later resumed, we rewind this counter before
+    continuing so pending tool outputs still get stored.
+    """
+
     _current_agent: TAgent | None = None
     """The agent currently handling the conversation."""
 
@@ -337,6 +345,7 @@ class RunState(Generic[TContext, TAgent]):
             if self._last_processed_response
             else None
         )
+        result["currentTurnPersistedItemCount"] = self._current_turn_persisted_item_count
         result["trace"] = None
 
         return result
@@ -571,6 +580,9 @@ class RunState(Generic[TContext, TAgent]):
         )
 
         state._current_turn = state_json["currentTurn"]
+        state._current_turn_persisted_item_count = state_json.get(
+            "currentTurnPersistedItemCount", 0
+        )
 
         # Reconstruct model responses
         state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
@@ -676,6 +688,9 @@ class RunState(Generic[TContext, TAgent]):
         )
 
         state._current_turn = state_json["currentTurn"]
+        state._current_turn_persisted_item_count = state_json.get(
+            "currentTurnPersistedItemCount", 0
+        )
 
         # Reconstruct model responses
         state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
