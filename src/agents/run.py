@@ -166,7 +166,13 @@ class _ServerConversationTracker:
 
         # On first call (when there are no generated items yet), include the original input
         if not generated_items:
-            input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
+            # Normalize original_input items to ensure field names are in snake_case
+            # (items from RunState deserialization may have camelCase)
+            raw_input_list = ItemHelpers.input_to_new_input_list(original_input)
+            # Filter out function_call items that don't have corresponding function_call_output
+            # (API requires every function_call to have a function_call_output)
+            filtered_input_list = AgentRunner._filter_incomplete_function_calls(raw_input_list)
+            input_items.extend(AgentRunner._normalize_input_items(filtered_input_list))
 
         # First, collect call_ids from tool_call_output_item items
         # (completed tool calls with outputs) and build a map of
@@ -753,8 +759,8 @@ class AgentRunner:
             original_user_input = run_state._original_input
             # Normalize items to remove top-level providerData (API doesn't accept it there)
             if isinstance(original_user_input, list):
-                prepared_input: str | list[TResponseInputItem] = (
-                    AgentRunner._normalize_input_items(original_user_input)
+                prepared_input: str | list[TResponseInputItem] = AgentRunner._normalize_input_items(
+                    original_user_input
                 )
             else:
                 prepared_input = original_user_input
@@ -856,8 +862,7 @@ class AgentRunner:
                     if session is not None and generated_items:
                         # Save tool_call_output_item items (the outputs)
                         tool_output_items: list[RunItem] = [
-                            item for item in generated_items
-                            if item.type == "tool_call_output_item"
+                            item for item in generated_items if item.type == "tool_call_output_item"
                         ]
                         # Also find and save the corresponding function_call items
                         # (they might not be in session if the run was interrupted before saving)
@@ -1462,9 +1467,12 @@ class AgentRunner:
             # state's input, causing duplicate items.
             if run_state is not None:
                 # Resuming from state - normalize items to remove top-level providerData
+                # and filter incomplete function_call pairs
                 if isinstance(starting_input, list):
+                    # Filter incomplete function_call pairs before normalizing
+                    filtered = AgentRunner._filter_incomplete_function_calls(starting_input)
                     prepared_input: str | list[TResponseInputItem] = (
-                        AgentRunner._normalize_input_items(starting_input)
+                        AgentRunner._normalize_input_items(filtered)
                     )
                 else:
                     prepared_input = starting_input
@@ -2492,19 +2500,81 @@ class AgentRunner:
         return run_config.model_provider.get_model(agent.model)
 
     @staticmethod
+    def _filter_incomplete_function_calls(
+        items: list[TResponseInputItem],
+    ) -> list[TResponseInputItem]:
+        """Filter out function_call items that don't have corresponding function_call_output.
+
+        The OpenAI API requires every function_call in an assistant message to have a
+        corresponding function_call_output (tool message). This function ensures only
+        complete pairs are included to prevent API errors.
+
+        IMPORTANT: This only filters incomplete function_call items. All other items
+        (messages, complete function_call pairs, etc.) are preserved to maintain
+        conversation history integrity.
+
+        Args:
+            items: List of input items to filter
+
+        Returns:
+            Filtered list with only complete function_call pairs. All non-function_call
+            items and complete function_call pairs are preserved.
+        """
+        # First pass: collect call_ids from function_call_output/function_call_result items
+        completed_call_ids: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                # Handle both API format (function_call_output) and
+                # protocol format (function_call_result)
+                if item_type in ("function_call_output", "function_call_result"):
+                    call_id = item.get("call_id") or item.get("callId")
+                    if call_id and isinstance(call_id, str):
+                        completed_call_ids.add(call_id)
+
+        # Second pass: only include function_call items that have corresponding outputs
+        filtered: list[TResponseInputItem] = []
+        for item in items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    call_id = item.get("call_id") or item.get("callId")
+                    # Only include if there's a corresponding
+                    # function_call_output/function_call_result
+                    if call_id and call_id in completed_call_ids:
+                        filtered.append(item)
+                else:
+                    # Include all non-function_call items
+                    filtered.append(item)
+            else:
+                # Include non-dict items as-is
+                filtered.append(item)
+
+        return filtered
+
+    @staticmethod
     def _normalize_input_items(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
-        """Normalize input items by removing top-level providerData/provider_data.
-        
+        """Normalize input items by removing top-level providerData/provider_data
+        and normalizing field names (callId -> call_id).
+
         The OpenAI API doesn't accept providerData at the top level of input items.
         providerData should only be in content where it belongs. This function removes
         top-level providerData while preserving it in content.
-        
+
+        Also normalizes field names from camelCase (callId) to snake_case (call_id)
+        to match API expectations.
+
+        Normalizes item types: converts 'function_call_result' to 'function_call_output'
+        to match API expectations.
+
         Args:
             items: List of input items to normalize
-            
+
         Returns:
             Normalized list of input items
         """
+        from .run_state import _normalize_field_names
+
         normalized: list[TResponseInputItem] = []
         for item in items:
             if isinstance(item, dict):
@@ -2514,6 +2584,18 @@ class AgentRunner:
                 # The API doesn't accept providerData at the top level of input items
                 normalized_item.pop("providerData", None)
                 normalized_item.pop("provider_data", None)
+                # Normalize item type: API expects 'function_call_output',
+                # not 'function_call_result'
+                item_type = normalized_item.get("type")
+                if item_type == "function_call_result":
+                    normalized_item["type"] = "function_call_output"
+                    item_type = "function_call_output"
+                # Remove invalid fields based on item type
+                # function_call_output items should not have 'name' field
+                if item_type == "function_call_output":
+                    normalized_item.pop("name", None)
+                # Normalize field names (callId -> call_id, responseId -> response_id)
+                normalized_item = _normalize_field_names(normalized_item)
                 normalized.append(cast(TResponseInputItem, normalized_item))
             else:
                 # For non-dict items, keep as-is (they should already be in correct format)
@@ -2560,10 +2642,14 @@ class AgentRunner:
                 f"Invalid `session_input_callback` value: {session_input_callback}. "
                 "Choose between `None` or a custom callable function."
             )
-        
+
+        # Filter incomplete function_call pairs before normalizing
+        # (API requires every function_call to have a function_call_output)
+        filtered = cls._filter_incomplete_function_calls(merged)
+
         # Normalize items to remove top-level providerData and deduplicate by ID
-        normalized = cls._normalize_input_items(merged)
-        
+        normalized = cls._normalize_input_items(filtered)
+
         # Deduplicate items by ID to prevent sending duplicate items to the API
         # This can happen when resuming from state and items are already in the session
         seen_ids: set[str] = set()
@@ -2575,13 +2661,13 @@ class AgentRunner:
                 item_id = cast(str | None, item.get("id"))
             elif hasattr(item, "id"):
                 item_id = cast(str | None, getattr(item, "id", None))
-            
+
             # Only add items we haven't seen before (or items without IDs)
             if item_id is None or item_id not in seen_ids:
                 deduplicated.append(item)
                 if item_id:
                     seen_ids.add(item_id)
-        
+
         return deduplicated
 
     @classmethod

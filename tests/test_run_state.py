@@ -507,6 +507,50 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[1], ToolCallItem)
         assert isinstance(new_state._generated_items[2], ToolCallOutputItem)
 
+    async def test_serializes_original_input_with_function_call_output(self):
+        """Test that originalInput with function_call_output items is converted to protocol."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        # Create originalInput with function_call_output (API format)
+        # This simulates items from session that are in API format
+        original_input = [
+            {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "test_tool",
+                "arguments": '{"arg": "value"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "result",
+            },
+        ]
+
+        state = RunState(
+            context=context, original_input=original_input, starting_agent=agent, max_turns=5
+        )
+
+        # Serialize - should convert function_call_output to function_call_result
+        json_data = state.to_json()
+
+        # Verify originalInput was converted to protocol format
+        assert isinstance(json_data["originalInput"], list)
+        assert len(json_data["originalInput"]) == 2
+
+        # First item should remain function_call (with camelCase)
+        assert json_data["originalInput"][0]["type"] == "function_call"
+        assert json_data["originalInput"][0]["callId"] == "call_123"
+        assert json_data["originalInput"][0]["name"] == "test_tool"
+
+        # Second item should be converted to function_call_result (protocol format)
+        assert json_data["originalInput"][1]["type"] == "function_call_result"
+        assert json_data["originalInput"][1]["callId"] == "call_123"
+        assert json_data["originalInput"][1]["name"] == "test_tool"  # Looked up from function_call
+        assert json_data["originalInput"][1]["status"] == "completed"  # Added default
+        assert json_data["originalInput"][1]["output"] == "result"
+
     async def test_deserialization_handles_unknown_agent_gracefully(self):
         """Test that deserialization skips items with unknown agents."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
