@@ -48,14 +48,6 @@ class RunState(Generic[TContext, TAgent]):
     _current_turn: int = 0
     """Current turn number in the conversation."""
 
-    _current_turn_persisted_item_count: int = 0
-    """Tracks how many generated run items from this turn were already persisted to session.
-
-    When saving to session, we slice off only new entries. When a turn is interrupted
-    (e.g., awaiting tool approval) and later resumed, we rewind this counter before
-    continuing so pending tool outputs still get stored.
-    """
-
     _current_agent: TAgent | None = None
     """The agent currently handling the conversation."""
 
@@ -250,13 +242,63 @@ class RunState(Generic[TContext, TAgent]):
             }
             model_responses.append(response_dict)
 
+        # Normalize and camelize originalInput if it's a list of items
+        # Convert API format to protocol format to match TypeScript schema
+        # Protocol expects function_call_result (not function_call_output)
+        original_input_serialized = self._original_input
+        if isinstance(original_input_serialized, list):
+            # First pass: build a map of call_id -> function_call name
+            # to help convert function_call_output to function_call_result
+            call_id_to_name: dict[str, str] = {}
+            for item in original_input_serialized:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    call_id = item.get("call_id") or item.get("callId")
+                    name = item.get("name")
+                    if item_type == "function_call" and call_id and name:
+                        call_id_to_name[call_id] = name
+
+            normalized_items = []
+            for item in original_input_serialized:
+                if isinstance(item, dict):
+                    # Create a copy to avoid modifying the original
+                    normalized_item = dict(item)
+                    # Remove session/conversation metadata fields that shouldn't be in originalInput
+                    # These are not part of the input protocol schema
+                    normalized_item.pop("id", None)
+                    normalized_item.pop("created_at", None)
+                    # Remove top-level providerData/provider_data (protocol allows it but
+                    # we remove it for cleaner serialization)
+                    normalized_item.pop("providerData", None)
+                    normalized_item.pop("provider_data", None)
+                    # Convert API format to protocol format
+                    # API uses function_call_output, protocol uses function_call_result
+                    item_type = normalized_item.get("type")
+                    call_id = normalized_item.get("call_id") or normalized_item.get("callId")
+                    if item_type == "function_call_output":
+                        # Convert to protocol format: function_call_result
+                        normalized_item["type"] = "function_call_result"
+                        # Protocol format requires status field (default to 'completed')
+                        if "status" not in normalized_item:
+                            normalized_item["status"] = "completed"
+                        # Protocol format requires name field
+                        # Look it up from the corresponding function_call if missing
+                        if "name" not in normalized_item and call_id:
+                            normalized_item["name"] = call_id_to_name.get(call_id, "")
+                    # Normalize field names to camelCase for JSON (call_id -> callId)
+                    normalized_item = self._camelize_field_names(normalized_item)
+                    normalized_items.append(normalized_item)
+                else:
+                    normalized_items.append(item)
+            original_input_serialized = normalized_items
+
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
             "currentTurn": self._current_turn,
             "currentAgent": {
                 "name": self._current_agent.name,
             },
-            "originalInput": self._original_input,
+            "originalInput": original_input_serialized,
             "modelResponses": model_responses,
             "context": {
                 "usage": {
@@ -345,7 +387,6 @@ class RunState(Generic[TContext, TAgent]):
             if self._last_processed_response
             else None
         )
-        result["currentTurnPersistedItemCount"] = self._current_turn_persisted_item_count
         result["trace"] = None
 
         return result
@@ -571,18 +612,29 @@ class RunState(Generic[TContext, TAgent]):
         context.usage = usage
         context._rebuild_approvals(context_data.get("approvals", {}))
 
+        # Normalize originalInput to remove providerData fields that may have been
+        # included by TypeScript serialization. These fields are metadata and should
+        # not be sent to the API.
+        original_input_raw = state_json["originalInput"]
+        if isinstance(original_input_raw, list):
+            # Normalize each item in the list to remove providerData fields
+            normalized_original_input = [
+                _normalize_field_names(item) if isinstance(item, dict) else item
+                for item in original_input_raw
+            ]
+        else:
+            # If it's a string, use it as-is
+            normalized_original_input = original_input_raw
+
         # Create the RunState instance
         state = RunState(
             context=context,
-            original_input=state_json["originalInput"],
+            original_input=normalized_original_input,
             starting_agent=current_agent,
             max_turns=state_json["maxTurns"],
         )
 
         state._current_turn = state_json["currentTurn"]
-        state._current_turn_persisted_item_count = state_json.get(
-            "currentTurnPersistedItemCount", 0
-        )
 
         # Reconstruct model responses
         state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
@@ -679,18 +731,29 @@ class RunState(Generic[TContext, TAgent]):
         context.usage = usage
         context._rebuild_approvals(context_data.get("approvals", {}))
 
+        # Normalize originalInput to remove providerData fields that may have been
+        # included by TypeScript serialization. These fields are metadata and should
+        # not be sent to the API.
+        original_input_raw = state_json["originalInput"]
+        if isinstance(original_input_raw, list):
+            # Normalize each item in the list to remove providerData fields
+            normalized_original_input = [
+                _normalize_field_names(item) if isinstance(item, dict) else item
+                for item in original_input_raw
+            ]
+        else:
+            # If it's a string, use it as-is
+            normalized_original_input = original_input_raw
+
         # Create the RunState instance
         state = RunState(
             context=context,
-            original_input=state_json["originalInput"],
+            original_input=normalized_original_input,
             starting_agent=current_agent,
             max_turns=state_json["maxTurns"],
         )
 
         state._current_turn = state_json["currentTurn"]
-        state._current_turn_persisted_item_count = state_json.get(
-            "currentTurnPersistedItemCount", 0
-        )
 
         # Reconstruct model responses
         state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
