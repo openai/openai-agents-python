@@ -744,12 +744,17 @@ class AgentRunner:
         # Check if we're resuming from a RunState
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = None
+        prepared_input: str | list[TResponseInputItem]
 
         if is_resumed_state:
             # Resuming from a saved state
             run_state = cast(RunState[TContext], input)
             original_user_input = run_state._original_input
-            prepared_input = run_state._original_input
+
+            if isinstance(run_state._original_input, list):
+                prepared_input = self._merge_provider_data_in_items(run_state._original_input)
+            else:
+                prepared_input = run_state._original_input
 
             # Override context with the state's context if not provided
             if context is None and run_state._context is not None:
@@ -826,6 +831,9 @@ class AgentRunner:
             # If resuming from an interrupted state, execute approved tools first
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
+                    # Track items before executing approved tools
+                    items_before_execution = len(generated_items)
+
                     # We're resuming from an interruption - execute approved tools
                     await self._execute_approved_tools(
                         agent=current_agent,
@@ -835,6 +843,16 @@ class AgentRunner:
                         run_config=run_config,
                         hooks=hooks,
                     )
+
+                    # Save the newly executed tool outputs to the session
+                    new_tool_outputs: list[RunItem] = [
+                        item
+                        for item in generated_items[items_before_execution:]
+                        if item.type == "tool_call_output_item"
+                    ]
+                    if new_tool_outputs and session is not None:
+                        await self._save_result_to_session(session, [], new_tool_outputs)
+
                     # Clear the current step since we've handled it
                     run_state._current_step = None
 
@@ -1175,7 +1193,14 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
-            input_for_result = run_state._original_input
+
+            if isinstance(run_state._original_input, list):
+                input_for_result = AgentRunner._merge_provider_data_in_items(
+                    run_state._original_input
+                )
+            else:
+                input_for_result = run_state._original_input
+
             # Use context from RunState if not provided
             if context is None and run_state._context is not None:
                 context = run_state._context.context
@@ -1394,6 +1419,9 @@ class AgentRunner:
             # If resuming from an interrupted state, execute approved tools first
             if run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
+                    # Track items before executing approved tools
+                    items_before_execution = len(streamed_result.new_items)
+
                     # We're resuming from an interruption - execute approved tools
                     await cls._execute_approved_tools_static(
                         agent=current_agent,
@@ -1403,6 +1431,16 @@ class AgentRunner:
                         run_config=run_config,
                         hooks=hooks,
                     )
+
+                    # Save the newly executed tool outputs to the session
+                    new_tool_outputs: list[RunItem] = [
+                        item
+                        for item in streamed_result.new_items[items_before_execution:]
+                        if item.type == "tool_call_output_item"
+                    ]
+                    if new_tool_outputs and session is not None:
+                        await cls._save_result_to_session(session, [], new_tool_outputs)
+
                     # Clear the current step since we've handled it
                     run_state._current_step = None
 
@@ -1716,6 +1754,8 @@ class AgentRunner:
                 # Include all other items
                 input_item = item.to_input_item()
                 input.append(input_item)
+
+        input = cls._merge_provider_data_in_items(input)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -2062,6 +2102,8 @@ class AgentRunner:
                 input_item = generated_item.to_input_item()
                 input.append(input_item)
 
+        input = cls._merge_provider_data_in_items(input)
+
         new_response = await cls._get_new_response(
             agent,
             system_prompt,
@@ -2400,6 +2442,30 @@ class AgentRunner:
         return run_config.model_provider.get_model(agent.model)
 
     @classmethod
+    def _merge_provider_data_in_items(
+        cls, items: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        """Remove providerData fields from items."""
+        result = []
+        for item in items:
+            if isinstance(item, dict):
+                merged_item = dict(item)
+                # Pop both possible keys (providerData and provider_data)
+                provider_data = merged_item.pop("providerData", None)
+                if provider_data is None:
+                    provider_data = merged_item.pop("provider_data", None)
+                # Merge contents if providerData exists and is a dict
+                if isinstance(provider_data, dict):
+                    # Merge provider_data contents, with existing fields taking precedence
+                    for key, value in provider_data.items():
+                        if key not in merged_item:
+                            merged_item[key] = value
+                result.append(cast(TResponseInputItem, merged_item))
+            else:
+                result.append(item)
+        return result
+
+    @classmethod
     async def _prepare_input_with_session(
         cls,
         input: str | list[TResponseInputItem],
@@ -2422,6 +2488,7 @@ class AgentRunner:
 
         # Get previous conversation history
         history = await session.get_items()
+        history = cls._merge_provider_data_in_items(history)
 
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
@@ -2431,7 +2498,9 @@ class AgentRunner:
         elif callable(session_input_callback):
             res = session_input_callback(history, new_input_list)
             if inspect.isawaitable(res):
-                return await res
+                res = await res
+            if isinstance(res, list):
+                res = cls._merge_provider_data_in_items(res)
             return res
         else:
             raise UserError(
