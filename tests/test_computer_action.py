@@ -4,7 +4,7 @@ These confirm that the correct computer action method is invoked for each action
 that screenshots are taken and wrapped appropriately, and that the execute function invokes
 hooks and returns the expected ToolCallOutputItem."""
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses.response_computer_tool_call import (
@@ -304,9 +304,8 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert output_item.agent is agent
     assert isinstance(output_item, ToolCallOutputItem)
     assert output_item.output == "data:image/png;base64,xyz"
-    raw = output_item.raw_item
+    raw = cast(dict[str, Any], output_item.raw_item)
     # Raw item is a dict-like mapping with expected output fields.
-    assert isinstance(raw, dict)
     assert raw["type"] == "computer_call_output"
     assert raw["output"]["type"] == "computer_screenshot"
     assert "image_url" in raw["output"]

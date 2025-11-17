@@ -11,15 +11,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 import time
 import urllib.request
 
+import docker  # type: ignore[import-untyped]
 import pytest
+from docker.errors import DockerException  # type: ignore[import-untyped]
 
 # Skip tests if dependencies are not available
 pytest.importorskip("dapr")  # Skip tests if Dapr is not installed
 pytest.importorskip("testcontainers")  # Skip if testcontainers is not installed
+if shutil.which("docker") is None:
+    pytest.skip(
+        "Docker executable is not available; skipping Dapr integration tests",
+        allow_module_level=True,
+    )
+try:
+    client = docker.from_env()
+    client.ping()
+except DockerException:
+    pytest.skip(
+        "Docker daemon is not available; skipping Dapr integration tests", allow_module_level=True
+    )
+else:
+    client.close()
 
 from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
 from testcontainers.core.network import Network  # type: ignore[import-untyped]

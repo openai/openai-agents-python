@@ -27,6 +27,7 @@ from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import logger
 from ..model_settings import MCPToolChoice
 from ..tool import (
+    ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
     FileSearchTool,
@@ -34,6 +35,7 @@ from ..tool import (
     HostedMCPTool,
     ImageGenerationTool,
     LocalShellTool,
+    ShellTool,
     Tool,
     WebSearchTool,
 )
@@ -488,6 +490,12 @@ class Converter:
             includes = None
         elif isinstance(tool, HostedMCPTool):
             converted_tool = tool.tool_config
+            includes = None
+        elif isinstance(tool, ApplyPatchTool):
+            converted_tool = cast(ToolParam, {"type": "apply_patch"})
+            includes = None
+        elif isinstance(tool, ShellTool):
+            converted_tool = cast(ToolParam, {"type": "shell"})
             includes = None
         elif isinstance(tool, ImageGenerationTool):
             converted_tool = tool.tool_config

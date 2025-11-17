@@ -13,7 +13,9 @@ from .agent import (
     ToolsToFinalOutputResult,
 )
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
+from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -58,7 +60,12 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import AgentHooks, RunHooks
-from .memory import OpenAIConversationsSession, Session, SessionABC, SQLiteSession
+from .memory import (
+    OpenAIConversationsSession,
+    Session,
+    SessionABC,
+    SQLiteSession,
+)
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
@@ -77,6 +84,7 @@ from .stream_events import (
     StreamEvent,
 )
 from .tool import (
+    ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
     FileSearchTool,
@@ -90,6 +98,14 @@ from .tool import (
     MCPToolApprovalFunction,
     MCPToolApprovalFunctionResult,
     MCPToolApprovalRequest,
+    ShellActionRequest,
+    ShellCallData,
+    ShellCallOutcome,
+    ShellCommandOutput,
+    ShellCommandRequest,
+    ShellExecutor,
+    ShellResult,
+    ShellTool,
     Tool,
     ToolOutputFileContent,
     ToolOutputFileContentDict,
@@ -207,6 +223,7 @@ __all__ = [
     "reset_conversation_history_wrappers",
     "set_conversation_history_wrappers",
     "Runner",
+    "apply_diff",
     "run_demo_loop",
     "Model",
     "ModelProvider",
@@ -288,6 +305,18 @@ __all__ = [
     "LocalShellCommandRequest",
     "LocalShellExecutor",
     "LocalShellTool",
+    "ShellActionRequest",
+    "ShellCallData",
+    "ShellCallOutcome",
+    "ShellCommandOutput",
+    "ShellCommandRequest",
+    "ShellExecutor",
+    "ShellResult",
+    "ShellTool",
+    "ApplyPatchEditor",
+    "ApplyPatchOperation",
+    "ApplyPatchResult",
+    "ApplyPatchTool",
     "Tool",
     "WebSearchTool",
     "HostedMCPTool",

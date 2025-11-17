@@ -6,7 +6,7 @@ import inspect
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast, get_args
+from typing import Any, Callable, Generic, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
@@ -1899,7 +1899,19 @@ class AgentRunner:
 
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
-_TOOL_CALL_TYPES: tuple[type, ...] = get_args(ToolCallItemTypes)
+
+
+def _get_tool_call_types() -> tuple[type, ...]:
+    normalized_types: list[type] = []
+    for type_hint in get_args(ToolCallItemTypes):
+        origin = get_origin(type_hint)
+        candidate = origin or type_hint
+        if isinstance(candidate, type):
+            normalized_types.append(candidate)
+    return tuple(normalized_types)
+
+
+_TOOL_CALL_TYPES: tuple[type, ...] = _get_tool_call_types()
 
 
 def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
