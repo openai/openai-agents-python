@@ -4,7 +4,7 @@ search:
 ---
 # SQLAlchemy 会话
 
-`SQLAlchemySession` 使用 SQLAlchemy 提供可用于生产环境的会话实现，允许你将 SQLAlchemy 支持的任意数据库（PostgreSQL、MySQL、SQLite 等）用于会话存储。
+`SQLAlchemySession` 使用 SQLAlchemy 提供可用于生产的会话实现，使你可以使用 SQLAlchemy 支持的任意数据库（PostgreSQL、MySQL、SQLite 等）进行会话存储。
 
 ## 安装
 
@@ -42,7 +42,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 使用现有引擎
+### 使用现有的引擎
 
 适用于已有 SQLAlchemy 引擎的应用：
 

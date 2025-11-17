@@ -4,21 +4,21 @@ search:
 ---
 # 工具
 
-工具让智能体能够执行操作：例如获取数据、运行代码、调用外部 API，甚至进行计算机操作。在 Agents SDK 中有三类工具：
+工具让智能体可以执行操作：如获取数据、运行代码、调用外部 API，甚至进行计算机操作。在 Agents SDK 中有三类工具：
 
-- 托管工具：这些工具在 LLM 服务与 AI 模型并行运行。OpenAI 提供检索、网络检索和计算机操作等托管工具。
-- Function calling：它允许你将任意 Python 函数用作工具。
-- 智能体作为工具：它允许你将一个智能体用作工具，使智能体在不进行任务转移的情况下调用其他智能体。
+- 托管工具：这些在 LLM 服务端与 AI 模型一起运行。OpenAI 提供检索、网络检索和计算机操作等托管工具。
+- Function calling：这些允许你将任意 Python 函数用作工具。
+- 将智能体作为工具：这允许你将智能体作为工具使用，使智能体之间可以相互调用而无需进行任务转移。
 
 ## 托管工具
 
-使用 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 时，OpenAI 提供一些内置工具：
+在使用 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 时，OpenAI 提供一些内置工具：
 
-- [`WebSearchTool`][agents.tool.WebSearchTool] 允许智能体进行网络检索。
-- [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的 OpenAI 向量存储 中检索信息。
+- [`WebSearchTool`][agents.tool.WebSearchTool] 让智能体进行网络检索。
+- [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的 OpenAI 向量存储检索信息。
 - [`ComputerTool`][agents.tool.ComputerTool] 允许自动化计算机操作任务。
-- [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 允许 LLM 在沙箱环境中执行代码。
-- [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务 的工具暴露给模型。
+- [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 让 LLM 在沙箱环境中执行代码。
+- [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务的工具暴露给模型。
 - [`ImageGenerationTool`][agents.tool.ImageGenerationTool] 根据提示词生成图像。
 - [`LocalShellTool`][agents.tool.LocalShellTool] 在你的机器上运行 shell 命令。
 
@@ -41,14 +41,14 @@ async def main():
     print(result.final_output)
 ```
 
-## 函数工具
+## 工具调用
 
-你可以将任意 Python 函数用作工具。Agents SDK 会自动完成工具设置：
+你可以将任意 Python 函数作为工具使用。Agents SDK 会自动完成工具设置：
 
-- 工具名将是该 Python 函数的名称（或你可以自定义名称）
-- 工具描述将取自函数的 docstring（或你可以自定义描述）
-- 函数输入的模式会根据函数的参数自动创建
-- 每个输入的描述会取自函数的 docstring，除非被禁用
+- 工具名称将是该 Python 函数的名称（或你可以提供名称）
+- 工具描述将取自函数的 docstring（或你可以提供描述）
+- 函数输入的模式会根据函数参数自动创建
+- 每个输入的描述将取自函数的 docstring，除非禁用
 
 我们使用 Python 的 `inspect` 模块提取函数签名，使用 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析 docstring，并使用 `pydantic` 创建模式。
 
@@ -102,9 +102,9 @@ for tool in agent.tools:
 
 ```
 
-1. 你可以为函数参数使用任意 Python 类型，函数可以是同步或异步的。
-2. 如果存在 docstring，将用于提取工具和参数的描述。
-3. 函数可以选择性地接收 `context`（必须是第一个参数）。你还可以设置覆盖项，如工具名称、描述、docstring 风格等。
+1. 你可以在函数参数中使用任意 Python 类型，且函数可以是同步或异步。
+2. 若存在 docstring，将用于获取描述和参数描述。
+3. 函数可选接收 `context`（必须是第一个参数）。你也可以设置覆盖项，如工具名称、描述、docstring 风格等。
 4. 你可以将装饰后的函数传入工具列表。
 
 ??? note "展开以查看输出"
@@ -177,22 +177,22 @@ for tool in agent.tools:
     }
     ```
 
-### 从函数工具返回图像或文件
+### 从工具调用返回图像或文件
 
-除了返回文本输出，你还可以从函数工具返回一个或多个图像或文件。为此，你可以返回以下任意类型：
+除了返回文本输出外，你还可以将一个或多个图像或文件作为函数工具的输出。为此，你可以返回以下任一内容：
 
-- 图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或其 TypedDict 版本 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
-- 文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或其 TypedDict 版本 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
-- 文本：字符串或可转为字符串的对象，或 [`ToolOutputText`][agents.tool.ToolOutputText]（或其 TypedDict 版本 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
+- 图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或 TypedDict 版本，[`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
+- 文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或 TypedDict 版本，[`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
+- 文本：字符串或可转为字符串的对象，或 [`ToolOutputText`][agents.tool.ToolOutputText]（或 TypedDict 版本，[`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
 
 ### 自定义函数工具
 
-有时你并不想用 Python 函数作为工具。如果你愿意，可以直接创建一个 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
+有时，你可能不想用 Python 函数作为工具。如果愿意，你可以直接创建一个 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
 
 - `name`
 - `description`
-- `params_json_schema`，即参数的 JSON schema
-- `on_invoke_tool`，这是一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和作为 JSON 字符串的参数，并且必须以字符串形式返回工具输出。
+- `params_json_schema`，即参数的 JSON 模式
+- `on_invoke_tool`，一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和作为 JSON 字符串的参数，并且必须返回字符串形式的工具输出。
 
 ```python
 from typing import Any
@@ -227,16 +227,16 @@ tool = FunctionTool(
 
 ### 自动参数与 docstring 解析
 
-如前所述，我们会自动解析函数签名以提取工具的模式，并解析 docstring 以提取工具和各参数的描述。注意事项：
+如前所述，我们会自动解析函数签名以提取工具的模式，并解析 docstring 来提取工具和各个参数的描述。注意事项如下：
 
-1. 使用 `inspect` 模块解析签名。我们使用类型注解理解参数类型，并动态构建一个 Pydantic 模型来表示整体模式。它支持大多数类型，包括 Python 基本组件、Pydantic 模型、TypedDict 等。
-2. 我们使用 `griffe` 解析 docstring。支持的 docstring 格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测 docstring 格式，但这仅是尽力而为；你可以在调用 `function_tool` 时显式设置。你也可以通过将 `use_docstring_info` 设为 `False` 来禁用 docstring 解析。
+1. 通过 `inspect` 模块进行签名解析。我们使用类型注解来理解参数类型，并动态构建一个 Pydantic 模型以表示整体模式。支持大多数类型，包括 Python 基本类型、Pydantic 模型、TypedDict 等等。
+2. 我们使用 `griffe` 解析 docstring。支持的 docstring 格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测 docstring 格式，但这只是尽力而为；你可以在调用 `function_tool` 时显式设置。你也可以通过将 `use_docstring_info` 设为 `False` 来禁用 docstring 解析。
 
 用于模式提取的代码位于 [`agents.function_schema`][]。
 
-## 智能体作为工具
+## 将智能体作为工具
 
-在某些工作流中，你可能希望由一个中央智能体编排一组专业化智能体，而不是进行任务转移。你可以通过将智能体建模为工具来实现。
+在某些工作流中，你可能希望由一个中心智能体来编排一组专业化智能体，而不是交接控制权。你可以通过将智能体建模为工具来实现。
 
 ```python
 from agents import Agent, Runner
@@ -298,9 +298,9 @@ async def run_my_agent() -> str:
 
 ### 自定义输出提取
 
-在某些情况下，你可能希望在将工具化智能体的输出返回给中央智能体之前对其进行修改。如果你希望：
+在某些情况下，你可能希望在将输出返回给中心智能体之前修改工具化智能体的输出。如果你希望：
 
-- 从子智能体的对话历史中提取某个特定信息（例如 JSON 负载）。
+- 从子智能体的对话历史中提取特定信息（例如 JSON 负载）。
 - 转换或重新格式化智能体的最终答案（例如将 Markdown 转为纯文本或 CSV）。
 - 验证输出，或在智能体响应缺失或格式错误时提供回退值。
 
@@ -323,7 +323,7 @@ json_tool = data_agent.as_tool(
 )
 ```
 
-### 条件式启用工具
+### 条件性启用工具
 
 你可以在运行时使用 `is_enabled` 参数有条件地启用或禁用智能体工具。这允许你根据上下文、用户偏好或运行时条件动态筛选 LLM 可用的工具。
 
@@ -380,26 +380,26 @@ async def main():
 asyncio.run(main())
 ```
 
-`is_enabled` 参数可接受：
+`is_enabled` 参数接受：
 
 - **布尔值**：`True`（始终启用）或 `False`（始终禁用）
 - **可调用函数**：接收 `(context, agent)` 并返回布尔值的函数
-- **异步函数**：用于更复杂的条件逻辑
+- **异步函数**：用于复杂条件逻辑的异步函数
 
-被禁用的工具在运行时对 LLM 完全不可见，这在以下场景很有用：
+被禁用的工具在运行时对 LLM 完全不可见，适用于：
 
 - 基于用户权限的功能门控
-- 特定环境的工具可用性（开发环境 vs 生产环境）
-- 对不同工具配置进行 A/B 测试
+- 特定环境的工具可用性（开发 vs 生产）
+- 不同工具配置的 A/B 测试
 - 基于运行时状态的动态工具筛选
 
-## 在函数工具中处理错误
+## 处理函数工具中的错误
 
-当你通过 `@function_tool` 创建函数工具时，可以传入 `failure_error_function`。这是一个在工具调用崩溃时向 LLM 提供错误响应的函数。
+当你通过 `@function_tool` 创建函数工具时，可以传入 `failure_error_function`。该函数在工具调用崩溃时向 LLM 提供错误响应。
 
 - 默认情况下（即未传入任何值），会运行 `default_tool_error_function`，告知 LLM 发生了错误。
-- 如果你传入了自己的错误函数，则会运行该函数，并将其响应发送给 LLM。
-- 如果你显式传入 `None`，则任何工具调用错误都会被重新抛出，以便你自行处理。如果模型生成了无效 JSON，可能是 `ModelBehaviorError`；如果你的代码崩溃，可能是 `UserError`，等等。
+- 如果你传入自定义错误函数，将改为运行该函数，并把其响应发送给 LLM。
+- 如果你显式传入 `None`，则任何工具调用错误都会重新抛出，供你处理。这可能是当模型生成了无效 JSON 时的 `ModelBehaviorError`，或你的代码崩溃时的 `UserError` 等。
 
 ```python
 from agents import function_tool, RunContextWrapper
@@ -422,4 +422,4 @@ def get_user_profile(user_id: str) -> str:
 
 ```
 
-如果你手动创建 `FunctionTool` 对象，那么必须在 `on_invoke_tool` 函数内部处理错误。
+如果你手动创建 `FunctionTool` 对象，则必须在 `on_invoke_tool` 函数内处理错误。

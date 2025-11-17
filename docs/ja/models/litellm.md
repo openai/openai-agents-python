@@ -2,17 +2,17 @@
 search:
   exclude: true
 ---
-# LiteLLM 経由の任意モデル利用
+# LiteLLM 経由で任意のモデルの使用
 
 !!! note
 
-    これは  LiteLLM  のベータ版統合です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題があれば [GitHub Issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に修正します。
+    LiteLLM の統合はベータ版です。特に小規模なモデルプロバイダーでは問題が発生する可能性があります。問題があれば [GitHub issues](https://github.com/openai/openai-agents-python/issues) からご報告ください。迅速に対応します。
 
-[LiteLLM](https://docs.litellm.ai/docs/) は、1 つのインターフェースで 100 以上のモデルを利用できるライブラリです。Agents SDK では  LiteLLM  統合を追加し、任意の AI モデルを利用できるようにしました。
+[LiteLLM](https://docs.litellm.ai/docs/) は、単一のインターフェースで 100+ のモデルを利用できるライブラリです。Agents SDK で任意の AI モデルを使えるように、LiteLLM 統合を追加しました。
 
 ## セットアップ
 
-`litellm` が利用可能であることを確認します。オプションの `litellm` 依存関係グループをインストールしてください。
+`litellm` が利用可能であることを確認する必要があります。オプションの `litellm` 依存関係グループをインストールしてください:
 
 ```bash
 pip install "openai-agents[litellm]"
@@ -20,12 +20,12 @@ pip install "openai-agents[litellm]"
 
 完了したら、任意のエージェントで [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] を使用できます。
 
-## 例
+## コード例
 
-これは完全に動作する例です。実行すると、モデル名と API キーの入力を求められます。例:
+これは完全に動作するコード例です。実行すると、モデル名と API キーの入力を求められます。たとえば次のように入力できます:
 
--   モデルに `openai/gpt-4.1`、OpenAI の API キー
--   モデルに `anthropic/claude-3-5-sonnet-20240620`、Anthropic の API キー
+-   `openai/gpt-4.1` をモデルに、API キーにご自身の OpenAI API キー
+-   `anthropic/claude-3-5-sonnet-20240620` をモデルに、API キーにご自身の Anthropic API キー
 -   など
 
 LiteLLM でサポートされているモデルの完全な一覧は、[litellm providers docs](https://docs.litellm.ai/docs/providers) を参照してください。
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
 ## 使用状況データの追跡
 
-LiteLLM の応答で Agents SDK の使用状況メトリクスを集計したい場合は、エージェント作成時に `ModelSettings(include_usage=True)` を渡してください。
+LiteLLM のレスポンスを Agents SDK の使用状況メトリクスに反映させたい場合は、エージェント作成時に `ModelSettings(include_usage=True)` を渡してください。
 
 ```python
 from agents import Agent, ModelSettings
@@ -91,4 +91,4 @@ agent = Agent(
 )
 ```
 
-`include_usage=True` の場合、LiteLLM のリクエストは、組み込みの OpenAI モデルと同様に `result.context_wrapper.usage` を介してトークン数およびリクエスト数を報告します。
+`include_usage=True` を指定すると、LiteLLM のリクエストは、組み込みの OpenAI モデルと同様に、`result.context_wrapper.usage` を通じてトークン数およびリクエスト数を報告します。
