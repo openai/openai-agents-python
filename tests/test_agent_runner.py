@@ -1030,7 +1030,7 @@ async def test_default_send_all_items():
     # Check the input from the last turn (second turn after function execution)
     last_input = model.last_turn_args["input"]
 
-    # In defaul, the second turn should contain ALL items:
+    # In default, the second turn should contain ALL items:
     # 1. Original user message
     # 2. Assistant response message
     # 3. Function call
