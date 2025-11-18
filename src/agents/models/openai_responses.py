@@ -326,6 +326,7 @@ class OpenAIResponsesModel(Model):
             extra_body=model_settings.extra_body,
             text=response_format,
             store=self._non_null_or_omit(model_settings.store),
+            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
             reasoning=self._non_null_or_omit(model_settings.reasoning),
             metadata=self._non_null_or_omit(model_settings.metadata),
             **extra_args,

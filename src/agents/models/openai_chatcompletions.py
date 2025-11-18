@@ -308,6 +308,7 @@ class OpenAIChatCompletionsModel(Model):
             reasoning_effort=self._non_null_or_omit(reasoning_effort),
             verbosity=self._non_null_or_omit(model_settings.verbosity),
             top_logprobs=self._non_null_or_omit(model_settings.top_logprobs),
+            prompt_cache_retention=self._non_null_or_omit(model_settings.prompt_cache_retention),
             extra_headers=self._merge_headers(model_settings),
             extra_query=model_settings.extra_query,
             extra_body=model_settings.extra_body,
