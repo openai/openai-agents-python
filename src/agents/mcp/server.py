@@ -150,8 +150,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def _apply_tool_filter(
         self,
         tools: list[MCPTool],
-        run_context: RunContextWrapper[Any],
-        agent: AgentBase,
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: AgentBase | None = None,
     ) -> list[MCPTool]:
         """Apply the tool filter to the list of tools."""
         if self.tool_filter is None:
@@ -163,6 +163,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
         # Handle callable tool filter (dynamic filter)
         else:
+            if run_context is None or agent is None:
+                raise UserError("run_context and agent are required for dynamic tool filtering")
             return await self._apply_dynamic_tool_filter(tools, run_context, agent)
 
     def _apply_static_tool_filter(
@@ -312,8 +314,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         # Filter tools based on tool_filter
         filtered_tools = tools
         if self.tool_filter is not None:
-            if run_context is None or agent is None:
-                raise UserError("run_context and agent are required for dynamic tool filtering")
             filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
         return filtered_tools
 
