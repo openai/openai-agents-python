@@ -4,11 +4,11 @@ search:
 ---
 # 用量
 
-Agents SDK 会自动跟踪每次运行的 token 用量。你可以从运行上下文中访问这些数据，用于监控成本、实施限制或记录分析数据。
+Agents SDK 会自动跟踪每次运行的 token 用量。你可以从运行上下文中访问它，用于监控成本、执行限制或记录分析数据。
 
 ## 跟踪内容
 
-- **requests**: 发出的 LLM API 调用次数
+- **requests**: 进行的 LLM API 调用次数
 - **input_tokens**: 发送的输入 token 总数
 - **output_tokens**: 接收的输出 token 总数
 - **total_tokens**: 输入 + 输出
@@ -17,9 +17,9 @@ Agents SDK 会自动跟踪每次运行的 token 用量。你可以从运行上�
   - `input_tokens_details.cached_tokens`
   - `output_tokens_details.reasoning_tokens`
 
-## 从一次运行访问用量
+## 从一次运行中访问用量
 
-在执行 `Runner.run(...)` 之后，通过 `result.context_wrapper.usage` 访问用量数据。
+在调用 `Runner.run(...)` 之后，通过 `result.context_wrapper.usage` 访问用量。
 
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
@@ -31,11 +31,11 @@ print("Output tokens:", usage.output_tokens)
 print("Total tokens:", usage.total_tokens)
 ```
 
-用量会在本次运行期间的所有模型调用中聚合（包括工具调用和任务转移）。
+用量会在此次运行中的所有模型调用间聚合（包括工具调用和任务转移）。
 
-### 在 LiteLLM 模型中启用用量
+### 在 LiteLLM 模型中启用用量统计
 
-LiteLLM 提供方默认不报告用量指标。当你使用 [`LitellmModel`](models/litellm.md) 时，将 `ModelSettings(include_usage=True)` 传入你的智能体，以便 LiteLLM 的响应填充 `result.context_wrapper.usage`。
+LiteLLM 提供方默认不报告用量指标。当你使用 [`LitellmModel`](models/litellm.md) 时，向你的智能体传入 `ModelSettings(include_usage=True)`，以便 LiteLLM 的响应填充 `result.context_wrapper.usage`。
 
 ```python
 from agents import Agent, ModelSettings, Runner
@@ -53,7 +53,7 @@ print(result.context_wrapper.usage.total_tokens)
 
 ## 按请求的用量跟踪
 
-SDK 会自动在 `request_usage_entries` 中跟踪每个 API 请求的用量，便于进行精细的成本计算和监控上下文窗口的消耗。
+SDK 会自动在 `request_usage_entries` 中跟踪每个 API 请求的用量，便于进行精细的成本计算和监控上下文窗口消耗。
 
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
@@ -64,7 +64,7 @@ for request in enumerate(result.context_wrapper.usage.request_usage_entries):
 
 ## 在会话中访问用量
 
-当你使用 `Session`（例如 `SQLiteSession`）时，每次调用 `Runner.run(...)` 都会返回该次运行的用量。会话会为上下文保留对话历史，但每次运行的用量彼此独立。
+当你使用 `Session`（例如 `SQLiteSession`）时，每次调用 `Runner.run(...)` 都会返回该次运行的用量。会话会维护对话历史用于上下文，但每次运行的用量彼此独立。
 
 ```python
 session = SQLiteSession("my_conversation")
@@ -76,11 +76,11 @@ second = await Runner.run(agent, "Can you elaborate?", session=session)
 print(second.context_wrapper.usage.total_tokens)  # Usage for second run
 ```
 
-请注意，虽然会话在运行之间保留对话上下文，但每次 `Runner.run()` 返回的用量指标仅代表那一次的执行。在会话中，之前的消息可能会在每次运行时被重新作为输入提供，这会影响后续轮次中的输入 token 计数。
+请注意，虽然会话会在运行之间保留对话上下文，但每次 `Runner.run()` 调用返回的用量指标仅代表该次执行。在会话中，之前的消息可能会作为输入重新提供给每次运行，这会影响后续轮次的输入 token 计数。
 
 ## 在钩子中使用用量
 
-如果你在使用 `RunHooks`，传递给每个钩子的 `context` 对象包含 `usage`。这使你可以在关键生命周期时刻记录用量。
+如果你使用 `RunHooks`，传递给每个钩子的 `context` 对象包含 `usage`。这使你可以在关键生命周期时刻记录用量。
 
 ```python
 class MyHooks(RunHooks):
@@ -91,7 +91,7 @@ class MyHooks(RunHooks):
 
 ## API 参考
 
-详见 API 文档：
+如需详细的 API 文档，请参见：
 
 -   [`Usage`][agents.usage.Usage] - 用量跟踪数据结构
 -   [`RequestUsage`][agents.usage.RequestUsage] - 按请求的用量详情

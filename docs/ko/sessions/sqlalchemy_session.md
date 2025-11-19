@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
 ### 기존 엔진 사용
 
-기존 SQLAlchemy 엔진을 사용하는 애플리케이션의 경우:
+기존 SQLAlchemy 엔진이 있는 애플리케이션의 경우:
 
 ```python
 import asyncio
@@ -76,5 +76,5 @@ if __name__ == "__main__":
 
 ## API 레퍼런스
 
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 주요 클래스
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 메인 클래스
 - [`Session`][agents.memory.session.Session] - 기본 세션 프로토콜
