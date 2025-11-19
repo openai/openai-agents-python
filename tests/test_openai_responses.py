@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from openai import NOT_GIVEN
+from openai import omit
 from openai.types.responses import ResponseCompletedEvent
 
 from agents import ModelSettings, ModelTracing, __version__
@@ -99,7 +99,7 @@ async def test_prompt_id_omits_model_parameter():
     )
 
     assert called_kwargs["prompt"] == {"id": "pmpt_123"}
-    assert called_kwargs["model"] is NOT_GIVEN
+    assert called_kwargs["model"] is omit
 
 
 @pytest.mark.allow_call_model_methods
@@ -134,4 +134,4 @@ async def test_prompt_id_omits_tools_parameter_when_no_tools_configured():
         prompt={"id": "pmpt_123"},
     )
 
-    assert called_kwargs["tools"] is NOT_GIVEN
+    assert called_kwargs["tools"] is omit

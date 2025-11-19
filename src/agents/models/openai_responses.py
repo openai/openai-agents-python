@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union, cast, overload
 
-from openai import APIStatusError, AsyncOpenAI, AsyncStream, NotGiven, Omit, NOT_GIVEN, omit
+from openai import APIStatusError, AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
 from openai.types.responses import (
     Response,
@@ -266,12 +266,10 @@ class OpenAIResponsesModel(Model):
         converted_tools_payload = _to_dump_compatible(converted_tools.tools)
         response_format = Converter.get_response_format(output_schema)
         should_omit_model = prompt is not None and not self._model_is_explicit
-        model_param: str | ChatModel | NotGiven = (
-            self.model if not should_omit_model else NOT_GIVEN
-        )
+        model_param: str | ChatModel | Omit = self.model if not should_omit_model else omit
         should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
-        tools_param: list[ToolParam] | NotGiven = (
-            converted_tools_payload if not should_omit_tools else NOT_GIVEN
+        tools_param: list[ToolParam] | Omit = (
+            converted_tools_payload if not should_omit_tools else omit
         )
 
         include_set: set[str] = set(converted_tools.includes)

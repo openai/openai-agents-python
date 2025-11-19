@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import pytest
-from openai import NOT_GIVEN
+from openai import omit
 
 from agents import Agent, Prompt, RunConfig, RunContextWrapper, Runner
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_responses import OpenAIResponsesModel
 
-from .fake_model import FakeModel
-from .fake_model import get_response_obj
+from .fake_model import FakeModel, get_response_obj
 from .test_responses import get_text_message
 
 
@@ -139,5 +140,5 @@ async def test_agent_prompt_with_default_model_omits_model_and_tools_parameters(
 
     expected_prompt = {"id": "pmpt_agent", "version": None, "variables": None}
     assert called_kwargs["prompt"] == expected_prompt
-    assert called_kwargs["model"] is NOT_GIVEN
-    assert called_kwargs["tools"] is NOT_GIVEN
+    assert called_kwargs["model"] is omit
+    assert called_kwargs["tools"] is omit
