@@ -81,7 +81,11 @@ async def test_prompt_id_omits_model_parameter():
         def __init__(self):
             self.responses = DummyResponses()
 
-    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=False,
+    )
 
     await model.get_response(
         system_instructions=None,
@@ -96,3 +100,38 @@ async def test_prompt_id_omits_model_parameter():
 
     assert called_kwargs["prompt"] == {"id": "pmpt_123"}
     assert called_kwargs["model"] is NOT_GIVEN
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_prompt_id_omits_tools_parameter_when_no_tools_configured():
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=False,
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        prompt={"id": "pmpt_123"},
+    )
+
+    assert called_kwargs["tools"] is NOT_GIVEN

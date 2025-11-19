@@ -81,13 +81,17 @@ class OpenAIProvider(ModelProvider):
         return self._client
 
     def get_model(self, model_name: str | None) -> Model:
-        if model_name is None:
-            model_name = get_default_model()
+        model_is_explicit = model_name is not None
+        resolved_model_name = model_name if model_name is not None else get_default_model()
 
         client = self._get_client()
 
         return (
-            OpenAIResponsesModel(model=model_name, openai_client=client)
+            OpenAIResponsesModel(
+                model=resolved_model_name,
+                openai_client=client,
+                model_is_explicit=model_is_explicit,
+            )
             if self._use_responses
-            else OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+            else OpenAIChatCompletionsModel(model=resolved_model_name, openai_client=client)
         )
