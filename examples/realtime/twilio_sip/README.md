@@ -25,7 +25,7 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 
 1. Install dependencies:
    ```bash
-   uv pip install -r examples/realtime/twilio-sip/requirements.txt
+   uv pip install -r examples/realtime/twilio_sip/requirements.txt
    ```
 2. Export required environment variables:
    ```bash

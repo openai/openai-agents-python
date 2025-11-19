@@ -198,6 +198,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
+        self._call_id: str | None = None
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -220,6 +221,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if model_name:
             self.model = model_name
 
+        self._call_id = call_id
         api_key = await get_api_key(options.get("api_key"))
 
         if "tracing" in model_settings:
@@ -833,10 +835,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         speed = model_settings.get("speed")
         modalities = model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities"))
 
-        input_audio_format = model_settings.get(
-            "input_audio_format",
-            DEFAULT_MODEL_SETTINGS.get("input_audio_format"),
-        )
+        if self._call_id:
+            input_audio_format = model_settings.get("input_audio_format")
+        else:
+            input_audio_format = model_settings.get(
+                "input_audio_format",
+                DEFAULT_MODEL_SETTINGS.get("input_audio_format"),
+            )
         input_audio_transcription = model_settings.get(
             "input_audio_transcription",
             DEFAULT_MODEL_SETTINGS.get("input_audio_transcription"),
@@ -845,10 +850,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "turn_detection",
             DEFAULT_MODEL_SETTINGS.get("turn_detection"),
         )
-        output_audio_format = model_settings.get(
-            "output_audio_format",
-            DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
-        )
+        if self._call_id:
+            output_audio_format = model_settings.get("output_audio_format")
+        else:
+            output_audio_format = model_settings.get(
+                "output_audio_format",
+                DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
+            )
         input_audio_noise_reduction = model_settings.get(
             "input_audio_noise_reduction",
             DEFAULT_MODEL_SETTINGS.get("input_audio_noise_reduction"),
