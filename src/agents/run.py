@@ -1051,9 +1051,9 @@ class AgentRunner:
                                     )
                                     if call_id in output_call_ids and item not in items_to_save:
                                         items_to_save.append(item)
-                            
-                            # Don't save original_user_input again - it was already saved at the start
-                            await self._save_result_to_session(session, [], items_to_save, run_state)
+
+                            # Don't save original_user_input again - already saved at start
+                            await self._save_result_to_session(session, [], items_to_save)
 
                             return result
                         elif isinstance(turn_result.next_step, NextStepInterruption):
@@ -1093,7 +1093,7 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items, run_state
+                                    session, [], turn_result.new_step_items
                                 )
                         else:
                             raise AgentsException(

@@ -92,6 +92,7 @@ def test_run_result_release_agents_breaks_strong_refs() -> None:
         tool_output_guardrail_results=[],
         _last_agent=agent,
         context_wrapper=RunContextWrapper(context=None),
+        interruptions=[],
     )
     assert item.agent is not None
     assert item.agent.name == "leak-test-agent"
@@ -122,6 +123,7 @@ def test_run_item_retains_agent_when_result_is_garbage_collected() -> None:
             tool_input_guardrail_results=[],
             tool_output_guardrail_results=[],
             _last_agent=agent,
+            interruptions=[],
             context_wrapper=RunContextWrapper(context=None),
         )
         return item, weakref.ref(result)
@@ -172,6 +174,7 @@ def test_run_result_repr_and_asdict_after_release_agents() -> None:
         tool_input_guardrail_results=[],
         tool_output_guardrail_results=[],
         _last_agent=agent,
+        interruptions=[],
         context_wrapper=RunContextWrapper(context=None),
     )
 
@@ -199,6 +202,7 @@ def test_run_result_release_agents_without_releasing_new_items() -> None:
         tool_input_guardrail_results=[],
         tool_output_guardrail_results=[],
         _last_agent=last_agent,
+        interruptions=[],
         context_wrapper=RunContextWrapper(context=None),
     )
 
@@ -230,6 +234,7 @@ def test_run_result_release_agents_is_idempotent() -> None:
         tool_output_guardrail_results=[],
         _last_agent=agent,
         context_wrapper=RunContextWrapper(context=None),
+        interruptions=[],
     )
 
     result.release_agents()
@@ -264,6 +269,7 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
         max_turns=1,
         _current_agent_output_schema=None,
         trace=None,
+        interruptions=[],
     )
 
     streaming_result.release_agents(release_new_items=False)
