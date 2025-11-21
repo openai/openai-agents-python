@@ -243,7 +243,7 @@ class RunState(Generic[TContext, TAgent]):
             model_responses.append(response_dict)
 
         # Normalize and camelize originalInput if it's a list of items
-        # Convert API format to protocol format to match TypeScript schema
+        # Convert API format to protocol format
         # Protocol expects function_call_result (not function_call_output)
         original_input_serialized = self._original_input
         if isinstance(original_input_serialized, list):
@@ -546,6 +546,8 @@ class RunState(Generic[TContext, TAgent]):
             result["sourceAgent"] = {"name": item.source_agent.name}
         if hasattr(item, "target_agent"):
             result["targetAgent"] = {"name": item.target_agent.name}
+        if hasattr(item, "tool_name") and item.tool_name is not None:
+            result["toolName"] = item.tool_name
 
         return result
 
@@ -613,7 +615,7 @@ class RunState(Generic[TContext, TAgent]):
         context._rebuild_approvals(context_data.get("approvals", {}))
 
         # Normalize originalInput to remove providerData fields that may have been
-        # included by TypeScript serialization. These fields are metadata and should
+        # included during serialization. These fields are metadata and should
         # not be sent to the API.
         original_input_raw = state_json["originalInput"]
         if isinstance(original_input_raw, list):
@@ -732,7 +734,7 @@ class RunState(Generic[TContext, TAgent]):
         context._rebuild_approvals(context_data.get("approvals", {}))
 
         # Normalize originalInput to remove providerData fields that may have been
-        # included by TypeScript serialization. These fields are metadata and should
+        # included during serialization. These fields are metadata and should
         # not be sent to the API.
         original_input_raw = state_json["originalInput"]
         if isinstance(original_input_raw, list):
@@ -1230,8 +1232,18 @@ def _deserialize_items(
                 result.append(MCPApprovalResponseItem(agent=agent, raw_item=raw_item_mcp_response))
 
             elif item_type == "tool_approval_item":
-                raw_item_approval = ResponseFunctionToolCall(**normalized_raw_item)
-                result.append(ToolApprovalItem(agent=agent, raw_item=raw_item_approval))
+                # Extract toolName if present (for backwards compatibility)
+                tool_name = item_data.get("toolName")
+                # Try to deserialize as ResponseFunctionToolCall first (most common case)
+                # If that fails, use the dict as-is for flexibility
+                try:
+                    raw_item_approval = ResponseFunctionToolCall(**normalized_raw_item)
+                except Exception:
+                    # If deserialization fails, use dict for flexibility with other tool types
+                    raw_item_approval = normalized_raw_item  # type: ignore[assignment]
+                result.append(
+                    ToolApprovalItem(agent=agent, raw_item=raw_item_approval, tool_name=tool_name)
+                )
 
         except Exception as e:
             logger.warning(f"Failed to deserialize item of type {item_type}: {e}")
