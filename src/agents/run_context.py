@@ -103,8 +103,30 @@ class RunContextWrapper(Generic[TContext]):
             approval_item: The tool approval item to approve.
             always_approve: If True, always approve this tool (for all future calls).
         """
-        tool_name = approval_item.raw_item.name
-        call_id = approval_item.raw_item.call_id
+        # Extract tool name: use explicit tool_name or fallback to raw_item.name
+        tool_name = approval_item.tool_name or (
+            getattr(approval_item.raw_item, "name", None)
+            if not isinstance(approval_item.raw_item, dict)
+            else approval_item.raw_item.get("name")
+        )
+        if not tool_name:
+            raise ValueError("Cannot determine tool name from approval item")
+
+        # Extract call ID: function tools have call_id, hosted tools have id
+        call_id: str | None = None
+        if isinstance(approval_item.raw_item, dict):
+            call_id = (
+                approval_item.raw_item.get("callId")
+                or approval_item.raw_item.get("call_id")
+                or approval_item.raw_item.get("id")
+            )
+        elif hasattr(approval_item.raw_item, "call_id"):
+            call_id = approval_item.raw_item.call_id
+        elif hasattr(approval_item.raw_item, "id"):
+            call_id = approval_item.raw_item.id
+
+        if not call_id:
+            raise ValueError("Cannot determine call ID from approval item")
 
         if always_approve:
             approval_entry = ApprovalRecord()
@@ -127,8 +149,30 @@ class RunContextWrapper(Generic[TContext]):
             approval_item: The tool approval item to reject.
             always_reject: If True, always reject this tool (for all future calls).
         """
-        tool_name = approval_item.raw_item.name
-        call_id = approval_item.raw_item.call_id
+        # Extract tool name: use explicit tool_name or fallback to raw_item.name
+        tool_name = approval_item.tool_name or (
+            getattr(approval_item.raw_item, "name", None)
+            if not isinstance(approval_item.raw_item, dict)
+            else approval_item.raw_item.get("name")
+        )
+        if not tool_name:
+            raise ValueError("Cannot determine tool name from approval item")
+
+        # Extract call ID: function tools have call_id, hosted tools have id
+        call_id: str | None = None
+        if isinstance(approval_item.raw_item, dict):
+            call_id = (
+                approval_item.raw_item.get("callId")
+                or approval_item.raw_item.get("call_id")
+                or approval_item.raw_item.get("id")
+            )
+        elif hasattr(approval_item.raw_item, "call_id"):
+            call_id = approval_item.raw_item.call_id
+        elif hasattr(approval_item.raw_item, "id"):
+            call_id = approval_item.raw_item.id
+
+        if not call_id:
+            raise ValueError("Cannot determine call ID from approval item")
 
         if always_reject:
             approval_entry = ApprovalRecord()
