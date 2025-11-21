@@ -327,8 +327,17 @@ class MCPApprovalResponseItem(RunItemBase[McpApprovalResponse]):
     type: Literal["mcp_approval_response_item"] = "mcp_approval_response_item"
 
 
+# Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
+ToolApprovalRawItem: TypeAlias = Union[
+    ResponseFunctionToolCall,
+    McpCall,
+    LocalShellCall,
+    dict[str, Any],  # For flexibility with other tool types
+]
+
+
 @dataclass
-class ToolApprovalItem(RunItemBase[ResponseFunctionToolCall]):
+class ToolApprovalItem(RunItemBase[Any]):
     """Represents a tool call that requires approval before execution.
 
     When a tool has `needs_approval=True`, the run will be interrupted and this item will be
@@ -336,10 +345,52 @@ class ToolApprovalItem(RunItemBase[ResponseFunctionToolCall]):
     RunState.approve() or RunState.reject() and resume the run.
     """
 
-    raw_item: ResponseFunctionToolCall
-    """The raw function tool call that requires approval."""
+    raw_item: ToolApprovalRawItem
+    """The raw tool call that requires approval. Can be a function tool call, hosted tool call,
+    shell call, or other tool type.
+    """
+
+    tool_name: str | None = None
+    """Explicit tool name to use for approval tracking when not present on the raw item.
+    If not provided, falls back to raw_item.name.
+    """
 
     type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    def __post_init__(self) -> None:
+        """Set tool_name from raw_item.name if not explicitly provided."""
+        if self.tool_name is None:
+            # Extract name from raw_item - handle different types
+            if isinstance(self.raw_item, dict):
+                self.tool_name = self.raw_item.get("name")
+            elif hasattr(self.raw_item, "name"):
+                self.tool_name = self.raw_item.name
+            else:
+                self.tool_name = None
+
+    @property
+    def name(self) -> str | None:
+        """Returns the tool name if available on the raw item or provided explicitly.
+
+        Kept for backwards compatibility with code that previously relied on raw_item.name.
+        """
+        return self.tool_name or (
+            getattr(self.raw_item, "name", None)
+            if not isinstance(self.raw_item, dict)
+            else self.raw_item.get("name")
+        )
+
+    @property
+    def arguments(self) -> str | None:
+        """Returns the arguments if the raw item has an arguments property, otherwise None.
+
+        This provides a safe way to access tool call arguments regardless of the raw_item type.
+        """
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("arguments")
+        elif hasattr(self.raw_item, "arguments"):
+            return self.raw_item.arguments
+        return None
 
 
 RunItem: TypeAlias = Union[

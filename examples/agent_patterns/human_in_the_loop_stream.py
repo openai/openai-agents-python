@@ -94,16 +94,16 @@ async def main():
 
             print("\nTool call details:")
             print(f"  Agent: {interruption.agent.name}")
-            print(f"  Tool: {interruption.raw_item.name}")
-            print(f"  Arguments: {interruption.raw_item.arguments}")
+            print(f"  Tool: {interruption.name}")
+            print(f"  Arguments: {interruption.arguments}")
 
             confirmed = await confirm("\nDo you approve this tool call?")
 
             if confirmed:
-                print(f"✓ Approved: {interruption.raw_item.name}")
+                print(f"✓ Approved: {interruption.name}")
                 state.approve(interruption)
             else:
-                print(f"✗ Rejected: {interruption.raw_item.name}")
+                print(f"✗ Rejected: {interruption.name}")
                 state.reject(interruption)
 
         # Resume execution with streaming

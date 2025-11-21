@@ -1,7 +1,4 @@
-"""Tests for RunState serialization, approval/rejection, and state management.
-
-These tests match the TypeScript implementation from openai-agents-js to ensure parity.
-"""
+"""Tests for RunState serialization, approval/rejection, and state management."""
 
 import json
 from typing import Any
@@ -458,7 +455,7 @@ class TestSerializationRoundTrip:
         assert len(new_state._current_step.interruptions) == 1
         restored_item = new_state._current_step.interruptions[0]
         assert isinstance(restored_item, ToolApprovalItem)
-        assert restored_item.raw_item.name == "myTool"
+        assert restored_item.name == "myTool"
 
     async def test_deserializes_various_item_types(self):
         """Test that deserialization handles different item types."""
@@ -2231,3 +2228,224 @@ class TestRunStateSerializationEdgeCases:
         # The item will be skipped due to validation failure, so result will be empty
         # But the union adapter code path (lines 1081-1084) is still covered
         assert len(result) == 0
+
+
+class TestToolApprovalItem:
+    """Test ToolApprovalItem functionality including tool_name property and serialization."""
+
+    def test_tool_approval_item_with_explicit_tool_name(self):
+        """Test that ToolApprovalItem uses explicit tool_name when provided."""
+        agent = Agent(name="TestAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_tool_name",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+
+        # Create with explicit tool_name
+        approval_item = ToolApprovalItem(
+            agent=agent, raw_item=raw_item, tool_name="explicit_tool_name"
+        )
+
+        assert approval_item.tool_name == "explicit_tool_name"
+        assert approval_item.name == "explicit_tool_name"
+
+    def test_tool_approval_item_falls_back_to_raw_item_name(self):
+        """Test that ToolApprovalItem falls back to raw_item.name when tool_name not provided."""
+        agent = Agent(name="TestAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_tool_name",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+
+        # Create without explicit tool_name
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+        assert approval_item.tool_name == "raw_tool_name"
+        assert approval_item.name == "raw_tool_name"
+
+    def test_tool_approval_item_with_dict_raw_item(self):
+        """Test that ToolApprovalItem handles dict raw_item correctly."""
+        agent = Agent(name="TestAgent")
+        raw_item = {
+            "type": "function_call",
+            "name": "dict_tool_name",
+            "callId": "call456",
+            "status": "completed",
+            "arguments": "{}",
+        }
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="explicit_name")
+
+        assert approval_item.tool_name == "explicit_name"
+        assert approval_item.name == "explicit_name"
+
+    def test_approve_tool_with_explicit_tool_name(self):
+        """Test that approve_tool works with explicit tool_name."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_name",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="explicit_name")
+        context.approve_tool(approval_item)
+
+        assert context.is_tool_approved(tool_name="explicit_name", call_id="call123") is True
+
+    def test_approve_tool_extracts_call_id_from_dict(self):
+        """Test that approve_tool extracts call_id from dict raw_item."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        # Dict with callId (camelCase) - simulating hosted tool
+        raw_item = {
+            "type": "hosted_tool_call",
+            "name": "hosted_tool",
+            "id": "hosted_call_123",  # Hosted tools use "id" instead of "call_id"
+        }
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+        context.approve_tool(approval_item)
+
+        assert context.is_tool_approved(tool_name="hosted_tool", call_id="hosted_call_123") is True
+
+    def test_reject_tool_with_explicit_tool_name(self):
+        """Test that reject_tool works with explicit tool_name."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_name",
+            call_id="call789",
+            status="completed",
+            arguments="{}",
+        )
+
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="explicit_name")
+        context.reject_tool(approval_item)
+
+        assert context.is_tool_approved(tool_name="explicit_name", call_id="call789") is False
+
+    async def test_serialize_tool_approval_item_with_tool_name(self):
+        """Test that ToolApprovalItem serializes toolName field."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="test", starting_agent=agent, max_turns=3)
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_name",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="explicit_name")
+        state._generated_items.append(approval_item)
+
+        json_data = state.to_json()
+        generated_items = json_data.get("generatedItems", [])
+        assert len(generated_items) == 1
+
+        approval_item_data = generated_items[0]
+        assert approval_item_data["type"] == "tool_approval_item"
+        assert approval_item_data["toolName"] == "explicit_name"
+
+    async def test_deserialize_tool_approval_item_with_tool_name(self):
+        """Test that ToolApprovalItem deserializes toolName field."""
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "tool_approval_item",
+            "agent": {"name": "TestAgent"},
+            "toolName": "explicit_tool_name",
+            "rawItem": {
+                "type": "function_call",
+                "name": "raw_tool_name",
+                "call_id": "call123",
+                "status": "completed",
+                "arguments": "{}",
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "tool_approval_item"
+        assert isinstance(result[0], ToolApprovalItem)
+        assert result[0].tool_name == "explicit_tool_name"
+        assert result[0].name == "explicit_tool_name"
+
+    async def test_round_trip_serialization_with_tool_name(self):
+        """Test round-trip serialization preserves toolName."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="test", starting_agent=agent, max_turns=3)
+
+        raw_item = ResponseFunctionToolCall(
+            type="function_call",
+            name="raw_name",
+            call_id="call123",
+            status="completed",
+            arguments="{}",
+        )
+        approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name="explicit_name")
+        state._generated_items.append(approval_item)
+
+        # Serialize and deserialize
+        json_data = state.to_json()
+        new_state = await RunState.from_json(agent, json_data)
+
+        assert len(new_state._generated_items) == 1
+        restored_item = new_state._generated_items[0]
+        assert isinstance(restored_item, ToolApprovalItem)
+        assert restored_item.tool_name == "explicit_name"
+        assert restored_item.name == "explicit_name"
+
+    def test_tool_approval_item_arguments_property(self):
+        """Test that ToolApprovalItem.arguments property correctly extracts arguments."""
+        agent = Agent(name="TestAgent")
+
+        # Test with ResponseFunctionToolCall
+        raw_item1 = ResponseFunctionToolCall(
+            type="function_call",
+            name="tool1",
+            call_id="call1",
+            status="completed",
+            arguments='{"city": "Oakland"}',
+        )
+        approval_item1 = ToolApprovalItem(agent=agent, raw_item=raw_item1)
+        assert approval_item1.arguments == '{"city": "Oakland"}'
+
+        # Test with dict raw_item
+        raw_item2 = {
+            "type": "function_call",
+            "name": "tool2",
+            "callId": "call2",
+            "status": "completed",
+            "arguments": '{"key": "value"}',
+        }
+        approval_item2 = ToolApprovalItem(agent=agent, raw_item=raw_item2)
+        assert approval_item2.arguments == '{"key": "value"}'
+
+        # Test with dict raw_item without arguments
+        raw_item3 = {
+            "type": "function_call",
+            "name": "tool3",
+            "callId": "call3",
+            "status": "completed",
+        }
+        approval_item3 = ToolApprovalItem(agent=agent, raw_item=raw_item3)
+        assert approval_item3.arguments is None
+
+        # Test with raw_item that has no arguments attribute
+        raw_item4 = {"type": "unknown", "name": "tool4"}
+        approval_item4 = ToolApprovalItem(agent=agent, raw_item=raw_item4)
+        assert approval_item4.arguments is None

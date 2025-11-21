@@ -357,37 +357,51 @@ class RunImpl:
                 config=run_config,
             ),
         )
-        # Check for tool approval interruptions before adding items
+        # Add all tool results to new_step_items first, including approval items.
+        # This ensures ToolCallItem items from processed_response.new_items are preserved
+        # in the conversation history when resuming after an interruption.
         from .items import ToolApprovalItem
 
+        # Add all function results (including approval items) to new_step_items
+        for result in function_results:
+            new_step_items.append(result.run_item)
+
+        # Add all other tool results
+        new_step_items.extend(computer_results)
+        for shell_result in shell_results:
+            new_step_items.append(shell_result)
+        for apply_patch_result in apply_patch_results:
+            new_step_items.append(apply_patch_result)
+        new_step_items.extend(local_shell_results)
+
+        # Check for interruptions after adding all items
         interruptions: list[RunItem] = []
-        approved_function_results = []
         for result in function_results:
             if isinstance(result.run_item, ToolApprovalItem):
                 interruptions.append(result.run_item)
-            else:
-                approved_function_results.append(result)
+        for shell_result in shell_results:
+            if isinstance(shell_result, ToolApprovalItem):
+                interruptions.append(shell_result)
+        for apply_patch_result in apply_patch_results:
+            if isinstance(apply_patch_result, ToolApprovalItem):
+                interruptions.append(apply_patch_result)
 
         # If there are interruptions, return immediately without executing remaining tools
         if interruptions:
-            # Return the interruption step
+            # new_step_items already contains:
+            # 1. processed_response.new_items (added at line 312) - includes ToolCallItem items
+            # 2. All tool results including approval items (added above)
+            # This ensures ToolCallItem items are preserved in conversation history when resuming
             return SingleStepResult(
                 original_input=original_input,
                 model_response=new_response,
                 pre_step_items=pre_step_items,
-                new_step_items=interruptions,
+                new_step_items=new_step_items,
                 next_step=NextStepInterruption(interruptions=interruptions),
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
                 processed_response=processed_response,
             )
-
-        new_step_items.extend([result.run_item for result in approved_function_results])
-        new_step_items.extend(computer_results)
-        new_step_items.extend(shell_results)
-        new_step_items.extend(apply_patch_results)
-        new_step_items.extend(local_shell_results)
-
         # Next, run the MCP approval requests
         if processed_response.mcp_approval_requests:
             approval_results = await cls.execute_mcp_approval_requests(
@@ -1016,7 +1030,9 @@ class RunImpl:
                             # Not yet decided - need to interrupt for approval
                             from .items import ToolApprovalItem
 
-                            approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+                            approval_item = ToolApprovalItem(
+                                agent=agent, raw_item=tool_call, tool_name=func_tool.name
+                            )
                             return FunctionToolResult(
                                 tool=func_tool, output=None, run_item=approval_item
                             )
@@ -1826,16 +1842,75 @@ class ShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
+        shell_call = _coerce_shell_call(call.tool_call)
+        shell_tool = call.shell_tool
+
+        # Check if approval is needed
+        needs_approval_result: bool = False
+        if isinstance(shell_tool.needs_approval, bool):
+            needs_approval_result = shell_tool.needs_approval
+        elif callable(shell_tool.needs_approval):
+            maybe_awaitable = shell_tool.needs_approval(
+                context_wrapper, shell_call.action, shell_call.call_id
+            )
+            needs_approval_result = (
+                await maybe_awaitable if inspect.isawaitable(maybe_awaitable) else maybe_awaitable
+            )
+
+        if needs_approval_result:
+            # Create approval item with explicit tool name
+            approval_item = ToolApprovalItem(
+                agent=agent, raw_item=call.tool_call, tool_name=shell_tool.name
+            )
+
+            # Handle on_approval callback if provided
+            if shell_tool.on_approval:
+                maybe_awaitable_decision = shell_tool.on_approval(context_wrapper, approval_item)
+                decision = (
+                    await maybe_awaitable_decision
+                    if inspect.isawaitable(maybe_awaitable_decision)
+                    else maybe_awaitable_decision
+                )
+                if decision.get("approve") is True:
+                    context_wrapper.approve_tool(approval_item)
+                elif decision.get("approve") is False:
+                    context_wrapper.reject_tool(approval_item)
+
+            # Check approval status
+            approval_status = context_wrapper.is_tool_approved(shell_tool.name, shell_call.call_id)
+
+            if approval_status is False:
+                # Rejected - return rejection output
+                response = "Tool execution was not approved."
+                rejection_output: dict[str, Any] = {
+                    "stdout": "",
+                    "stderr": response,
+                    "outcome": {"type": "exit", "exitCode": None},
+                }
+                rejection_raw_item: dict[str, Any] = {
+                    "type": "shell_call_output",
+                    "call_id": shell_call.call_id,
+                    "output": [rejection_output],
+                }
+                return ToolCallOutputItem(
+                    agent=agent,
+                    output=response,
+                    raw_item=cast(Any, rejection_raw_item),
+                )
+
+            if approval_status is not True:
+                # Pending approval - return approval item
+                return approval_item
+
+        # Approved or no approval needed - proceed with execution
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
+            hooks.on_tool_start(context_wrapper, agent, shell_tool),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
+                agent.hooks.on_tool_start(context_wrapper, agent, shell_tool)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
-
-        shell_call = _coerce_shell_call(call.tool_call)
         request = ShellCommandRequest(ctx_wrapper=context_wrapper, data=shell_call)
         status: Literal["completed", "failed"] = "completed"
         output_text = ""
@@ -1950,6 +2025,65 @@ class ApplyPatchAction:
         config: RunConfig,
     ) -> RunItem:
         apply_patch_tool = call.apply_patch_tool
+        operation = _coerce_apply_patch_operation(call.tool_call)
+
+        # Extract call_id from tool_call
+        call_id = _extract_apply_patch_call_id(call.tool_call)
+
+        # Check if approval is needed
+        needs_approval_result: bool = False
+        if isinstance(apply_patch_tool.needs_approval, bool):
+            needs_approval_result = apply_patch_tool.needs_approval
+        elif callable(apply_patch_tool.needs_approval):
+            maybe_awaitable = apply_patch_tool.needs_approval(context_wrapper, operation, call_id)
+            needs_approval_result = (
+                await maybe_awaitable if inspect.isawaitable(maybe_awaitable) else maybe_awaitable
+            )
+
+        if needs_approval_result:
+            # Create approval item with explicit tool name
+            approval_item = ToolApprovalItem(
+                agent=agent, raw_item=call.tool_call, tool_name=apply_patch_tool.name
+            )
+
+            # Handle on_approval callback if provided
+            if apply_patch_tool.on_approval:
+                maybe_awaitable_decision = apply_patch_tool.on_approval(
+                    context_wrapper, approval_item
+                )
+                decision = (
+                    await maybe_awaitable_decision
+                    if inspect.isawaitable(maybe_awaitable_decision)
+                    else maybe_awaitable_decision
+                )
+                if decision.get("approve") is True:
+                    context_wrapper.approve_tool(approval_item)
+                elif decision.get("approve") is False:
+                    context_wrapper.reject_tool(approval_item)
+
+            # Check approval status
+            approval_status = context_wrapper.is_tool_approved(apply_patch_tool.name, call_id)
+
+            if approval_status is False:
+                # Rejected - return rejection output
+                response = "Tool execution was not approved."
+                rejection_raw_item: dict[str, Any] = {
+                    "type": "apply_patch_call_output",
+                    "call_id": call_id,
+                    "status": "failed",
+                    "output": response,
+                }
+                return ToolCallOutputItem(
+                    agent=agent,
+                    output=response,
+                    raw_item=cast(Any, rejection_raw_item),
+                )
+
+            if approval_status is not True:
+                # Pending approval - return approval item
+                return approval_item
+
+        # Approved or no approval needed - proceed with execution
         await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
             (

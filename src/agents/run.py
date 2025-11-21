@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, Union, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_prompt_param import (
@@ -2041,10 +2042,55 @@ class AgentRunner:
                 continue
 
             tool_call = interruption.raw_item
-            tool_name = tool_call.name
+            # Use ToolApprovalItem's name property which handles different raw_item types
+            tool_name = interruption.name
+            if not tool_name:
+                # Create a minimal ResponseFunctionToolCall for error output
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name="unknown",
+                    call_id="unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output = "Tool approval item missing tool name."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Extract call_id - function tools have call_id, hosted tools have id
+            call_id: str | None = None
+            if isinstance(tool_call, dict):
+                call_id = tool_call.get("callId") or tool_call.get("call_id") or tool_call.get("id")
+            elif hasattr(tool_call, "call_id"):
+                call_id = tool_call.call_id
+            elif hasattr(tool_call, "id"):
+                call_id = tool_call.id
+
+            if not call_id:
+                # Create a minimal ResponseFunctionToolCall for error output
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name=tool_name,
+                    call_id="unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output = "Tool approval item missing call ID."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
 
             # Check if this tool was approved
-            approval_status = context_wrapper.is_tool_approved(tool_name, tool_call.call_id)
+            approval_status = context_wrapper.is_tool_approved(tool_name, call_id)
             if approval_status is not True:
                 # Not approved or rejected - add rejection message
                 if approval_status is False:
@@ -2052,9 +2098,21 @@ class AgentRunner:
                 else:
                     output = "Tool approval status unclear."
 
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
                 output_item = ToolCallOutputItem(
                     output=output,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
                     agent=agent,
                 )
                 generated_items.append(output_item)
@@ -2064,10 +2122,22 @@ class AgentRunner:
             tool = tool_map.get(tool_name)
             if tool is None:
                 # Tool not found - add error output
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
                 output = f"Tool '{tool_name}' not found."
                 output_item = ToolCallOutputItem(
                     output=output,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
                     agent=agent,
                 )
                 generated_items.append(output_item)
@@ -2077,10 +2147,42 @@ class AgentRunner:
             from .tool import FunctionTool
 
             if not isinstance(tool, FunctionTool):
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
                 output = f"Tool '{tool_name}' is not a function tool."
                 output_item = ToolCallOutputItem(
                     output=output,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_call, output),
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Only function tools can be executed - ensure tool_call is ResponseFunctionToolCall
+            if not isinstance(tool_call, ResponseFunctionToolCall):
+                output = (
+                    f"Tool '{tool_name}' approval item has invalid raw_item type for execution."
+                )
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name=tool_name,
+                    call_id=call_id or "unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
                     agent=agent,
                 )
                 generated_items.append(output_item)
