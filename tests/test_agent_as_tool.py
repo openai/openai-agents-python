@@ -225,30 +225,15 @@ async def test_agent_as_tool_is_enabled_preserves_other_params():
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_returns_concatenated_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Agent tool should use default text aggregation when no custom extractor is provided."""
+async def test_agent_as_tool_returns_final_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Agent tool should return final_output when no custom extractor is provided."""
 
     agent = Agent(name="storyteller")
-
-    message = ResponseOutputMessage(
-        id="msg_1",
-        role="assistant",
-        status="completed",
-        type="message",
-        content=[
-            ResponseOutputText(
-                annotations=[],
-                text="Hello world",
-                type="output_text",
-                logprobs=[],
-            )
-        ],
-    )
 
     result = type(
         "DummyResult",
         (),
-        {"new_items": [MessageOutputItem(agent=agent, raw_item=message)]},
+        {"final_output": "Hello world"},
     )()
 
     async def fake_run(

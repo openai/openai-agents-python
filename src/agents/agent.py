@@ -13,7 +13,6 @@ from typing_extensions import NotRequired, TypeAlias, TypedDict
 from .agent_output import AgentOutputSchemaBase
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
-from .items import ItemHelpers
 from .logger import logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings
@@ -417,7 +416,7 @@ class Agent(AgentBase, Generic[TContext]):
             description_override=tool_description or "",
             is_enabled=is_enabled,
         )
-        async def run_agent(context: RunContextWrapper, input: str) -> str:
+        async def run_agent(context: RunContextWrapper, input: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
@@ -436,7 +435,7 @@ class Agent(AgentBase, Generic[TContext]):
             if custom_output_extractor:
                 return await custom_output_extractor(output)
 
-            return ItemHelpers.text_message_outputs(output.new_items)
+            return output.final_output
 
         return run_agent
 
