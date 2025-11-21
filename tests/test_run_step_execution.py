@@ -407,3 +407,118 @@ async def test_execute_tools_handles_tool_approval_item():
     assert isinstance(result.next_step, NextStepInterruption)
     assert len(result.next_step.interruptions) == 1
     assert isinstance(result.next_step.interruptions[0], ToolApprovalItem)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_handles_shell_tool_approval_item():
+    """Test that execute_tools_and_side_effects handles ToolApprovalItem from shell tools."""
+    from agents import ShellTool
+    from agents._run_impl import ToolRunShellCall
+
+    async def needs_approval(_ctx, _action, _call_id) -> bool:
+        return True
+
+    shell_tool = ShellTool(executor=lambda request: "output", needs_approval=needs_approval)
+    agent = Agent(name="TestAgent", tools=[shell_tool])
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {"commands": ["echo hi"], "timeout_ms": 1000},
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[tool_run],
+        apply_patch_calls=[],
+        mcp_approval_requests=[],
+        tools_used=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=None,  # type: ignore[arg-type]
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+    )
+
+    # Should have interruptions since shell tool needs approval and hasn't been approved
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert len(result.next_step.interruptions) == 1
+    assert isinstance(result.next_step.interruptions[0], ToolApprovalItem)
+    assert result.next_step.interruptions[0].tool_name == "shell"
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_handles_apply_patch_tool_approval_item():
+    """Test that execute_tools_and_side_effects handles ToolApprovalItem from apply_patch tools."""
+    from agents import ApplyPatchTool
+    from agents._run_impl import ToolRunApplyPatchCall
+    from agents.editor import ApplyPatchOperation, ApplyPatchResult
+
+    class DummyEditor:
+        def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            return ApplyPatchResult(output="Created")
+
+        def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            return ApplyPatchResult(output="Updated")
+
+        def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+            return ApplyPatchResult(output="Deleted")
+
+    async def needs_approval(_ctx, _operation, _call_id) -> bool:
+        return True
+
+    apply_patch_tool = ApplyPatchTool(editor=DummyEditor(), needs_approval=needs_approval)
+    agent = Agent(name="TestAgent", tools=[apply_patch_tool])
+
+    tool_call = {
+        "type": "apply_patch_call",
+        "call_id": "call_apply",
+        "operation": {"type": "update_file", "path": "test.md", "diff": "-a\n+b\n"},
+    }
+
+    tool_run = ToolRunApplyPatchCall(tool_call=tool_call, apply_patch_tool=apply_patch_tool)
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[tool_run],
+        mcp_approval_requests=[],
+        tools_used=[],
+        interruptions=[],
+    )
+
+    result = await RunImpl.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=None,  # type: ignore[arg-type]
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+    )
+
+    # Should have interruptions since apply_patch tool needs approval and hasn't been approved
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert len(result.next_step.interruptions) == 1
+    assert isinstance(result.next_step.interruptions[0], ToolApprovalItem)
+    assert result.next_step.interruptions[0].tool_name == "apply_patch"
