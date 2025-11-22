@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from typing_extensions import TypedDict
 
 from agents import (
@@ -29,7 +30,26 @@ from agents import (
     handoff,
 )
 from agents.agent import ToolsToFinalOutputResult
-from agents.tool import FunctionToolResult, function_tool
+from agents.computer import Computer
+from agents.items import (
+    ModelResponse,
+    RunItem,
+    ToolApprovalItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+)
+from agents.lifecycle import RunHooks
+from agents.memory.session import Session
+from agents.run import (
+    AgentRunner,
+    _default_trace_include_sensitive_data,
+    _ServerConversationTracker,
+    get_default_agent_runner,
+    set_default_agent_runner,
+)
+from agents.run_state import RunState
+from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -41,6 +61,141 @@ from .test_responses import (
     get_text_message,
 )
 from .utils.simple_session import SimpleListSession
+
+
+class _DummySession(Session):
+    def __init__(self, history: list[TResponseInputItem] | None = None):
+        self.session_id = "session"
+        self._history = history or []
+        self.saved_items: list[TResponseInputItem] = []
+
+    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        normalized: list[TResponseInputItem] = []
+        for candidate in self._history:
+            if isinstance(candidate, dict):
+                normalized.append(cast(TResponseInputItem, dict(candidate)))
+            else:
+                normalized.append(candidate)
+        return normalized
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        self.saved_items.extend(items)
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        if not self.saved_items:
+            return None
+        return self.saved_items.pop()
+
+    async def clear_session(self) -> None:
+        self._history.clear()
+        self.saved_items.clear()
+
+
+class _DummyRunItem:
+    def __init__(self, payload: dict[str, Any], item_type: str = "tool_call_output_item"):
+        self._payload = payload
+        self.type = item_type
+
+    def to_input_item(self) -> dict[str, Any]:
+        return self._payload
+
+
+def test_set_default_agent_runner_roundtrip():
+    runner = AgentRunner()
+    set_default_agent_runner(runner)
+    assert get_default_agent_runner() is runner
+
+    # Reset to ensure other tests are unaffected.
+    set_default_agent_runner(None)
+    assert isinstance(get_default_agent_runner(), AgentRunner)
+
+
+def test_default_trace_include_sensitive_data_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "false")
+    assert _default_trace_include_sensitive_data() is False
+
+    monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "TRUE")
+    assert _default_trace_include_sensitive_data() is True
+
+
+def test_filter_incomplete_function_calls_removes_orphans():
+    items: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "call_orphan",
+                "name": "tool_one",
+                "arguments": "{}",
+            },
+        ),
+        cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "call_keep",
+                "name": "tool_keep",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "call_keep", "output": "done"},
+        ),
+    ]
+
+    filtered = AgentRunner._filter_incomplete_function_calls(items)
+    assert len(filtered) == 3
+    for entry in filtered:
+        if isinstance(entry, dict):
+            assert entry.get("call_id") != "call_orphan"
+
+
+def test_normalize_input_items_strips_provider_data():
+    items: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call_result",
+                "callId": "call_norm",
+                "status": "completed",
+                "output": "out",
+                "providerData": {"trace": "keep"},
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "message",
+                "role": "user",
+                "content": "hi",
+                "providerData": {"trace": "remove"},
+            },
+        ),
+    ]
+
+    normalized = AgentRunner._normalize_input_items(items)
+    first = cast(dict[str, Any], normalized[0])
+    second = cast(dict[str, Any], normalized[1])
+
+    assert first["type"] == "function_call_output"
+    assert "providerData" not in first
+    assert second["role"] == "user"
+    assert "providerData" not in second
+
+
+def test_server_conversation_tracker_tracks_previous_response_id():
+    tracker = _ServerConversationTracker(conversation_id=None, previous_response_id="resp_a")
+    response = ModelResponse(
+        output=[get_text_message("hello")],
+        usage=Usage(),
+        response_id="resp_b",
+    )
+    tracker.track_server_items(response)
+
+    assert tracker.previous_response_id == "resp_b"
+    assert len(tracker.server_items) == 1
 
 
 def _as_message(item: Any) -> dict[str, Any]:
@@ -303,7 +458,7 @@ async def test_default_handoff_history_nested_and_filters_respected():
     assert isinstance(result.input, list)
     assert len(result.input) == 1
     summary = _as_message(result.input[0])
-    assert summary["role"] == "assistant"
+    assert summary["role"] == "system"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "<CONVERSATION HISTORY>" in summary_content
@@ -360,7 +515,7 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     closer_input = closer_model.first_turn_args["input"]
     assert isinstance(closer_input, list)
     summary = _as_message(closer_input[0])
-    assert summary["role"] == "assistant"
+    assert summary["role"] == "system"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert summary_content.count("<CONVERSATION HISTORY>") == 1
@@ -678,6 +833,140 @@ async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_converts_protocol_history():
+    history_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_result",
+            "call_id": "call_prepare",
+            "name": "tool_prepare",
+            "status": "completed",
+            "output": "ok",
+        },
+    )
+    session = _DummySession(history=[history_item])
+
+    prepared_input = await AgentRunner._prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    first_item = cast(dict[str, Any], prepared_input[0])
+    last_item = cast(dict[str, Any], prepared_input[-1])
+    assert first_item["type"] == "function_call_output"
+    assert "name" not in first_item
+    assert "status" not in first_item
+    assert last_item["role"] == "user"
+    assert last_item["content"] == "hello"
+
+
+def test_ensure_api_input_item_handles_model_dump_objects():
+    class _ModelDumpItem:
+        def model_dump(self, exclude_unset: bool = True) -> dict[str, Any]:
+            return {
+                "type": "function_call_result",
+                "call_id": "call_model_dump",
+                "name": "dump_tool",
+                "status": "completed",
+                "output": "dumped",
+            }
+
+    dummy_item: Any = _ModelDumpItem()
+    converted = AgentRunner._ensure_api_input_item(dummy_item)
+    assert converted["type"] == "function_call_output"
+    assert "name" not in converted
+    assert "status" not in converted
+    assert converted["output"] == "dumped"
+
+
+def test_ensure_api_input_item_stringifies_object_output():
+    payload = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_result",
+            "call_id": "call_object",
+            "output": {"complex": "value"},
+        },
+    )
+
+    converted = AgentRunner._ensure_api_input_item(payload)
+    assert converted["type"] == "function_call_output"
+    assert isinstance(converted["output"], str)
+    assert "complex" in converted["output"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_uses_sync_callback():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "hi"})
+    session = _DummySession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        first = cast(dict[str, Any], history[0])
+        assert first["role"] == "user"
+        return history + new_input
+
+    prepared = await AgentRunner._prepare_input_with_session("second", session, callback)
+    assert len(prepared) == 2
+    last_item = cast(dict[str, Any], prepared[-1])
+    assert last_item["role"] == "user"
+    assert last_item.get("content") == "second"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_awaits_async_callback():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "initial"})
+    session = _DummySession(history=[history_item])
+
+    async def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        await asyncio.sleep(0)
+        return history + new_input
+
+    prepared = await AgentRunner._prepare_input_with_session("later", session, callback)
+    assert len(prepared) == 2
+    first_item = cast(dict[str, Any], prepared[0])
+    assert first_item["role"] == "user"
+    assert first_item.get("content") == "initial"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_strips_protocol_fields():
+    session = _DummySession()
+    original_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_result",
+            "call_id": "call_original",
+            "name": "original_tool",
+            "status": "completed",
+            "output": "1",
+        },
+    )
+    run_item_payload = {
+        "type": "function_call_result",
+        "call_id": "call_result",
+        "name": "result_tool",
+        "status": "completed",
+        "output": "2",
+    }
+    dummy_run_item = _DummyRunItem(run_item_payload)
+
+    await AgentRunner._save_result_to_session(
+        session,
+        [original_item],
+        [cast(RunItem, dummy_run_item)],
+    )
+
+    assert len(session.saved_items) == 2
+    for saved in session.saved_items:
+        saved_dict = cast(dict[str, Any], saved)
+        assert saved_dict["type"] == "function_call_output"
+        assert "name" not in saved_dict
+        assert "status" not in saved_dict
+
+
+@pytest.mark.asyncio
 async def test_output_guardrail_tripwire_triggered_causes_exception():
     def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
@@ -697,6 +986,58 @@ async def test_output_guardrail_tripwire_triggered_causes_exception():
 
     with pytest.raises(OutputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_no_tripwire_continues_execution():
+    """Test input guardrail that doesn't trigger tripwire continues execution."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,  # Doesn't trigger tripwire
+        )
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("response")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[InputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    # Should complete successfully without raising exception
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output == "response"
+
+
+@pytest.mark.asyncio
+async def test_output_guardrail_no_tripwire_continues_execution():
+    """Test output guardrail that doesn't trigger tripwire continues execution."""
+
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], agent_output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(
+            output_info=None,
+            tripwire_triggered=False,  # Doesn't trigger tripwire
+        )
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("response")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        output_guardrails=[OutputGuardrail(guardrail_function=guardrail_function)],
+    )
+
+    # Should complete successfully without raising exception
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output == "response"
 
 
 @function_tool
@@ -1351,3 +1692,259 @@ async def test_session_add_items_called_multiple_times_for_multi_turn_completion
             assert (await session.get_items()) == expected_items
 
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_non_function_tool():
+    """Test _execute_approved_tools handles non-FunctionTool."""
+    model = FakeModel()
+
+    # Create a computer tool (not a FunctionTool)
+    class MockComputer(Computer):
+        @property
+        def environment(self) -> str:  # type: ignore[override]
+            return "mac"
+
+        @property
+        def dimensions(self) -> tuple[int, int]:
+            return (1920, 1080)
+
+        def screenshot(self) -> str:
+            return "screenshot"
+
+        def click(self, x: int, y: int, button: str) -> None:
+            pass
+
+        def double_click(self, x: int, y: int) -> None:
+            pass
+
+        def drag(self, path: list[tuple[int, int]]) -> None:
+            pass
+
+        def keypress(self, keys: list[str]) -> None:
+            pass
+
+        def move(self, x: int, y: int) -> None:
+            pass
+
+        def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+            pass
+
+        def type(self, text: str) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    computer = MockComputer()
+    computer_tool = ComputerTool(computer=computer)
+
+    agent = Agent(name="TestAgent", model=model, tools=[computer_tool])
+
+    # Create an approved tool call for the computer tool
+    # ComputerTool has name "computer_use_preview"
+    tool_call = get_function_tool_call("computer_use_preview", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add error message about tool not being a function tool
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "not a function tool" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool():
+    """Test _execute_approved_tools handles rejected tools."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Create a rejected tool call
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Reject via RunState
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.reject(approval_item)
+
+    generated_items: list[Any] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add rejection message
+    assert len(generated_items) == 1
+    assert "not approved" in generated_items[0].output.lower()
+    assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_unclear_status():
+    """Test _execute_approved_tools handles unclear approval status."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Create a tool call with unclear status (neither approved nor rejected)
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Don't approve or reject - status will be None
+
+    generated_items: list[Any] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add unclear status message
+    assert len(generated_items) == 1
+    assert "unclear" in generated_items[0].output.lower()
+    assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_missing_tool():
+    """Test _execute_approved_tools handles missing tools."""
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model)
+    # Agent has no tools
+
+    # Create an approved tool call for a tool that doesn't exist
+    tool_call = get_function_tool_call("nonexistent_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    # Approve via RunState
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Execute approved tools
+    await AgentRunner._execute_approved_tools_static(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Should add error message about tool not found
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "not found" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_instance_method():
+    """Test the instance method wrapper for _execute_approved_tools."""
+    model = FakeModel()
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=1,
+    )
+    state.approve(approval_item)
+
+    generated_items: list[RunItem] = []
+
+    # Create an AgentRunner instance and use the instance method
+    runner = AgentRunner()
+    await runner._execute_approved_tools(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+    )
+
+    # Tool should have been called
+    assert tool_called is True
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert generated_items[0].output == "tool_result"
