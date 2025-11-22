@@ -35,12 +35,14 @@ from agents.items import (
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
+    TResponseInputItem,
 )
 from agents.run_context import RunContextWrapper
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
     RunState,
     _build_agent_map,
+    _convert_protocol_result_to_api,
     _deserialize_items,
     _deserialize_processed_response,
     _normalize_field_names,
@@ -547,6 +549,93 @@ class TestSerializationRoundTrip:
         assert json_data["originalInput"][1]["name"] == "test_tool"  # Looked up from function_call
         assert json_data["originalInput"][1]["status"] == "completed"  # Added default
         assert json_data["originalInput"][1]["output"] == "result"
+
+    async def test_from_json_converts_protocol_original_input_to_api_format(self):
+        """Protocol formatted originalInput should be normalized back to API format when loading."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(
+            context=context, original_input="placeholder", starting_agent=agent, max_turns=5
+        )
+
+        state_json = state.to_json()
+        state_json["originalInput"] = [
+            {
+                "type": "function_call",
+                "callId": "call_abc",
+                "name": "demo_tool",
+                "arguments": '{"x":1}',
+            },
+            {
+                "type": "function_call_result",
+                "callId": "call_abc",
+                "name": "demo_tool",
+                "status": "completed",
+                "output": "demo-output",
+            },
+        ]
+
+        restored_state = await RunState.from_json(agent, state_json)
+        assert isinstance(restored_state._original_input, list)
+        assert len(restored_state._original_input) == 2
+
+        first_item = restored_state._original_input[0]
+        second_item = restored_state._original_input[1]
+        assert isinstance(first_item, dict)
+        assert isinstance(second_item, dict)
+        assert first_item["type"] == "function_call"
+        assert second_item["type"] == "function_call_output"
+        assert second_item["call_id"] == "call_abc"
+        assert second_item["output"] == "demo-output"
+        assert "name" not in second_item
+        assert "status" not in second_item
+
+    def test_serialize_tool_call_output_looks_up_name(self):
+        """ToolCallOutputItem serialization should infer name from generated tool calls."""
+        agent = Agent(name="TestAgent")
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = RunState(context=context, original_input=[], starting_agent=agent, max_turns=5)
+
+        tool_call = ResponseFunctionToolCall(
+            id="fc_lookup",
+            type="function_call",
+            call_id="call_lookup",
+            name="lookup_tool",
+            arguments="{}",
+            status="completed",
+        )
+        state._generated_items.append(ToolCallItem(agent=agent, raw_item=tool_call))
+
+        output_item = ToolCallOutputItem(
+            agent=agent,
+            raw_item={"type": "function_call_output", "call_id": "call_lookup", "output": "ok"},
+            output="ok",
+        )
+
+        serialized = state._serialize_item(output_item)
+        raw_item = serialized["rawItem"]
+        assert raw_item["type"] == "function_call_result"
+        assert raw_item["name"] == "lookup_tool"
+        assert raw_item["status"] == "completed"
+
+    def test_lookup_function_name_from_original_input(self):
+        """_lookup_function_name should fall back to original input entries."""
+        agent = Agent(name="TestAgent")
+        original_input: list[TResponseInputItem] = [
+            {
+                "type": "function_call",
+                "call_id": "call_from_input",
+                "name": "input_tool",
+                "arguments": "{}",
+            }
+        ]
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        state = RunState(
+            context=context, original_input=original_input, starting_agent=agent, max_turns=5
+        )
+
+        assert state._lookup_function_name("call_from_input") == "input_tool"
+        assert state._lookup_function_name("missing_call") == ""
 
     async def test_deserialization_handles_unknown_agent_gracefully(self):
         """Test that deserialization skips items with unknown agents."""
@@ -1513,6 +1602,46 @@ class TestRunStateSerializationEdgeCases:
         result = _deserialize_items([item_data], {"TestAgent": agent})
         assert len(result) == 1
         assert result[0].type == "handoff_call_item"
+
+    async def test_convert_protocol_result_stringifies_output_dict(self):
+        """Ensure protocol conversion stringifies dict outputs."""
+        raw_item = {
+            "type": "function_call_result",
+            "callId": "call123",
+            "name": "tool",
+            "status": "completed",
+            "output": {"key": "value"},
+        }
+        converted = _convert_protocol_result_to_api(raw_item)
+        assert converted["type"] == "function_call_output"
+        assert isinstance(converted["output"], str)
+        assert "key" in converted["output"]
+
+    async def test_deserialize_handoff_output_item_without_agent(self):
+        """handoff_output_item should fall back to sourceAgent when agent is missing."""
+        source_agent = Agent(name="SourceAgent")
+        target_agent = Agent(name="TargetAgent")
+        agent_map = {"SourceAgent": source_agent, "TargetAgent": target_agent}
+
+        item_data = {
+            "type": "handoff_output_item",
+            # No agent field present.
+            "sourceAgent": {"name": "SourceAgent"},
+            "targetAgent": {"name": "TargetAgent"},
+            "rawItem": {
+                "type": "function_call_result",
+                "callId": "call123",
+                "name": "transfer_to_weather",
+                "status": "completed",
+                "output": "payload",
+            },
+        }
+
+        result = _deserialize_items([item_data], agent_map)
+        assert len(result) == 1
+        handoff_item = result[0]
+        assert handoff_item.type == "handoff_output_item"
+        assert handoff_item.agent is source_agent
 
     async def test_deserialize_mcp_items(self):
         """Test deserialization of MCP-related items."""
