@@ -83,7 +83,7 @@ class Usage:
 
     def add(
         self,
-        other: "Usage",
+        other: Usage,
         model_name: str,
         agent_name: str,
         response_id: str | None = None,
