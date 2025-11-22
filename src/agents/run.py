@@ -676,6 +676,7 @@ class AgentRunner:
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
+                    context_wrapper.run_items = generated_items
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1160,6 +1161,7 @@ class AgentRunner:
                     ]
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
+                    context_wrapper.run_items = turn_result.generated_items
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
