@@ -264,7 +264,7 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     assert isinstance(nested.input_history, tuple)
     assert len(nested.input_history) == 1
     summary = _as_message(nested.input_history[0])
-    assert summary["role"] == "assistant"
+    assert summary["role"] == "system"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     start_marker, end_marker = get_conversation_history_wrappers()
@@ -289,7 +289,7 @@ def test_nest_handoff_history_handles_missing_user() -> None:
     assert isinstance(nested.input_history, tuple)
     assert len(nested.input_history) == 1
     summary = _as_message(nested.input_history[0])
-    assert summary["role"] == "assistant"
+    assert summary["role"] == "system"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "reasoning" in summary_content.lower()
@@ -323,7 +323,7 @@ def test_nest_handoff_history_appends_existing_history() -> None:
 
     assert isinstance(second_nested.input_history, tuple)
     summary = _as_message(second_nested.input_history[0])
-    assert summary["role"] == "assistant"
+    assert summary["role"] == "system"
     content = summary["content"]
     assert isinstance(content, str)
     start_marker, end_marker = get_conversation_history_wrappers()

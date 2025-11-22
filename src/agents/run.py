@@ -59,6 +59,7 @@ from .items import (
     ToolCallItem,
     ToolCallItemTypes,
     TResponseInputItem,
+    normalize_function_call_output_payload,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
@@ -758,10 +759,15 @@ class AgentRunner:
             # Resuming from a saved state
             run_state = cast(RunState[TContext], input)
             original_user_input = run_state._original_input
-            # Normalize items to remove top-level providerData (API doesn't accept it there)
+            # Normalize items to remove top-level providerData and convert protocol to API format
+            # Then filter incomplete function calls to ensure API compatibility
             if isinstance(original_user_input, list):
-                prepared_input: str | list[TResponseInputItem] = AgentRunner._normalize_input_items(
-                    original_user_input
+                # Normalize first (converts protocol format to API format, normalizes field names)
+                normalized = AgentRunner._normalize_input_items(original_user_input)
+                # Filter incomplete function calls after normalization
+                # This ensures consistent field names (call_id vs callId) for matching
+                prepared_input: str | list[TResponseInputItem] = (
+                    AgentRunner._filter_incomplete_function_calls(normalized)
                 )
             else:
                 prepared_input = original_user_input
@@ -810,12 +816,16 @@ class AgentRunner:
             if is_resumed_state and run_state is not None:
                 # Restore state from RunState
                 current_turn = run_state._current_turn
-                # Normalize original_input to remove top-level providerData
-                # (API doesn't accept it there)
+                # Normalize original_input: remove top-level providerData,
+                # convert protocol to API format, then filter incomplete function calls
                 raw_original_input = run_state._original_input
                 if isinstance(raw_original_input, list):
+                    # Normalize first (converts protocol to API format, normalizes field names)
+                    normalized = AgentRunner._normalize_input_items(raw_original_input)
+                    # Filter incomplete function calls after normalization
+                    # This ensures consistent field names (call_id vs callId) for matching
                     original_input: str | list[TResponseInputItem] = (
-                        AgentRunner._normalize_input_items(raw_original_input)
+                        AgentRunner._filter_incomplete_function_calls(normalized)
                     )
                 else:
                     original_input = raw_original_input
@@ -884,8 +894,40 @@ class AgentRunner:
                             )
                             in output_call_ids
                         ]
-                        # Save both function_call and function_call_output together
-                        items_to_save = tool_call_items + tool_output_items
+                        # Check which items are already in the session to avoid duplicates
+                        # Get existing items from session and extract their call_ids
+                        existing_items = await session.get_items()
+                        existing_call_ids: set[str] = set()
+                        for existing_item in existing_items:
+                            if isinstance(existing_item, dict):
+                                item_type = existing_item.get("type")
+                                if item_type in ("function_call", "function_call_output"):
+                                    existing_call_id = existing_item.get(
+                                        "call_id"
+                                    ) or existing_item.get("callId")
+                                    if existing_call_id and isinstance(existing_call_id, str):
+                                        existing_call_ids.add(existing_call_id)
+
+                        # Filter out items that are already in the session
+                        items_to_save: list[RunItem] = []
+                        for item in tool_call_items + tool_output_items:
+                            item_call_id: str | None = None
+                            if isinstance(item.raw_item, dict):
+                                raw_call_id = item.raw_item.get("call_id") or item.raw_item.get(
+                                    "callId"
+                                )
+                                item_call_id = (
+                                    cast(str | None, raw_call_id) if raw_call_id else None
+                                )
+                            elif hasattr(item.raw_item, "call_id"):
+                                item_call_id = cast(
+                                    str | None, getattr(item.raw_item, "call_id", None)
+                                )
+
+                            # Only save if not already in session
+                            if item_call_id is None or item_call_id not in existing_call_ids:
+                                items_to_save.append(item)
+
                         if items_to_save:
                             await self._save_result_to_session(session, [], items_to_save)
                     # Clear the current step since we've handled it
@@ -1470,11 +1512,12 @@ class AgentRunner:
                 # Resuming from state - normalize items to remove top-level providerData
                 # and filter incomplete function_call pairs
                 if isinstance(starting_input, list):
-                    # Filter incomplete function_call pairs before normalizing
-                    filtered = AgentRunner._filter_incomplete_function_calls(starting_input)
-                    prepared_input: str | list[TResponseInputItem] = (
-                        AgentRunner._normalize_input_items(filtered)
-                    )
+                    # Normalize field names first (camelCase -> snake_case) to ensure
+                    # consistent field names for filtering
+                    normalized_input = AgentRunner._normalize_input_items(starting_input)
+                    # Filter incomplete function_call pairs after normalizing
+                    filtered = AgentRunner._filter_incomplete_function_calls(normalized_input)
+                    prepared_input: str | list[TResponseInputItem] = filtered
                 else:
                     prepared_input = starting_input
             else:
@@ -2677,32 +2720,66 @@ class AgentRunner:
         """
         from .run_state import _normalize_field_names
 
+        def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                return dict(value)
+            if hasattr(value, "model_dump"):
+                try:
+                    return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+                except Exception:
+                    return None
+            return None
+
         normalized: list[TResponseInputItem] = []
         for item in items:
-            if isinstance(item, dict):
-                # Create a copy to avoid modifying the original
-                normalized_item = dict(item)
-                # Remove top-level providerData/provider_data - these should only be in content
-                # The API doesn't accept providerData at the top level of input items
-                normalized_item.pop("providerData", None)
-                normalized_item.pop("provider_data", None)
-                # Normalize item type: API expects 'function_call_output',
-                # not 'function_call_result'
-                item_type = normalized_item.get("type")
-                if item_type == "function_call_result":
-                    normalized_item["type"] = "function_call_output"
-                    item_type = "function_call_output"
-                # Remove invalid fields based on item type
-                # function_call_output items should not have 'name' field
-                if item_type == "function_call_output":
-                    normalized_item.pop("name", None)
-                # Normalize field names (callId -> call_id, responseId -> response_id)
-                normalized_item = _normalize_field_names(normalized_item)
-                normalized.append(cast(TResponseInputItem, normalized_item))
-            else:
-                # For non-dict items, keep as-is (they should already be in correct format)
+            coerced = _coerce_to_dict(item)
+            if coerced is None:
                 normalized.append(item)
+                continue
+
+            normalized_item = dict(coerced)
+            normalized_item.pop("providerData", None)
+            normalized_item.pop("provider_data", None)
+            item_type = normalized_item.get("type")
+            if item_type == "function_call_result":
+                normalized_item["type"] = "function_call_output"
+                item_type = "function_call_output"
+            if item_type == "function_call_output":
+                normalized_item.pop("name", None)
+                normalized_item.pop("status", None)
+                normalized_item = normalize_function_call_output_payload(normalized_item)
+            normalized_item = _normalize_field_names(normalized_item)
+            normalized.append(cast(TResponseInputItem, normalized_item))
         return normalized
+
+    @staticmethod
+    def _ensure_api_input_item(item: TResponseInputItem) -> TResponseInputItem:
+        """Ensure item is in API format (function_call_output, snake_case fields)."""
+
+        def _coerce_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                return dict(value)
+            if hasattr(value, "model_dump"):
+                try:
+                    return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+                except Exception:
+                    return None
+            return None
+
+        coerced = _coerce_dict(item)
+        if coerced is None:
+            return item
+
+        normalized = dict(coerced)
+        item_type = normalized.get("type")
+        if item_type == "function_call_result":
+            normalized["type"] = "function_call_output"
+            normalized.pop("name", None)
+            normalized.pop("status", None)
+
+        if normalized.get("type") == "function_call_output":
+            normalized = normalize_function_call_output_payload(normalized)
+        return cast(TResponseInputItem, normalized)
 
     @classmethod
     async def _prepare_input_with_session(
@@ -2728,13 +2805,19 @@ class AgentRunner:
         # Get previous conversation history
         history = await session.get_items()
 
+        # Convert protocol format items from session to API format.
+        # TypeScript may save protocol format (function_call_result) to sessions,
+        # but the API expects API format (function_call_output).
+        converted_history = [cls._ensure_api_input_item(item) for item in history]
+
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
+        new_input_list = [cls._ensure_api_input_item(item) for item in new_input_list]
 
         if session_input_callback is None:
-            merged = history + new_input_list
+            merged = converted_history + new_input_list
         elif callable(session_input_callback):
-            res = session_input_callback(history, new_input_list)
+            res = session_input_callback(converted_history, new_input_list)
             if inspect.isawaitable(res):
                 merged = await res
             else:
@@ -2788,10 +2871,19 @@ class AgentRunner:
             return
 
         # Convert original input to list format if needed
-        input_list = ItemHelpers.input_to_new_input_list(original_input)
+        input_list = [
+            cls._ensure_api_input_item(item)
+            for item in ItemHelpers.input_to_new_input_list(original_input)
+        ]
+
+        # Filter out tool_approval_item items before converting to input format
+        # These items represent pending approvals and shouldn't be sent to the API
+        items_to_convert = [item for item in new_items if item.type != "tool_approval_item"]
 
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in new_items]
+        new_items_as_input = [
+            cls._ensure_api_input_item(item.to_input_item()) for item in items_to_convert
+        ]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input

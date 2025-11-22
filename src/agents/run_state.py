@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic
+from typing import TYPE_CHECKING, Any, Generic, cast
 
 from typing_extensions import TypeVar
 
 from ._run_impl import NextStepInterruption
 from .exceptions import UserError
-from .items import ToolApprovalItem
+from .items import ToolApprovalItem, normalize_function_call_output_payload
 from .logger import logger
 from .run_context import RunContextWrapper
 from .usage import Usage
@@ -530,6 +530,12 @@ class RunState(Generic[TContext, TAgent]):
         else:
             raw_item_dict = item.raw_item
 
+        # Convert tool output-like items into protocol format so TypeScript can deserialize them.
+        if item.type in {"tool_call_output_item", "handoff_output_item"} and isinstance(
+            raw_item_dict, dict
+        ):
+            raw_item_dict = self._convert_output_item_to_protocol(raw_item_dict)
+
         # Convert snake_case to camelCase for JSON serialization
         raw_item_dict = self._camelize_field_names(raw_item_dict)
 
@@ -550,6 +556,76 @@ class RunState(Generic[TContext, TAgent]):
             result["toolName"] = item.tool_name
 
         return result
+
+    def _convert_output_item_to_protocol(self, raw_item_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert API-format tool output items to protocol format."""
+        converted = dict(raw_item_dict)
+        call_id = cast(str | None, converted.get("call_id") or converted.get("callId"))
+
+        converted["type"] = "function_call_result"
+
+        if not converted.get("name"):
+            converted["name"] = self._lookup_function_name(call_id or "")
+
+        if not converted.get("status"):
+            converted["status"] = "completed"
+
+        return converted
+
+    def _lookup_function_name(self, call_id: str) -> str:
+        """Attempt to find the function name for the provided call_id."""
+        if not call_id:
+            return ""
+
+        def _extract_name(raw: Any) -> str | None:
+            candidate_call_id: str | None = None
+            if isinstance(raw, dict):
+                candidate_call_id = cast(str | None, raw.get("call_id") or raw.get("callId"))
+                if candidate_call_id == call_id:
+                    name_value = raw.get("name", "")
+                    return str(name_value) if name_value else ""
+            else:
+                candidate_call_id = cast(
+                    str | None,
+                    getattr(raw, "call_id", None) or getattr(raw, "callId", None),
+                )
+                if candidate_call_id == call_id:
+                    name_value = getattr(raw, "name", "")
+                    return str(name_value) if name_value else ""
+            return None
+
+        # Search generated items first
+        for run_item in self._generated_items:
+            if run_item.type != "tool_call_item":
+                continue
+            name = _extract_name(run_item.raw_item)
+            if name is not None:
+                return name
+
+        # Inspect last processed response
+        if self._last_processed_response is not None:
+            for run_item in self._last_processed_response.new_items:
+                if run_item.type != "tool_call_item":
+                    continue
+                name = _extract_name(run_item.raw_item)
+                if name is not None:
+                    return name
+
+        # Finally, inspect the original input list where the function call originated
+        if isinstance(self._original_input, list):
+            for input_item in self._original_input:
+                if not isinstance(input_item, dict):
+                    continue
+                if input_item.get("type") != "function_call":
+                    continue
+                item_call_id = cast(
+                    str | None, input_item.get("call_id") or input_item.get("callId")
+                )
+                if item_call_id == call_id:
+                    name_value = input_item.get("name", "")
+                    return str(name_value) if name_value else ""
+
+        return ""
 
     def to_string(self) -> str:
         """Serializes the run state to a JSON string.
@@ -617,13 +693,21 @@ class RunState(Generic[TContext, TAgent]):
         # Normalize originalInput to remove providerData fields that may have been
         # included during serialization. These fields are metadata and should
         # not be sent to the API.
+        # Also convert protocol format (function_call_result) back to API format
+        # (function_call_output) for internal use, since originalInput is used to
+        # prepare input for the API.
         original_input_raw = state_json["originalInput"]
         if isinstance(original_input_raw, list):
             # Normalize each item in the list to remove providerData fields
-            normalized_original_input = [
-                _normalize_field_names(item) if isinstance(item, dict) else item
-                for item in original_input_raw
-            ]
+            # and convert protocol format back to API format
+            normalized_original_input = []
+            for item in original_input_raw:
+                if isinstance(item, dict):
+                    normalized_item = _normalize_field_names(item)
+                    normalized_item = _convert_protocol_result_to_api(normalized_item)
+                    normalized_original_input.append(normalized_item)
+                else:
+                    normalized_original_input.append(item)
         else:
             # If it's a string, use it as-is
             normalized_original_input = original_input_raw
@@ -736,13 +820,29 @@ class RunState(Generic[TContext, TAgent]):
         # Normalize originalInput to remove providerData fields that may have been
         # included during serialization. These fields are metadata and should
         # not be sent to the API.
+        # Also convert protocol format (function_call_result) back to API format
+        # (function_call_output) for internal use, since originalInput is used to
+        # prepare input for the API.
         original_input_raw = state_json["originalInput"]
         if isinstance(original_input_raw, list):
             # Normalize each item in the list to remove providerData fields
-            normalized_original_input = [
-                _normalize_field_names(item) if isinstance(item, dict) else item
-                for item in original_input_raw
-            ]
+            # and convert protocol format back to API format
+            normalized_original_input = []
+            for item in original_input_raw:
+                if isinstance(item, dict):
+                    normalized_item = _normalize_field_names(item)
+                    # Convert protocol format (function_call_result) back to API format
+                    # (function_call_output) for internal use
+                    item_type = normalized_item.get("type")
+                    if item_type == "function_call_result":
+                        normalized_item = dict(normalized_item)
+                        normalized_item["type"] = "function_call_output"
+                        # Remove protocol-only fields
+                        normalized_item.pop("name", None)
+                        normalized_item.pop("status", None)
+                    normalized_original_input.append(normalized_item)
+                else:
+                    normalized_original_input.append(item)
         else:
             # If it's a string, use it as-is
             normalized_original_input = original_input_raw
@@ -1108,8 +1208,41 @@ def _deserialize_items(
     result: list[RunItem] = []
 
     for item_data in items_data:
-        item_type = item_data["type"]
-        agent_name = item_data["agent"]["name"]
+        item_type = item_data.get("type")
+        if not item_type:
+            logger.warning("Item missing type field, skipping")
+            continue
+
+        # Handle items that might not have an agent field (e.g., from TypeScript serialization)
+        agent_name: str | None = None
+        agent_data = item_data.get("agent")
+        if agent_data:
+            if isinstance(agent_data, dict):
+                agent_name = agent_data.get("name")
+            elif isinstance(agent_data, str):
+                agent_name = agent_data
+        elif "agentName" in item_data:
+            # Handle alternative field name
+            agent_name = item_data.get("agentName")
+
+        if not agent_name and item_type == "handoff_output_item":
+            # Older serializations may store only source/target agent fields.
+            source_agent_data = item_data.get("sourceAgent")
+            if isinstance(source_agent_data, dict):
+                agent_name = source_agent_data.get("name")
+            elif isinstance(source_agent_data, str):
+                agent_name = source_agent_data
+            if not agent_name:
+                target_agent_data = item_data.get("targetAgent")
+                if isinstance(target_agent_data, dict):
+                    agent_name = target_agent_data.get("name")
+                elif isinstance(target_agent_data, str):
+                    agent_name = target_agent_data
+
+        if not agent_name:
+            logger.warning(f"Item missing agent field, skipping: {item_type}")
+            continue
+
         agent = agent_map.get(agent_name)
         if not agent:
             logger.warning(f"Agent {agent_name} not found, skipping item")
@@ -1139,7 +1272,9 @@ def _deserialize_items(
                 from pydantic import TypeAdapter
 
                 # Try to determine the type based on the dict structure
+                normalized_raw_item = _convert_protocol_result_to_api(normalized_raw_item)
                 output_type = normalized_raw_item.get("type")
+
                 raw_item_output: FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
                 if output_type == "function_call_output":
                     function_adapter: TypeAdapter[FunctionCallOutput] = TypeAdapter(
@@ -1194,7 +1329,7 @@ def _deserialize_items(
                             TResponseInputItem
                         )
                         raw_item_handoff_output = input_item_adapter.validate_python(
-                            normalized_raw_item
+                            _convert_protocol_result_to_api(normalized_raw_item)
                         )
                     except ValidationError:
                         # If validation fails, use the raw dict as-is
@@ -1250,3 +1385,15 @@ def _deserialize_items(
             continue
 
     return result
+
+
+def _convert_protocol_result_to_api(raw_item: dict[str, Any]) -> dict[str, Any]:
+    """Convert protocol format (function_call_result) to API format (function_call_output)."""
+    if raw_item.get("type") != "function_call_result":
+        return raw_item
+
+    api_item = dict(raw_item)
+    api_item["type"] = "function_call_output"
+    api_item.pop("name", None)
+    api_item.pop("status", None)
+    return normalize_function_call_output_payload(api_item)
