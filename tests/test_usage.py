@@ -21,7 +21,14 @@ def test_usage_add_aggregates_all_fields():
         total_tokens=15,
     )
 
-    u1.add(u2, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     assert u1.requests == 3
     assert u1.input_tokens == 17
@@ -42,7 +49,14 @@ def test_usage_add_aggregates_with_none_values():
         total_tokens=15,
     )
 
-    u1.add(u2, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     assert u1.requests == 2
     assert u1.input_tokens == 7
@@ -60,9 +74,11 @@ def test_request_usage_creation():
         total_tokens=300,
         input_tokens_details=InputTokensDetails(cached_tokens=10),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=20),
-        model_name="gpt-5",
-        agent_name="test-agent",
-        response_id="resp-123",
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-123",
+        },
     )
 
     assert request_usage.input_tokens == 100
@@ -70,9 +86,9 @@ def test_request_usage_creation():
     assert request_usage.total_tokens == 300
     assert request_usage.input_tokens_details.cached_tokens == 10
     assert request_usage.output_tokens_details.reasoning_tokens == 20
-    assert request_usage.model_name == "gpt-5"
-    assert request_usage.agent_name == "test-agent"
-    assert request_usage.response_id == "resp-123"
+    assert request_usage.metadata["model_name"] == "gpt-5"
+    assert request_usage.metadata["agent_name"] == "test-agent"
+    assert request_usage.metadata["response_id"] == "resp-123"
 
 
 def test_usage_add_preserves_single_request():
@@ -87,7 +103,14 @@ def test_usage_add_preserves_single_request():
         total_tokens=300,
     )
 
-    u1.add(u2, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     # Should preserve the request usage details
     assert len(u1.request_usage_entries) == 1
@@ -97,9 +120,9 @@ def test_usage_add_preserves_single_request():
     assert request_usage.total_tokens == 300
     assert request_usage.input_tokens_details.cached_tokens == 10
     assert request_usage.output_tokens_details.reasoning_tokens == 20
-    assert request_usage.model_name == "gpt-5"
-    assert request_usage.agent_name == "test-agent"
-    assert request_usage.response_id == "resp-1"
+    assert request_usage.metadata["model_name"] == "gpt-5"
+    assert request_usage.metadata["agent_name"] == "test-agent"
+    assert request_usage.metadata["response_id"] == "resp-1"
 
 
 def test_usage_add_ignores_zero_token_requests():
@@ -114,7 +137,14 @@ def test_usage_add_ignores_zero_token_requests():
         total_tokens=0,
     )
 
-    u1.add(u2, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     # Should not create a request_usage_entry for zero tokens
     assert len(u1.request_usage_entries) == 0
@@ -132,7 +162,14 @@ def test_usage_add_ignores_multi_request_usage():
         total_tokens=300,
     )
 
-    u1.add(u2, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     # Should not create a request usage entry for multi-request usage
     assert len(u1.request_usage_entries) == 0
@@ -150,7 +187,14 @@ def test_usage_add_merges_existing_request_usage_entries():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=20),
         total_tokens=300,
     )
-    u1.add(u2, model_name="gpt-5", agent_name="agent-1", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "agent-1",
+            "response_id": "resp-1",
+        },
+    )
 
     # Create second usage with request_usage_entries
     u3 = Usage(
@@ -162,7 +206,14 @@ def test_usage_add_merges_existing_request_usage_entries():
         total_tokens=125,
     )
 
-    u1.add(u3, model_name="gpt-5", agent_name="agent-2", response_id="resp-2")
+    u1.add(
+        u3,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "agent-2",
+            "response_id": "resp-2",
+        },
+    )
 
     # Should have both request_usage_entries
     assert len(u1.request_usage_entries) == 2
@@ -172,16 +223,16 @@ def test_usage_add_merges_existing_request_usage_entries():
     assert first.input_tokens == 100
     assert first.output_tokens == 200
     assert first.total_tokens == 300
-    assert first.agent_name == "agent-1"
-    assert first.response_id == "resp-1"
+    assert first.metadata["agent_name"] == "agent-1"
+    assert first.metadata["response_id"] == "resp-1"
 
     # Second request
     second = u1.request_usage_entries[1]
     assert second.input_tokens == 50
     assert second.output_tokens == 75
     assert second.total_tokens == 125
-    assert second.agent_name == "agent-2"
-    assert second.response_id == "resp-2"
+    assert second.metadata["agent_name"] == "agent-2"
+    assert second.metadata["response_id"] == "resp-2"
 
 
 def test_usage_add_with_pre_existing_request_usage_entries():
@@ -197,7 +248,14 @@ def test_usage_add_with_pre_existing_request_usage_entries():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=20),
         total_tokens=300,
     )
-    u1.add(u2, model_name="gpt-5", agent_name="agent-1", response_id="resp-1")
+    u1.add(
+        u2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "agent-1",
+            "response_id": "resp-1",
+        },
+    )
 
     # Create another usage with request_usage_entries
     u3 = Usage(
@@ -210,7 +268,14 @@ def test_usage_add_with_pre_existing_request_usage_entries():
     )
 
     # Add u3 to u1
-    u1.add(u3, model_name="gpt-5", agent_name="agent-2", response_id="resp-2")
+    u1.add(
+        u3,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "agent-2",
+            "response_id": "resp-2",
+        },
+    )
 
     # Should have both request_usage_entries
     assert len(u1.request_usage_entries) == 2
@@ -240,7 +305,14 @@ def test_anthropic_cost_calculation_scenario():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         total_tokens=150_000,
     )
-    usage.add(req1, model_name="gpt-5", agent_name="test-agent", response_id="resp-1")
+    usage.add(
+        req1,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-1",
+        },
+    )
 
     # Second request: 150K input tokens
     req2 = Usage(
@@ -251,7 +323,14 @@ def test_anthropic_cost_calculation_scenario():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         total_tokens=225_000,
     )
-    usage.add(req2, model_name="gpt-5", agent_name="test-agent", response_id="resp-2")
+    usage.add(
+        req2,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-2",
+        },
+    )
 
     # Third request: 80K input tokens
     req3 = Usage(
@@ -262,7 +341,14 @@ def test_anthropic_cost_calculation_scenario():
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         total_tokens=120_000,
     )
-    usage.add(req3, model_name="gpt-5", agent_name="test-agent", response_id="resp-3")
+    usage.add(
+        req3,
+        metadata={
+            "model_name": "gpt-5",
+            "agent_name": "test-agent",
+            "response_id": "resp-3",
+        },
+    )
 
     # Verify aggregated totals
     assert usage.requests == 3

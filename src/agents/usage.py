@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+from typing import Any
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic.dataclasses import dataclass
@@ -25,14 +26,8 @@ class RequestUsage:
     output_tokens_details: OutputTokensDetails
     """Details about the output tokens for this individual request."""
 
-    model_name: str
-    """The model name used for this request."""
-
-    agent_name: str
-    """The agent name that made this request."""
-
-    response_id: str | None = None
-    """The response ID for this request (i.e. ModelResponse.response_id)."""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Additional metadata for this request (e.g., model_name, agent_name, response_id)."""
 
 
 @dataclass
@@ -84,9 +79,7 @@ class Usage:
     def add(
         self,
         other: Usage,
-        model_name: str,
-        agent_name: str,
-        response_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add another Usage object to this one, aggregating all fields.
 
@@ -94,9 +87,7 @@ class Usage:
 
         Args:
             other: The Usage object to add to this one.
-            model_name: The model name used for this request.
-            agent_name: The agent name that made this request.
-            response_id: The response ID for this request.
+            metadata: Additional metadata for this request
         """
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
@@ -121,9 +112,7 @@ class Usage:
                 total_tokens=other.total_tokens,
                 input_tokens_details=other.input_tokens_details,
                 output_tokens_details=other.output_tokens_details,
-                model_name=model_name,
-                agent_name=agent_name,
-                response_id=response_id,
+                metadata=metadata or {},
             )
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:

@@ -1404,9 +1404,11 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(
                     usage,
-                    model_name=model.model,
-                    agent_name=agent.name,
-                    response_id=event.response.id,
+                    metadata={
+                        "model_name": model.model,
+                        "agent_name": agent.name,
+                        "response_id": event.response.id,
+                    },
                 )
 
             if isinstance(event, ResponseOutputItemDoneEvent):
@@ -1826,9 +1828,11 @@ class AgentRunner:
 
         context_wrapper.usage.add(
             new_response.usage,
-            model_name=model.model,
-            agent_name=agent.name,
-            response_id=new_response.response_id,
+            metadata={
+                "model_name": model.model,
+                "agent_name": agent.name,
+                "response_id": new_response.response_id,
+            },
         )
 
         # If we have run hooks, or if the agent has hooks, we need to call them after the LLM call
