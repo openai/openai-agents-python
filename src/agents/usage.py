@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import field
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
