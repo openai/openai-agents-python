@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from typing_extensions import TypeVar
 
-from ._run_impl import QueueCompleteSentinel
+from ._run_impl import NextStepInterruption, ProcessedResponse, QueueCompleteSentinel
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import (
@@ -22,7 +22,9 @@ from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_state import RunState
 from .stream_events import StreamEvent
+from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .util._pretty_print import (
     pretty_print_result,
@@ -201,9 +203,6 @@ class RunResult(RunResultBase):
                 result = await Runner.run(agent, state)
             ```
         """
-        from ._run_impl import NextStepInterruption
-        from .run_state import RunState
-
         # Create a RunState from the current result
         state = RunState(
             context=self.context_wrapper,
@@ -508,9 +507,6 @@ class RunResultStreaming(RunResultBase):
                     pass
             ```
         """
-        from ._run_impl import NextStepInterruption
-        from .run_state import RunState
-
         # Create a RunState from the current result
         state = RunState(
             context=self.context_wrapper,

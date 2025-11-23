@@ -9,12 +9,14 @@ from pydantic import BaseModel
 
 from agents import (
     Agent,
+    ApplyPatchTool,
     MessageOutputItem,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
     RunHooks,
     RunItem,
+    ShellTool,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
@@ -29,8 +31,11 @@ from agents._run_impl import (
     ProcessedResponse,
     RunImpl,
     SingleStepResult,
+    ToolRunApplyPatchCall,
     ToolRunFunction,
+    ToolRunShellCall,
 )
+from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
@@ -412,8 +417,6 @@ async def test_execute_tools_handles_tool_approval_item():
 @pytest.mark.asyncio
 async def test_execute_tools_handles_shell_tool_approval_item():
     """Test that execute_tools_and_side_effects handles ToolApprovalItem from shell tools."""
-    from agents import ShellTool
-    from agents._run_impl import ToolRunShellCall
 
     async def needs_approval(_ctx, _action, _call_id) -> bool:
         return True
@@ -465,9 +468,6 @@ async def test_execute_tools_handles_shell_tool_approval_item():
 @pytest.mark.asyncio
 async def test_execute_tools_handles_apply_patch_tool_approval_item():
     """Test that execute_tools_and_side_effects handles ToolApprovalItem from apply_patch tools."""
-    from agents import ApplyPatchTool
-    from agents._run_impl import ToolRunApplyPatchCall
-    from agents.editor import ApplyPatchOperation, ApplyPatchResult
 
     class DummyEditor:
         def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:

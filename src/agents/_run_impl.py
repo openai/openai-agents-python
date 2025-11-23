@@ -360,8 +360,6 @@ class RunImpl:
         # Add all tool results to new_step_items first, including approval items.
         # This ensures ToolCallItem items from processed_response.new_items are preserved
         # in the conversation history when resuming after an interruption.
-        from .items import ToolApprovalItem
-
         # Add all function results (including approval items) to new_step_items
         for result in function_results:
             new_step_items.append(result.run_item)
@@ -1008,8 +1006,6 @@ class RunImpl:
                     needs_approval_result = func_tool.needs_approval
                     if callable(needs_approval_result):
                         # Parse arguments for dynamic approval check
-                        import json
-
                         try:
                             parsed_args = (
                                 json.loads(tool_call.arguments) if tool_call.arguments else {}
@@ -1028,8 +1024,6 @@ class RunImpl:
 
                         if approval_status is None:
                             # Not yet decided - need to interrupt for approval
-                            from .items import ToolApprovalItem
-
                             approval_item = ToolApprovalItem(
                                 agent=agent, raw_item=tool_call, tool_name=func_tool.name
                             )
@@ -2433,8 +2427,6 @@ def _is_apply_patch_name(name: str | None, tool: ApplyPatchTool | None) -> bool:
 def _build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
     async def on_invoke_tool(_ctx: ToolContext[Any], value: Any) -> Any:
         if isinstance(value, str):
-            import json
-
             return json.loads(value)
         return value
 

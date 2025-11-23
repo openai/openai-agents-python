@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses as _dc
 import inspect
 import os
 import warnings
@@ -56,8 +57,10 @@ from .items import (
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
     normalize_function_call_output_payload,
 )
@@ -76,7 +79,7 @@ from .stream_events import (
     RunItemStreamEvent,
     StreamEvent,
 )
-from .tool import Tool, dispose_resolved_computers
+from .tool import FunctionTool, Tool, dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -1994,8 +1997,6 @@ class AgentRunner:
             event_queue=streamed_result._event_queue,
         )
 
-        import dataclasses as _dc
-
         # Filter out items that have already been sent to avoid duplicates
         items_to_filter = single_step_result.new_step_items
 
@@ -2072,8 +2073,6 @@ class AgentRunner:
         hooks: RunHooks[TContext],
     ) -> None:
         """Execute tools that have been approved after an interruption (classmethod version)."""
-        from .items import ToolApprovalItem, ToolCallOutputItem
-
         tool_runs: list[ToolRunFunction] = []
 
         # Find all tools from the agent
@@ -2187,8 +2186,6 @@ class AgentRunner:
                 continue
 
             # Only function tools can be executed via ToolRunFunction
-            from .tool import FunctionTool
-
             if not isinstance(tool, FunctionTool):
                 # Only function tools can create proper tool_call_output_item
                 error_tool_call = (
@@ -2718,7 +2715,6 @@ class AgentRunner:
         Returns:
             Normalized list of input items
         """
-        from .run_state import _normalize_field_names
 
         def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
             if isinstance(value, dict):
