@@ -127,7 +127,7 @@ def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInp
     ]
     content = "\n".join(content_lines)
     summary_message: dict[str, Any] = {
-        "role": "system",
+        "role": "assistant",
         "content": content,
     }
     return cast(TResponseInputItem, summary_message)
