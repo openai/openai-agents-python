@@ -189,6 +189,7 @@ async def main():
     # California
 ```
 
+For the first turn where no real `previous_response_id` exists, you can set `previous_response_id="bootstrap"` to force-enable response chaining for internal function calls inside the first turn.
 
 ## Long running agents & human-in-the-loop
 

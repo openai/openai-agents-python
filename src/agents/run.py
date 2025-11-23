@@ -129,7 +129,11 @@ class CallModelData(Generic[TContext]):
 @dataclass
 class _ServerConversationTracker:
     """Tracks server-side conversation state for either conversation_id or
-    previous_response_id modes."""
+    previous_response_id modes.
+
+    Special value 'bootstrap' for previous_response_id enables chaining for internal
+    function calls in the first turn, even when there's no actual previous response ID yet.
+    """
 
     conversation_id: str | None = None
     previous_response_id: str | None = None
@@ -1360,6 +1364,7 @@ class AgentRunner:
         previous_response_id = (
             server_conversation_tracker.previous_response_id
             if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id != "bootstrap"
             else None
         )
         conversation_id = (
@@ -1798,6 +1803,7 @@ class AgentRunner:
         previous_response_id = (
             server_conversation_tracker.previous_response_id
             if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id != "bootstrap"
             else None
         )
         conversation_id = (

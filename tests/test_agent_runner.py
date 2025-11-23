@@ -1225,6 +1225,119 @@ async def test_default_send_all_items_streamed():
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_mode_multi_turn():
+    """Test that bootstrap mode (previous_response_id='bootstrap') enables
+    chaining from the first internal turn."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message", previous_response_id="bootstrap")
+    assert result.final_output == "done"
+
+    # Check the first call
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # In bootstrap mode, first call should NOT have previous_response_id
+    assert model.first_turn_args.get("previous_response_id") is None
+
+    # Check the input from the second turn (after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In bootstrap mode, the second turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # In bootstrap mode, second call should have previous_response_id set to the first response
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_mode_multi_turn_streamed():
+    """Test that bootstrap mode (previous_response_id='bootstrap') enables
+    chaining from the first internal turn (streamed mode)."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", previous_response_id="bootstrap")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    # Check the first call
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # In bootstrap mode, first call should NOT have previous_response_id
+    assert model.first_turn_args.get("previous_response_id") is None
+
+    # Check the input from the second turn (after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # In bootstrap mode, the second turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # In bootstrap mode, second call should have previous_response_id set to the first response
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
 async def test_dynamic_tool_addition_run() -> None:
     """Test that tools can be added to an agent during a run."""
     model = FakeModel()
