@@ -6,13 +6,54 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, cast
 
+from openai.types.responses import (
+    ResponseComputerToolCall,
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+)
+from openai.types.responses.response_input_param import (
+    ComputerCallOutput,
+    FunctionCallOutput,
+    LocalShellCallOutput,
+    McpApprovalResponse,
+)
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+    McpListTools,
+)
+from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
 
-from ._run_impl import NextStepInterruption
+from ._run_impl import (
+    NextStepInterruption,
+    ProcessedResponse,
+    ToolRunComputerAction,
+    ToolRunFunction,
+    ToolRunHandoff,
+    ToolRunMCPApprovalRequest,
+)
 from .exceptions import UserError
-from .items import ToolApprovalItem, normalize_function_call_output_payload
+from .handoffs import Handoff
+from .items import (
+    HandoffCallItem,
+    HandoffOutputItem,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
+    MCPListToolsItem,
+    MessageOutputItem,
+    ModelResponse,
+    ReasoningItem,
+    RunItem,
+    ToolApprovalItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+    normalize_function_call_output_payload,
+)
 from .logger import logger
 from .run_context import RunContextWrapper
+from .tool import ComputerTool, FunctionTool, HostedMCPTool
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -285,6 +326,17 @@ class RunState(Generic[TContext, TAgent]):
                         # Look it up from the corresponding function_call if missing
                         if "name" not in normalized_item and call_id:
                             normalized_item["name"] = call_id_to_name.get(call_id, "")
+                    # Convert assistant messages with string content to array format
+                    # TypeScript SDK requires content to be an array for assistant messages
+                    role = normalized_item.get("role")
+                    if role == "assistant":
+                        content = normalized_item.get("content")
+                        if isinstance(content, str):
+                            # Convert string content to array format with output_text
+                            normalized_item["content"] = [{"type": "output_text", "text": content}]
+                        # Ensure status field is present (required by TypeScript schema)
+                        if "status" not in normalized_item:
+                            normalized_item["status"] = "completed"
                     # Normalize field names to camelCase for JSON (call_id -> callId)
                     normalized_item = self._camelize_field_names(normalized_item)
                     normalized_items.append(normalized_item)
@@ -745,8 +797,6 @@ class RunState(Generic[TContext, TAgent]):
         # Reconstruct current step if it's an interruption
         current_step_data = state_json.get("currentStep")
         if current_step_data and current_step_data.get("type") == "next_step_interruption":
-            from openai.types.responses import ResponseFunctionToolCall
-
             interruptions: list[RunItem] = []
             # Handle both old format (interruptions directly) and new format (wrapped in data)
             interruptions_data = current_step_data.get("data", {}).get(
@@ -880,8 +930,6 @@ class RunState(Generic[TContext, TAgent]):
         # Reconstruct current step if it's an interruption
         current_step_data = state_json.get("currentStep")
         if current_step_data and current_step_data.get("type") == "next_step_interruption":
-            from openai.types.responses import ResponseFunctionToolCall
-
             interruptions: list[RunItem] = []
             # Handle both old format (interruptions directly) and new format (wrapped in data)
             interruptions_data = current_step_data.get("data", {}).get(
@@ -920,15 +968,6 @@ async def _deserialize_processed_response(
     Returns:
         A reconstructed ProcessedResponse instance.
     """
-    from ._run_impl import (
-        ProcessedResponse,
-        ToolRunComputerAction,
-        ToolRunFunction,
-        ToolRunHandoff,
-        ToolRunMCPApprovalRequest,
-    )
-    from .tool import FunctionTool
-
     # Deserialize new items
     new_items = _deserialize_items(processed_response_data.get("newItems", []), agent_map)
 
@@ -944,13 +983,9 @@ async def _deserialize_processed_response(
         tool.name: tool for tool in all_tools if hasattr(tool, "type") and tool.type == "computer"
     }
     # Build MCP tools map
-    from .tool import HostedMCPTool
-
     mcp_tools_map = {tool.name: tool for tool in all_tools if isinstance(tool, HostedMCPTool)}
 
     # Get handoffs from the agent
-    from .handoffs import Handoff
-
     handoffs_map: dict[str, Handoff[Any, Agent[Any]]] = {}
     if hasattr(current_agent, "handoffs"):
         for handoff in current_agent.handoffs:
@@ -969,8 +1004,6 @@ async def _deserialize_processed_response(
             "handoff", {}
         ).get("tool_name")
         if handoff_name and handoff_name in handoffs_map:
-            from openai.types.responses import ResponseFunctionToolCall
-
             tool_call = ResponseFunctionToolCall(**tool_call_data)
             handoff = handoffs_map[handoff_name]
             handoffs.append(ToolRunHandoff(tool_call=tool_call, handoff=handoff))
@@ -981,22 +1014,16 @@ async def _deserialize_processed_response(
         tool_call_data = _normalize_field_names(func_data.get("toolCall", {}))
         tool_name = func_data.get("tool", {}).get("name")
         if tool_name and tool_name in tools_map:
-            from openai.types.responses import ResponseFunctionToolCall
-
             tool_call = ResponseFunctionToolCall(**tool_call_data)
             function_tool = tools_map[tool_name]
             functions.append(ToolRunFunction(tool_call=tool_call, function_tool=function_tool))
 
     # Deserialize computer actions
-    from .tool import ComputerTool
-
     computer_actions = []
     for action_data in processed_response_data.get("computerActions", []):
         tool_call_data = _normalize_field_names(action_data.get("toolCall", {}))
         computer_name = action_data.get("computer", {}).get("name")
         if computer_name and computer_name in computer_tools_map:
-            from openai.types.responses import ResponseComputerToolCall
-
             computer_tool_call = ResponseComputerToolCall(**tool_call_data)
             computer_tool = computer_tools_map[computer_name]
             # Only include ComputerTool instances
@@ -1011,9 +1038,6 @@ async def _deserialize_processed_response(
         request_item_data = request_data.get("requestItem", {})
         raw_item_data = _normalize_field_names(request_item_data.get("rawItem", {}))
         # Create a McpApprovalRequest from the raw item data
-        from openai.types.responses.response_output_item import McpApprovalRequest
-        from pydantic import TypeAdapter
-
         request_item_adapter: TypeAdapter[McpApprovalRequest] = TypeAdapter(McpApprovalRequest)
         request_item = request_item_adapter.validate_python(raw_item_data)
 
@@ -1135,8 +1159,6 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
         List of ModelResponse instances.
     """
 
-    from .items import ModelResponse
-
     result = []
     for resp_data in responses_data:
         usage = Usage()
@@ -1144,8 +1166,6 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
         usage.input_tokens = resp_data["usage"]["inputTokens"]
         usage.output_tokens = resp_data["usage"]["outputTokens"]
         usage.total_tokens = resp_data["usage"]["totalTokens"]
-
-        from pydantic import TypeAdapter
 
         # Normalize output items from JSON format (camelCase) to Python format (snake_case)
         normalized_output = [
@@ -1182,28 +1202,6 @@ def _deserialize_items(
     Returns:
         List of RunItem instances.
     """
-    from openai.types.responses import (
-        ResponseFunctionToolCall,
-        ResponseOutputMessage,
-        ResponseReasoningItem,
-    )
-    from openai.types.responses.response_output_item import (
-        McpApprovalRequest,
-        McpListTools,
-    )
-
-    from .items import (
-        HandoffCallItem,
-        HandoffOutputItem,
-        MCPApprovalRequestItem,
-        MCPApprovalResponseItem,
-        MCPListToolsItem,
-        MessageOutputItem,
-        ReasoningItem,
-        ToolApprovalItem,
-        ToolCallItem,
-        ToolCallOutputItem,
-    )
 
     result: list[RunItem] = []
 
@@ -1264,13 +1262,6 @@ def _deserialize_items(
 
             elif item_type == "tool_call_output_item":
                 # For tool call outputs, validate and convert the raw dict
-                from openai.types.responses.response_input_param import (
-                    ComputerCallOutput,
-                    FunctionCallOutput,
-                    LocalShellCallOutput,
-                )
-                from pydantic import TypeAdapter
-
                 # Try to determine the type based on the dict structure
                 normalized_raw_item = _convert_protocol_result_to_api(normalized_raw_item)
                 output_type = normalized_raw_item.get("type")
@@ -1320,10 +1311,6 @@ def _deserialize_items(
                     # For handoff output items, we need to validate the raw_item
                     # as a TResponseInputItem (which is a union type)
                     # If validation fails, use the raw dict as-is (for test compatibility)
-                    from pydantic import TypeAdapter, ValidationError
-
-                    from .items import TResponseInputItem
-
                     try:
                         input_item_adapter: TypeAdapter[TResponseInputItem] = TypeAdapter(
                             TResponseInputItem
@@ -1355,9 +1342,6 @@ def _deserialize_items(
 
             elif item_type == "mcp_approval_response_item":
                 # Validate and convert the raw dict to McpApprovalResponse
-                from openai.types.responses.response_input_param import McpApprovalResponse
-                from pydantic import TypeAdapter
-
                 approval_response_adapter: TypeAdapter[McpApprovalResponse] = TypeAdapter(
                     McpApprovalResponse
                 )
