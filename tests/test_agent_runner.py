@@ -458,7 +458,7 @@ async def test_default_handoff_history_nested_and_filters_respected():
     assert isinstance(result.input, list)
     assert len(result.input) == 1
     summary = _as_message(result.input[0])
-    assert summary["role"] == "system"
+    assert summary["role"] == "assistant"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "<CONVERSATION HISTORY>" in summary_content
@@ -515,7 +515,7 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     closer_input = closer_model.first_turn_args["input"]
     assert isinstance(closer_input, list)
     summary = _as_message(closer_input[0])
-    assert summary["role"] == "system"
+    assert summary["role"] == "assistant"
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert summary_content.count("<CONVERSATION HISTORY>") == 1
