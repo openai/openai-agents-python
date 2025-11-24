@@ -144,6 +144,15 @@ class MCPUtil:
         agent: "AgentBase",
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
+        # Validate that the server has a session before retrieving tools
+        # This helps catch connection issues early, especially when using LiteLLM proxy
+        if hasattr(server, "session") and server.session is None:
+            server_name = getattr(server, "name", "unknown")
+            raise UserError(
+                f"MCP server '{server_name}' is not connected. "
+                f"Please ensure the server is connected by calling `server.connect()` "
+                f"before passing it to an agent."
+            )
 
         with mcp_tools_span(server=server.name) as span:
             tools = await server.list_tools(run_context, agent)
@@ -183,6 +192,23 @@ class MCPUtil:
         cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
     ) -> str:
         """Invoke an MCP tool and return the result as a string."""
+        # Check if the server has a session (for servers that use ClientSession)
+        # This helps catch cases where the server was not properly connected
+        # or the session was lost (e.g., when using LiteLLM proxy)
+        if hasattr(server, "session") and server.session is None:
+            server_name = getattr(server, "name", "unknown")
+            error_msg = (
+                f"MCP server '{server_name}' is not connected. "
+                f"The server session is not available. "
+                f"Please ensure the server is connected by calling `server.connect()` "
+                f"before using it with an agent, and that the server remains connected "
+                f"during tool execution."
+            )
+            logger.error(
+                f"Error invoking MCP tool {tool.name} on server {server_name}: {error_msg}"
+            )
+            raise UserError(error_msg)
+
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
@@ -202,7 +228,16 @@ class MCPUtil:
         try:
             result = await server.call_tool(tool.name, json_data)
         except Exception as e:
-            logger.error(f"Error invoking MCP tool {tool.name}: {e}")
+            server_name = getattr(server, "name", "unknown")
+            logger.error(f"Error invoking MCP tool {tool.name} on server {server_name}: {e}")
+            # If the error is a UserError about server not initialized, provide more context
+            if isinstance(e, UserError) and "not initialized" in str(e).lower():
+                raise UserError(
+                    f"MCP server '{server_name}' session is not available. "
+                    f"Tool '{tool.name}' cannot be executed. "
+                    f"Please ensure the server is connected and remains connected "
+                    f"during tool execution."
+                ) from e
             raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
 
         if _debug.DONT_LOG_TOOL_DATA:
