@@ -39,6 +39,8 @@ class RunItemStreamEvent:
         "mcp_approval_requested",
         "mcp_approval_response",
         "mcp_list_tools",
+        # Custom tool events emitted by tools via RunContextWrapper.emit_event
+        "tool_event",
     ]
     """The name of the event."""
 

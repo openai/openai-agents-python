@@ -887,6 +887,13 @@ class AgentRunner:
             context_wrapper=context_wrapper,
         )
 
+        # Provide an emitter to the context so tools can stream custom events.
+        async def _emit(evt: StreamEvent) -> None:
+            streamed_result._event_queue.put_nowait(evt)
+
+        context_wrapper._emit_fn = _emit
+        context_wrapper._current_agent = starting_agent
+
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
             self._start_streaming(
@@ -1059,6 +1066,8 @@ class AgentRunner:
             await AgentRunner._save_result_to_session(session, starting_input, [])
 
             while True:
+                # Keep current agent reference up-to-date for tool event emission.
+                context_wrapper._current_agent = current_agent
                 # Check for soft cancel before starting new turn
                 if streamed_result._cancel_mode == "after_turn":
                     streamed_result.is_complete = True
