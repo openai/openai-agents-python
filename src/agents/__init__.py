@@ -50,6 +50,7 @@ from .handoffs import (
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
+    InjectedInputItem,
     ItemHelpers,
     MessageOutputItem,
     ModelResponse,
@@ -66,6 +67,7 @@ from .memory import (
     SessionABC,
     SQLiteSession,
 )
+from .message_history import MessageHistory
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
@@ -276,6 +278,7 @@ __all__ = [
     "RunItem",
     "HandoffCallItem",
     "HandoffOutputItem",
+    "InjectedInputItem",
     "ToolCallItem",
     "ToolCallOutputItem",
     "ReasoningItem",
@@ -287,6 +290,7 @@ __all__ = [
     "SQLiteSession",
     "OpenAIConversationsSession",
     "RunContextWrapper",
+    "MessageHistory",
     "TContext",
     "RunErrorDetails",
     "RunResult",

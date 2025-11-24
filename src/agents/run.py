@@ -55,11 +55,13 @@ from .items import (
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
 from .memory import Session, SessionInputCallback
+from .message_history import InjectedMessageRecord
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -169,6 +171,55 @@ class _ServerConversationTracker:
             self.sent_items.add(raw_item_id)
 
         return input_items
+
+
+def _extract_call_id_from_tool_output(item: ToolCallOutputItem) -> str | None:
+    raw_item = item.raw_item
+    if isinstance(raw_item, dict):
+        return cast(str | None, raw_item.get("call_id"))
+    return cast(str | None, getattr(raw_item, "call_id", None))
+
+
+def _insert_injected_items(
+    target_items: list[RunItem], injected_records: list[InjectedMessageRecord]
+) -> None:
+    if not injected_records:
+        return
+
+    front_insertions = 0
+    for record in sorted(injected_records, key=lambda r: r.order):
+        stage = record.stage
+        if stage in ("agent_start", "before_llm"):
+            insert_at = front_insertions
+            target_items.insert(insert_at, record.item)
+            front_insertions += 1
+            continue
+
+        if stage in ("after_llm", "unspecified"):
+            target_items.append(record.item)
+            continue
+
+        if stage in ("before_tool", "after_tool") and record.call_id:
+            tool_index = None
+            for idx, item in enumerate(target_items):
+                if isinstance(item, ToolCallOutputItem):
+                    call_id = _extract_call_id_from_tool_output(item)
+                    if call_id == record.call_id:
+                        tool_index = idx
+                        break
+            if tool_index is None:
+                target_items.append(record.item)
+                continue
+            if stage == "before_tool":
+                target_items.insert(tool_index, record.item)
+                if tool_index <= front_insertions:
+                    front_insertions += 1
+            else:
+                target_items.insert(tool_index + 1, record.item)
+            continue
+
+        # Fallback when we don't have enough metadata
+        target_items.append(record.item)
 
 
 # Type alias for the optional input filter callback
@@ -562,6 +613,8 @@ class AgentRunner:
             context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
                 context=context,  # type: ignore
             )
+            context_wrapper.message_history.set_original_input(original_input)
+            context_wrapper.message_history.bind_generated_items(generated_items)
 
             input_guardrail_results: list[InputGuardrailResult] = []
             tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
@@ -676,6 +729,8 @@ class AgentRunner:
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
+                    context_wrapper.message_history.set_original_input(original_input)
+                    context_wrapper.message_history.bind_generated_items(generated_items)
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -886,6 +941,8 @@ class AgentRunner:
             trace=new_trace,
             context_wrapper=context_wrapper,
         )
+        context_wrapper.message_history.set_original_input(streamed_result.input)
+        context_wrapper.message_history.bind_generated_items(streamed_result.new_items)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
@@ -1055,6 +1112,8 @@ class AgentRunner:
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
+            context_wrapper.message_history.set_original_input(streamed_result.input)
+            context_wrapper.message_history.bind_generated_items(streamed_result.new_items)
 
             await AgentRunner._save_result_to_session(session, starting_input, [])
 
@@ -1160,6 +1219,8 @@ class AgentRunner:
                     ]
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
+                    context_wrapper.message_history.set_original_input(streamed_result.input)
+                    context_wrapper.message_history.bind_generated_items(streamed_result.new_items)
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1300,16 +1361,21 @@ class AgentRunner:
     ) -> SingleStepResult:
         emitted_tool_call_ids: set[str] = set()
         emitted_reasoning_item_ids: set[str] = set()
+        history = context_wrapper.message_history
 
         if should_run_agent_start_hooks:
-            await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
-                (
-                    agent.hooks.on_start(context_wrapper, agent)
-                    if agent.hooks
-                    else _coro.noop_coroutine()
-                ),
-            )
+            marker = history.begin_injection_stage("agent_start")
+            try:
+                await asyncio.gather(
+                    hooks.on_agent_start(context_wrapper, agent),
+                    (
+                        agent.hooks.on_start(context_wrapper, agent)
+                        if agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
+                )
+            finally:
+                history.end_injection_stage(marker)
 
         output_schema = cls._get_output_schema(agent)
 
@@ -1328,13 +1394,30 @@ class AgentRunner:
 
         final_response: ModelResponse | None = None
 
+        history.set_original_input(streamed_result.input)
+        history.bind_generated_items(streamed_result.new_items)
+
+        override_messages = history.consume_next_turn_override()
+        pending_input_items = history.pending_input_items()
+
         if server_conversation_tracker is not None:
+            if override_messages is not None:
+                raise UserError(
+                    "message_history overrides are not supported when using conversation_id or "
+                    "previous_response_id."
+                )
             input = server_conversation_tracker.prepare_input(
                 streamed_result.input, streamed_result.new_items
             )
         else:
-            input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            if override_messages is not None:
+                input = override_messages
+            else:
+                input = ItemHelpers.input_to_new_input_list(streamed_result.input)
+                input.extend([item.to_input_item() for item in streamed_result.new_items])
+
+        if pending_input_items:
+            input.extend(pending_input_items)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1345,105 +1428,121 @@ class AgentRunner:
             system_instructions=system_prompt,
         )
 
-        # Call hook just before the model is invoked, with the correct system_prompt.
-        await asyncio.gather(
-            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
-            (
-                agent.hooks.on_llm_start(
-                    context_wrapper, agent, filtered.instructions, filtered.input
+        history.bind_live_input_buffer(filtered.input)
+        try:
+            # Call hook just before the model is invoked, with the correct system_prompt.
+            llm_start_marker = history.begin_injection_stage("before_llm")
+            try:
+                await asyncio.gather(
+                    hooks.on_llm_start(
+                        context_wrapper, agent, filtered.instructions, filtered.input
+                    ),
+                    (
+                        agent.hooks.on_llm_start(
+                            context_wrapper, agent, filtered.instructions, filtered.input
+                        )
+                        if agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
                 )
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+            finally:
+                history.end_injection_stage(llm_start_marker)
 
-        previous_response_id = (
-            server_conversation_tracker.previous_response_id
-            if server_conversation_tracker
-            else None
-        )
-        conversation_id = (
-            server_conversation_tracker.conversation_id if server_conversation_tracker else None
-        )
+            previous_response_id = (
+                server_conversation_tracker.previous_response_id
+                if server_conversation_tracker
+                else None
+            )
+            conversation_id = (
+                server_conversation_tracker.conversation_id if server_conversation_tracker else None
+            )
 
-        # 1. Stream the output events
-        async for event in model.stream_response(
-            filtered.instructions,
-            filtered.input,
-            model_settings,
-            all_tools,
-            output_schema,
-            handoffs,
-            get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
-            ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-        ):
-            # Emit the raw event ASAP
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            # 1. Stream the output events
+            async for event in model.stream_response(
+                filtered.instructions,
+                filtered.input,
+                model_settings,
+                all_tools,
+                output_schema,
+                handoffs,
+                get_model_tracing_impl(
+                    run_config.tracing_disabled, run_config.trace_include_sensitive_data
+                ),
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt_config,
+            ):
+                # Emit the raw event ASAP
+                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
-            if isinstance(event, ResponseCompletedEvent):
-                usage = (
-                    Usage(
-                        requests=1,
-                        input_tokens=event.response.usage.input_tokens,
-                        output_tokens=event.response.usage.output_tokens,
-                        total_tokens=event.response.usage.total_tokens,
-                        input_tokens_details=event.response.usage.input_tokens_details,
-                        output_tokens_details=event.response.usage.output_tokens_details,
+                if isinstance(event, ResponseCompletedEvent):
+                    usage = (
+                        Usage(
+                            requests=1,
+                            input_tokens=event.response.usage.input_tokens,
+                            output_tokens=event.response.usage.output_tokens,
+                            total_tokens=event.response.usage.total_tokens,
+                            input_tokens_details=event.response.usage.input_tokens_details,
+                            output_tokens_details=event.response.usage.output_tokens_details,
+                        )
+                        if event.response.usage
+                        else Usage()
                     )
-                    if event.response.usage
-                    else Usage()
-                )
-                final_response = ModelResponse(
-                    output=event.response.output,
-                    usage=usage,
-                    response_id=event.response.id,
-                )
-                context_wrapper.usage.add(usage)
-
-            if isinstance(event, ResponseOutputItemDoneEvent):
-                output_item = event.item
-
-                if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id: str | None = getattr(
-                        output_item, "call_id", getattr(output_item, "id", None)
+                    final_response = ModelResponse(
+                        output=event.response.output,
+                        usage=usage,
+                        response_id=event.response.id,
                     )
+                    context_wrapper.usage.add(usage)
 
-                    if call_id and call_id not in emitted_tool_call_ids:
-                        emitted_tool_call_ids.add(call_id)
+                if isinstance(event, ResponseOutputItemDoneEvent):
+                    output_item = event.item
 
-                        tool_item = ToolCallItem(
-                            raw_item=cast(ToolCallItemTypes, output_item),
-                            agent=agent,
-                        )
-                        streamed_result._event_queue.put_nowait(
-                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                    if isinstance(output_item, _TOOL_CALL_TYPES):
+                        call_id: str | None = getattr(
+                            output_item, "call_id", getattr(output_item, "id", None)
                         )
 
-                elif isinstance(output_item, ResponseReasoningItem):
-                    reasoning_id: str | None = getattr(output_item, "id", None)
+                        if call_id and call_id not in emitted_tool_call_ids:
+                            emitted_tool_call_ids.add(call_id)
 
-                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
-                        emitted_reasoning_item_ids.add(reasoning_id)
+                            tool_item = ToolCallItem(
+                                raw_item=cast(ToolCallItemTypes, output_item),
+                                agent=agent,
+                            )
+                            streamed_result._event_queue.put_nowait(
+                                RunItemStreamEvent(item=tool_item, name="tool_called")
+                            )
 
-                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
-                        streamed_result._event_queue.put_nowait(
-                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
-                        )
+                    elif isinstance(output_item, ResponseReasoningItem):
+                        reasoning_id: str | None = getattr(output_item, "id", None)
+
+                        if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                            emitted_reasoning_item_ids.add(reasoning_id)
+
+                            reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                            streamed_result._event_queue.put_nowait(
+                                RunItemStreamEvent(
+                                    item=reasoning_item, name="reasoning_item_created"
+                                )
+                            )
+        finally:
+            history.release_live_input_buffer()
 
         # Call hook just after the model response is finalized.
         if final_response is not None:
-            await asyncio.gather(
-                (
-                    agent.hooks.on_llm_end(context_wrapper, agent, final_response)
-                    if agent.hooks
-                    else _coro.noop_coroutine()
-                ),
-                hooks.on_llm_end(context_wrapper, agent, final_response),
-            )
+            llm_end_marker = history.begin_injection_stage("after_llm")
+            try:
+                await asyncio.gather(
+                    (
+                        agent.hooks.on_llm_end(context_wrapper, agent, final_response)
+                        if agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
+                    hooks.on_llm_end(context_wrapper, agent, final_response),
+                )
+            finally:
+                history.end_injection_stage(llm_end_marker)
 
         # 2. At this point, the streaming is complete for this turn of the agent loop.
         if not final_response:
@@ -1464,6 +1563,10 @@ class AgentRunner:
             tool_use_tracker=tool_use_tracker,
             event_queue=streamed_result._event_queue,
         )
+
+        injected_records = history.flush_pending_items()
+        if injected_records:
+            _insert_injected_items(single_step_result.new_step_items, injected_records)
 
         import dataclasses as _dc
 
@@ -1523,34 +1626,56 @@ class AgentRunner:
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
-        # Ensure we run the hooks before anything else
+        history = context_wrapper.message_history
         if should_run_agent_start_hooks:
-            await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
-                (
-                    agent.hooks.on_start(context_wrapper, agent)
-                    if agent.hooks
-                    else _coro.noop_coroutine()
-                ),
-            )
+            marker = history.begin_injection_stage("agent_start")
+            try:
+                await asyncio.gather(
+                    hooks.on_agent_start(context_wrapper, agent),
+                    (
+                        agent.hooks.on_start(context_wrapper, agent)
+                        if agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
+                )
+            finally:
+                history.end_injection_stage(marker)
 
         system_prompt, prompt_config = await asyncio.gather(
             agent.get_system_prompt(context_wrapper),
             agent.get_prompt(context_wrapper),
         )
 
+        history.set_original_input(original_input)
+        history.bind_generated_items(generated_items)
+
+        override_messages = history.consume_next_turn_override()
+        pending_input_items = history.pending_input_items()
+
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
+
         if server_conversation_tracker is not None:
-            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+            if override_messages is not None:
+                raise UserError(
+                    "message_history overrides are not supported when using conversation_id or "
+                    "previous_response_id."
+                )
+            model_input = server_conversation_tracker.prepare_input(original_input, generated_items)
         else:
-            input = ItemHelpers.input_to_new_input_list(original_input)
-            input.extend([generated_item.to_input_item() for generated_item in generated_items])
+            if override_messages is not None:
+                model_input = override_messages
+            else:
+                model_input = ItemHelpers.input_to_new_input_list(original_input)
+                model_input.extend(item.to_input_item() for item in generated_items)
+
+        if pending_input_items:
+            model_input.extend(pending_input_items)
 
         new_response = await cls._get_new_response(
             agent,
             system_prompt,
-            input,
+            model_input,
             output_schema,
             all_tools,
             handoffs,
@@ -1562,7 +1687,7 @@ class AgentRunner:
             prompt_config,
         )
 
-        return await cls._get_single_step_result_from_response(
+        single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
             original_input=original_input,
             pre_step_items=generated_items,
@@ -1575,6 +1700,12 @@ class AgentRunner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
         )
+
+        injected_records = history.flush_pending_items()
+        if injected_records:
+            _insert_injected_items(single_step_result.new_step_items, injected_records)
+
+        return single_step_result
 
     @classmethod
     async def _get_single_step_result_from_response(
@@ -1767,6 +1898,8 @@ class AgentRunner:
         server_conversation_tracker: _ServerConversationTracker | None,
         prompt_config: ResponsePromptParam | None,
     ) -> ModelResponse:
+        history = context_wrapper.message_history
+
         # Allow user to modify model input right before the call, if configured
         filtered = await cls._maybe_filter_model_input(
             agent=agent,
@@ -1780,56 +1913,71 @@ class AgentRunner:
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
-        # If we have run hooks, or if the agent has hooks, we need to call them before the LLM call
-        await asyncio.gather(
-            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
-            (
-                agent.hooks.on_llm_start(
-                    context_wrapper,
-                    agent,
-                    filtered.instructions,  # Use filtered instructions
-                    filtered.input,  # Use filtered input
+        history.bind_live_input_buffer(filtered.input)
+        try:
+            # If we have run hooks, or if the agent has hooks,
+            # we need to call them before the LLM call
+            llm_start_marker = history.begin_injection_stage("before_llm")
+            try:
+                await asyncio.gather(
+                    hooks.on_llm_start(
+                        context_wrapper, agent, filtered.instructions, filtered.input
+                    ),
+                    (
+                        agent.hooks.on_llm_start(
+                            context_wrapper,
+                            agent,
+                            filtered.instructions,  # Use filtered instructions
+                            filtered.input,  # Use filtered input
+                        )
+                        if agent.hooks
+                        else _coro.noop_coroutine()
+                    ),
                 )
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+            finally:
+                history.end_injection_stage(llm_start_marker)
 
-        previous_response_id = (
-            server_conversation_tracker.previous_response_id
-            if server_conversation_tracker
-            else None
-        )
-        conversation_id = (
-            server_conversation_tracker.conversation_id if server_conversation_tracker else None
-        )
+            previous_response_id = (
+                server_conversation_tracker.previous_response_id
+                if server_conversation_tracker
+                else None
+            )
+            conversation_id = (
+                server_conversation_tracker.conversation_id if server_conversation_tracker else None
+            )
 
-        new_response = await model.get_response(
-            system_instructions=filtered.instructions,
-            input=filtered.input,
-            model_settings=model_settings,
-            tools=all_tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
-            ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-        )
+            new_response = await model.get_response(
+                system_instructions=filtered.instructions,
+                input=filtered.input,
+                model_settings=model_settings,
+                tools=all_tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=get_model_tracing_impl(
+                    run_config.tracing_disabled, run_config.trace_include_sensitive_data
+                ),
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt_config,
+            )
+        finally:
+            history.release_live_input_buffer()
 
         context_wrapper.usage.add(new_response.usage)
 
         # If we have run hooks, or if the agent has hooks, we need to call them after the LLM call
-        await asyncio.gather(
-            (
-                agent.hooks.on_llm_end(context_wrapper, agent, new_response)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-            hooks.on_llm_end(context_wrapper, agent, new_response),
-        )
+        llm_end_marker = history.begin_injection_stage("after_llm")
+        try:
+            await asyncio.gather(
+                (
+                    agent.hooks.on_llm_end(context_wrapper, agent, new_response)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+                hooks.on_llm_end(context_wrapper, agent, new_response),
+            )
+        finally:
+            history.end_injection_stage(llm_end_marker)
 
         return new_response
 
