@@ -89,6 +89,37 @@ class MyHooks(RunHooks):
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
 
+## 在钩子中修改对话历史
+
+`RunContextWrapper` 还暴露了 `message_history`，允许钩子直接读取或修改当前会话：
+
+- `get_messages()` 以 `ResponseInputItem` 列表的形式返回完整对话（原始输入、模型输出以及所有待插入消息）。
+- `add_message(agent=..., message=...)` 将自定义消息（字符串、字典或 `ResponseInputItem` 列表）加入队列。消息会立即追加到本次 LLM 调用的输入，并作为 `InjectedInputItem` 出现在运行结果或流式事件中。
+- `override_next_turn(messages)` 用自定义内容完全替换下一次 LLM 调用的输入，适用于在守护程序或人工审核后重写上下文的场景。
+
+```python
+class BroadcastHooks(RunHooks):
+  def __init__(self, reviewer_name: str):
+    self.reviewer_name = reviewer_name
+
+  async def on_llm_start(
+    self,
+    context: RunContextWrapper,
+    agent: Agent,
+    _instructions: str | None,
+    _input_items: list[TResponseInputItem],
+  ) -> None:
+    context.message_history.add_message(
+      agent=agent,
+      message={
+        "role": "user",
+        "content": f"{self.reviewer_name}: 回答前请先引用附录中的数据。",
+      },
+    )
+```
+
+> **注意：** 当运行时指定了 `conversation_id` 或 `previous_response_id` 时，会话由服务器端线程维护，此时无法调用 `message_history.override_next_turn()`。
+
 ## API 参考
 
 如需详细的 API 文档，请参见：
@@ -96,4 +127,5 @@ class MyHooks(RunHooks):
 -   [`Usage`][agents.usage.Usage] - 用量跟踪数据结构
 -   [`RequestUsage`][agents.usage.RequestUsage] - 按请求的用量详情
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - 从运行上下文访问用量
+-   [`MessageHistory`][agents.run_context.MessageHistory] - 在钩子中查看或编辑对话
 -   [`RunHooks`][agents.run.RunHooks] - 接入用量跟踪的生命周期

@@ -154,6 +154,16 @@ class MessageOutputItem(RunItemBase[ResponseOutputMessage]):
 
 
 @dataclass
+class InjectedInputItem(RunItemBase[TResponseInputItem]):
+    """Represents a manually injected input item added via hooks."""
+
+    raw_item: TResponseInputItem
+    """The injected input item that should be treated as part of the conversation."""
+
+    type: Literal["injected_input_item"] = "injected_input_item"
+
+
+@dataclass
 class HandoffCallItem(RunItemBase[ResponseFunctionToolCall]):
     """Represents a tool call for a handoff from one agent to another."""
 
@@ -329,6 +339,7 @@ class MCPApprovalResponseItem(RunItemBase[McpApprovalResponse]):
 
 RunItem: TypeAlias = Union[
     MessageOutputItem,
+    InjectedInputItem,
     HandoffCallItem,
     HandoffOutputItem,
     ToolCallItem,

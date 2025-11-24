@@ -85,6 +85,44 @@ class MyHooks(RunHooks):
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
 
+## Modifying chat history in hooks
+
+`RunContextWrapper` also exposes `message_history`, giving hooks a mutable view of the
+conversation:
+
+- `get_messages()` returns the full transcript (original input, model outputs, and pending
+    injections) as a list of `ResponseInputItem` dictionaries.
+- `add_message(agent=..., message=...)` queues custom messages (string, dict, or list of
+    `ResponseInputItem`s). Pending messages are appended to the current LLM input immediately and are
+    emitted as `InjectedInputItem`s in the run result or stream events.
+- `override_next_turn(messages)` replaces the entire input for the upcoming LLM call. Use this to
+    rewrite history after a guardrail or external reviewer intervenes.
+
+```python
+class BroadcastHooks(RunHooks):
+        def __init__(self, reviewer_name: str):
+                self.reviewer_name = reviewer_name
+
+        async def on_llm_start(
+                self,
+                context: RunContextWrapper,
+                agent: Agent,
+                _instructions: str | None,
+                _input_items: list[TResponseInputItem],
+        ) -> None:
+                context.message_history.add_message(
+                        agent=agent,
+                        message={
+                                "role": "user",
+                                "content": f"{self.reviewer_name}: Please cite the appendix before answering.",
+                        },
+                )
+```
+
+> **Note:** When running with `conversation_id` or `previous_response_id`, overrides are managed by
+> the server-side conversation thread and `message_history.override_next_turn()` is disabled for
+> that run.
+
 ## API Reference
 
 For detailed API documentation, see:
@@ -92,4 +130,5 @@ For detailed API documentation, see:
 -   [`Usage`][agents.usage.Usage] - Usage tracking data structure
 -   [`RequestUsage`][agents.usage.RequestUsage] - Per-request usage details
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - Access usage from run context
+-   [`MessageHistory`][agents.run_context.MessageHistory] - Inspect or edit the conversation from hooks
 -   [`RunHooks`][agents.run.RunHooks] - Hook into usage tracking lifecycle

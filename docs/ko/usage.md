@@ -89,6 +89,37 @@ class MyHooks(RunHooks):
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
 
+## 훅에서 대화 기록 수정하기
+
+`RunContextWrapper`에는 `message_history`도 포함되어 있어 훅에서 현재 대화를 바로 읽거나 수정할 수 있습니다.
+
+- `get_messages()`는 원본 입력, 모델 출력, 보류 중인 삽입 항목을 모두 포함한 전체 기록을 `ResponseInputItem` 리스트로 반환합니다.
+- `add_message(agent=..., message=...)`는 사용자 정의 메시지(문자열, 딕셔너리 또는 `ResponseInputItem` 리스트)를 큐에 추가합니다. 추가된 메시지는 즉시 LLM 입력에 이어 붙고 실행 결과/스트림 이벤트에서는 `InjectedInputItem`으로 노출됩니다.
+- `override_next_turn(messages)`는 다음 LLM 호출의 입력 전체를 교체할 때 사용합니다. 가드레일이나 외부 검토 결과에 따라 히스토리를 다시 작성해야 할 때 유용합니다.
+
+```python
+class BroadcastHooks(RunHooks):
+  def __init__(self, reviewer_name: str):
+    self.reviewer_name = reviewer_name
+
+  async def on_llm_start(
+    self,
+    context: RunContextWrapper,
+    agent: Agent,
+    _instructions: str | None,
+    _input_items: list[TResponseInputItem],
+  ) -> None:
+    context.message_history.add_message(
+      agent=agent,
+      message={
+        "role": "user",
+        "content": f"{self.reviewer_name}: 답변 전에 부록 데이터를 인용하세요.",
+      },
+    )
+```
+
+> **참고:** `conversation_id` 또는 `previous_response_id`와 함께 실행하는 경우 서버 측 대화 스레드가 입력을 관리하므로 해당 런에서는 `message_history.override_next_turn()`을 사용할 수 없습니다.
+
 ## API 레퍼런스
 
 자세한 API 문서는 다음을 참조하세요:
@@ -96,4 +127,5 @@ class MyHooks(RunHooks):
 -   [`Usage`][agents.usage.Usage] - 사용량 추적 데이터 구조
 -   [`RequestUsage`][agents.usage.RequestUsage] - 요청별 사용량 세부 정보
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - 실행 컨텍스트에서 사용량 접근
+-   [`MessageHistory`][agents.run_context.MessageHistory] - 훅에서 대화 기록을 조회/편집
 -   [`RunHooks`][agents.run.RunHooks] - 사용량 추적 수명 주기에 훅 연결

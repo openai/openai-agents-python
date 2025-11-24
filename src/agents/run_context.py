@@ -3,6 +3,7 @@ from typing import Any, Generic
 
 from typing_extensions import TypeVar
 
+from .message_history import MessageHistory
 from .usage import Usage
 
 TContext = TypeVar("TContext", default=Any)
@@ -24,3 +25,6 @@ class RunContextWrapper(Generic[TContext]):
     """The usage of the agent run so far. For streamed responses, the usage will be stale until the
     last chunk of the stream is processed.
     """
+
+    message_history: MessageHistory = field(default_factory=MessageHistory)
+    """Mutable conversation history that hooks can inspect and update."""
