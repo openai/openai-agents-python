@@ -249,16 +249,21 @@ class TestSessionExceptions:
 
         session = RealtimeSession(fake_model, fake_agent, None)
 
-        # Add some fake guardrail tasks
-        fake_task1 = Mock()
-        fake_task1.done.return_value = False
-        fake_task1.cancel = Mock()
+        # Create real async tasks for testing cleanup
+        async def long_running_task():
+            await asyncio.sleep(10)
 
-        fake_task2 = Mock()
-        fake_task2.done.return_value = True
-        fake_task2.cancel = Mock()
+        async def completed_task():
+            pass
 
-        session._guardrail_tasks = {fake_task1, fake_task2}
+        # Create tasks
+        task1 = asyncio.create_task(long_running_task())
+        task2 = asyncio.create_task(completed_task())
+
+        # Wait for task2 to complete
+        await task2
+
+        session._guardrail_tasks = {task1, task2}
 
         fake_model.set_next_events([exception_event])
 
@@ -268,8 +273,8 @@ class TestSessionExceptions:
                     pass
 
         # Verify guardrail tasks were properly cleaned up
-        fake_task1.cancel.assert_called_once()
-        fake_task2.cancel.assert_not_called()  # Already done
+        assert task1.cancelled()  # Should be cancelled
+        assert task2.done()  # Was already done
         assert len(session._guardrail_tasks) == 0
 
     @pytest.mark.asyncio
