@@ -54,8 +54,8 @@ The SDK automatically tracks usage for each API request in `request_usage_entrie
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
 
-for request in enumerate(result.context_wrapper.usage.request_usage_entries):
-    print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
+for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
+    print(f"Request {i + 1}: Input={request.input_tokens} tokens, Output={request.output_tokens} tokens, metadata={request.metadata}")
 ```
 
 ## Accessing usage with sessions

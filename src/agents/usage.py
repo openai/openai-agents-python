@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import field
+from typing import Any
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic.dataclasses import dataclass
@@ -22,6 +25,9 @@ class RequestUsage:
 
     output_tokens_details: OutputTokensDetails
     """Details about the output tokens for this individual request."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Additional metadata for this request (e.g., model_name, agent_name, response_id)."""
 
 
 @dataclass
@@ -70,13 +76,18 @@ class Usage:
         if self.output_tokens_details.reasoning_tokens is None:
             self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
 
-    def add(self, other: "Usage") -> None:
+    def add(
+        self,
+        other: Usage,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Add another Usage object to this one, aggregating all fields.
 
         This method automatically preserves request_usage_entries.
 
         Args:
             other: The Usage object to add to this one.
+            metadata: Additional metadata for this request
         """
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
@@ -101,6 +112,7 @@ class Usage:
                 total_tokens=other.total_tokens,
                 input_tokens_details=other.input_tokens_details,
                 output_tokens_details=other.output_tokens_details,
+                metadata=metadata or {},
             )
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
