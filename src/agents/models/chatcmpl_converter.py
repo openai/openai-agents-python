@@ -43,10 +43,12 @@ from openai.types.responses import (
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_reasoning_item import Content, Summary
 
+from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
 from ..handoffs import Handoff
 from ..items import TResponseInputItem, TResponseOutputItem
+from ..logger import logger
 from ..model_settings import MCPToolChoice
 from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
@@ -55,6 +57,44 @@ ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseIn
 
 
 class Converter:
+    @classmethod
+    def _sanitize_tool_call_arguments(cls, arguments: str | None, tool_name: str) -> str:
+        """
+        Validates and sanitizes tool call arguments JSON string.
+
+        If the arguments are invalid JSON, returns "{}" as a safe default.
+        This prevents API errors when invalid JSON is stored in session history
+        and later sent to APIs that strictly validate JSON (like Anthropic via litellm).
+
+        Args:
+            arguments: The raw arguments string from the tool call.
+            tool_name: The name of the tool (for logging purposes).
+
+        Returns:
+            Valid JSON string. If input is invalid, returns "{}".
+        """
+        if not arguments:
+            return "{}"
+
+        try:
+            # Validate JSON by parsing it
+            json.loads(arguments)
+            return arguments
+        except (json.JSONDecodeError, TypeError):
+            # If invalid JSON, return empty object as safe default
+            # This prevents API errors while maintaining compatibility
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.debug(
+                    f"Invalid JSON in tool call arguments for {tool_name}, sanitizing to '{{}}'"
+                )
+            else:
+                truncated_args = arguments[:100] if len(arguments) > 100 else arguments
+                logger.debug(
+                    f"Invalid JSON in tool call arguments for {tool_name}: "
+                    f"{truncated_args}, sanitizing to '{{}}'"
+                )
+            return "{}"
+
     @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
@@ -524,7 +564,9 @@ class Converter:
                     pending_thinking_blocks = None  # Clear after using
 
                 tool_calls = list(asst.get("tool_calls", []))
-                arguments = func_call["arguments"] if func_call["arguments"] else "{}"
+                arguments = cls._sanitize_tool_call_arguments(
+                    func_call.get("arguments"), func_call["name"]
+                )
                 new_tool_call = ChatCompletionMessageFunctionToolCallParam(
                     id=func_call["call_id"],
                     type="function",
