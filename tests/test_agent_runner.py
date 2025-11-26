@@ -1226,7 +1226,7 @@ async def test_default_send_all_items_streamed():
 
 @pytest.mark.asyncio
 async def test_bootstrap_mode_multi_turn():
-    """Test that bootstrap mode (previous_response_id='bootstrap') enables
+    """Test that bootstrap mode (previous_response_id='') enables
     chaining from the first internal turn."""
     model = FakeModel()
     agent = Agent(
@@ -1244,7 +1244,7 @@ async def test_bootstrap_mode_multi_turn():
         ]
     )
 
-    result = await Runner.run(agent, input="user_message", previous_response_id="bootstrap")
+    result = await Runner.run(agent, input="user_message", previous_response_id="")
     assert result.final_output == "done"
 
     # Check the first call
@@ -1281,7 +1281,7 @@ async def test_bootstrap_mode_multi_turn():
 
 @pytest.mark.asyncio
 async def test_bootstrap_mode_multi_turn_streamed():
-    """Test that bootstrap mode (previous_response_id='bootstrap') enables
+    """Test that bootstrap mode (previous_response_id='') enables
     chaining from the first internal turn (streamed mode)."""
     model = FakeModel()
     agent = Agent(
@@ -1299,7 +1299,7 @@ async def test_bootstrap_mode_multi_turn_streamed():
         ]
     )
 
-    result = Runner.run_streamed(agent, input="user_message", previous_response_id="bootstrap")
+    result = Runner.run_streamed(agent, input="user_message", previous_response_id="")
     async for _ in result.stream_events():
         pass
 
