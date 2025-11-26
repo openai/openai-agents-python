@@ -174,8 +174,13 @@ from agents import Agent, Runner
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
-    # First turn
-    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
+    # First turn: since there's no previous_response_id yet,
+    # you can set it to an empty string to force-enable response chaining
+    # for internal function calls inside the first turn.
+    result1 = await Runner.run(
+        agent,
+        "What city is the Golden Gate Bridge in?",
+        previous_response_id="")
     print(result1.final_output)
     # San Francisco
 
@@ -188,7 +193,6 @@ async def main():
     print(result2.final_output)
     # California
 ```
-
 
 ## Long running agents & human-in-the-loop
 
