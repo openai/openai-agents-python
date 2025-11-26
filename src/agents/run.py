@@ -851,7 +851,12 @@ class AgentRunner:
             tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
             current_span: Span[AgentSpanData] | None = None
-            current_agent = starting_agent
+            # When resuming from state, use the current agent from the state (which may be different
+            # from starting_agent if a handoff occurred). Otherwise use starting_agent.
+            if is_resumed_state and run_state is not None and run_state._current_agent is not None:
+                current_agent = run_state._current_agent
+            else:
+                current_agent = starting_agent
             should_run_agent_start_hooks = True
 
             # save only the new user input to the session, not the combined history
@@ -1479,7 +1484,12 @@ class AgentRunner:
             streamed_result.trace.start(mark_as_current=True)
 
         current_span: Span[AgentSpanData] | None = None
-        current_agent = starting_agent
+        # When resuming from state, use the current agent from the state (which may be different
+        # from starting_agent if a handoff occurred). Otherwise use starting_agent.
+        if run_state is not None and run_state._current_agent is not None:
+            current_agent = run_state._current_agent
+        else:
+            current_agent = starting_agent
         current_turn = 0
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
@@ -1549,6 +1559,70 @@ class AgentRunner:
                         run_config=run_config,
                         hooks=hooks,
                     )
+                    # Save tool outputs to session immediately after approval
+                    # This ensures incomplete function calls in the session are completed
+                    if session is not None and streamed_result.new_items:
+                        # Save tool_call_output_item items (the outputs)
+                        tool_output_items: list[RunItem] = [
+                            item
+                            for item in streamed_result.new_items
+                            if item.type == "tool_call_output_item"
+                        ]
+                        # Also find and save the corresponding function_call items
+                        # (they might not be in session if the run was interrupted before saving)
+                        output_call_ids = {
+                            item.raw_item.get("call_id")
+                            if isinstance(item.raw_item, dict)
+                            else getattr(item.raw_item, "call_id", None)
+                            for item in tool_output_items
+                        }
+                        tool_call_items: list[RunItem] = [
+                            item
+                            for item in streamed_result.new_items
+                            if item.type == "tool_call_item"
+                            and (
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                            )
+                            in output_call_ids
+                        ]
+                        # Check which items are already in the session to avoid duplicates
+                        # Get existing items from session and extract their call_ids
+                        existing_items = await session.get_items()
+                        existing_call_ids: set[str] = set()
+                        for existing_item in existing_items:
+                            if isinstance(existing_item, dict):
+                                item_type = existing_item.get("type")
+                                if item_type in ("function_call", "function_call_output"):
+                                    existing_call_id = existing_item.get(
+                                        "call_id"
+                                    ) or existing_item.get("callId")
+                                    if existing_call_id and isinstance(existing_call_id, str):
+                                        existing_call_ids.add(existing_call_id)
+
+                        # Filter out items that are already in the session
+                        items_to_save: list[RunItem] = []
+                        for item in tool_call_items + tool_output_items:
+                            item_call_id: str | None = None
+                            if isinstance(item.raw_item, dict):
+                                raw_call_id = item.raw_item.get("call_id") or item.raw_item.get(
+                                    "callId"
+                                )
+                                item_call_id = (
+                                    cast(str | None, raw_call_id) if raw_call_id else None
+                                )
+                            elif hasattr(item.raw_item, "call_id"):
+                                item_call_id = cast(
+                                    str | None, getattr(item.raw_item, "call_id", None)
+                                )
+
+                            # Only save if not already in session
+                            if item_call_id is None or item_call_id not in existing_call_ids:
+                                items_to_save.append(item)
+
+                        if items_to_save:
+                            await AgentRunner._save_result_to_session(session, [], items_to_save)
                     # Clear the current step since we've handled it
                     run_state._current_step = None
 
