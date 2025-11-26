@@ -9,7 +9,9 @@ from mcp.types import (
     Content,
     GetPromptResult,
     ListPromptsResult,
+    ListResourcesResult,
     PromptMessage,
+    ReadResourceResult,
     TextContent,
 )
 
@@ -119,6 +121,21 @@ class FakeMCPServer(MCPServer):
         content = f"Fake prompt content for {name}"
         message = PromptMessage(role="user", content=TextContent(type="text", text=content))
         return GetPromptResult(description=f"Fake prompt: {name}", messages=[message])
+
+    async def list_resources(self, run_context=None, agent=None) -> ListResourcesResult:
+        """Return empty list of resources for fake server"""
+        return ListResourcesResult(resources=[])
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Return a simple resource result for fake server"""
+        from mcp.types import TextResourceContents
+        from pydantic import AnyUrl
+
+        uri_obj = AnyUrl(uri)
+        contents = TextResourceContents(
+            uri=uri_obj, mimeType="text/plain", text=f"Fake resource content for {uri}"
+        )
+        return ReadResourceResult(contents=[contents])
 
     @property
     def name(self) -> str:
