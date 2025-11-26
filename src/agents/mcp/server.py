@@ -376,12 +376,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         """Read a specific resource from the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
-
-        from pydantic import AnyUrl
-
-        # Convert string to AnyUrl if needed
-        uri_obj = AnyUrl(uri) if isinstance(uri, str) else uri
-        return await self.session.read_resource(uri_obj)
+        return await self.session.read_resource(uri)  # type: ignore[arg-type]
 
     async def cleanup(self):
         """Cleanup the server."""
