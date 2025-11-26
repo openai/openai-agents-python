@@ -97,7 +97,9 @@ class ChatCmplStreamHandler:
                 )
 
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
-            usage = chunk.usage if hasattr(chunk, "usage") else None
+            # Only update when chunk has usage data (not always in the last chunk)
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                usage = chunk.usage
 
             if not chunk.choices or not chunk.choices[0].delta:
                 continue
