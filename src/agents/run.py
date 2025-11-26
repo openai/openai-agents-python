@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses as _dc
 import inspect
 import os
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, cast, get_args, get_origin
+from typing import Any, Callable, Generic, Union, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_prompt_param import (
@@ -22,10 +24,12 @@ from ._run_impl import (
     AgentToolUseTracker,
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepInterruption,
     NextStepRunAgain,
     QueueCompleteSentinel,
     RunImpl,
     SingleStepResult,
+    ToolRunFunction,
     TraceCtxManager,
     get_model_tracing_impl,
 )
@@ -53,9 +57,12 @@ from .items import (
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
+    normalize_function_call_output_payload,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
@@ -65,13 +72,14 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
+from .run_state import RunState, _normalize_field_names
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
     RunItemStreamEvent,
     StreamEvent,
 )
-from .tool import Tool
+from .tool import FunctionTool, Tool
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -152,12 +160,67 @@ class _ServerConversationTracker:
         self,
         original_input: str | list[TResponseInputItem],
         generated_items: list[RunItem],
+        model_responses: list[ModelResponse] | None = None,
     ) -> list[TResponseInputItem]:
         input_items: list[TResponseInputItem] = []
 
         # On first call (when there are no generated items yet), include the original input
         if not generated_items:
-            input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
+            # Normalize original_input items to ensure field names are in snake_case
+            # (items from RunState deserialization may have camelCase)
+            raw_input_list = ItemHelpers.input_to_new_input_list(original_input)
+            # Filter out function_call items that don't have corresponding function_call_output
+            # (API requires every function_call to have a function_call_output)
+            filtered_input_list = AgentRunner._filter_incomplete_function_calls(raw_input_list)
+            input_items.extend(AgentRunner._normalize_input_items(filtered_input_list))
+
+        # First, collect call_ids from tool_call_output_item items
+        # (completed tool calls with outputs) and build a map of
+        # call_id -> tool_call_item for quick lookup
+        completed_tool_call_ids: set[str] = set()
+        tool_call_items_by_id: dict[str, RunItem] = {}
+
+        # Also look for tool calls in model responses (they might have been sent in previous turns)
+        tool_call_items_from_responses: dict[str, Any] = {}
+        if model_responses:
+            for response in model_responses:
+                for output_item in response.output:
+                    # Check if this is a tool call item
+                    if isinstance(output_item, dict):
+                        item_type = output_item.get("type")
+                        call_id = output_item.get("call_id")
+                    elif hasattr(output_item, "type") and hasattr(output_item, "call_id"):
+                        item_type = output_item.type
+                        call_id = output_item.call_id
+                    else:
+                        continue
+
+                    if item_type == "function_call" and call_id:
+                        tool_call_items_from_responses[call_id] = output_item
+
+        for item in generated_items:
+            if item.type == "tool_call_output_item":
+                # Extract call_id from the output item
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    completed_tool_call_ids.add(call_id)
+            elif item.type == "tool_call_item":
+                # Extract call_id from the tool call item and store it for later lookup
+                tool_call_raw_item: Any = item.raw_item
+                if isinstance(tool_call_raw_item, dict):
+                    call_id = tool_call_raw_item.get("call_id")
+                elif hasattr(tool_call_raw_item, "call_id"):
+                    call_id = tool_call_raw_item.call_id
+                else:
+                    call_id = None
+                if call_id and isinstance(call_id, str):
+                    tool_call_items_by_id[call_id] = item
 
         # Process generated_items, skip items already sent or from server
         for item in generated_items:
@@ -165,10 +228,153 @@ class _ServerConversationTracker:
 
             if raw_item_id in self.sent_items or raw_item_id in self.server_items:
                 continue
+
+            # Skip tool_approval_item items - they're metadata about pending approvals
+            if item.type == "tool_approval_item":
+                continue
+
+            # For tool_call_item items, only include them if there's a
+            # corresponding tool_call_output_item (i.e., the tool has been
+            # executed and has an output)
+            if item.type == "tool_call_item":
+                # Extract call_id from the tool call item
+                tool_call_item_raw: Any = item.raw_item
+                if isinstance(tool_call_item_raw, dict):
+                    call_id = tool_call_item_raw.get("call_id")
+                elif hasattr(tool_call_item_raw, "call_id"):
+                    call_id = tool_call_item_raw.call_id
+                else:
+                    call_id = None
+
+                # Only include if there's a matching tool_call_output_item
+                if call_id and isinstance(call_id, str) and call_id in completed_tool_call_ids:
+                    input_items.append(item.to_input_item())
+                    self.sent_items.add(raw_item_id)
+                continue
+
+            # For tool_call_output_item items, also include the corresponding tool_call_item
+            # even if it's already in sent_items (API requires both)
+            if item.type == "tool_call_output_item":
+                raw_item = item.raw_item
+                if isinstance(raw_item, dict):
+                    call_id = raw_item.get("call_id")
+                elif hasattr(raw_item, "call_id"):
+                    call_id = raw_item.call_id
+                else:
+                    call_id = None
+
+                # Track which item IDs have been added to avoid duplicates
+                # Include the corresponding tool_call_item if it exists and hasn't been added yet
+                # First check in generatedItems, then in model responses
+                if call_id and isinstance(call_id, str):
+                    if call_id in tool_call_items_by_id:
+                        tool_call_item = tool_call_items_by_id[call_id]
+                        tool_call_raw_item_id = id(tool_call_item.raw_item)
+                        # Include even if already sent (API requires both call and output)
+                        if tool_call_raw_item_id not in self.server_items:
+                            tool_call_input_item = tool_call_item.to_input_item()
+                            # Check if this item has already been added (by ID)
+                            if isinstance(tool_call_input_item, dict):
+                                tool_call_item_id = tool_call_input_item.get("id")
+                            else:
+                                tool_call_item_id = getattr(tool_call_input_item, "id", None)
+                            # Only add if not already in input_items (check by ID)
+                            if tool_call_item_id:
+                                already_added = any(
+                                    (
+                                        isinstance(existing_item, dict)
+                                        and existing_item.get("id") == tool_call_item_id
+                                    )
+                                    or (
+                                        hasattr(existing_item, "id")
+                                        and getattr(existing_item, "id", None) == tool_call_item_id
+                                    )
+                                    for existing_item in input_items
+                                )
+                                if not already_added:
+                                    input_items.append(tool_call_input_item)
+                            else:
+                                input_items.append(tool_call_input_item)
+                    elif call_id in tool_call_items_from_responses:
+                        # Tool call is in model responses (was sent in previous turn)
+                        tool_call_from_response = tool_call_items_from_responses[call_id]
+                        # Normalize field names from JSON (camelCase) to Python (snake_case)
+                        if isinstance(tool_call_from_response, dict):
+                            normalized_tool_call = _normalize_field_names(tool_call_from_response)
+                            tool_call_item_id_raw = normalized_tool_call.get("id")
+                            tool_call_item_id = (
+                                tool_call_item_id_raw
+                                if isinstance(tool_call_item_id_raw, str)
+                                else None
+                            )
+                        else:
+                            # It's already a Pydantic model, convert to dict
+                            normalized_tool_call = (
+                                tool_call_from_response.model_dump(exclude_unset=True)
+                                if hasattr(tool_call_from_response, "model_dump")
+                                else tool_call_from_response
+                            )
+                            tool_call_item_id = (
+                                getattr(tool_call_from_response, "id", None)
+                                if hasattr(tool_call_from_response, "id")
+                                else (
+                                    normalized_tool_call.get("id")
+                                    if isinstance(normalized_tool_call, dict)
+                                    else None
+                                )
+                            )
+                            if not isinstance(tool_call_item_id, str):
+                                tool_call_item_id = None
+                        # Only add if not already in input_items (check by ID)
+                        if tool_call_item_id:
+                            already_added = any(
+                                (
+                                    isinstance(existing_item, dict)
+                                    and existing_item.get("id") == tool_call_item_id
+                                )
+                                or (
+                                    hasattr(existing_item, "id")
+                                    and getattr(existing_item, "id", None) == tool_call_item_id
+                                )
+                                for existing_item in input_items
+                            )
+                            if not already_added:
+                                input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+                        else:
+                            input_items.append(normalized_tool_call)  # type: ignore[arg-type]
+
+                # Include the tool_call_output_item (check for duplicates by ID)
+                output_input_item = item.to_input_item()
+                if isinstance(output_input_item, dict):
+                    output_item_id = output_input_item.get("id")
+                else:
+                    output_item_id = getattr(output_input_item, "id", None)
+                if output_item_id:
+                    already_added = any(
+                        (
+                            isinstance(existing_item, dict)
+                            and existing_item.get("id") == output_item_id
+                        )
+                        or (
+                            hasattr(existing_item, "id")
+                            and getattr(existing_item, "id", None) == output_item_id
+                        )
+                        for existing_item in input_items
+                    )
+                    if not already_added:
+                        input_items.append(output_input_item)
+                        self.sent_items.add(raw_item_id)
+                else:
+                    input_items.append(output_input_item)
+                    self.sent_items.add(raw_item_id)
+                continue
+
             input_items.append(item.to_input_item())
             self.sent_items.add(raw_item_id)
 
-        return input_items
+        # Normalize items to remove top-level providerData before returning
+        # The API doesn't accept providerData at the top level of input items
+        return AgentRunner._normalize_input_items(input_items)
 
 
 # Type alias for the optional input filter callback
@@ -296,7 +502,7 @@ class Runner:
     async def run(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -371,7 +577,7 @@ class Runner:
     def run_sync(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         *,
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
@@ -444,7 +650,7 @@ class Runner:
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         context: TContext | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
@@ -519,7 +725,7 @@ class AgentRunner:
     async def run(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -532,6 +738,38 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
+        # Check if we're resuming from a RunState
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+
+        if is_resumed_state:
+            # Resuming from a saved state
+            run_state = cast(RunState[TContext], input)
+            original_user_input = run_state._original_input
+            # Normalize items to remove top-level providerData and convert protocol to API format
+            # Then filter incomplete function calls to ensure API compatibility
+            if isinstance(original_user_input, list):
+                # Normalize first (converts protocol format to API format, normalizes field names)
+                normalized = AgentRunner._normalize_input_items(original_user_input)
+                # Filter incomplete function calls after normalization
+                # This ensures consistent field names (call_id vs callId) for matching
+                prepared_input: str | list[TResponseInputItem] = (
+                    AgentRunner._filter_incomplete_function_calls(normalized)
+                )
+            else:
+                prepared_input = original_user_input
+
+            # Override context with the state's context if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+        else:
+            # Keep original user input separate from session-prepared input
+            raw_input = cast(Union[str, list[TResponseInputItem]], input)
+            original_user_input = raw_input
+            prepared_input = await self._prepare_input_with_session(
+                raw_input, session, run_config.session_input_callback
+            )
+
         if conversation_id is not None or previous_response_id is not None:
             server_conversation_tracker = _ServerConversationTracker(
                 conversation_id=conversation_id, previous_response_id=previous_response_id
@@ -539,12 +777,13 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
-        # Keep original user input separate from session-prepared input
-        original_user_input = input
-        prepared_input = await self._prepare_input_with_session(
-            input, session, run_config.session_input_callback
-        )
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
 
+        # Always create a fresh tool_use_tracker
+        # (it's rebuilt from the run state if needed during execution)
         tool_use_tracker = AgentToolUseTracker()
 
         with TraceCtxManager(
@@ -554,25 +793,130 @@ class AgentRunner:
             metadata=run_config.trace_metadata,
             disabled=run_config.tracing_disabled,
         ):
-            current_turn = 0
-            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
-            generated_items: list[RunItem] = []
-            model_responses: list[ModelResponse] = []
-
-            context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-                context=context,  # type: ignore
-            )
+            if is_resumed_state and run_state is not None:
+                # Restore state from RunState
+                current_turn = run_state._current_turn
+                # Normalize original_input: remove top-level providerData,
+                # convert protocol to API format, then filter incomplete function calls
+                raw_original_input = run_state._original_input
+                if isinstance(raw_original_input, list):
+                    # Normalize first (converts protocol to API format, normalizes field names)
+                    normalized = AgentRunner._normalize_input_items(raw_original_input)
+                    # Filter incomplete function calls after normalization
+                    # This ensures consistent field names (call_id vs callId) for matching
+                    original_input: str | list[TResponseInputItem] = (
+                        AgentRunner._filter_incomplete_function_calls(normalized)
+                    )
+                else:
+                    original_input = raw_original_input
+                generated_items = run_state._generated_items
+                model_responses = run_state._model_responses
+                # Cast to the correct type since we know this is TContext
+                context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+            else:
+                # Fresh run
+                current_turn = 0
+                original_input = _copy_str_or_list(prepared_input)
+                generated_items = []
+                model_responses = []
+                context_wrapper = RunContextWrapper(
+                    context=context,  # type: ignore
+                )
 
             input_guardrail_results: list[InputGuardrailResult] = []
             tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
             tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
             current_span: Span[AgentSpanData] | None = None
-            current_agent = starting_agent
+            # When resuming from state, use the current agent from the state (which may be different
+            # from starting_agent if a handoff occurred). Otherwise use starting_agent.
+            if is_resumed_state and run_state is not None and run_state._current_agent is not None:
+                current_agent = run_state._current_agent
+            else:
+                current_agent = starting_agent
             should_run_agent_start_hooks = True
 
             # save only the new user input to the session, not the combined history
-            await self._save_result_to_session(session, original_user_input, [])
+            # Skip saving if resuming from state - input is already in session
+            if not is_resumed_state:
+                await self._save_result_to_session(session, original_user_input, [])
+
+            # If resuming from an interrupted state, execute approved tools first
+            if is_resumed_state and run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await self._execute_approved_tools(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=generated_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Save tool outputs to session immediately after approval
+                    # This ensures incomplete function calls in the session are completed
+                    if session is not None and generated_items:
+                        # Save tool_call_output_item items (the outputs)
+                        tool_output_items: list[RunItem] = [
+                            item for item in generated_items if item.type == "tool_call_output_item"
+                        ]
+                        # Also find and save the corresponding function_call items
+                        # (they might not be in session if the run was interrupted before saving)
+                        output_call_ids = {
+                            item.raw_item.get("call_id")
+                            if isinstance(item.raw_item, dict)
+                            else getattr(item.raw_item, "call_id", None)
+                            for item in tool_output_items
+                        }
+                        tool_call_items: list[RunItem] = [
+                            item
+                            for item in generated_items
+                            if item.type == "tool_call_item"
+                            and (
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                            )
+                            in output_call_ids
+                        ]
+                        # Check which items are already in the session to avoid duplicates
+                        # Get existing items from session and extract their call_ids
+                        existing_items = await session.get_items()
+                        existing_call_ids: set[str] = set()
+                        for existing_item in existing_items:
+                            if isinstance(existing_item, dict):
+                                item_type = existing_item.get("type")
+                                if item_type in ("function_call", "function_call_output"):
+                                    existing_call_id = existing_item.get(
+                                        "call_id"
+                                    ) or existing_item.get("callId")
+                                    if existing_call_id and isinstance(existing_call_id, str):
+                                        existing_call_ids.add(existing_call_id)
+
+                        # Filter out items that are already in the session
+                        items_to_save: list[RunItem] = []
+                        for item in tool_call_items + tool_output_items:
+                            item_call_id: str | None = None
+                            if isinstance(item.raw_item, dict):
+                                raw_call_id = item.raw_item.get("call_id") or item.raw_item.get(
+                                    "callId"
+                                )
+                                item_call_id = (
+                                    cast(str | None, raw_call_id) if raw_call_id else None
+                                )
+                            elif hasattr(item.raw_item, "call_id"):
+                                item_call_id = cast(
+                                    str | None, getattr(item.raw_item, "call_id", None)
+                                )
+
+                            # Only save if not already in session
+                            if item_call_id is None or item_call_id not in existing_call_ids:
+                                items_to_save.append(item)
+
+                        if items_to_save:
+                            await self._save_result_to_session(session, [], items_to_save)
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
 
             try:
                 while True:
@@ -653,6 +997,7 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 server_conversation_tracker=server_conversation_tracker,
+                                model_responses=model_responses,
                             ),
                         )
 
@@ -670,6 +1015,7 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             server_conversation_tracker=server_conversation_tracker,
+                            model_responses=model_responses,
                         )
                     should_run_agent_start_hooks = False
 
@@ -704,15 +1050,53 @@ class AgentRunner:
                                 tool_input_guardrail_results=tool_input_guardrail_results,
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
+                                interruptions=[],
                             )
-                            if not any(
-                                guardrail_result.output.tripwire_triggered
-                                for guardrail_result in input_guardrail_results
-                            ):
-                                await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
-                                )
+                            # Save items from this final step
+                            # (original_user_input was already saved at the start,
+                            # and items from previous turns were saved incrementally)
+                            # We also need to ensure any function_call items that correspond to
+                            # function_call_output items in new_step_items are included
+                            items_to_save = list(turn_result.new_step_items)
+                            # Find any function_call_output items and ensure their function_calls
+                            # are included if they're in generated_items but not in new_step_items
+                            output_call_ids = {
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                                for item in turn_result.new_step_items
+                                if item.type == "tool_call_output_item"
+                            }
+                            for item in generated_items:
+                                if item.type == "tool_call_item":
+                                    call_id = (
+                                        item.raw_item.get("call_id")
+                                        if isinstance(item.raw_item, dict)
+                                        else getattr(item.raw_item, "call_id", None)
+                                    )
+                                    if call_id in output_call_ids and item not in items_to_save:
+                                        items_to_save.append(item)
 
+                            # Don't save original_user_input again - already saved at start
+                            await self._save_result_to_session(session, [], items_to_save)
+
+                            return result
+                        elif isinstance(turn_result.next_step, NextStepInterruption):
+                            # Tool approval is needed - return a result with interruptions
+                            result = RunResult(
+                                input=original_input,
+                                new_items=generated_items,
+                                raw_responses=model_responses,
+                                final_output=None,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=[],
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                                interruptions=turn_result.next_step.interruptions,
+                                _last_processed_response=turn_result.processed_response,
+                            )
                             return result
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -756,7 +1140,7 @@ class AgentRunner:
     def run_sync(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
         context = kwargs.get("context")
@@ -835,7 +1219,7 @@ class AgentRunner:
     def run_streamed(
         self,
         starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem],
+        input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
@@ -865,18 +1249,38 @@ class AgentRunner:
         )
 
         output_schema = AgentRunner._get_output_schema(starting_agent)
-        context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
-            context=context  # type: ignore
-        )
+
+        # Handle RunState input
+        is_resumed_state = isinstance(input, RunState)
+        run_state: RunState[TContext] | None = None
+        input_for_result: str | list[TResponseInputItem]
+
+        if is_resumed_state:
+            run_state = cast(RunState[TContext], input)
+            # Normalize input_for_result to remove top-level providerData
+            # (API doesn't accept it there)
+            raw_input_for_result = run_state._original_input
+            if isinstance(raw_input_for_result, list):
+                input_for_result = AgentRunner._normalize_input_items(raw_input_for_result)
+            else:
+                input_for_result = raw_input_for_result
+            # Use context from RunState if not provided
+            if context is None and run_state._context is not None:
+                context = run_state._context.context
+            # Use context wrapper from RunState
+            context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
+        else:
+            input_for_result = cast(Union[str, list[TResponseInputItem]], input)
+            context_wrapper = RunContextWrapper(context=context)  # type: ignore
 
         streamed_result = RunResultStreaming(
-            input=_copy_str_or_list(input),
-            new_items=[],
+            input=_copy_str_or_list(input_for_result),
+            new_items=run_state._generated_items if run_state else [],
             current_agent=starting_agent,
-            raw_responses=[],
+            raw_responses=run_state._model_responses if run_state else [],
             final_output=None,
             is_complete=False,
-            current_turn=0,
+            current_turn=run_state._current_turn if run_state else 0,
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
@@ -885,12 +1289,13 @@ class AgentRunner:
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
+            interruptions=[],
         )
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         streamed_result._run_impl_task = asyncio.create_task(
             self._start_streaming(
-                starting_input=input,
+                starting_input=input_for_result,
                 streamed_result=streamed_result,
                 starting_agent=starting_agent,
                 max_turns=max_turns,
@@ -900,6 +1305,7 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 session=session,
+                run_state=run_state,
             )
         )
         return streamed_result
@@ -1028,12 +1434,18 @@ class AgentRunner:
         previous_response_id: str | None,
         conversation_id: str | None,
         session: Session | None,
+        run_state: RunState[TContext] | None = None,
     ):
         if streamed_result.trace:
             streamed_result.trace.start(mark_as_current=True)
 
         current_span: Span[AgentSpanData] | None = None
-        current_agent = starting_agent
+        # When resuming from state, use the current agent from the state (which may be different
+        # from starting_agent if a handoff occurred). Otherwise use starting_agent.
+        if run_state is not None and run_state._current_agent is not None:
+            current_agent = run_state._current_agent
+        else:
+            current_agent = starting_agent
         current_turn = 0
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
@@ -1045,18 +1457,123 @@ class AgentRunner:
         else:
             server_conversation_tracker = None
 
+        # Prime the server conversation tracker from state if resuming
+        if server_conversation_tracker is not None and run_state is not None:
+            for response in run_state._model_responses:
+                server_conversation_tracker.track_server_items(response)
+
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
             # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(
-                starting_input, session, run_config.session_input_callback
-            )
+            # When resuming from a RunState, skip _prepare_input_with_session because
+            # the state's _original_input already contains the full conversation history.
+            # Calling _prepare_input_with_session would merge session history with the
+            # state's input, causing duplicate items.
+            if run_state is not None:
+                # Resuming from state - normalize items to remove top-level providerData
+                # and filter incomplete function_call pairs
+                if isinstance(starting_input, list):
+                    # Normalize field names first (camelCase -> snake_case) to ensure
+                    # consistent field names for filtering
+                    normalized_input = AgentRunner._normalize_input_items(starting_input)
+                    # Filter incomplete function_call pairs after normalizing
+                    filtered = AgentRunner._filter_incomplete_function_calls(normalized_input)
+                    prepared_input: str | list[TResponseInputItem] = filtered
+                else:
+                    prepared_input = starting_input
+            else:
+                # Fresh run - prepare input with session history
+                prepared_input = await AgentRunner._prepare_input_with_session(
+                    starting_input, session, run_config.session_input_callback
+                )
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
 
-            await AgentRunner._save_result_to_session(session, starting_input, [])
+            # Save only the new user input to the session, not the combined history
+            # Skip saving if resuming from state - input is already in session
+            if run_state is None:
+                await AgentRunner._save_result_to_session(session, starting_input, [])
+
+            # If resuming from an interrupted state, execute approved tools first
+            if run_state is not None and run_state._current_step is not None:
+                if isinstance(run_state._current_step, NextStepInterruption):
+                    # We're resuming from an interruption - execute approved tools
+                    await cls._execute_approved_tools_static(
+                        agent=current_agent,
+                        interruptions=run_state._current_step.interruptions,
+                        context_wrapper=context_wrapper,
+                        generated_items=streamed_result.new_items,
+                        run_config=run_config,
+                        hooks=hooks,
+                    )
+                    # Save tool outputs to session immediately after approval
+                    # This ensures incomplete function calls in the session are completed
+                    if session is not None and streamed_result.new_items:
+                        # Save tool_call_output_item items (the outputs)
+                        tool_output_items: list[RunItem] = [
+                            item
+                            for item in streamed_result.new_items
+                            if item.type == "tool_call_output_item"
+                        ]
+                        # Also find and save the corresponding function_call items
+                        # (they might not be in session if the run was interrupted before saving)
+                        output_call_ids = {
+                            item.raw_item.get("call_id")
+                            if isinstance(item.raw_item, dict)
+                            else getattr(item.raw_item, "call_id", None)
+                            for item in tool_output_items
+                        }
+                        tool_call_items: list[RunItem] = [
+                            item
+                            for item in streamed_result.new_items
+                            if item.type == "tool_call_item"
+                            and (
+                                item.raw_item.get("call_id")
+                                if isinstance(item.raw_item, dict)
+                                else getattr(item.raw_item, "call_id", None)
+                            )
+                            in output_call_ids
+                        ]
+                        # Check which items are already in the session to avoid duplicates
+                        # Get existing items from session and extract their call_ids
+                        existing_items = await session.get_items()
+                        existing_call_ids: set[str] = set()
+                        for existing_item in existing_items:
+                            if isinstance(existing_item, dict):
+                                item_type = existing_item.get("type")
+                                if item_type in ("function_call", "function_call_output"):
+                                    existing_call_id = existing_item.get(
+                                        "call_id"
+                                    ) or existing_item.get("callId")
+                                    if existing_call_id and isinstance(existing_call_id, str):
+                                        existing_call_ids.add(existing_call_id)
+
+                        # Filter out items that are already in the session
+                        items_to_save: list[RunItem] = []
+                        for item in tool_call_items + tool_output_items:
+                            item_call_id: str | None = None
+                            if isinstance(item.raw_item, dict):
+                                raw_call_id = item.raw_item.get("call_id") or item.raw_item.get(
+                                    "callId"
+                                )
+                                item_call_id = (
+                                    cast(str | None, raw_call_id) if raw_call_id else None
+                                )
+                            elif hasattr(item.raw_item, "call_id"):
+                                item_call_id = cast(
+                                    str | None, getattr(item.raw_item, "call_id", None)
+                                )
+
+                            # Only save if not already in session
+                            if item_call_id is None or item_call_id not in existing_call_ids:
+                                items_to_save.append(item)
+
+                        if items_to_save:
+                            await AgentRunner._save_result_to_session(session, [], items_to_save)
+                    # Clear the current step since we've handled it
+                    run_state._current_step = None
 
             while True:
                 # Check for soft cancel before starting new turn
@@ -1226,6 +1743,12 @@ class AgentRunner:
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    elif isinstance(turn_result.next_step, NextStepInterruption):
+                        # Tool approval is needed - complete the stream with interruptions
+                        streamed_result.interruptions = turn_result.next_step.interruptions
+                        streamed_result._last_processed_response = turn_result.processed_response
+                        streamed_result.is_complete = True
+                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
                         if session is not None:
                             should_skip_session_save = (
@@ -1330,11 +1853,19 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, streamed_result.new_items, streamed_result.raw_responses
             )
         else:
+            # Filter out tool_approval_item items and include all other items
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            for item in streamed_result.new_items:
+                if item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = item.to_input_item()
+                input.append(input_item)
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1408,12 +1939,16 @@ class AgentRunner:
                 output_item = event.item
 
                 if isinstance(output_item, _TOOL_CALL_TYPES):
-                    call_id: str | None = getattr(
+                    output_call_id: str | None = getattr(
                         output_item, "call_id", getattr(output_item, "id", None)
                     )
 
-                    if call_id and call_id not in emitted_tool_call_ids:
-                        emitted_tool_call_ids.add(call_id)
+                    if (
+                        output_call_id
+                        and isinstance(output_call_id, str)
+                        and output_call_id not in emitted_tool_call_ids
+                    ):
+                        emitted_tool_call_ids.add(output_call_id)
 
                         tool_item = ToolCallItem(
                             raw_item=cast(ToolCallItemTypes, output_item),
@@ -1465,8 +2000,6 @@ class AgentRunner:
             event_queue=streamed_result._event_queue,
         )
 
-        import dataclasses as _dc
-
         # Filter out items that have already been sent to avoid duplicates
         items_to_filter = single_step_result.new_step_items
 
@@ -1508,6 +2041,216 @@ class AgentRunner:
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
+    async def _execute_approved_tools(
+        self,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (instance method version).
+
+        This is a thin wrapper around the classmethod version for use in non-streaming mode.
+        """
+        await AgentRunner._execute_approved_tools_static(
+            agent=agent,
+            interruptions=interruptions,
+            context_wrapper=context_wrapper,
+            generated_items=generated_items,
+            run_config=run_config,
+            hooks=hooks,
+        )
+
+    @classmethod
+    async def _execute_approved_tools_static(
+        cls,
+        *,
+        agent: Agent[TContext],
+        interruptions: list[Any],  # list[RunItem] but avoid circular import
+        context_wrapper: RunContextWrapper[TContext],
+        generated_items: list[Any],  # list[RunItem]
+        run_config: RunConfig,
+        hooks: RunHooks[TContext],
+    ) -> None:
+        """Execute tools that have been approved after an interruption (classmethod version)."""
+        tool_runs: list[ToolRunFunction] = []
+
+        # Find all tools from the agent
+        all_tools = await AgentRunner._get_all_tools(agent, context_wrapper)
+        tool_map = {tool.name: tool for tool in all_tools}
+
+        for interruption in interruptions:
+            if not isinstance(interruption, ToolApprovalItem):
+                continue
+
+            tool_call = interruption.raw_item
+            # Use ToolApprovalItem's name property which handles different raw_item types
+            tool_name = interruption.name
+            if not tool_name:
+                # Create a minimal ResponseFunctionToolCall for error output
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name="unknown",
+                    call_id="unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output = "Tool approval item missing tool name."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Extract call_id - function tools have call_id, hosted tools have id
+            call_id: str | None = None
+            if isinstance(tool_call, dict):
+                call_id = tool_call.get("callId") or tool_call.get("call_id") or tool_call.get("id")
+            elif hasattr(tool_call, "call_id"):
+                call_id = tool_call.call_id
+            elif hasattr(tool_call, "id"):
+                call_id = tool_call.id
+
+            if not call_id:
+                # Create a minimal ResponseFunctionToolCall for error output
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name=tool_name,
+                    call_id="unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output = "Tool approval item missing call ID."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Check if this tool was approved
+            approval_status = context_wrapper.is_tool_approved(tool_name, call_id)
+            if approval_status is not True:
+                # Not approved or rejected - add rejection message
+                if approval_status is False:
+                    output = "Tool execution was not approved."
+                else:
+                    output = "Tool approval status unclear."
+
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Tool was approved - find it and prepare for execution
+            tool = tool_map.get(tool_name)
+            if tool is None:
+                # Tool not found - add error output
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
+                output = f"Tool '{tool_name}' not found."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Only function tools can be executed via ToolRunFunction
+            if not isinstance(tool, FunctionTool):
+                # Only function tools can create proper tool_call_output_item
+                error_tool_call = (
+                    tool_call
+                    if isinstance(tool_call, ResponseFunctionToolCall)
+                    else ResponseFunctionToolCall(
+                        type="function_call",
+                        name=tool_name,
+                        call_id=call_id or "unknown",
+                        status="completed",
+                        arguments="{}",
+                    )
+                )
+                output = f"Tool '{tool_name}' is not a function tool."
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            # Only function tools can be executed - ensure tool_call is ResponseFunctionToolCall
+            if not isinstance(tool_call, ResponseFunctionToolCall):
+                output = (
+                    f"Tool '{tool_name}' approval item has invalid raw_item type for execution."
+                )
+                error_tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name=tool_name,
+                    call_id=call_id or "unknown",
+                    status="completed",
+                    arguments="{}",
+                )
+                output_item = ToolCallOutputItem(
+                    output=output,
+                    raw_item=ItemHelpers.tool_call_output_item(error_tool_call, output),
+                    agent=agent,
+                )
+                generated_items.append(output_item)
+                continue
+
+            tool_runs.append(ToolRunFunction(function_tool=tool, tool_call=tool_call))
+
+        # Execute approved tools
+        if tool_runs:
+            (
+                function_results,
+                tool_input_guardrail_results,
+                tool_output_guardrail_results,
+            ) = await RunImpl.execute_function_tool_calls(
+                agent=agent,
+                tool_runs=tool_runs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            )
+
+            # Add tool outputs to generated_items
+            for result in function_results:
+                generated_items.append(result.run_item)
+
     @classmethod
     async def _run_single_turn(
         cls,
@@ -1522,6 +2265,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None = None,
+        model_responses: list[ModelResponse] | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -1542,10 +2286,21 @@ class AgentRunner:
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
         if server_conversation_tracker is not None:
-            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+            input = server_conversation_tracker.prepare_input(
+                original_input, generated_items, model_responses
+            )
         else:
+            # Filter out tool_approval_item items and include all other items
+            # Combine originalInput and generatedItems
             input = ItemHelpers.input_to_new_input_list(original_input)
-            input.extend([generated_item.to_input_item() for generated_item in generated_items])
+            for generated_item in generated_items:
+                if generated_item.type == "tool_approval_item":
+                    # Skip tool_approval_item items - they're metadata about pending
+                    # approvals and shouldn't be sent to the API
+                    continue
+                # Include all other items
+                input_item = generated_item.to_input_item()
+                input.append(input_item)
 
         new_response = await cls._get_new_response(
             agent,
@@ -1883,6 +2638,142 @@ class AgentRunner:
 
         return run_config.model_provider.get_model(agent.model)
 
+    @staticmethod
+    def _filter_incomplete_function_calls(
+        items: list[TResponseInputItem],
+    ) -> list[TResponseInputItem]:
+        """Filter out function_call items that don't have corresponding function_call_output.
+
+        The OpenAI API requires every function_call in an assistant message to have a
+        corresponding function_call_output (tool message). This function ensures only
+        complete pairs are included to prevent API errors.
+
+        IMPORTANT: This only filters incomplete function_call items. All other items
+        (messages, complete function_call pairs, etc.) are preserved to maintain
+        conversation history integrity.
+
+        Args:
+            items: List of input items to filter
+
+        Returns:
+            Filtered list with only complete function_call pairs. All non-function_call
+            items and complete function_call pairs are preserved.
+        """
+        # First pass: collect call_ids from function_call_output/function_call_result items
+        completed_call_ids: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                # Handle both API format (function_call_output) and
+                # protocol format (function_call_result)
+                if item_type in ("function_call_output", "function_call_result"):
+                    call_id = item.get("call_id") or item.get("callId")
+                    if call_id and isinstance(call_id, str):
+                        completed_call_ids.add(call_id)
+
+        # Second pass: only include function_call items that have corresponding outputs
+        filtered: list[TResponseInputItem] = []
+        for item in items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    call_id = item.get("call_id") or item.get("callId")
+                    # Only include if there's a corresponding
+                    # function_call_output/function_call_result
+                    if call_id and call_id in completed_call_ids:
+                        filtered.append(item)
+                else:
+                    # Include all non-function_call items
+                    filtered.append(item)
+            else:
+                # Include non-dict items as-is
+                filtered.append(item)
+
+        return filtered
+
+    @staticmethod
+    def _normalize_input_items(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+        """Normalize input items by removing top-level providerData/provider_data
+        and normalizing field names (callId -> call_id).
+
+        The OpenAI API doesn't accept providerData at the top level of input items.
+        providerData should only be in content where it belongs. This function removes
+        top-level providerData while preserving it in content.
+
+        Also normalizes field names from camelCase (callId) to snake_case (call_id)
+        to match API expectations.
+
+        Normalizes item types: converts 'function_call_result' to 'function_call_output'
+        to match API expectations.
+
+        Args:
+            items: List of input items to normalize
+
+        Returns:
+            Normalized list of input items
+        """
+
+        def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                return dict(value)
+            if hasattr(value, "model_dump"):
+                try:
+                    return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+                except Exception:
+                    return None
+            return None
+
+        normalized: list[TResponseInputItem] = []
+        for item in items:
+            coerced = _coerce_to_dict(item)
+            if coerced is None:
+                normalized.append(item)
+                continue
+
+            normalized_item = dict(coerced)
+            normalized_item.pop("providerData", None)
+            normalized_item.pop("provider_data", None)
+            item_type = normalized_item.get("type")
+            if item_type == "function_call_result":
+                normalized_item["type"] = "function_call_output"
+                item_type = "function_call_output"
+            if item_type == "function_call_output":
+                normalized_item.pop("name", None)
+                normalized_item.pop("status", None)
+                normalized_item = normalize_function_call_output_payload(normalized_item)
+            normalized_item = _normalize_field_names(normalized_item)
+            normalized.append(cast(TResponseInputItem, normalized_item))
+        return normalized
+
+    @staticmethod
+    def _ensure_api_input_item(item: TResponseInputItem) -> TResponseInputItem:
+        """Ensure item is in API format (function_call_output, snake_case fields)."""
+
+        def _coerce_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+            if isinstance(value, dict):
+                return dict(value)
+            if hasattr(value, "model_dump"):
+                try:
+                    return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+                except Exception:
+                    return None
+            return None
+
+        coerced = _coerce_dict(item)
+        if coerced is None:
+            return item
+
+        normalized = dict(coerced)
+        item_type = normalized.get("type")
+        if item_type == "function_call_result":
+            normalized["type"] = "function_call_output"
+            normalized.pop("name", None)
+            normalized.pop("status", None)
+
+        if normalized.get("type") == "function_call_output":
+            normalized = normalize_function_call_output_payload(normalized)
+        return cast(TResponseInputItem, normalized)
+
     @classmethod
     async def _prepare_input_with_session(
         cls,
@@ -1907,21 +2798,55 @@ class AgentRunner:
         # Get previous conversation history
         history = await session.get_items()
 
+        # Convert protocol format items from session to API format.
+        # TypeScript may save protocol format (function_call_result) to sessions,
+        # but the API expects API format (function_call_output).
+        converted_history = [cls._ensure_api_input_item(item) for item in history]
+
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
+        new_input_list = [cls._ensure_api_input_item(item) for item in new_input_list]
 
         if session_input_callback is None:
-            return history + new_input_list
+            merged = converted_history + new_input_list
         elif callable(session_input_callback):
-            res = session_input_callback(history, new_input_list)
+            res = session_input_callback(converted_history, new_input_list)
             if inspect.isawaitable(res):
-                return await res
-            return res
+                merged = await res
+            else:
+                merged = res
         else:
             raise UserError(
                 f"Invalid `session_input_callback` value: {session_input_callback}. "
                 "Choose between `None` or a custom callable function."
             )
+
+        # Filter incomplete function_call pairs before normalizing
+        # (API requires every function_call to have a function_call_output)
+        filtered = cls._filter_incomplete_function_calls(merged)
+
+        # Normalize items to remove top-level providerData and deduplicate by ID
+        normalized = cls._normalize_input_items(filtered)
+
+        # Deduplicate items by ID to prevent sending duplicate items to the API
+        # This can happen when resuming from state and items are already in the session
+        seen_ids: set[str] = set()
+        deduplicated: list[TResponseInputItem] = []
+        for item in normalized:
+            # Extract ID from item
+            item_id: str | None = None
+            if isinstance(item, dict):
+                item_id = cast(str | None, item.get("id"))
+            elif hasattr(item, "id"):
+                item_id = cast(str | None, getattr(item, "id", None))
+
+            # Only add items we haven't seen before (or items without IDs)
+            if item_id is None or item_id not in seen_ids:
+                deduplicated.append(item)
+                if item_id:
+                    seen_ids.add(item_id)
+
+        return deduplicated
 
     @classmethod
     async def _save_result_to_session(
@@ -1939,13 +2864,23 @@ class AgentRunner:
             return
 
         # Convert original input to list format if needed
-        input_list = ItemHelpers.input_to_new_input_list(original_input)
+        input_list = [
+            cls._ensure_api_input_item(item)
+            for item in ItemHelpers.input_to_new_input_list(original_input)
+        ]
+
+        # Filter out tool_approval_item items before converting to input format
+        # These items represent pending approvals and shouldn't be sent to the API
+        items_to_convert = [item for item in new_items if item.type != "tool_approval_item"]
 
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in new_items]
+        new_items_as_input = [
+            cls._ensure_api_input_item(item.to_input_item()) for item in items_to_convert
+        ]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
+
         await session.add_items(items_to_save)
 
     @staticmethod

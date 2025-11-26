@@ -74,6 +74,7 @@ def create_mock_run_result(
         tool_output_guardrail_results=[],
         context_wrapper=context_wrapper,
         _last_agent=agent,
+        interruptions=[],
     )
 
 

@@ -20,7 +20,7 @@ from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from .computer import AsyncComputer, Computer
-from .editor import ApplyPatchEditor
+from .editor import ApplyPatchEditor, ApplyPatchOperation
 from .exceptions import ModelBehaviorError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
@@ -34,7 +34,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent, AgentBase
-    from .items import RunItem
+    from .items import RunItem, ToolApprovalItem
 
 
 ToolParams = ParamSpec("ToolParams")
@@ -179,6 +179,15 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    needs_approval: (
+        bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+    ) = False
+    """Whether the tool needs approval before execution. If True, the run will be interrupted
+    and the tool call will need to be approved using RunState.approve() or rejected using
+    RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
+    function that takes (run_context, tool_parameters, call_id) and returns whether this
+    specific call needs approval."""
+
     # Tool-specific guardrails
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
     """Optional list of input guardrails to run before invoking this tool."""
@@ -296,6 +305,58 @@ MCPToolApprovalFunction = Callable[
     [MCPToolApprovalRequest], MaybeAwaitable[MCPToolApprovalFunctionResult]
 ]
 """A function that approves or rejects a tool call."""
+
+
+ShellApprovalFunction = Callable[
+    [RunContextWrapper[Any], "ShellActionRequest", str], MaybeAwaitable[bool]
+]
+"""A function that determines whether a shell action requires approval.
+Takes (run_context, action, call_id) and returns whether approval is needed.
+"""
+
+
+class ShellOnApprovalFunctionResult(TypedDict):
+    """The result of a shell tool on_approval callback."""
+
+    approve: bool
+    """Whether to approve the tool call."""
+
+    reason: NotRequired[str]
+    """An optional reason, if rejected."""
+
+
+ShellOnApprovalFunction = Callable[
+    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[ShellOnApprovalFunctionResult]
+]
+"""A function that auto-approves or rejects a shell tool call when approval is needed.
+Takes (run_context, approval_item) and returns approval decision.
+"""
+
+
+ApplyPatchApprovalFunction = Callable[
+    [RunContextWrapper[Any], ApplyPatchOperation, str], MaybeAwaitable[bool]
+]
+"""A function that determines whether an apply_patch operation requires approval.
+Takes (run_context, operation, call_id) and returns whether approval is needed.
+"""
+
+
+class ApplyPatchOnApprovalFunctionResult(TypedDict):
+    """The result of an apply_patch tool on_approval callback."""
+
+    approve: bool
+    """Whether to approve the tool call."""
+
+    reason: NotRequired[str]
+    """An optional reason, if rejected."""
+
+
+ApplyPatchOnApprovalFunction = Callable[
+    [RunContextWrapper[Any], "ToolApprovalItem"], MaybeAwaitable[ApplyPatchOnApprovalFunctionResult]
+]
+"""A function that auto-approves or rejects an apply_patch tool call when approval is needed.
+Takes (run_context, approval_item) and returns approval decision.
+"""
 
 
 @dataclass
@@ -451,6 +512,17 @@ class ShellTool:
 
     executor: ShellExecutor
     name: str = "shell"
+    needs_approval: bool | ShellApprovalFunction = False
+    """Whether the shell tool needs approval before execution. If True, the run will be interrupted
+    and the tool call will need to be approved using RunState.approve() or rejected using
+    RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
+    function that takes (run_context, action, call_id) and returns whether this specific call
+    needs approval.
+    """
+    on_approval: ShellOnApprovalFunction | None = None
+    """Optional handler to auto-approve or reject when approval is required.
+    If provided, it will be invoked immediately when an approval is needed.
+    """
 
     @property
     def type(self) -> str:
@@ -463,6 +535,17 @@ class ApplyPatchTool:
 
     editor: ApplyPatchEditor
     name: str = "apply_patch"
+    needs_approval: bool | ApplyPatchApprovalFunction = False
+    """Whether the apply_patch tool needs approval before execution. If True, the run will be
+    interrupted and the tool call will need to be approved using RunState.approve() or rejected
+    using RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
+    function that takes (run_context, operation, call_id) and returns whether this specific call
+    needs approval.
+    """
+    on_approval: ApplyPatchOnApprovalFunction | None = None
+    """Optional handler to auto-approve or reject when approval is required.
+    If provided, it will be invoked immediately when an approval is needed.
+    """
 
     @property
     def type(self) -> str:
@@ -503,6 +586,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -518,6 +603,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -533,6 +620,8 @@ def function_tool(
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
+    needs_approval: bool
+    | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -564,6 +653,11 @@ def function_tool(
         is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the tool is enabled. Disabled tools are hidden
             from the LLM at runtime.
+        needs_approval: Whether the tool needs approval before execution. If True, the run will
+            be interrupted and the tool call will need to be approved using RunState.approve() or
+            rejected using RunState.reject() before continuing. Can be a bool (always/never needs
+            approval) or a function that takes (run_context, tool_parameters, call_id) and returns
+            whether this specific call needs approval.
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -661,6 +755,7 @@ def function_tool(
             on_invoke_tool=_on_invoke_tool,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,
+            needs_approval=needs_approval,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses

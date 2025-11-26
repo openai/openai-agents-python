@@ -15,7 +15,7 @@ from agents import (
     ShellTool,
 )
 from agents._run_impl import ShellAction, ToolRunShellCall
-from agents.items import ToolCallOutputItem
+from agents.items import ToolApprovalItem, ToolCallOutputItem
 
 
 @pytest.mark.asyncio
@@ -135,3 +135,181 @@ async def test_shell_tool_executor_failure_returns_error() -> None:
     assert "status" not in payload_dict
     assert "shell_output" not in payload_dict
     assert "provider_data" not in payload_dict
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_needs_approval_returns_approval_item() -> None:
+    """Test that shell tool with needs_approval=True returns ToolApprovalItem."""
+
+    async def needs_approval(_ctx, _action, _call_id) -> bool:
+        return True
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=needs_approval,
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolApprovalItem)
+    assert result.tool_name == "shell"
+    assert result.name == "shell"
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_needs_approval_rejected_returns_rejection() -> None:
+    """Test that shell tool with needs_approval that is rejected returns rejection output."""
+
+    async def needs_approval(_ctx, _action, _call_id) -> bool:
+        return True
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=needs_approval,
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    # Pre-reject the tool call
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call, tool_name="shell")
+    context_wrapper.reject_tool(approval_item)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert "Tool execution was not approved" in result.output
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["type"] == "shell_call_output"
+    assert len(raw_item["output"]) == 1
+    assert raw_item["output"][0]["stderr"] == "Tool execution was not approved."
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_on_approval_callback_auto_approves() -> None:
+    """Test that shell tool on_approval callback can auto-approve."""
+
+    async def needs_approval(_ctx, _action, _call_id) -> bool:
+        return True
+
+    async def on_approval(_ctx, approval_item) -> dict[str, Any]:
+        return {"approve": True}
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=needs_approval,
+        on_approval=on_approval,  # type: ignore[arg-type]
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    # Should execute normally since on_approval auto-approved
+    assert isinstance(result, ToolCallOutputItem)
+    assert result.output == "output"
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_on_approval_callback_auto_rejects() -> None:
+    """Test that shell tool on_approval callback can auto-reject."""
+
+    async def needs_approval(_ctx, _action, _call_id) -> bool:
+        return True
+
+    async def on_approval(
+        _ctx: RunContextWrapper[Any], approval_item: ToolApprovalItem
+    ) -> dict[str, Any]:
+        return {"approve": False, "reason": "Not allowed"}
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=needs_approval,
+        on_approval=on_approval,  # type: ignore[arg-type]
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    # Should return rejection output
+    assert isinstance(result, ToolCallOutputItem)
+    assert "Tool execution was not approved" in result.output
