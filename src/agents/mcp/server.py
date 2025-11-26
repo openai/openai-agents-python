@@ -15,7 +15,14 @@ from mcp.client.session import MessageHandlerFnT
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import GetSessionIdCallback, streamablehttp_client
 from mcp.shared.message import SessionMessage
-from mcp.types import CallToolResult, GetPromptResult, InitializeResult, ListPromptsResult
+from mcp.types import (
+    CallToolResult,
+    GetPromptResult,
+    InitializeResult,
+    ListPromptsResult,
+    ListResourcesResult,
+    ReadResourceResult,
+)
 from typing_extensions import NotRequired, TypedDict
 
 from ..exceptions import UserError
@@ -90,6 +97,18 @@ class MCPServer(abc.ABC):
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> GetPromptResult:
         """Get a specific prompt from the server."""
+        pass
+
+    @abc.abstractmethod
+    async def list_resources(
+        self,
+    ) -> ListResourcesResult:
+        """List the resources available on the server."""
+        pass
+
+    @abc.abstractmethod
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read a specific resource from the server."""
         pass
 
 
@@ -343,6 +362,26 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
 
         return await self.session.get_prompt(name, arguments)
+
+    async def list_resources(
+        self,
+    ) -> ListResourcesResult:
+        """List the resources available on the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        return await self.session.list_resources()
+
+    async def read_resource(self, uri: str) -> ReadResourceResult:
+        """Read a specific resource from the server."""
+        if not self.session:
+            raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+        from pydantic import AnyUrl
+
+        # Convert string to AnyUrl if needed
+        uri_obj = AnyUrl(uri) if isinstance(uri, str) else uri
+        return await self.session.read_resource(uri_obj)
 
     async def cleanup(self):
         """Cleanup the server."""
