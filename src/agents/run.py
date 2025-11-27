@@ -1285,6 +1285,14 @@ class AgentRunner:
             if streamed_result.trace:
                 streamed_result.trace.finish(reset_current=True)
 
+            # Ensure QueueCompleteSentinel is always put in the queue when the stream ends,
+            # even if an exception occurs before the inner try/except block (e.g., in
+            # _save_result_to_session at the beginning). Without this, stream_events()
+            # would hang forever waiting for more items.
+            if not streamed_result.is_complete:
+                streamed_result.is_complete = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+
     @classmethod
     async def _run_single_turn_streamed(
         cls,

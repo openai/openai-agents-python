@@ -534,3 +534,33 @@ async def test_sqlite_session_concurrent_access():
         expected = {f"Message {i}" for i in range(10)}
         assert contents == expected
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_session_add_items_exception_propagates_in_streamed():
+    """Test that exceptions from session.add_items are properly propagated
+    in run_streamed instead of causing the stream to hang forever.
+    Regression test for https://github.com/openai/openai-agents-python/issues/2130
+    """
+    session = SQLiteSession("test_exception_session")
+
+    async def _failing_add_items(_items):
+        raise RuntimeError("Simulated session.add_items failure")
+
+    session.add_items = _failing_add_items  # type: ignore[method-assign]
+
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("This should not be reached")])
+
+    result = Runner.run_streamed(agent, "Hello", session=session)
+
+    async def consume_stream():
+        async for _event in result.stream_events():
+            pass
+
+    with pytest.raises(RuntimeError, match="Simulated session.add_items failure"):
+        # Timeout ensures test fails fast instead of hanging forever if bug regresses
+        await asyncio.wait_for(consume_stream(), timeout=5.0)
+
+    session.close()
