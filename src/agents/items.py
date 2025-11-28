@@ -356,6 +356,13 @@ class ModelResponse:
     be passed to `Runner.run`.
     """
 
+    logprobs: list[Any] | None = None
+    """Token log probabilities from the model response.
+    Only populated when using the chat completions API with `top_logprobs` set in ModelSettings.
+    Each element corresponds to a token and contains the token string, log probability, and
+    optionally the top alternative tokens with their log probabilities.
+    """
+
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
         # We happen to know that the shape of the Pydantic output items are the same as the
