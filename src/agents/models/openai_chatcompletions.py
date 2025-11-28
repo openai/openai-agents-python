@@ -119,10 +119,15 @@ class OpenAIChatCompletionsModel(Model):
 
             items = Converter.message_to_output_items(message) if message is not None else []
 
+            logprobs_data = None
+            if first_choice and first_choice.logprobs and first_choice.logprobs.content:
+                logprobs_data = [lp.model_dump() for lp in first_choice.logprobs.content]
+
             return ModelResponse(
                 output=items,
                 usage=usage,
                 response_id=None,
+                logprobs=logprobs_data,
             )
 
     async def stream_response(
