@@ -429,13 +429,13 @@ result = await Runner.run(
 
 ## Community session implementations
 
-The community has built session implementations for other frameworks:
+The community has developed additional session implementations:
 
-| Package | Description | Install |
-|---------|-------------|---------|
-| [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | Django ORM-based sessions for any Django-supported database (PostgreSQL, MySQL, SQLite) | `pip install openai-django-sessions` |
+| Package | Description |
+|---------|-------------|
+| [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | Django ORM-based sessions for any Django-supported database (PostgreSQL, MySQL, SQLite, and more) |
 
-If you've built a session implementation, consider opening a PR to add it here!
+If you've built a session implementation, please feel free to submit a documentation PR to add it here!
 
 ## API Reference
 
