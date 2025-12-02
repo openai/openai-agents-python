@@ -1,3 +1,4 @@
+from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from agents.usage import RequestUsage, Usage
@@ -270,7 +271,24 @@ def test_anthropic_cost_calculation_scenario():
 
 
 def test_usage_normalizes_none_token_details():
-    # Some providers don't populate optional fields, resulting in None values
+    # Some providers don't populate optional token detail fields
+    # (cached_tokens, reasoning_tokens), and the OpenAI SDK's generated
+    # code can bypass Pydantic validation (e.g., via model_construct),
+    # allowing None values. We normalize these to 0 to prevent TypeErrors.
+
+    # Test entire objects being None (BeforeValidator)
+    usage = Usage(
+        requests=1,
+        input_tokens=100,
+        input_tokens_details=None,  # type: ignore[arg-type]
+        output_tokens=50,
+        output_tokens_details=None,  # type: ignore[arg-type]
+        total_tokens=150,
+    )
+    assert usage.input_tokens_details.cached_tokens == 0
+    assert usage.output_tokens_details.reasoning_tokens == 0
+
+    # Test fields within objects being None (__post_init__)
     input_details = InputTokensDetails(cached_tokens=0)
     input_details.__dict__["cached_tokens"] = None
 
@@ -289,3 +307,33 @@ def test_usage_normalizes_none_token_details():
     # __post_init__ should normalize None to 0
     assert usage.input_tokens_details.cached_tokens == 0
     assert usage.output_tokens_details.reasoning_tokens == 0
+
+
+def test_usage_normalizes_chat_completions_types():
+    # Chat Completions API uses PromptTokensDetails and CompletionTokensDetails,
+    # while Usage expects InputTokensDetails and OutputTokensDetails (Responses API).
+    # The BeforeValidator should convert between these types.
+
+    prompt_details = PromptTokensDetails(audio_tokens=10, cached_tokens=50)
+    completion_details = CompletionTokensDetails(
+        accepted_prediction_tokens=5,
+        audio_tokens=10,
+        reasoning_tokens=100,
+        rejected_prediction_tokens=2,
+    )
+
+    usage = Usage(
+        requests=1,
+        input_tokens=200,
+        input_tokens_details=prompt_details,  # type: ignore[arg-type]
+        output_tokens=150,
+        output_tokens_details=completion_details,  # type: ignore[arg-type]
+        total_tokens=350,
+    )
+
+    # Should convert to Responses API types, extracting the relevant fields
+    assert isinstance(usage.input_tokens_details, InputTokensDetails)
+    assert usage.input_tokens_details.cached_tokens == 50
+
+    assert isinstance(usage.output_tokens_details, OutputTokensDetails)
+    assert usage.output_tokens_details.reasoning_tokens == 100
