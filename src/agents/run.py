@@ -129,10 +129,15 @@ class CallModelData(Generic[TContext]):
 @dataclass
 class _ServerConversationTracker:
     """Tracks server-side conversation state for either conversation_id or
-    previous_response_id modes."""
+    previous_response_id modes.
+
+    Note: When auto_previous_response_id=True is used, response chaining is enabled
+    automatically for the first turn, even when there's no actual previous response ID yet.
+    """
 
     conversation_id: str | None = None
     previous_response_id: str | None = None
+    auto_previous_response_id: bool = False
     sent_items: set[int] = field(default_factory=set)
     server_items: set[int] = field(default_factory=set)
 
@@ -140,10 +145,10 @@ class _ServerConversationTracker:
         for output_item in model_response.output:
             self.server_items.add(id(output_item))
 
-        # Update previous_response_id only when using previous_response_id
+        # Update previous_response_id when using previous_response_id mode or auto mode
         if (
             self.conversation_id is None
-            and self.previous_response_id is not None
+            and (self.previous_response_id is not None or self.auto_previous_response_id)
             and model_response.response_id is not None
         ):
             self.previous_response_id = model_response.response_id
@@ -284,6 +289,9 @@ class RunOptions(TypedDict, Generic[TContext]):
     previous_response_id: NotRequired[str | None]
     """The ID of the previous response, if any."""
 
+    auto_previous_response_id: NotRequired[bool]
+    """Enable automatic response chaining for the first turn."""
+
     conversation_id: NotRequired[str | None]
     """The ID of the stored conversation, if any."""
 
@@ -303,6 +311,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResult:
@@ -363,6 +372,7 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
             session=session,
         )
@@ -378,6 +388,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResult:
@@ -438,6 +449,7 @@ class Runner:
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             session=session,
+            auto_previous_response_id=auto_previous_response_id,
         )
 
     @classmethod
@@ -450,6 +462,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResultStreaming:
@@ -505,6 +518,7 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
             session=session,
         )
@@ -527,14 +541,23 @@ class AgentRunner:
         hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+
         if run_config is None:
             run_config = RunConfig()
 
-        if conversation_id is not None or previous_response_id is not None:
+        # Check whether to enable OpenAI server-managed conversation
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
             server_conversation_tracker = _ServerConversationTracker(
-                conversation_id=conversation_id, previous_response_id=previous_response_id
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
             )
         else:
             server_conversation_tracker = None
@@ -773,6 +796,7 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
@@ -819,6 +843,7 @@ class AgentRunner:
                 hooks=hooks,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
             )
         )
@@ -852,6 +877,7 @@ class AgentRunner:
         hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
@@ -907,6 +933,7 @@ class AgentRunner:
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
                 session=session,
             )
@@ -1035,6 +1062,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         previous_response_id: str | None,
+        auto_previous_response_id: bool,
         conversation_id: str | None,
         session: Session | None,
     ):
@@ -1047,9 +1075,16 @@ class AgentRunner:
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
 
-        if conversation_id is not None or previous_response_id is not None:
+        # Check whether to enable OpenAI server-managed conversation
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
             server_conversation_tracker = _ServerConversationTracker(
-                conversation_id=conversation_id, previous_response_id=previous_response_id
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
             )
         else:
             server_conversation_tracker = None
@@ -1376,6 +1411,7 @@ class AgentRunner:
         previous_response_id = (
             server_conversation_tracker.previous_response_id
             if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
             else None
         )
         conversation_id = (
@@ -1814,6 +1850,7 @@ class AgentRunner:
         previous_response_id = (
             server_conversation_tracker.previous_response_id
             if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
             else None
         )
         conversation_id = (

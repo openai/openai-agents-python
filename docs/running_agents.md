@@ -143,25 +143,16 @@ from openai import AsyncOpenAI
 client = AsyncOpenAI()
 
 async def main():
-    # Create a server-managed conversation
-    conversation = await client.conversations.create()
-    conv_id = conversation.id    
-
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
-    # First turn
-    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?", conversation_id=conv_id)
-    print(result1.final_output)
-    # San Francisco
+    # Create a server-managed conversation
+    conversation = await client.conversations.create()
+    conv_id = conversation.id
 
-    # Second turn reuses the same conversation_id
-    result2 = await Runner.run(
-        agent,
-        "What state is it in?",
-        conversation_id=conv_id,
-    )
-    print(result2.final_output)
-    # California
+    while True:
+        user_input = input("You: ")
+        result = await Runner.run(agent, user_input, conversation_id=conv_id)
+        print(f"Assistant: {result.final_output}")
 ```
 
 #### 2. Using `previous_response_id`
@@ -174,21 +165,22 @@ from agents import Agent, Runner
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
-    # First turn
-    result1 = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
-    print(result1.final_output)
-    # San Francisco
+    previous_response_id = None
 
-    # Second turn, chained to the previous response
-    result2 = await Runner.run(
-        agent,
-        "What state is it in?",
-        previous_response_id=result1.last_response_id,
-    )
-    print(result2.final_output)
-    # California
+    while True:
+        user_input = input("You: ")
+
+        # Setting auto_previous_response_id=True enables response chaining automatically
+        # for the first turn, even when there's no actual previous response ID yet.
+        result = await Runner.run(
+            agent,
+            user_input,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=True,
+        )
+        previous_response_id = result.last_response_id
+        print(f"Assistant: {result.final_output}")
 ```
-
 
 ## Long running agents & human-in-the-loop
 
