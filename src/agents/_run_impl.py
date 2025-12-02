@@ -59,6 +59,7 @@ from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
+    InjectedInputItem,
     ItemHelpers,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
@@ -891,14 +892,20 @@ class RunImpl:
         Returns:
             The result from the tool execution.
         """
-        await asyncio.gather(
-            hooks.on_tool_start(tool_context, agent, func_tool),
-            (
-                agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
+        marker = tool_context.message_history.begin_injection_stage(
+            "before_tool", tool_call.call_id
         )
+        try:
+            await asyncio.gather(
+                hooks.on_tool_start(tool_context, agent, func_tool),
+                (
+                    agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            tool_context.message_history.end_injection_stage(marker)
 
         return await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
 
@@ -961,16 +968,22 @@ class RunImpl:
                         )
 
                         # 4) Tool end hooks (with final result, which may have been overridden)
-                        await asyncio.gather(
-                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                            (
-                                agent.hooks.on_tool_end(
-                                    tool_context, agent, func_tool, final_result
-                                )
-                                if agent.hooks
-                                else _coro.noop_coroutine()
-                            ),
+                        end_marker = tool_context.message_history.begin_injection_stage(
+                            "after_tool", tool_call.call_id
                         )
+                        try:
+                            await asyncio.gather(
+                                hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                                (
+                                    agent.hooks.on_tool_end(
+                                        tool_context, agent, func_tool, final_result
+                                    )
+                                    if agent.hooks
+                                    else _coro.noop_coroutine()
+                                ),
+                            )
+                        finally:
+                            tool_context.message_history.end_injection_stage(end_marker)
                     result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
@@ -1401,7 +1414,7 @@ class RunImpl:
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
         for item in new_step_items:
-            if isinstance(item, MessageOutputItem):
+            if isinstance(item, MessageOutputItem) or isinstance(item, InjectedInputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
             elif isinstance(item, HandoffCallItem):
                 event = RunItemStreamEvent(item=item, name="handoff_requested")
@@ -1535,24 +1548,37 @@ class ComputerAction:
             else cls._get_screenshot_sync(action.computer_tool.computer, action.tool_call)
         )
 
-        _, _, output = await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
-            (
-                agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-            output_func,
+        action_call_id = _get_tool_call_id(action.tool_call)
+        marker = context_wrapper.message_history.begin_injection_stage(
+            "before_tool", action_call_id
         )
+        try:
+            _, _, output = await asyncio.gather(
+                hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+                (
+                    agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+                output_func,
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(marker)
 
-        await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
-            (
-                agent.hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
+        end_marker = context_wrapper.message_history.begin_injection_stage(
+            "after_tool", action_call_id
         )
+        try:
+            await asyncio.gather(
+                hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+                (
+                    agent.hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(end_marker)
 
         # TODO: don't send a screenshot every single time, use references
         image_url = f"data:image/png;base64,{output}"
@@ -1638,14 +1664,19 @@ class LocalShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
-        await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
-            (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        call_id = _get_tool_call_id(call.tool_call)
+        marker = context_wrapper.message_history.begin_injection_stage("before_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+                (
+                    agent.hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(marker)
 
         request = LocalShellCommandRequest(
             ctx_wrapper=context_wrapper,
@@ -1657,18 +1688,22 @@ class LocalShellAction:
         else:
             result = output
 
-        await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
-            (
-                agent.hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        end_marker = context_wrapper.message_history.begin_injection_stage("after_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+                (
+                    agent.hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(end_marker)
 
         raw_payload: dict[str, Any] = {
             "type": "local_shell_call_output",
-            "call_id": call.tool_call.call_id,
+            "call_id": call_id,
             "output": result,
         }
         return ToolCallOutputItem(
@@ -1689,14 +1724,19 @@ class ShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
-        await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
-            (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        call_id = _get_tool_call_id(call.tool_call)
+        marker = context_wrapper.message_history.begin_injection_stage("before_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
+                (
+                    agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(marker)
 
         shell_call = _coerce_shell_call(call.tool_call)
         request = ShellCommandRequest(ctx_wrapper=context_wrapper, data=shell_call)
@@ -1725,14 +1765,18 @@ class ShellAction:
             output_text = _format_shell_error(exc)
             logger.error("Shell executor failed: %s", exc, exc_info=True)
 
-        await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
-            (
-                agent.hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        end_marker = context_wrapper.message_history.begin_injection_stage("after_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+                (
+                    agent.hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(end_marker)
 
         raw_entries: list[dict[str, Any]] | None = None
         if shell_output_payload:
@@ -1813,14 +1857,19 @@ class ApplyPatchAction:
         config: RunConfig,
     ) -> RunItem:
         apply_patch_tool = call.apply_patch_tool
-        await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
-            (
-                agent.hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        call_id = _extract_apply_patch_call_id(call.tool_call)
+        marker = context_wrapper.message_history.begin_injection_stage("before_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
+                (
+                    agent.hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(marker)
 
         status: Literal["completed", "failed"] = "completed"
         output_text = ""
@@ -1849,18 +1898,22 @@ class ApplyPatchAction:
             output_text = _format_shell_error(exc)
             logger.error("Apply patch editor failed: %s", exc, exc_info=True)
 
-        await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
-            (
-                agent.hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
-                if agent.hooks
-                else _coro.noop_coroutine()
-            ),
-        )
+        end_marker = context_wrapper.message_history.begin_injection_stage("after_tool", call_id)
+        try:
+            await asyncio.gather(
+                hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+                (
+                    agent.hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+            )
+        finally:
+            context_wrapper.message_history.end_injection_stage(end_marker)
 
         raw_item: dict[str, Any] = {
             "type": "apply_patch_call_output",
-            "call_id": _extract_apply_patch_call_id(call.tool_call),
+            "call_id": call_id,
             "status": status,
         }
         if output_text:
@@ -1958,6 +2011,12 @@ def _normalize_exit_code(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _get_tool_call_id(tool_call: Any) -> str | None:
+    if isinstance(tool_call, Mapping):
+        return cast(str | None, tool_call.get("call_id"))
+    return cast(str | None, getattr(tool_call, "call_id", None))
 
 
 def _render_shell_outputs(outputs: Sequence[ShellCommandOutput]) -> str:

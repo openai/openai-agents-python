@@ -89,6 +89,37 @@ class MyHooks(RunHooks):
         print(f"{agent.name} → {u.requests} requests, {u.total_tokens} total tokens")
 ```
 
+## フックから会話履歴を編集する
+
+`RunContextWrapper` には `message_history` も含まれており、フックから会話を直接読み書きできます。
+
+- `get_messages()` は元の入力・モデル出力・保留中の挿入を含む完全な履歴を `ResponseInputItem` のリストとして返します。
+- `add_message(agent=..., message=...)` は任意のメッセージ（文字列、辞書、または `ResponseInputItem` のリスト）をキューに追加します。追加されたメッセージは即座に LLM への入力に連結され、実行結果やストリームイベントでは `InjectedInputItem` として公開されます。
+- `override_next_turn(messages)` は次の LLM 呼び出しに送信される履歴全体を置き換えます。ガードレールや外部レビュー後に履歴を書き換えたい場合に使用できます。
+
+```python
+class BroadcastHooks(RunHooks):
+  def __init__(self, reviewer_name: str):
+    self.reviewer_name = reviewer_name
+
+  async def on_llm_start(
+    self,
+    context: RunContextWrapper,
+    agent: Agent,
+    _instructions: str | None,
+    _input_items: list[TResponseInputItem],
+  ) -> None:
+    context.message_history.add_message(
+      agent=agent,
+      message={
+        "role": "user",
+        "content": f"{self.reviewer_name}: 先に付録のデータを引用してください。",
+      },
+    )
+```
+
+> **注意:** `conversation_id` または `previous_response_id` を指定して実行している場合、履歴はサーバー側のスレッドで管理されるため、そのランでは `message_history.override_next_turn()` を使用できません。
+
 ## API リファレンス
 
 詳細な API ドキュメントは次を参照してください:
@@ -96,4 +127,5 @@ class MyHooks(RunHooks):
 -   [`Usage`][agents.usage.Usage] - 使用状況トラッキングのデータ構造
 -   [`RequestUsage`][agents.usage.RequestUsage] - リクエストごとの使用状況の詳細
 -   [`RunContextWrapper`][agents.run.RunContextWrapper] - 実行コンテキストから使用状況にアクセス
+-   [`MessageHistory`][agents.run_context.MessageHistory] - フックから会話履歴を閲覧・編集
 -   [`RunHooks`][agents.run.RunHooks] - 使用状況トラッキングのライフサイクルにフック
