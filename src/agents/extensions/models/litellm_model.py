@@ -339,17 +339,19 @@ class LitellmModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        # Build reasoning_effort dict to preserve both effort and summary fields
-        # LiteLLM supports reasoning_effort as a dict: {"effort": "medium", "summary": "auto"}
+        # Build reasoning_effort - use dict only when summary is present (OpenAI feature)
+        # Otherwise pass string for backward compatibility with all providers
         reasoning_effort: dict[str, Any] | str | None = None
         if model_settings.reasoning:
-            reasoning_dict: dict[str, Any] = {}
-            if model_settings.reasoning.effort is not None:
-                reasoning_dict["effort"] = model_settings.reasoning.effort
             if model_settings.reasoning.summary is not None:
-                reasoning_dict["summary"] = model_settings.reasoning.summary
-            if reasoning_dict:
-                reasoning_effort = reasoning_dict
+                # Dict format when summary is needed (OpenAI only)
+                reasoning_effort = {
+                    "effort": model_settings.reasoning.effort,
+                    "summary": model_settings.reasoning.summary,
+                }
+            elif model_settings.reasoning.effort is not None:
+                # String format for compatibility with all providers
+                reasoning_effort = model_settings.reasoning.effort
 
         # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none"
         # Priority order:

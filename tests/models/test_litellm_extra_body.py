@@ -115,8 +115,8 @@ async def test_reasoning_effort_prefers_model_settings(monkeypatch):
         previous_response_id=None,
     )
 
-    # reasoning_effort is now a dict to preserve both effort and summary fields
-    assert captured["reasoning_effort"] == {"effort": "low"}
+    # reasoning_effort is string when no summary is provided (backward compatible)
+    assert captured["reasoning_effort"] == "low"
     assert settings.extra_body == {"reasoning_effort": "high"}
 
 
