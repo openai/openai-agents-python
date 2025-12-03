@@ -179,6 +179,10 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    func: ToolFunction[...] | None = None
+    """The function that implements the tool. Ensures that a reference to the original function exists
+    when @function_tool is used."""
+
     # Tool-specific guardrails
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
     """Optional list of input guardrails to run before invoking this tool."""
@@ -661,6 +665,7 @@ def function_tool(
             on_invoke_tool=_on_invoke_tool,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,
+            func=func
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
