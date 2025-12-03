@@ -233,7 +233,9 @@ class WebSearchTool:
     """The amount of context to use for the search."""
 
     external_web_access: bool | None = None
-    """Control whether the web search tool fetches live content or uses only cached/indexed results in the Responses API. Set external_web_access: false on the web_search tool to run in offline/cache-only mode. Default is true (live access) if you do not set it.
+    """Control whether the web search tool fetches live content or uses only cached/indexed
+    results in the Responses API. Set external_web_access: false on the web_search tool to run
+    in offline or cache-only mode. Default is true (live access) if you do not set it.
     """
 
     @property
