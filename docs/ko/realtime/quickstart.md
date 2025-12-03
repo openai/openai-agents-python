@@ -4,28 +4,28 @@ search:
 ---
 # 빠른 시작
 
-실시간 에이전트는 OpenAI의 Realtime API를 사용해 AI 에이전트와 음성 대화를 가능하게 합니다. 이 가이드는 첫 번째 실시간 음성 에이전트를 만드는 과정을 안내합니다.
+실시간 에이전트는 OpenAI의 Realtime API 를 사용하여 AI 에이전트와 음성 대화를 가능하게 합니다. 이 가이드는 첫 실시간 음성 에이전트를 만드는 과정을 안내합니다.
 
 !!! warning "베타 기능"
-실시간 에이전트는 베타 단계입니다. 구현을 개선하는 과정에서 호환성 문제가 발생할 수 있습니다.
+실시간 에이전트는 베타 단계입니다. 구현이 개선되는 동안 일부 호환성 문제가 발생할 수 있습니다.
 
 ## 사전 준비
 
 -   Python 3.9 이상
--   OpenAI API key
--   OpenAI Agents SDK에 대한 기본적인 이해
+-   OpenAI API 키
+-   OpenAI Agents SDK 에 대한 기본 이해
 
 ## 설치
 
-아직 설치하지 않았다면 OpenAI Agents SDK를 설치하세요:
+아직 설치하지 않았다면 OpenAI Agents SDK 를 설치하세요:
 
 ```bash
 pip install openai-agents
 ```
 
-## 첫 번째 실시간 에이전트 만들기
+## 첫 실시간 에이전트 생성
 
-### 1. 필요한 구성 요소 가져오기
+### 1. 필요한 구성요소 임포트
 
 ```python
 import asyncio
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 전체 예제
 
-다음은 완전한 작동 예제입니다:
+다음은 완전하게 동작하는 예제입니다:
 
 ```python
 import asyncio
@@ -194,13 +194,13 @@ if __name__ == "__main__":
 
 -   `model_name`: 사용 가능한 실시간 모델에서 선택 (예: `gpt-realtime`)
 -   `voice`: 음성 선택 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: 텍스트 또는 오디오 활성화 (`["text"]` 또는 `["audio"]`)
+-   `modalities`: 텍스트 또는 오디오 사용 (`["text"]` 또는 `["audio"]`)
 
 ### 오디오 설정
 
 -   `input_audio_format`: 입력 오디오 형식 (`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: 출력 오디오 형식
--   `input_audio_transcription`: 전사 설정
+-   `input_audio_transcription`: 전사 구성
 
 ### 턴 감지
 
@@ -211,15 +211,15 @@ if __name__ == "__main__":
 
 ## 다음 단계
 
--   [실시간 에이전트에 대해 더 알아보기](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더에서 작동하는 예제 코드를 확인하세요
+-   [실시간 에이전트 더 알아보기](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작하는 code examples 확인
 -   에이전트에 도구 추가
 -   에이전트 간 핸드오프 구현
 -   안전을 위한 가드레일 설정
 
 ## 인증
 
-환경 변수에 OpenAI API key가 설정되어 있는지 확인하세요:
+환경 변수에 OpenAI API 키가 설정되어 있는지 확인하세요:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"

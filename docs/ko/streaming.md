@@ -4,13 +4,13 @@ search:
 ---
 # 스트리밍
 
-스트리밍을 사용하면 에이전트 실행이 진행되는 동안 업데이트를 구독할 수 있습니다. 이는 최종 사용자에게 진행 상황과 부분 응답을 보여주는 데 유용합니다.
+스트리밍을 사용하면 에이전트 실행이 진행되는 동안 업데이트를 구독할 수 있습니다. 이는 최종 사용자에게 진행 상황 업데이트와 부분 응답을 보여주는 데 유용합니다.
 
-스트리밍하려면 [`Runner.run_streamed()`][agents.run.Runner.run_streamed]를 호출하여 [`RunResultStreaming`][agents.result.RunResultStreaming]을 받을 수 있습니다. `result.stream_events()`를 호출하면 아래에 설명된 [`StreamEvent`][agents.stream_events.StreamEvent] 객체의 비동기 스트림을 얻습니다.
+스트리밍하려면 [`Runner.run_streamed()`][agents.run.Runner.run_streamed]를 호출하면 되며, 그러면 [`RunResultStreaming`][agents.result.RunResultStreaming]이 반환됩니다. `result.stream_events()`를 호출하면 아래에 설명된 [`StreamEvent`][agents.stream_events.StreamEvent] 객체의 비동기 스트림을 받을 수 있습니다.
 
 ## 원문 응답 이벤트
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent]는 LLM에서 직접 전달되는 원문 이벤트입니다. OpenAI Responses API 형식을 사용하므로 각 이벤트에는 유형(예: `response.created`, `response.output_text.delta` 등)과 데이터가 있습니다. 이러한 이벤트는 생성되는 즉시 사용자에게 응답 메시지를 스트리밍하려는 경우에 유용합니다.
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent]는 LLM에서 직접 전달되는 원문 이벤트입니다. 이들은 OpenAI Responses API 형식이며, 각 이벤트는 유형(예: `response.created`, `response.output_text.delta` 등)과 데이터를 가집니다. 이러한 이벤트는 생성 즉시 응답 메시지를 사용자에게 스트리밍하려는 경우에 유용합니다.
 
 예를 들어, 다음은 LLM이 생성한 텍스트를 토큰 단위로 출력합니다.
 
@@ -35,9 +35,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 실행 항목 이벤트 및 에이전트 이벤트
+## 실행 항목 이벤트와 에이전트 이벤트
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]는 상위 수준의 이벤트입니다. 항목이 완전히 생성되었을 때를 알려줍니다. 이를 통해 각 토큰이 아니라 "메시지 생성됨", "도구 실행됨" 수준에서 진행 상황을 전달할 수 있습니다. 유사하게, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent]는 현재 에이전트가 변경될 때(예: 핸드오프 결과로) 업데이트를 제공합니다.
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]는 더 상위 수준의 이벤트입니다. 항목이 완전히 생성되었을 때를 알려줍니다. 이를 통해 각 토큰이 아닌 "메시지 생성 완료", "도구가 실행됨" 등의 수준에서 진행 상황을 전달할 수 있습니다. 또한 [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent]는 현재 에이전트가 변경될 때 업데이트를 제공합니다(예: 핸드오프의 결과로).
 
 예를 들어, 다음은 원문 이벤트를 무시하고 사용자에게 업데이트를 스트리밍합니다.
 

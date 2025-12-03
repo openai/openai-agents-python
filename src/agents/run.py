@@ -715,6 +715,15 @@ class AgentRunner:
 
                             return result
                         elif isinstance(turn_result.next_step, NextStepHandoff):
+                            # Save the conversation to session if enabled (before handoff)
+                            if session is not None:
+                                if not any(
+                                    guardrail_result.output.tripwire_triggered
+                                    for guardrail_result in input_guardrail_results
+                                ):
+                                    await self._save_result_to_session(
+                                        session, [], turn_result.new_step_items
+                                    )
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             current_span.finish(reset_current=True)
                             current_span = None
@@ -1166,8 +1175,7 @@ class AgentRunner:
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
                         # Save the conversation to session if enabled (before handoff)
-                        # Note: Non-streaming path doesn't save handoff turns immediately,
-                        # but streaming needs to for graceful cancellation support
+                        # Streaming needs to save for graceful cancellation support
                         if session is not None:
                             should_skip_session_save = (
                                 await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
@@ -1284,6 +1292,14 @@ class AgentRunner:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
                 streamed_result.trace.finish(reset_current=True)
+
+            # Ensure QueueCompleteSentinel is always put in the queue when the stream ends,
+            # even if an exception occurs before the inner try/except block (e.g., in
+            # _save_result_to_session at the beginning). Without this, stream_events()
+            # would hang forever waiting for more items.
+            if not streamed_result.is_complete:
+                streamed_result.is_complete = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
     @classmethod
     async def _run_single_turn_streamed(

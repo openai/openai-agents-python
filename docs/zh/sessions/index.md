@@ -4,9 +4,9 @@ search:
 ---
 # 会话
 
-Agents SDK 提供内置的会话记忆，用于在多次智能体运行之间自动维护对话历史，无需在轮次间手动处理 `.to_input_list()`。
+Agents SDK 提供内置的会话记忆，用于在多次智能体运行之间自动维护对话历史，免去在回合之间手动处理 `.to_input_list()` 的需求。
 
-会话为特定会话存储对话历史，使智能体无需显式的手动内存管理即可保持上下文。这对于构建聊天应用或多轮对话（希望智能体记住先前互动）尤其有用。
+会话为特定会话存储对话历史，使智能体无需显式的手动内存管理即可保持上下文。这对构建聊天应用或需要让智能体记住先前交互的多轮对话尤为有用。
 
 ## 快速开始
 
@@ -49,19 +49,19 @@ print(result.final_output)  # "Approximately 39 million"
 
 ## 工作原理
 
-当启用会话记忆时：
+启用会话记忆后：
 
-1. **每次运行之前**：运行器会自动检索该会话的对话历史，并将其预置到输入项之前。
-2. **每次运行之后**：运行期间生成的所有新项（用户输入、助手回复、工具调用等）都会自动存储到会话中。
-3. **上下文保留**：使用相同会话的每次后续运行都会包含完整的对话历史，使智能体能够保持上下文。
+1. **每次运行前**：运行器会自动检索该会话的对话历史，并将其预置到输入项前。
+2. **每次运行后**：在运行期间生成的所有新项目（用户输入、助手回复、工具调用等）都会自动存入会话。
+3. **上下文保留**：后续使用相同会话的每次运行都会包含完整的对话历史，帮助智能体维持上下文。
 
 这消除了在运行之间手动调用 `.to_input_list()` 并管理对话状态的需要。
 
-## 记忆操作
+## 内存操作
 
 ### 基本操作
 
-会话支持多种用于管理对话历史的操作：
+会话支持多种管理对话历史的操作：
 
 ```python
 from agents import SQLiteSession
@@ -86,9 +86,9 @@ print(last_item)  # {"role": "assistant", "content": "Hi there!"}
 await session.clear_session()
 ```
 
-### 使用 pop_item 进行更正
+### 使用 pop_item 进行纠正
 
-当你希望撤销或修改对话中的最后一个条目时，`pop_item` 方法特别有用：
+当你希望撤销或修改对话中的最后一项时，`pop_item` 方法特别有用：
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -119,11 +119,11 @@ print(f"Agent: {result.final_output}")
 
 ## 会话类型
 
-SDK 提供了多种会话实现以适配不同用例：
+SDK 提供了多种适用于不同用例的会话实现：
 
 ### OpenAI Conversations API 会话
 
-通过 `OpenAIConversationsSession` 使用 [OpenAI 的 Conversations API](https://platform.openai.com/docs/api-reference/conversations)。
+通过 `OpenAIConversationsSession` 使用 [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations)。
 
 ```python
 from agents import Agent, Runner, OpenAIConversationsSession
@@ -159,7 +159,7 @@ print(result.final_output)  # "California"
 
 ### SQLite 会话
 
-默认的、轻量级的 SQLite 会话实现：
+默认的轻量级 SQLite 实现：
 
 ```python
 from agents import SQLiteSession
@@ -180,7 +180,7 @@ result = await Runner.run(
 
 ### SQLAlchemy 会话
 
-可用于生产环境的会话，实现于任何 SQLAlchemy 支持的数据库之上：
+使用任一 SQLAlchemy 支持的数据库的生产级会话：
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
@@ -198,13 +198,13 @@ engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
 session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 ```
 
-参见 [SQLAlchemy 会话](sqlalchemy_session.md) 获取详细文档。
+详见 [SQLAlchemy Sessions](sqlalchemy_session.md) 的详细文档。
 
 
 
 ### 高级 SQLite 会话
 
-增强型 SQLite 会话，提供会话分支、使用情况分析以及结构化查询：
+具备会话分支、用量分析与结构化查询的增强型 SQLite 会话：
 
 ```python
 from agents.extensions.memory import AdvancedSQLiteSession
@@ -224,11 +224,11 @@ await session.store_run_usage(result)  # Track token usage
 await session.create_branch_from_turn(2)  # Branch from turn 2
 ```
 
-参见 [高级 SQLite 会话](advanced_sqlite_session.md) 获取详细文档。
+详见 [Advanced SQLite Sessions](advanced_sqlite_session.md) 的详细文档。
 
 ### 加密会话
 
-针对任意会话实现的透明加密封装：
+适用于任意会话实现的透明加密封装：
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -251,27 +251,27 @@ session = EncryptedSession(
 result = await Runner.run(agent, "Hello", session=session)
 ```
 
-参见 [加密会话](encrypted_session.md) 获取详细文档。
+详见 [Encrypted Sessions](encrypted_session.md) 的详细文档。
 
 ### 其他会话类型
 
-还有一些其他内置选项。请参考 `examples/memory/` 以及 `extensions/memory/` 下的源码。
+还有更多内置选项。请参阅 `examples/memory/` 以及 `extensions/memory/` 下的源代码。
 
 ## 会话管理
 
 ### 会话 ID 命名
 
-使用有意义的会话 ID，帮助你组织对话：
+使用有意义的会话 ID 以便组织对话：
 
-- 用户维度："user_12345"
-- 线程维度："thread_abc123"
-- 场景维度："support_ticket_456"
+- 用户维度：`"user_12345"`
+- 线程维度：`"thread_abc123"`
+- 场景维度：`"support_ticket_456"`
 
-### 记忆持久化
+### 内存持久化
 
 - 使用内存型 SQLite（`SQLiteSession("session_id")`）用于临时对话
-- 使用文件型 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）用于持久化对话
-- 使用基于 SQLAlchemy 的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）用于生产系统，适配 SQLAlchemy 支持的现有数据库
+- 使用文件型 SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）用于持久对话
+- 使用 SQLAlchemy 驱动的会话（`SQLAlchemySession("session_id", engine=engine, create_tables=True")`）用于由 SQLAlchemy 支持的现有数据库的生产系统
 - 使用 Dapr 状态存储会话（`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`）用于生产级云原生部署，支持 30+ 种数据库后端，并内置遥测、追踪与数据隔离
 - 当你希望将历史存储在 OpenAI Conversations API 中时，使用 OpenAI 托管的存储（`OpenAIConversationsSession()`）
 - 使用加密会话（`EncryptedSession(session_id, underlying_session, encryption_key)`）为任意会话提供透明加密与基于 TTL 的过期
@@ -387,7 +387,7 @@ if __name__ == "__main__":
 
 ## 自定义会话实现
 
-你可以通过创建一个遵循 [`Session`][agents.memory.session.Session] 协议的类来实现自定义会话记忆：
+你可以通过创建遵循 [`Session`][agents.memory.session.Session] 协议的类来实现自定义会话内存：
 
 ```python
 from agents.memory.session import SessionABC
@@ -430,14 +430,24 @@ result = await Runner.run(
 )
 ```
 
+## 社区会话实现
+
+社区已开发了更多会话实现：
+
+| Package | Description |
+|---------|-------------|
+| [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | 基于 Django ORM 的会话，适用于任何 Django 支持的数据库（PostgreSQL、MySQL、SQLite 等） |
+
+如果你构建了会话实现，欢迎提交文档 PR 将其添加到此处！
+
 ## API 参考
 
-详细 API 文档参见：
+详细 API 文档请参阅：
 
 - [`Session`][agents.memory.session.Session] - 协议接口
 - [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API 实现
-- [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - 基础 SQLite 实现
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 基于 SQLAlchemy 的实现
+- [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - 基本 SQLite 实现
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 驱动实现
 - [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr 状态存储实现
-- [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 带分支与分析能力的增强型 SQLite
+- [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 具备分支与分析的增强型 SQLite
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 适用于任意会话的加密封装

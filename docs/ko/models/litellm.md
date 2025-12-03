@@ -6,29 +6,29 @@ search:
 
 !!! note
 
-    LiteLLM 연동은 베타 단계입니다. 특히 소규모 모델 제공자에서 문제가 발생할 수 있습니다. [Github issues](https://github.com/openai/openai-agents-python/issues)로 문제를 보고해 주세요. 신속히 수정하겠습니다.
+    LiteLLM 통합은 베타입니다. 특히 소규모 모델 제공업체에서 문제가 발생할 수 있습니다. [GitHub 이슈](https://github.com/openai/openai-agents-python/issues)로 보고해 주시면 신속히 해결하겠습니다.
 
-[LiteLLM](https://docs.litellm.ai/docs/)은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. Agents SDK 에 LiteLLM 연동을 추가하여, 어떤 AI 모델이든 사용할 수 있습니다.
+[LiteLLM](https://docs.litellm.ai/docs/)은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. Agents SDK 에 LiteLLM 통합을 추가하여 어떤 AI 모델이든 사용할 수 있습니다.
 
 ## 설정
 
-`litellm` 이 사용 가능해야 합니다. 선택적 `litellm` 의존성 그룹을 설치해 준비할 수 있습니다:
+`litellm` 이 사용 가능해야 합니다. 선택적 `litellm` 종속성 그룹을 설치하면 됩니다:
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-설치가 완료되면, 어떤 에이전트에서도 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] 을 사용할 수 있습니다.
+설치가 완료되면 어떤 에이전트에서도 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel] 을 사용할 수 있습니다.
 
 ## 예제
 
-다음은 완전히 동작하는 예제입니다. 실행하면 모델 이름과 API 키를 입력하라는 프롬프트가 표시됩니다. 예를 들어 다음과 같이 입력할 수 있습니다:
+다음은 완전한 동작 예제입니다. 실행하면 모델 이름과 API 키를 입력하라는 프롬프트가 표시됩니다. 예를 들어 다음과 같이 입력할 수 있습니다:
 
-- `openai/gpt-4.1` 를 모델로, OpenAI API 키
-- `anthropic/claude-3-5-sonnet-20240620` 를 모델로, Anthropic API 키
-- 등등
+-   모델에는 `openai/gpt-4.1`, API 키에는 OpenAI API 키
+-   모델에는 `anthropic/claude-3-5-sonnet-20240620`, API 키에는 Anthropic API 키
+-   등
 
-LiteLLM 에서 지원하는 전체 모델 목록은 [litellm 제공자 문서](https://docs.litellm.ai/docs/providers)를 참조하세요.
+LiteLLM 에서 지원하는 전체 모델 목록은 [litellm providers docs](https://docs.litellm.ai/docs/providers)를 참조하세요.
 
 ```python
 from __future__ import annotations
@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
 ## 사용량 데이터 추적
 
-LiteLLM 응답이 Agents SDK 사용량 지표에 반영되도록 하려면, 에이전트를 만들 때 `ModelSettings(include_usage=True)` 를 전달하세요.
+LiteLLM 응답으로 Agents SDK 사용량 지표를 채우려면 에이전트를 만들 때 `ModelSettings(include_usage=True)` 를 전달하세요.
 
 ```python
 from agents import Agent, ModelSettings
@@ -91,4 +91,4 @@ agent = Agent(
 )
 ```
 
-`include_usage=True` 인 경우, LiteLLM 요청은 기본 제공 OpenAI 모델과 마찬가지로 `result.context_wrapper.usage` 를 통해 토큰 및 요청 수를 보고합니다.
+`include_usage=True` 를 사용하면 LiteLLM 요청은 내장된 OpenAI 모델과 동일하게 `result.context_wrapper.usage` 를 통해 토큰 및 요청 수를 보고합니다.

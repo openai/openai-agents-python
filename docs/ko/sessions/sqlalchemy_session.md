@@ -8,7 +8,7 @@ search:
 
 ## 설치
 
-SQLAlchemy 세션에는 `sqlalchemy` extra가 필요합니다:
+SQLAlchemy 세션에는 `sqlalchemy` 익스트라가 필요합니다:
 
 ```bash
 pip install openai-agents[sqlalchemy]
@@ -18,7 +18,7 @@ pip install openai-agents[sqlalchemy]
 
 ### 데이터베이스 URL 사용
 
-가장 간단한 시작 방법:
+시작하는 가장 간단한 방법:
 
 ```python
 import asyncio
@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
 ### 기존 엔진 사용
 
-기존 SQLAlchemy 엔진이 있는 애플리케이션의 경우:
+기존 SQLAlchemy 엔진을 사용하는 애플리케이션의 경우:
 
 ```python
 import asyncio

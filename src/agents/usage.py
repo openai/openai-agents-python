@@ -1,7 +1,34 @@
-from dataclasses import field
+from __future__ import annotations
 
+from dataclasses import field
+from typing import Annotated
+
+from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
+
+
+def _normalize_input_tokens_details(
+    v: InputTokensDetails | PromptTokensDetails | None,
+) -> InputTokensDetails:
+    """Converts None or PromptTokensDetails to InputTokensDetails."""
+    if v is None:
+        return InputTokensDetails(cached_tokens=0)
+    if isinstance(v, PromptTokensDetails):
+        return InputTokensDetails(cached_tokens=v.cached_tokens or 0)
+    return v
+
+
+def _normalize_output_tokens_details(
+    v: OutputTokensDetails | CompletionTokensDetails | None,
+) -> OutputTokensDetails:
+    """Converts None or CompletionTokensDetails to OutputTokensDetails."""
+    if v is None:
+        return OutputTokensDetails(reasoning_tokens=0)
+    if isinstance(v, CompletionTokensDetails):
+        return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
+    return v
 
 
 @dataclass
@@ -32,16 +59,16 @@ class Usage:
     input_tokens: int = 0
     """Total input tokens sent, across all requests."""
 
-    input_tokens_details: InputTokensDetails = field(
-        default_factory=lambda: InputTokensDetails(cached_tokens=0)
-    )
+    input_tokens_details: Annotated[
+        InputTokensDetails, BeforeValidator(_normalize_input_tokens_details)
+    ] = field(default_factory=lambda: InputTokensDetails(cached_tokens=0))
     """Details about the input tokens, matching responses API usage details."""
     output_tokens: int = 0
     """Total output tokens received, across all requests."""
 
-    output_tokens_details: OutputTokensDetails = field(
-        default_factory=lambda: OutputTokensDetails(reasoning_tokens=0)
-    )
+    output_tokens_details: Annotated[
+        OutputTokensDetails, BeforeValidator(_normalize_output_tokens_details)
+    ] = field(default_factory=lambda: OutputTokensDetails(reasoning_tokens=0))
     """Details about the output tokens, matching responses API usage details."""
 
     total_tokens: int = 0
@@ -70,7 +97,7 @@ class Usage:
         if self.output_tokens_details.reasoning_tokens is None:
             self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
 
-    def add(self, other: "Usage") -> None:
+    def add(self, other: Usage) -> None:
         """Add another Usage object to this one, aggregating all fields.
 
         This method automatically preserves request_usage_entries.
