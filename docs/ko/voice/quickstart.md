@@ -4,9 +4,9 @@ search:
 ---
 # 빠른 시작
 
-## 사전 준비
+## 준비 사항
 
-Agents SDK의 기본 [빠른 시작 안내](../quickstart.md)를 따라 가상환경을 설정했는지 확인하세요. 그런 다음 SDK에서 선택적 음성 관련 의존성을 설치합니다:
+Agents SDK의 기본 [빠른 시작 안내](../quickstart.md)를 따르고 가상 환경을 설정했는지 확인하세요. 그런 다음 SDK에서 선택 사항인 음성 관련 의존성을 설치하세요:
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,11 +14,11 @@ pip install 'openai-agents[voice]'
 
 ## 개념
 
-알아두어야 할 핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 3단계 프로세스입니다:
+핵심 개념은 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]이며, 다음과 같은 3단계 프로세스입니다:
 
-1. 음성을 텍스트로 변환하기 위해 음성 인식(speech-to-text) 모델을 실행
-2. 보통 에이전트 워크플로인 코드를 실행하여 결과 생성
-3. 결과 텍스트를 다시 오디오로 변환하기 위해 음성 합성(text-to-speech) 모델을 실행
+1. 음성을 텍스트로 변환하기 위해 음성 인식(speech-to-text) 모델을 실행합니다.
+2. 보통 에이전트형 워크플로인 코드를 실행하여 결과를 생성합니다.
+3. 결과 텍스트를 다시 음성으로 변환하기 위해 음성 합성(text-to-speech) 모델을 실행합니다.
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## 에이전트
 
-먼저 몇 개의 에이전트를 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙할 것입니다. 몇 개의 에이전트, 하나의 핸드오프, 그리고 하나의 도구를 사용합니다.
+먼저 에이전트를 몇 개 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 보신 적이 있다면 익숙하게 느껴질 것입니다. 에이전트 몇 개와 핸드오프, 그리고 도구 하나를 사용하겠습니다.
 
 ```python
 import asyncio
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 음성 파이프라인
 
-[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]를 워크플로로 사용해 간단한 음성 파이프라인을 설정합니다.
+워크플로로 [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]를 사용하여 간단한 음성 파이프라인을 설정하겠습니다.
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 전체 통합
+## 종합하기
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-이 예제를 실행하면 에이전트가 직접 말합니다! 에이전트와 직접 대화할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)에서 확인하세요.
+이 예제를 실행하면 에이전트가 말합니다! 직접 에이전트와 대화할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)에서 확인하세요.
