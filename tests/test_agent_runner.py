@@ -1225,6 +1225,174 @@ async def test_default_send_all_items_streamed():
 
 
 @pytest.mark.asyncio
+async def test_auto_previous_response_id_multi_turn():
+    """Test that auto_previous_response_id=True enables
+    chaining from the first internal turn."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message", auto_previous_response_id=True)
+    assert result.final_output == "done"
+
+    # Check the first call
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # With auto_previous_response_id=True, first call should NOT have previous_response_id
+    assert model.first_turn_args.get("previous_response_id") is None
+
+    # Check the input from the second turn (after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # With auto_previous_response_id=True, the second turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # With auto_previous_response_id=True, second call should have
+    # previous_response_id set to the first response
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_auto_previous_response_id_multi_turn_streamed():
+    """Test that auto_previous_response_id=True enables
+    chaining from the first internal turn (streamed mode)."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", auto_previous_response_id=True)
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+
+    # Check the first call
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # With auto_previous_response_id=True, first call should NOT have previous_response_id
+    assert model.first_turn_args.get("previous_response_id") is None
+
+    # Check the input from the second turn (after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # With auto_previous_response_id=True, the second turn should only contain the tool output
+    assert isinstance(last_input, list)
+    assert len(last_input) == 1  # Only the function result
+
+    # The single item should be a tool result
+    tool_result_item = last_input[0]
+    assert tool_result_item.get("type") == "function_call_output"
+    assert tool_result_item.get("call_id") is not None
+
+    # With auto_previous_response_id=True, second call should have
+    # previous_response_id set to the first response
+    assert model.last_turn_args.get("previous_response_id") == "resp-789"
+
+
+@pytest.mark.asyncio
+async def test_without_previous_response_id_and_auto_previous_response_id_no_chaining():
+    """Test that without previous_response_id and auto_previous_response_id,
+    internal turns don't chain."""
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("test_func", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a message and tool call
+            [get_text_message("a_message"), get_function_tool_call("test_func", '{"arg": "foo"}')],
+            # Second turn: final text message
+            [get_text_message("done")],
+        ]
+    )
+
+    # Call without passing previous_response_id and without passing auto_previous_response_id
+    result = await Runner.run(agent, input="user_message")
+    assert result.final_output == "done"
+
+    # Check the first call
+    assert model.first_turn_args is not None
+    first_input = model.first_turn_args["input"]
+
+    # First call should include the original user input
+    assert isinstance(first_input, list)
+    assert len(first_input) == 1  # Should contain the user message
+
+    # The input should be the user message
+    user_message = first_input[0]
+    assert user_message.get("role") == "user"
+    assert user_message.get("content") == "user_message"
+
+    # First call should NOT have previous_response_id
+    assert model.first_turn_args.get("previous_response_id") is None
+
+    # Check the input from the second turn (after function execution)
+    last_input = model.last_turn_args["input"]
+
+    # Without passing previous_response_id and auto_previous_response_id,
+    # the second turn should contain all items (no chaining):
+    # user message, assistant response, function call, and tool result
+    assert isinstance(last_input, list)
+    assert len(last_input) == 4  # User message, assistant message, function call, and tool result
+
+    # Second call should also NOT have previous_response_id (no chaining)
+    assert model.last_turn_args.get("previous_response_id") is None
+
+
+@pytest.mark.asyncio
 async def test_dynamic_tool_addition_run() -> None:
     """Test that tools can be added to an agent during a run."""
     model = FakeModel()

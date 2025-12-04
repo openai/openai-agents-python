@@ -4,15 +4,15 @@ search:
 ---
 # 流式传输
 
-流式传输可让你在智能体运行过程中订阅其更新。这对于向最终用户展示进度更新和部分响应很有用。
+流式传输允许你在智能体运行过程中订阅其更新。这有助于向最终用户展示进度更新和部分响应。
 
-要进行流式传输，你可以调用 [`Runner.run_streamed()`][agents.run.Runner.run_streamed]，它会返回一个 [`RunResultStreaming`][agents.result.RunResultStreaming]。调用 `result.stream_events()` 将得到一个异步的 [`StreamEvent`][agents.stream_events.StreamEvent] 对象流，详见下文。
+要进行流式传输，你可以调用 [`Runner.run_streamed()`][agents.run.Runner.run_streamed]，它会返回一个 [`RunResultStreaming`][agents.result.RunResultStreaming]。调用 `result.stream_events()` 会得到一个由 [`StreamEvent`][agents.stream_events.StreamEvent] 对象组成的异步流，详见下文说明。
 
 ## 原始响应事件
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] 是直接由 LLM 传递的原始事件。它们采用 OpenAI Responses API 格式，这意味着每个事件都有一个类型（如 `response.created`、`response.output_text.delta` 等）和数据。如果你希望在响应生成时立刻将消息流式传输给用户，这些事件会很有用。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] 是直接来自 LLM 的原始事件。它们采用 OpenAI Responses API 格式，即每个事件都有一个类型（如 `response.created`、`response.output_text.delta` 等）和数据。如果你希望在生成后立刻将响应消息流式传输给用户，这些事件会很有用。
 
-例如，下面的代码会逐 token 输出 LLM 生成的文本。
+例如，下面的示例将按 token 输出由 LLM 生成的文本。
 
 ```python
 import asyncio
@@ -37,9 +37,9 @@ if __name__ == "__main__":
 
 ## 运行项事件与智能体事件
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] 属于更高层级的事件。它们会在某个条目完全生成时通知你。这使你可以在“消息已生成”“工具已运行”等层级（而非每个 token）推送进度更新。类似地，[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] 会在当前智能体发生变化时（例如由于一次任务转移）向你提供更新。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] 属于更高层级的事件。它会在某个项完全生成时通知你。这样你可以在“消息已生成”“工具已运行”等层级（而非逐个 token）推送进度更新。类似地，[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] 会在当前智能体发生变化时提供更新（例如由于任务转移）。
 
-例如，下面的代码会忽略原始事件并向用户流式传输更新。
+例如，下面的示例会忽略原始事件，只向用户流式传输更新。
 
 ```python
 import asyncio

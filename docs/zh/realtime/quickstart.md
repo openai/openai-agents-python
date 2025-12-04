@@ -4,20 +4,20 @@ search:
 ---
 # 快速开始
 
-Realtime 智能体通过 OpenAI 的 Realtime API 实现与 AI 智能体的语音对话。本指南将带你创建你的第一个实时语音智能体。
+实时智能体通过 OpenAI 的 Realtime API 支持与 AI 智能体进行语音对话。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "测试版功能"
-Realtime 智能体目前为测试版。随着实现的改进，可能会有不兼容的变更。
+Realtime 智能体处于测试阶段。随着实现的改进，可能会发生不兼容的变更。
 
 ## 前提条件
 
-- Python 3.9 或更高版本
-- OpenAI API 密钥
-- 对 OpenAI Agents SDK 的基本了解
+-   Python 3.9 或更高版本
+-   OpenAI API key
+-   对 OpenAI Agents SDK 有基本了解
 
 ## 安装
 
-如果尚未安装，请安装 OpenAI Agents SDK：
+如果尚未安装，请先安装 OpenAI Agents SDK：
 
 ```bash
 pip install openai-agents
@@ -192,40 +192,40 @@ if __name__ == "__main__":
 
 ### 模型设置
 
-- `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
-- `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
-- `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
+-   `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
+-   `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+-   `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
 
-- `input_audio_format`: 输入音频的格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
-- `output_audio_format`: 输出音频的格式
-- `input_audio_transcription`: 转写配置
+-   `input_audio_format`: 输入音频的格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
+-   `output_audio_format`: 输出音频的格式
+-   `input_audio_transcription`: 转写配置
 
-### 轮次检测
+### 发言轮次检测
 
-- `type`: 检测方法（`server_vad`、`semantic_vad`）
-- `threshold`: 语音活动阈值（0.0-1.0）
-- `silence_duration_ms`: 用于检测轮次结束的静音时长
-- `prefix_padding_ms`: 语音开始前的音频填充
+-   `type`: 检测方法（`server_vad`、`semantic_vad`）
+-   `threshold`: 语音活动阈值（0.0-1.0）
+-   `silence_duration_ms`: 用于检测回合结束的静音时长
+-   `prefix_padding_ms`: 语音前的音频填充
 
 ## 后续步骤
 
-- [进一步了解实时智能体](guide.md)
-- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可运行示例
-- 为你的智能体添加工具
-- 在智能体之间实现任务转移
-- 设置安全防护措施以确保安全
+-   [进一步了解实时智能体](guide.md)
+-   在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可运行的示例
+-   为你的智能体添加工具
+-   实现智能体之间的任务转移
+-   设置安全防护措施以提升安全性
 
 ## 身份验证
 
-请确保在你的环境中设置了 OpenAI API 密钥：
+确保在环境中设置了你的 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传入：
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

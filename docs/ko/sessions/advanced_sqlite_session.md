@@ -9,10 +9,10 @@ search:
 ## 기능
 
 - **대화 분기**: 임의의 사용자 메시지에서 대체 대화 경로 생성
-- **사용량 추적**: 각 턴별 토큰 사용량에 대한 상세 분석과 전체 JSON 분해 제공
-- **구조화된 쿼리**: 턴별 대화 조회, 도구 사용 통계 등 제공
+- **사용량 추적**: 전체 JSON 분해를 포함한 턴별 상세 토큰 사용량 분석
+- **구조화된 쿼리**: 턴별 대화, 도구 사용 통계 등 조회
 - **분기 관리**: 독립적인 분기 전환 및 관리
-- **메시지 구조 메타데이터**: 메시지 타입, 도구 사용, 대화 흐름 추적
+- **메시지 구조 메타데이터**: 메시지 유형, 도구 사용, 대화 흐름 추적
 
 ## 빠른 시작
 
@@ -85,15 +85,15 @@ session = AdvancedSQLiteSession(
 ### 매개변수
 
 - `session_id` (str): 대화 세션의 고유 식별자
-- `db_path` (str | Path): SQLite 데이터베이스 파일 경로. 인메모리 저장을 위해 기본값은 `:memory:`
-- `create_tables` (bool): 고급 테이블을 자동으로 생성할지 여부. 기본값은 `False`
+- `db_path` (str | Path): SQLite 데이터베이스 파일 경로. 메모리 저장소의 경우 기본값은 `:memory:`
+- `create_tables` (bool): 고급 테이블을 자동 생성할지 여부. 기본값은 `False`
 - `logger` (logging.Logger | None): 세션에 사용할 커스텀 로거. 기본값은 모듈 로거
 
 ## 사용량 추적
 
-AdvancedSQLiteSession은 대화의 각 턴별로 토큰 사용 데이터를 저장하여 상세 사용량 분석을 제공합니다. **이는 매 에이전트 실행 후 `store_run_usage` 메서드를 호출하는 것에 전적으로 의존합니다.**
+AdvancedSQLiteSession은 대화의 각 턴별 토큰 사용 데이터 저장을 통해 상세한 사용량 분석을 제공합니다. **이는 각 에이전트 실행 후 `store_run_usage` 메서드가 호출되는 것에 전적으로 의존합니다.**
 
-### 사용 데이터 저장
+### 사용량 데이터 저장
 
 ```python
 # After each agent run, store the usage data
@@ -245,17 +245,17 @@ for turn in matching_turns:
 
 ### 메시지 구조
 
-세션은 다음을 포함한 메시지 구조를 자동으로 추적합니다:
+세션은 다음을 포함하여 메시지 구조를 자동으로 추적합니다:
 
-- 메시지 타입(user, assistant, tool_call 등)
-- 도구 호출 시 도구 이름
+- 메시지 유형(user, assistant, tool_call 등)
+- 도구 호출의 도구 이름
 - 턴 번호와 시퀀스 번호
-- 분기 연관
+- 분기 연관 관계
 - 타임스탬프
 
 ## 데이터베이스 스키마
 
-AdvancedSQLiteSession은 기본 SQLite 스키마를 확장하여 두 개의 추가 테이블을 제공합니다:
+AdvancedSQLiteSession은 기본 SQLite 스키마를 두 개의 추가 테이블로 확장합니다:
 
 ### message_structure 테이블
 
@@ -298,10 +298,9 @@ CREATE TABLE turn_usage (
 
 ## 전체 예제
 
-모든 기능에 대한 종합적인 데모는 [전체 예제](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)를 확인하세요.
+모든 기능을 포괄적으로 시연하는 [완전한 예제](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)를 확인하세요.
 
-
-## API 레퍼런스
+## API Reference
 
 - [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 메인 클래스
 - [`Session`][agents.memory.session.Session] - 기본 세션 프로토콜

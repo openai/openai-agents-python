@@ -4,58 +4,58 @@ search:
 ---
 # コード例
 
-[リポジトリ](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションには、SDK の多様なサンプル実装があります。これらのコード例は、さまざまなパターンや機能を示す複数のカテゴリーに整理されています。
+[repo](https://github.com/openai/openai-agents-python/tree/main/examples) の examples セクションで、SDK のさまざまなサンプル実装をご覧ください。これらのコード例は、異なるパターンや機能を示す複数のカテゴリーに整理されています。
 
 ## カテゴリー
 
 -   **[agent_patterns](https://github.com/openai/openai-agents-python/tree/main/examples/agent_patterns):**
-    このカテゴリーの例では、一般的なエージェント設計パターンを示します。例えば:
+    このカテゴリーのコード例は、次のような一般的な エージェント の設計パターンを示します。
 
     -   決定的なワークフロー
     -   ツールとしての エージェント
     -   エージェント の並列実行
-    -   条件付きツール使用
-    -   入出力ガードレール
-    -   判定者としての LLM
+    -   条件付きのツール使用
+    -   入力/出力の ガードレール
+    -   審判としての LLM
     -   ルーティング
     -   ストリーミング ガードレール
 
 -   **[basic](https://github.com/openai/openai-agents-python/tree/main/examples/basic):**
-    このカテゴリーの例では、SDK の基礎的な機能を紹介します。例えば:
+    これらのコード例は、次のような SDK の基本的な機能を紹介します。
 
-    -   Hello World のコード例（デフォルト モデル、GPT-5、open-weight モデル）
+    -   Hello World のコード例（デフォルト モデル、GPT-5、オープンウェイト モデル）
     -   エージェント のライフサイクル管理
     -   動的な システムプロンプト
-    -   ストリーミング出力（テキスト、アイテム、function call args）
+    -   ストリーミング 出力（テキスト、アイテム、関数呼び出しの引数）
     -   プロンプト テンプレート
     -   ファイル処理（ローカルとリモート、画像と PDF）
     -   使用状況の追跡
-    -   厳密でない出力型
-    -   以前の response ID の使用
+    -   厳密でない出力タイプ
+    -   前回のレスポンス ID の利用
 
 -   **[customer_service](https://github.com/openai/openai-agents-python/tree/main/examples/customer_service):**
-    航空会社向けのカスタマーサービス システムの例。
+    航空会社向けのカスタマー サービス システムのコード例。
 
 -   **[financial_research_agent](https://github.com/openai/openai-agents-python/tree/main/examples/financial_research_agent):**
-    エージェント とツールを用いた財務データ分析のための、構造化された調査ワークフローを示す金融リサーチ エージェント。
+    金融データ分析のための エージェント とツールで、構造化された調査ワークフローを示す金融調査 エージェント。
 
 -   **[handoffs](https://github.com/openai/openai-agents-python/tree/main/examples/handoffs):**
-    メッセージ フィルタリングを伴うエージェントのハンドオフの実用例。
+    メッセージ フィルタリングを用いた エージェント のハンドオフの実践的なコード例をご覧ください。
 
 -   **[hosted_mcp](https://github.com/openai/openai-agents-python/tree/main/examples/hosted_mcp):**
-    ホストされた MCP (Model Context Protocol) のコネクタと承認の使い方を示す例。
+    ホストされた MCP (Model Context Protocol) コネクタと承認の使い方を示すコード例。
 
 -   **[mcp](https://github.com/openai/openai-agents-python/tree/main/examples/mcp):**
-    MCP (Model Context Protocol) を用いたエージェントの構築方法を学べます。内容:
+    MCP (Model Context Protocol) を用いて エージェント を構築する方法を学べます。内容:
 
-    -   ファイルシステムの例
-    -   Git の例
-    -   MCP プロンプト サーバーの例
-    -   SSE (Server-Sent Events) の例
-    -   ストリーム可能な HTTP の例
+    -   ファイルシステム のコード例
+    -   Git のコード例
+    -   MCP プロンプト サーバーのコード例
+    -   SSE (Server-Sent Events) のコード例
+    -   ストリーム可能な HTTP のコード例
 
 -   **[memory](https://github.com/openai/openai-agents-python/tree/main/examples/memory):**
-    エージェント向けのさまざまなメモリ実装の例。内容:
+    エージェント 向けのさまざまなメモリ実装のコード例。内容:
 
     -   SQLite セッション ストレージ
     -   高度な SQLite セッション ストレージ
@@ -65,29 +65,29 @@ search:
     -   OpenAI セッション ストレージ
 
 -   **[model_providers](https://github.com/openai/openai-agents-python/tree/main/examples/model_providers):**
-    カスタム プロバイダーや LiteLLM 連携を含む、OpenAI 以外のモデルを SDK で使う方法。
+    カスタム プロバイダーや LiteLLM との統合を含む、OpenAI 以外のモデルを SDK で使う方法を紹介します。
 
 -   **[realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime):**
-    SDK を使ってリアルタイム 体験を構築する方法を示す例。内容:
+    SDK を使ってリアルタイムな体験を構築する方法を示すコード例。内容:
 
     -   Web アプリケーション
     -   コマンドライン インターフェース
-    -   Twilio 連携
+    -   Twilio との統合
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
-    推論コンテンツと structured outputs を扱う方法を示す例。
+    推論コンテンツと structured outputs を扱う方法を示すコード例。
 
 -   **[research_bot](https://github.com/openai/openai-agents-python/tree/main/examples/research_bot):**
-    複雑なマルチエージェント リサーチ ワークフローを示す、ディープリサーチの簡易クローン。
+    複雑なマルチ エージェントのリサーチ ワークフローを示す、シンプルな ディープリサーチ のクローン。
 
 -   **[tools](https://github.com/openai/openai-agents-python/tree/main/examples/tools):**
-    次のような OpenAI がホストするツール の実装方法を学べます:
+    次のような OpenAI がホストするツール の実装方法を学べます。
 
-    -   Web 検索 と フィルター付き Web 検索
+    -   Web 検索 と フィルター付きの Web 検索
     -   ファイル検索
     -   Code Interpreter
     -   コンピュータ操作
     -   画像生成
 
 -   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
-    TTS と STT モデルを使った音声 エージェントの例。ストリーミング音声のコード例を含みます。
+    TTS と STT モデルを用いた 音声 エージェントのコード例。ストリーミング 音声のコード例も含みます。
