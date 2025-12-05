@@ -340,6 +340,7 @@ class Converter:
         cls,
         items: str | Iterable[TResponseInputItem],
         preserve_thinking_blocks: bool = False,
+        include_reasoning_content: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -372,6 +373,21 @@ class Converter:
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
+        pending_reasoning_content: str | None = None
+
+        def apply_pending_reasoning_content(
+            message: ChatCompletionAssistantMessageParam,
+        ) -> None:
+            nonlocal pending_reasoning_content
+            if (
+                not include_reasoning_content
+                or pending_reasoning_content is None
+                or "reasoning_content" in message
+            ):
+                return
+
+            cast(dict[str, Any], message)["reasoning_content"] = pending_reasoning_content
+            pending_reasoning_content = None
 
         def flush_assistant_message() -> None:
             nonlocal current_assistant_msg
@@ -387,6 +403,9 @@ class Converter:
             if current_assistant_msg is None:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
                 current_assistant_msg["tool_calls"] = []
+                apply_pending_reasoning_content(current_assistant_msg)
+            else:
+                apply_pending_reasoning_content(current_assistant_msg)
 
             return current_assistant_msg
 
@@ -479,6 +498,7 @@ class Converter:
                     new_asst["content"] = combined
 
                 new_asst["tool_calls"] = []
+                apply_pending_reasoning_content(new_asst)
                 current_assistant_msg = new_asst
 
             # 4) function/file-search calls => attach to assistant
@@ -556,6 +576,32 @@ class Converter:
 
             # 7) reasoning message => extract thinking blocks if present
             elif reasoning_item := cls.maybe_reasoning_message(item):
+                # Capture reasoning content if present so we can attach it to the next assistant
+                # message (required by some providers for tool calls).
+                summary_items = reasoning_item.get("summary")
+                if (
+                    include_reasoning_content
+                    and isinstance(summary_items, list)
+                    and len(summary_items) > 0
+                ):
+                    reasoning_text = summary_items[0].get("text")
+                    if reasoning_text is not None:
+                        pending_reasoning_content = reasoning_text
+                if (
+                    include_reasoning_content
+                    and pending_reasoning_content is None
+                    and isinstance(reasoning_item.get("content"), list)
+                ):
+                    reasoning_texts = [
+                        content_item.get("text")
+                        for content_item in cast(list[dict[str, Any]], reasoning_item["content"])
+                        if isinstance(content_item, dict)
+                        and content_item.get("type") == "reasoning_text"
+                        and content_item.get("text") is not None
+                    ]
+                    if reasoning_texts:
+                        pending_reasoning_content = "".join(cast(list[str], reasoning_texts))
+
                 # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
                 content_items = reasoning_item.get("content", [])
                 encrypted_content = reasoning_item.get("encrypted_content")

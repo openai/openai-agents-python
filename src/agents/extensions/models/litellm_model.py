@@ -280,7 +280,9 @@ class LitellmModel(Model):
         )
 
         converted_messages = Converter.items_to_messages(
-            input, preserve_thinking_blocks=preserve_thinking_blocks
+            input,
+            preserve_thinking_blocks=preserve_thinking_blocks,
+            include_reasoning_content=self._should_include_reasoning_content(model_settings),
         )
 
         # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
@@ -435,6 +437,25 @@ class LitellmModel(Model):
             reasoning=model_settings.reasoning,
         )
         return response, ret
+
+    def _should_include_reasoning_content(self, model_settings: ModelSettings) -> bool:
+        """Determine whether to forward reasoning_content on assistant messages.
+
+        DeepSeek thinking mode requires reasoning_content to be present on messages with tool
+        calls, otherwise the API returns a 400.
+        """
+        model_name = str(self.model).lower()
+        base_url = (self.base_url or "").lower()
+
+        if "deepseek" in model_name or "deepseek.com" in base_url:
+            return True
+
+        if isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body:
+            return True
+        if model_settings.extra_args and "thinking" in model_settings.extra_args:
+            return True
+
+        return False
 
     def _fix_tool_message_ordering(
         self, messages: list[ChatCompletionMessageParam]
