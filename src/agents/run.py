@@ -557,6 +557,7 @@ class AgentRunner:
             current_turn = 0
             original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
             generated_items: list[RunItem] = []
+            all_generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
             context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
@@ -652,7 +653,12 @@ class AgentRunner:
 
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
-                    generated_items = turn_result.generated_items
+                    all_generated_items.extend(turn_result.new_step_items)
+                    generated_items = (
+                        []
+                        if turn_result.reset_conversation_items
+                        else turn_result.generated_items
+                    )
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -670,7 +676,7 @@ class AgentRunner:
                         )
                         result = RunResult(
                             input=original_input,
-                            new_items=generated_items,
+                            new_items=all_generated_items,
                             raw_responses=model_responses,
                             final_output=turn_result.next_step.output,
                             _last_agent=current_agent,
@@ -707,14 +713,14 @@ class AgentRunner:
                             f"Unknown next step type: {type(turn_result.next_step)}"
                         )
             except AgentsException as exc:
-                exc.run_data = RunErrorDetails(
-                    input=original_input,
-                    new_items=generated_items,
-                    raw_responses=model_responses,
-                    last_agent=current_agent,
-                    context_wrapper=context_wrapper,
-                    input_guardrail_results=input_guardrail_results,
-                    output_guardrail_results=[],
+                    exc.run_data = RunErrorDetails(
+                        input=original_input,
+                        new_items=all_generated_items,
+                        raw_responses=model_responses,
+                        last_agent=current_agent,
+                        context_wrapper=context_wrapper,
+                        input_guardrail_results=input_guardrail_results,
+                        output_guardrail_results=[],
                 )
                 raise
             finally:
@@ -1016,6 +1022,9 @@ class AgentRunner:
 
             await AgentRunner._save_result_to_session(session, starting_input, [])
 
+            generated_items: list[RunItem] = []
+            all_generated_items: list[RunItem] = []
+
             while True:
                 # Check for soft cancel before starting new turn
                 if streamed_result._cancel_mode == "after_turn":
@@ -1085,6 +1094,7 @@ class AgentRunner:
                         tool_use_tracker,
                         all_tools,
                         server_conversation_tracker,
+                        generated_items,
                     )
                     should_run_agent_start_hooks = False
 
@@ -1092,7 +1102,13 @@ class AgentRunner:
                         turn_result.model_response
                     ]
                     streamed_result.input = turn_result.original_input
-                    streamed_result.new_items = turn_result.generated_items
+                    all_generated_items.extend(turn_result.new_step_items)
+                    generated_items = (
+                        []
+                        if turn_result.reset_conversation_items
+                        else turn_result.generated_items
+                    )
+                    streamed_result.new_items = list(all_generated_items)
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1229,6 +1245,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
+        generated_items: list[RunItem],
         server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
         emitted_tool_call_ids: set[str] = set()
@@ -1263,11 +1280,11 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, generated_items
             )
         else:
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            input.extend([item.to_input_item() for item in generated_items])
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1386,7 +1403,7 @@ class AgentRunner:
         single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
             original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            pre_step_items=generated_items,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -1396,6 +1413,7 @@ class AgentRunner:
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
             event_queue=streamed_result._event_queue,
+            server_conversation_mode=server_conversation_tracker is not None,
         )
 
         import dataclasses as _dc
@@ -1507,6 +1525,7 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            server_conversation_mode=server_conversation_tracker is not None,
         )
 
     @classmethod
@@ -1525,6 +1544,7 @@ class AgentRunner:
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
         event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
+        server_conversation_mode: bool = False,
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -1554,6 +1574,7 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            server_conversation_mode=server_conversation_mode,
         )
 
     @classmethod
@@ -1570,6 +1591,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        server_conversation_mode: bool = False,
     ) -> SingleStepResult:
         original_input = streamed_result.input
         pre_step_items = streamed_result.new_items
@@ -1596,6 +1618,7 @@ class AgentRunner:
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            server_conversation_mode=server_conversation_mode,
         )
         new_step_items = [
             item

@@ -29,6 +29,7 @@ from agents import (
     RunItem,
     ToolCallItem,
     Usage,
+    UserError,
     handoff,
 )
 from agents._run_impl import RunImpl, ToolRunHandoff
@@ -303,6 +304,78 @@ async def test_handoff_can_enable_history_nesting(monkeypatch: pytest.MonkeyPatc
             "content": "nested",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_server_conversation_disables_history_nesting(monkeypatch: pytest.MonkeyPatch):
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    override_handoff = handoff(target_agent)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
+    run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
+    run_config = RunConfig()
+    context_wrapper = RunContextWrapper(context=None)
+    hooks = RunHooks()
+    original_input = [get_text_input_item("hello")]
+    pre_step_items: list[RunItem] = []
+    new_step_items: list[RunItem] = []
+    new_response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    calls: list[HandoffInputData] = []
+
+    def fake_nest(
+        handoff_input_data: HandoffInputData,
+        *,
+        history_mapper: Any,
+    ) -> HandoffInputData:
+        calls.append(handoff_input_data)
+        return handoff_input_data
+
+    monkeypatch.setattr("agents._run_impl.nest_handoff_history", fake_nest)
+
+    result = await RunImpl.execute_handoffs(
+        agent=source_agent,
+        original_input=list(original_input),
+        pre_step_items=pre_step_items,
+        new_step_items=new_step_items,
+        new_response=new_response,
+        run_handoffs=run_handoffs,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
+        server_conversation_mode=True,
+    )
+
+    assert calls == []
+    assert result.original_input == original_input
+    assert result.reset_conversation_items is False
+
+
+@pytest.mark.asyncio
+async def test_server_conversation_rejects_input_filter():
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    override_handoff = handoff(target_agent, input_filter=lambda d: d)
+    tool_call = cast(ResponseFunctionToolCall, get_handoff_tool_call(target_agent))
+    run_handoffs = [ToolRunHandoff(handoff=override_handoff, tool_call=tool_call)]
+    run_config = RunConfig()
+    context_wrapper = RunContextWrapper(context=None)
+    hooks = RunHooks()
+    new_response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    with pytest.raises(UserError):
+        await RunImpl.execute_handoffs(
+            agent=source_agent,
+            original_input=[get_text_input_item("hello")],
+            pre_step_items=[],
+            new_step_items=[],
+            new_response=new_response,
+            run_handoffs=run_handoffs,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            server_conversation_mode=True,
+        )
 
 
 @pytest.mark.asyncio

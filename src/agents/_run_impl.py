@@ -226,6 +226,10 @@ class SingleStepResult:
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from this step."""
 
+    reset_conversation_items: bool = False
+    """When True, omit previously generated items from the next model call (e.g. after nesting
+    handoff history) while still keeping them in run results."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
@@ -260,6 +264,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
+        server_conversation_mode: bool = False,
     ) -> SingleStepResult:
         # Make a copy of the generated items
         pre_step_items = list(pre_step_items)
@@ -320,6 +325,7 @@ class RunImpl:
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 run_config=run_config,
+                server_conversation_mode=server_conversation_mode,
             )
 
         # Next, we'll check if the tool use should result in a final output
@@ -927,6 +933,7 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
+        server_conversation_mode: bool = False,
     ) -> SingleStepResult:
         # If there is more than one handoff, add tool responses that reject those handoffs
         multiple_handoffs = len(run_handoffs) > 1
@@ -1004,6 +1011,21 @@ class RunImpl:
                 if handoff_nest_setting is not None
                 else run_config.nest_handoff_history
             )
+            reset_conversation_items = False
+            if server_conversation_mode:
+                if input_filter:
+                    raise UserError(
+                        "Handoff input filters are not supported when using server-managed "
+                        "conversations (conversation_id or previous_response_id). Remove the "
+                        "input_filter or disable server-managed conversation state."
+                    )
+                if should_nest_history:
+                    logger.warning(
+                        "Disabling nest_handoff_history because server-managed conversation state "
+                        "is enabled via conversation_id or previous_response_id."
+                    )
+                input_filter = None
+                should_nest_history = False
             handoff_input_data: HandoffInputData | None = None
             if input_filter or should_nest_history:
                 handoff_input_data = HandoffInputData(
@@ -1059,6 +1081,7 @@ class RunImpl:
                     handoff_input_data,
                     history_mapper=run_config.handoff_history_mapper,
                 )
+                reset_conversation_items = True
                 original_input = (
                     nested.input_history
                     if isinstance(nested.input_history, str)
@@ -1075,6 +1098,7 @@ class RunImpl:
             next_step=NextStepHandoff(new_agent),
             tool_input_guardrail_results=[],
             tool_output_guardrail_results=[],
+            reset_conversation_items=reset_conversation_items,
         )
 
     @classmethod
