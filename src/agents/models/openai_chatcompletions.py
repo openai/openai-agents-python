@@ -9,7 +9,13 @@ from openai import AsyncOpenAI, AsyncStream, Omit, omit
 from openai.types import ChatModel
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
-from openai.types.responses import Response
+from openai.types.responses import (
+    Response,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
+from openai.types.responses.response_output_text import Logprob
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
@@ -119,11 +125,32 @@ class OpenAIChatCompletionsModel(Model):
 
             items = Converter.message_to_output_items(message) if message is not None else []
 
+            logprob_models = None
+            if first_choice and first_choice.logprobs and first_choice.logprobs.content:
+                logprob_models = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    first_choice.logprobs.content
+                )
+
+            if logprob_models:
+                self._attach_logprobs_to_output(items, logprob_models)
+
             return ModelResponse(
                 output=items,
                 usage=usage,
                 response_id=None,
             )
+
+    def _attach_logprobs_to_output(
+        self, output_items: list[ResponseOutputItem], logprobs: list[Logprob]
+    ) -> None:
+        for output_item in output_items:
+            if not isinstance(output_item, ResponseOutputMessage):
+                continue
+
+            for content in output_item.content:
+                if isinstance(content, ResponseOutputText):
+                    content.logprobs = logprobs
+                    return
 
     async def stream_response(
         self,
