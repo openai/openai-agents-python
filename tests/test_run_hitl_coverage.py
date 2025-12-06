@@ -1347,6 +1347,7 @@ async def test_start_streaming_fresh_run_exercises_persistence(monkeypatch):
         context_wrapper=context_wrapper,
         run_config=run_config,
         previous_response_id=None,
+        auto_previous_response_id=False,
         conversation_id=None,
         session=None,
         run_state=None,
