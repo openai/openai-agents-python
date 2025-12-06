@@ -1945,7 +1945,7 @@ class AgentRunner:
         else:
             # input is already str | list[TResponseInputItem] when not RunState
             # Reuse input_for_result variable from outer scope
-            input_for_result = cast(str | list[TResponseInputItem], input)
+            input_for_result = cast(Union[str, list[TResponseInputItem]], input)
             context_wrapper = RunContextWrapper(context=context)  # type: ignore
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
