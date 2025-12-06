@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, cast
 
@@ -19,20 +21,14 @@ from openai.types.responses.response_input_param import (
     McpApprovalResponse,
 )
 from openai.types.responses.response_output_item import (
+    LocalShellCall,
     McpApprovalRequest,
     McpListTools,
 )
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeVar
 
-from ._run_impl import (
-    NextStepInterruption,
-    ProcessedResponse,
-    ToolRunComputerAction,
-    ToolRunFunction,
-    ToolRunHandoff,
-    ToolRunMCPApprovalRequest,
-)
 from .exceptions import UserError
 from .handoffs import Handoff
 from .items import (
@@ -53,11 +49,14 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
-from .tool import ComputerTool, FunctionTool, HostedMCPTool
-from .usage import Usage
+from .tool import ApplyPatchTool, ComputerTool, FunctionTool, HostedMCPTool, ShellTool
+from .usage import RequestUsage, Usage
 
 if TYPE_CHECKING:
-    from ._run_impl import ProcessedResponse
+    from ._run_impl import (
+        NextStepInterruption,
+        ProcessedResponse,
+    )
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
@@ -119,6 +118,15 @@ class RunState(Generic[TContext, TAgent]):
     _last_processed_response: ProcessedResponse | None = None
     """The last processed model response. This is needed for resuming from interruptions."""
 
+    _current_turn_persisted_item_count: int = 0
+    """Tracks how many generated run items from this turn were already written to the session.
+    When a turn is interrupted (e.g., awaiting tool approval) and later resumed, we rewind the
+    counter before continuing so the pending tool output still gets stored.
+    """
+
+    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
+    """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -135,7 +143,7 @@ class RunState(Generic[TContext, TAgent]):
             max_turns: Maximum number of turns allowed.
         """
         self._context = context
-        self._original_input = original_input
+        self._original_input = _clone_original_input(original_input)
         self._current_agent = starting_agent
         self._max_turns = max_turns
         self._model_responses = []
@@ -145,6 +153,8 @@ class RunState(Generic[TContext, TAgent]):
         self._current_step = None
         self._current_turn = 0
         self._last_processed_response = None
+        self._current_turn_persisted_item_count = 0
+        self._tool_use_tracker_snapshot = {}
 
     def get_interruptions(self) -> list[RunItem]:
         """Returns all interruptions if the current step is an interruption.
@@ -152,6 +162,9 @@ class RunState(Generic[TContext, TAgent]):
         Returns:
             List of tool approval items awaiting approval, or empty list if no interruptions.
         """
+        # Import at runtime to avoid circular import
+        from ._run_impl import NextStepInterruption
+
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
         return self._current_step.interruptions
@@ -208,6 +221,7 @@ class RunState(Generic[TContext, TAgent]):
             field_mapping = {
                 "call_id": "callId",
                 "response_id": "responseId",
+                "provider_data": "providerData",
             }
 
             for key, value in data.items():
@@ -272,8 +286,36 @@ class RunState(Generic[TContext, TAgent]):
                 "usage": {
                     "requests": resp.usage.requests,
                     "inputTokens": resp.usage.input_tokens,
+                    "inputTokensDetails": [
+                        resp.usage.input_tokens_details.model_dump()
+                        if hasattr(resp.usage.input_tokens_details, "model_dump")
+                        else {}
+                    ],
                     "outputTokens": resp.usage.output_tokens,
+                    "outputTokensDetails": [
+                        resp.usage.output_tokens_details.model_dump()
+                        if hasattr(resp.usage.output_tokens_details, "model_dump")
+                        else {}
+                    ],
                     "totalTokens": resp.usage.total_tokens,
+                    "requestUsageEntries": [
+                        {
+                            "inputTokens": entry.input_tokens,
+                            "outputTokens": entry.output_tokens,
+                            "totalTokens": entry.total_tokens,
+                            "inputTokensDetails": (
+                                entry.input_tokens_details.model_dump()
+                                if hasattr(entry.input_tokens_details, "model_dump")
+                                else {}
+                            ),
+                            "outputTokensDetails": (
+                                entry.output_tokens_details.model_dump()
+                                if hasattr(entry.output_tokens_details, "model_dump")
+                                else {}
+                            ),
+                        }
+                        for entry in resp.usage.request_usage_entries
+                    ],
                 },
                 "output": [
                     self._camelize_field_names(item.model_dump(exclude_unset=True))
@@ -288,30 +330,11 @@ class RunState(Generic[TContext, TAgent]):
         # Protocol expects function_call_result (not function_call_output)
         original_input_serialized = self._original_input
         if isinstance(original_input_serialized, list):
-            # First pass: build a map of call_id -> function_call name
-            # to help convert function_call_output to function_call_result
-            call_id_to_name: dict[str, str] = {}
-            for item in original_input_serialized:
-                if isinstance(item, dict):
-                    item_type = item.get("type")
-                    call_id = item.get("call_id") or item.get("callId")
-                    name = item.get("name")
-                    if item_type == "function_call" and call_id and name:
-                        call_id_to_name[call_id] = name
-
             normalized_items = []
             for item in original_input_serialized:
                 if isinstance(item, dict):
                     # Create a copy to avoid modifying the original
                     normalized_item = dict(item)
-                    # Remove session/conversation metadata fields that shouldn't be in originalInput
-                    # These are not part of the input protocol schema
-                    normalized_item.pop("id", None)
-                    normalized_item.pop("created_at", None)
-                    # Remove top-level providerData/provider_data (protocol allows it but
-                    # we remove it for cleaner serialization)
-                    normalized_item.pop("providerData", None)
-                    normalized_item.pop("provider_data", None)
                     # Convert API format to protocol format
                     # API uses function_call_output, protocol uses function_call_result
                     item_type = normalized_item.get("type")
@@ -325,16 +348,16 @@ class RunState(Generic[TContext, TAgent]):
                         # Protocol format requires name field
                         # Look it up from the corresponding function_call if missing
                         if "name" not in normalized_item and call_id:
-                            normalized_item["name"] = call_id_to_name.get(call_id, "")
+                            normalized_item["name"] = self._lookup_function_name(call_id)
                     # Convert assistant messages with string content to array format
-                    # TypeScript SDK requires content to be an array for assistant messages
+                    # Protocol requires content to be an array for assistant messages
                     role = normalized_item.get("role")
                     if role == "assistant":
                         content = normalized_item.get("content")
                         if isinstance(content, str):
                             # Convert string content to array format with output_text
                             normalized_item["content"] = [{"type": "output_text", "text": content}]
-                        # Ensure status field is present (required by TypeScript schema)
+                        # Ensure status field is present (required by protocol schema)
                         if "status" not in normalized_item:
                             normalized_item["status"] = "completed"
                     # Normalize field names to camelCase for JSON (call_id -> callId)
@@ -356,8 +379,36 @@ class RunState(Generic[TContext, TAgent]):
                 "usage": {
                     "requests": self._context.usage.requests,
                     "inputTokens": self._context.usage.input_tokens,
+                    "inputTokensDetails": [
+                        self._context.usage.input_tokens_details.model_dump()
+                        if hasattr(self._context.usage.input_tokens_details, "model_dump")
+                        else {}
+                    ],
                     "outputTokens": self._context.usage.output_tokens,
+                    "outputTokensDetails": [
+                        self._context.usage.output_tokens_details.model_dump()
+                        if hasattr(self._context.usage.output_tokens_details, "model_dump")
+                        else {}
+                    ],
                     "totalTokens": self._context.usage.total_tokens,
+                    "requestUsageEntries": [
+                        {
+                            "inputTokens": entry.input_tokens,
+                            "outputTokens": entry.output_tokens,
+                            "totalTokens": entry.total_tokens,
+                            "inputTokensDetails": (
+                                entry.input_tokens_details.model_dump()
+                                if hasattr(entry.input_tokens_details, "model_dump")
+                                else {}
+                            ),
+                            "outputTokensDetails": (
+                                entry.output_tokens_details.model_dump()
+                                if hasattr(entry.output_tokens_details, "model_dump")
+                                else {}
+                            ),
+                        }
+                        for entry in self._context.usage.request_usage_entries
+                    ],
                 },
                 "approvals": approvals_dict,
                 "context": self._context.context
@@ -368,7 +419,7 @@ class RunState(Generic[TContext, TAgent]):
                     else {}
                 ),
             },
-            "toolUseTracker": {},
+            "toolUseTracker": copy.deepcopy(self._tool_use_tracker_snapshot),
             "maxTurns": self._max_turns,
             "noActiveAgentRun": True,
             "inputGuardrailResults": [
@@ -395,34 +446,74 @@ class RunState(Generic[TContext, TAgent]):
             ],
         }
 
-        # Include items from lastProcessedResponse.newItems in generatedItems
-        # so tool_call_items are available when preparing input after approving tools
-        generated_items_to_serialize = list(self._generated_items)
-        if self._last_processed_response:
-            # Add tool_call_items from lastProcessedResponse.newItems to generatedItems
-            # so they're available when preparing input after approving tools
-            for item in self._last_processed_response.new_items:
-                if item.type == "tool_call_item":
-                    # Only add if not already in generated_items (avoid duplicates)
-                    if not any(
-                        existing_item.type == "tool_call_item"
-                        and hasattr(existing_item.raw_item, "call_id")
-                        and hasattr(item.raw_item, "call_id")
-                        and existing_item.raw_item.call_id == item.raw_item.call_id
-                        for existing_item in generated_items_to_serialize
-                    ):
-                        generated_items_to_serialize.append(item)
+        # generated_items already contains the latest turn's items.
+        # Include lastProcessedResponse.newItems only when they are not
+        # already present (by id/type or function call_id) to avoid duplicates.
+        generated_items = list(self._generated_items)
+        if self._last_processed_response and self._last_processed_response.new_items:
+            seen_id_types: set[tuple[str, str]] = set()
+            seen_call_ids: set[str] = set()
 
-        result["generatedItems"] = [
-            self._serialize_item(item) for item in generated_items_to_serialize
-        ]
+            def _id_type_call(item: Any) -> tuple[str | None, str | None, str | None]:
+                item_id = None
+                item_type = None
+                call_id = None
+                if hasattr(item, "raw_item"):
+                    raw = item.raw_item
+                    if isinstance(raw, dict):
+                        item_id = raw.get("id")
+                        item_type = raw.get("type")
+                        call_id = raw.get("call_id") or raw.get("callId")
+                    else:
+                        item_id = getattr(raw, "id", None)
+                        item_type = getattr(raw, "type", None)
+                        call_id = getattr(raw, "call_id", None)
+                if item_id is None and hasattr(item, "id"):
+                    item_id = getattr(item, "id", None)
+                if item_type is None and hasattr(item, "type"):
+                    item_type = getattr(item, "type", None)
+                return item_id, item_type, call_id
+
+            for existing in generated_items:
+                item_id, item_type, call_id = _id_type_call(existing)
+                if item_id and item_type:
+                    seen_id_types.add((item_id, item_type))
+                if call_id:
+                    seen_call_ids.add(call_id)
+
+            for new_item in self._last_processed_response.new_items:
+                item_id, item_type, call_id = _id_type_call(new_item)
+                if call_id and call_id in seen_call_ids:
+                    continue
+                if item_id and item_type and (item_id, item_type) in seen_id_types:
+                    continue
+                if item_id and item_type:
+                    seen_id_types.add((item_id, item_type))
+                if call_id:
+                    seen_call_ids.add(call_id)
+                generated_items.append(new_item)
+        result["generatedItems"] = [self._serialize_item(item) for item in generated_items]
         result["currentStep"] = self._serialize_current_step()
         result["lastModelResponse"] = (
             {
                 "usage": {
                     "requests": self._model_responses[-1].usage.requests,
                     "inputTokens": self._model_responses[-1].usage.input_tokens,
+                    "inputTokensDetails": [
+                        self._model_responses[-1].usage.input_tokens_details.model_dump()
+                        if hasattr(
+                            self._model_responses[-1].usage.input_tokens_details, "model_dump"
+                        )
+                        else {}
+                    ],
                     "outputTokens": self._model_responses[-1].usage.output_tokens,
+                    "outputTokensDetails": [
+                        self._model_responses[-1].usage.output_tokens_details.model_dump()
+                        if hasattr(
+                            self._model_responses[-1].usage.output_tokens_details, "model_dump"
+                        )
+                        else {}
+                    ],
                     "totalTokens": self._model_responses[-1].usage.total_tokens,
                 },
                 "output": [
@@ -439,6 +530,7 @@ class RunState(Generic[TContext, TAgent]):
             if self._last_processed_response
             else None
         )
+        result["currentTurnPersistedItemCount"] = self._current_turn_persisted_item_count
         result["trace"] = None
 
         return result
@@ -517,6 +609,38 @@ class RunState(Generic[TContext, TAgent]):
                 }
             )
 
+        shell_actions = []
+        for shell_action in processed_response.shell_calls:
+            shell_dict = {"name": shell_action.shell_tool.name}
+            if hasattr(shell_action.shell_tool, "description"):
+                shell_dict["description"] = shell_action.shell_tool.description
+            shell_actions.append(
+                {
+                    "toolCall": self._camelize_field_names(
+                        shell_action.tool_call.model_dump(exclude_unset=True)
+                        if hasattr(shell_action.tool_call, "model_dump")
+                        else shell_action.tool_call
+                    ),
+                    "shell": shell_dict,
+                }
+            )
+
+        apply_patch_actions = []
+        for apply_patch_action in processed_response.apply_patch_calls:
+            apply_patch_dict = {"name": apply_patch_action.apply_patch_tool.name}
+            if hasattr(apply_patch_action.apply_patch_tool, "description"):
+                apply_patch_dict["description"] = apply_patch_action.apply_patch_tool.description
+            apply_patch_actions.append(
+                {
+                    "toolCall": self._camelize_field_names(
+                        apply_patch_action.tool_call.model_dump(exclude_unset=True)
+                        if hasattr(apply_patch_action.tool_call, "model_dump")
+                        else apply_patch_action.tool_call
+                    ),
+                    "applyPatch": apply_patch_dict,
+                }
+            )
+
         # Serialize MCP approval requests
         mcp_approval_requests = []
         for request in processed_response.mcp_approval_requests:
@@ -543,11 +667,16 @@ class RunState(Generic[TContext, TAgent]):
             "handoffs": handoffs,
             "functions": functions,
             "computerActions": computer_actions,
+            "shellActions": shell_actions,
+            "applyPatchActions": apply_patch_actions,
             "mcpApprovalRequests": mcp_approval_requests,
         }
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
+        # Import at runtime to avoid circular import
+        from ._run_impl import NextStepInterruption
+
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
 
@@ -582,7 +711,7 @@ class RunState(Generic[TContext, TAgent]):
         else:
             raw_item_dict = item.raw_item
 
-        # Convert tool output-like items into protocol format so TypeScript can deserialize them.
+        # Convert tool output-like items into protocol format for cross-SDK compatibility.
         if item.type in {"tool_call_output_item", "handoff_output_item"} and isinstance(
             raw_item_dict, dict
         ):
@@ -687,6 +816,26 @@ class RunState(Generic[TContext, TAgent]):
         """
         return json.dumps(self.to_json(), indent=2)
 
+    def set_tool_use_tracker_snapshot(self, snapshot: Mapping[str, Sequence[str]] | None) -> None:
+        """Store a copy of the serialized tool-use tracker data."""
+        if not snapshot:
+            self._tool_use_tracker_snapshot = {}
+            return
+
+        normalized: dict[str, list[str]] = {}
+        for agent_name, tools in snapshot.items():
+            if not isinstance(agent_name, str):
+                continue
+            normalized[agent_name] = [tool for tool in tools if isinstance(tool, str)]
+        self._tool_use_tracker_snapshot = normalized
+
+    def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
+        """Return a defensive copy of the tool-use tracker snapshot."""
+        return {
+            agent_name: list(tool_names)
+            for agent_name, tool_names in self._tool_use_tracker_snapshot.items()
+        }
+
     @staticmethod
     async def from_string(
         initial_agent: Agent[Any], state_string: str
@@ -735,8 +884,41 @@ class RunState(Generic[TContext, TAgent]):
         usage = Usage()
         usage.requests = context_data["usage"]["requests"]
         usage.input_tokens = context_data["usage"]["inputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        input_tokens_details_raw = context_data["usage"].get("inputTokensDetails") or {
+            "cached_tokens": 0
+        }
+        if isinstance(input_tokens_details_raw, list) and len(input_tokens_details_raw) > 0:
+            input_tokens_details_raw = input_tokens_details_raw[0]
+        usage.input_tokens_details = TypeAdapter(InputTokensDetails).validate_python(
+            input_tokens_details_raw
+        )
         usage.output_tokens = context_data["usage"]["outputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        output_tokens_details_raw = context_data["usage"].get("outputTokensDetails") or {
+            "reasoning_tokens": 0
+        }
+        if isinstance(output_tokens_details_raw, list) and len(output_tokens_details_raw) > 0:
+            output_tokens_details_raw = output_tokens_details_raw[0]
+        usage.output_tokens_details = TypeAdapter(OutputTokensDetails).validate_python(
+            output_tokens_details_raw
+        )
         usage.total_tokens = context_data["usage"]["totalTokens"]
+        usage.request_usage_entries = [
+            RequestUsage(
+                input_tokens=entry.get("inputTokens", 0),
+                output_tokens=entry.get("outputTokens", 0),
+                total_tokens=entry.get("totalTokens", 0),
+                input_tokens_details=TypeAdapter(InputTokensDetails).validate_python(
+                    entry.get("inputTokensDetails") or {"cached_tokens": 0}
+                ),
+                output_tokens_details=TypeAdapter(OutputTokensDetails).validate_python(
+                    entry.get("outputTokensDetails") or {"reasoning_tokens": 0}
+                ),
+            )
+            for entry in context_data["usage"].get("requestUsageEntries", [])
+        ]
+        # Note: requestUsageEntries.inputTokensDetails should remain as object (not array)
 
         context = RunContextWrapper(context=context_data.get("context", {}))
         context.usage = usage
@@ -755,7 +937,10 @@ class RunState(Generic[TContext, TAgent]):
             normalized_original_input = []
             for item in original_input_raw:
                 if isinstance(item, dict):
-                    normalized_item = _normalize_field_names(item)
+                    item_dict = dict(item)
+                    item_dict.pop("providerData", None)
+                    item_dict.pop("provider_data", None)
+                    normalized_item = _normalize_field_names(item_dict)
                     normalized_item = _convert_protocol_result_to_api(normalized_item)
                     normalized_original_input.append(normalized_item)
                 else:
@@ -813,7 +998,16 @@ class RunState(Generic[TContext, TAgent]):
                     approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
                     interruptions.append(approval_item)
 
+            # Import at runtime to avoid circular import
+            from ._run_impl import NextStepInterruption
+
             state._current_step = NextStepInterruption(interruptions=interruptions)
+
+        # Restore persisted item count for session tracking
+        state._current_turn_persisted_item_count = state_json.get(
+            "currentTurnPersistedItemCount", 0
+        )
+        state.set_tool_use_tracker_snapshot(state_json.get("toolUseTracker", {}))
 
         return state
 
@@ -860,8 +1054,41 @@ class RunState(Generic[TContext, TAgent]):
         usage = Usage()
         usage.requests = context_data["usage"]["requests"]
         usage.input_tokens = context_data["usage"]["inputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        input_tokens_details_raw = context_data["usage"].get("inputTokensDetails") or {
+            "cached_tokens": 0
+        }
+        if isinstance(input_tokens_details_raw, list) and len(input_tokens_details_raw) > 0:
+            input_tokens_details_raw = input_tokens_details_raw[0]
+        usage.input_tokens_details = TypeAdapter(InputTokensDetails).validate_python(
+            input_tokens_details_raw
+        )
         usage.output_tokens = context_data["usage"]["outputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        output_tokens_details_raw = context_data["usage"].get("outputTokensDetails") or {
+            "reasoning_tokens": 0
+        }
+        if isinstance(output_tokens_details_raw, list) and len(output_tokens_details_raw) > 0:
+            output_tokens_details_raw = output_tokens_details_raw[0]
+        usage.output_tokens_details = TypeAdapter(OutputTokensDetails).validate_python(
+            output_tokens_details_raw
+        )
         usage.total_tokens = context_data["usage"]["totalTokens"]
+        usage.request_usage_entries = [
+            RequestUsage(
+                input_tokens=entry.get("inputTokens", 0),
+                output_tokens=entry.get("outputTokens", 0),
+                total_tokens=entry.get("totalTokens", 0),
+                input_tokens_details=TypeAdapter(InputTokensDetails).validate_python(
+                    entry.get("inputTokensDetails") or {"cached_tokens": 0}
+                ),
+                output_tokens_details=TypeAdapter(OutputTokensDetails).validate_python(
+                    entry.get("outputTokensDetails") or {"reasoning_tokens": 0}
+                ),
+            )
+            for entry in context_data["usage"].get("requestUsageEntries", [])
+        ]
+        # Note: requestUsageEntries.inputTokensDetails should remain as object (not array)
 
         context = RunContextWrapper(context=context_data.get("context", {}))
         context.usage = usage
@@ -880,7 +1107,10 @@ class RunState(Generic[TContext, TAgent]):
             normalized_original_input = []
             for item in original_input_raw:
                 if isinstance(item, dict):
-                    normalized_item = _normalize_field_names(item)
+                    item_dict = dict(item)
+                    item_dict.pop("providerData", None)
+                    item_dict.pop("provider_data", None)
+                    normalized_item = _normalize_field_names(item_dict)
                     # Convert protocol format (function_call_result) back to API format
                     # (function_call_output) for internal use
                     item_type = normalized_item.get("type")
@@ -946,7 +1176,16 @@ class RunState(Generic[TContext, TAgent]):
                     approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
                     interruptions.append(approval_item)
 
+            # Import at runtime to avoid circular import
+            from ._run_impl import NextStepInterruption
+
             state._current_step = NextStepInterruption(interruptions=interruptions)
+
+        # Restore persisted item count for session tracking
+        state._current_turn_persisted_item_count = state_json.get(
+            "currentTurnPersistedItemCount", 0
+        )
+        state.set_tool_use_tracker_snapshot(state_json.get("toolUseTracker", {}))
 
         return state
 
@@ -982,6 +1221,14 @@ async def _deserialize_processed_response(
     computer_tools_map = {
         tool.name: tool for tool in all_tools if hasattr(tool, "type") and tool.type == "computer"
     }
+    shell_tools_map = {
+        tool.name: tool for tool in all_tools if hasattr(tool, "type") and tool.type == "shell"
+    }
+    apply_patch_tools_map = {
+        tool.name: tool
+        for tool in all_tools
+        if hasattr(tool, "type") and tool.type == "apply_patch"
+    }
     # Build MCP tools map
     mcp_tools_map = {tool.name: tool for tool in all_tools if isinstance(tool, HostedMCPTool)}
 
@@ -995,6 +1242,17 @@ async def _deserialize_processed_response(
                     handoffs_map[handoff.tool_name] = handoff
                 elif hasattr(handoff, "name"):
                     handoffs_map[handoff.name] = handoff
+
+    # Import at runtime to avoid circular import
+    from ._run_impl import (
+        ProcessedResponse,
+        ToolRunApplyPatchCall,
+        ToolRunComputerAction,
+        ToolRunFunction,
+        ToolRunHandoff,
+        ToolRunMCPApprovalRequest,
+        ToolRunShellCall,
+    )
 
     # Deserialize handoffs
     handoffs = []
@@ -1032,6 +1290,40 @@ async def _deserialize_processed_response(
                     ToolRunComputerAction(tool_call=computer_tool_call, computer_tool=computer_tool)
                 )
 
+    # Deserialize shell actions
+    shell_actions = []
+    for action_data in processed_response_data.get("shellActions", []):
+        tool_call_data = _normalize_field_names(action_data.get("toolCall", {}))
+        shell_name = action_data.get("shell", {}).get("name")
+        if shell_name and shell_name in shell_tools_map:
+            try:
+                shell_call = TypeAdapter(LocalShellCall).validate_python(tool_call_data)
+            except ValidationError:
+                shell_call = tool_call_data  # type: ignore[assignment]
+            shell_tool = shell_tools_map[shell_name]
+            # Type assertion: shell_tools_map only contains ShellTool instances
+            if isinstance(shell_tool, ShellTool):
+                shell_actions.append(ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool))
+
+    # Deserialize apply patch actions
+    apply_patch_actions = []
+    for action_data in processed_response_data.get("applyPatchActions", []):
+        tool_call_data = _normalize_field_names(action_data.get("toolCall", {}))
+        apply_patch_name = action_data.get("applyPatch", {}).get("name")
+        if apply_patch_name and apply_patch_name in apply_patch_tools_map:
+            try:
+                apply_patch_tool_call = ResponseFunctionToolCall(**tool_call_data)
+            except Exception:
+                apply_patch_tool_call = tool_call_data  # type: ignore[assignment]
+            apply_patch_tool = apply_patch_tools_map[apply_patch_name]
+            # Type assertion: apply_patch_tools_map only contains ApplyPatchTool instances
+            if isinstance(apply_patch_tool, ApplyPatchTool):
+                apply_patch_actions.append(
+                    ToolRunApplyPatchCall(
+                        tool_call=apply_patch_tool_call, apply_patch_tool=apply_patch_tool
+                    )
+                )
+
     # Deserialize MCP approval requests
     mcp_approval_requests = []
     for request_data in processed_response_data.get("mcpApprovalRequests", []):
@@ -1066,8 +1358,8 @@ async def _deserialize_processed_response(
         functions=functions,
         computer_actions=computer_actions,
         local_shell_calls=[],  # Not serialized in JSON schema
-        shell_calls=[],  # Not serialized in JSON schema
-        apply_patch_calls=[],  # Not serialized in JSON schema
+        shell_calls=shell_actions,
+        apply_patch_calls=apply_patch_actions,
         tools_used=processed_response_data.get("toolsUsed", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=[],  # Not serialized in ProcessedResponse
@@ -1093,19 +1385,13 @@ def _normalize_field_names(data: dict[str, Any]) -> dict[str, Any]:
     field_mapping = {
         "callId": "call_id",
         "responseId": "response_id",
-        # Note: providerData is metadata and should not be normalized or included
-        # in Pydantic models, so we exclude it here
     }
 
-    # Fields to exclude (metadata that shouldn't be sent to API)
-    exclude_fields = {"providerData", "provider_data"}
-
     for key, value in data.items():
-        # Skip metadata fields that shouldn't be included
-        if key in exclude_fields:
+        # Drop providerData/provider_data entirely (matches JS behavior)
+        if key in {"providerData", "provider_data"}:
             continue
 
-        # Normalize the key if needed
         normalized_key = field_mapping.get(key, key)
 
         # Recursively normalize nested dictionaries
@@ -1164,8 +1450,40 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
         usage = Usage()
         usage.requests = resp_data["usage"]["requests"]
         usage.input_tokens = resp_data["usage"]["inputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        input_tokens_details_raw = resp_data["usage"].get("inputTokensDetails") or {
+            "cached_tokens": 0
+        }
+        if isinstance(input_tokens_details_raw, list) and len(input_tokens_details_raw) > 0:
+            input_tokens_details_raw = input_tokens_details_raw[0]
+        usage.input_tokens_details = TypeAdapter(InputTokensDetails).validate_python(
+            input_tokens_details_raw
+        )
         usage.output_tokens = resp_data["usage"]["outputTokens"]
+        # Handle both array format (protocol) and object format (legacy Python)
+        output_tokens_details_raw = resp_data["usage"].get("outputTokensDetails") or {
+            "reasoning_tokens": 0
+        }
+        if isinstance(output_tokens_details_raw, list) and len(output_tokens_details_raw) > 0:
+            output_tokens_details_raw = output_tokens_details_raw[0]
+        usage.output_tokens_details = TypeAdapter(OutputTokensDetails).validate_python(
+            output_tokens_details_raw
+        )
         usage.total_tokens = resp_data["usage"]["totalTokens"]
+        usage.request_usage_entries = [
+            RequestUsage(
+                input_tokens=entry.get("inputTokens", 0),
+                output_tokens=entry.get("outputTokens", 0),
+                total_tokens=entry.get("totalTokens", 0),
+                input_tokens_details=TypeAdapter(InputTokensDetails).validate_python(
+                    entry.get("inputTokensDetails") or {"cached_tokens": 0}
+                ),
+                output_tokens_details=TypeAdapter(OutputTokensDetails).validate_python(
+                    entry.get("outputTokensDetails") or {"reasoning_tokens": 0}
+                ),
+            )
+            for entry in resp_data["usage"].get("requestUsageEntries", [])
+        ]
 
         # Normalize output items from JSON format (camelCase) to Python format (snake_case)
         normalized_output = [
@@ -1211,7 +1529,7 @@ def _deserialize_items(
             logger.warning("Item missing type field, skipping")
             continue
 
-        # Handle items that might not have an agent field (e.g., from TypeScript serialization)
+        # Handle items that might not have an agent field (e.g., from cross-SDK serialization)
         agent_name: str | None = None
         agent_data = item_data.get("agent")
         if agent_data:
@@ -1381,3 +1699,10 @@ def _convert_protocol_result_to_api(raw_item: dict[str, Any]) -> dict[str, Any]:
     api_item.pop("name", None)
     api_item.pop("status", None)
     return normalize_function_call_output_payload(api_item)
+
+
+def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:
+    """Return a deep copy of the original input so later mutations don't leak into saved state."""
+    if isinstance(original_input, str):
+        return original_input
+    return copy.deepcopy(original_input)

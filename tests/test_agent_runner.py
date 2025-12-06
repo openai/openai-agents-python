@@ -846,9 +846,13 @@ async def test_prepare_input_with_session_converts_protocol_history():
     )
     session = _DummySession(history=[history_item])
 
-    prepared_input = await AgentRunner._prepare_input_with_session("hello", session, None)
+    prepared_input, session_items = await AgentRunner._prepare_input_with_session(
+        "hello", session, None
+    )
 
     assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
     first_item = cast(dict[str, Any], prepared_input[0])
     last_item = cast(dict[str, Any], prepared_input[-1])
     assert first_item["type"] == "function_call_output"
@@ -905,11 +909,16 @@ async def test_prepare_input_with_session_uses_sync_callback():
         assert first["role"] == "user"
         return history + new_input
 
-    prepared = await AgentRunner._prepare_input_with_session("second", session, callback)
+    prepared, session_items = await AgentRunner._prepare_input_with_session(
+        "second", session, callback
+    )
     assert len(prepared) == 2
     last_item = cast(dict[str, Any], prepared[-1])
     assert last_item["role"] == "user"
     assert last_item.get("content") == "second"
+    # session_items should contain only the new turn input
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
 
 
 @pytest.mark.asyncio
@@ -923,11 +932,15 @@ async def test_prepare_input_with_session_awaits_async_callback():
         await asyncio.sleep(0)
         return history + new_input
 
-    prepared = await AgentRunner._prepare_input_with_session("later", session, callback)
+    prepared, session_items = await AgentRunner._prepare_input_with_session(
+        "later", session, callback
+    )
     assert len(prepared) == 2
     first_item = cast(dict[str, Any], prepared[0])
     assert first_item["role"] == "user"
     assert first_item.get("content") == "initial"
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0]).get("role") == "user"
 
 
 @pytest.mark.asyncio

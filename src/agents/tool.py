@@ -190,6 +190,12 @@ class FunctionToolResult:
     run_item: RunItem
     """The run item that was produced as a result of the tool call."""
 
+    interruptions: list[RunItem] = field(default_factory=list)
+    """Interruptions from nested agent runs (for agent-as-tool)."""
+
+    agent_run_result: Any = None  # RunResult | None, but avoid circular import
+    """Nested agent run result (for agent-as-tool)."""
+
 
 @dataclass
 class FunctionTool:
@@ -243,6 +249,12 @@ class FunctionTool:
 
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
     """Optional list of output guardrails to run after invoking this tool."""
+
+    _is_agent_tool: bool = field(default=False, init=False, repr=False)
+    """Internal flag indicating if this tool is an agent-as-tool."""
+
+    _agent_instance: Any = field(default=None, init=False, repr=False)
+    """Internal reference to the agent instance if this is an agent-as-tool."""
 
     def __post_init__(self):
         if self.strict_json_schema:

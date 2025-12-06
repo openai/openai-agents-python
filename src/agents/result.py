@@ -155,6 +155,13 @@ class RunResult(RunResultBase):
     )
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
     """The last processed model response. This is needed for resuming from interruptions."""
+    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    _current_turn_persisted_item_count: int = 0
+    """Number of items from new_items already persisted to session for the
+    current turn."""
+    _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
+    """The original input from the first turn. Unlike `input`, this is never updated during the run.
+    Used by to_state() to preserve the correct originalInput when serializing state."""
 
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
@@ -204,9 +211,12 @@ class RunResult(RunResultBase):
             ```
         """
         # Create a RunState from the current result
+        original_input_for_state = getattr(self, "_original_input", None)
         state = RunState(
             context=self.context_wrapper,
-            original_input=self.input,
+            original_input=original_input_for_state
+            if original_input_for_state is not None
+            else self.input,
             starting_agent=self.last_agent,
             max_turns=10,  # This will be overridden by the runner
         )
@@ -217,6 +227,8 @@ class RunResult(RunResultBase):
         state._input_guardrail_results = self.input_guardrail_results
         state._output_guardrail_results = self.output_guardrail_results
         state._last_processed_response = self._last_processed_response
+        state._current_turn_persisted_item_count = self._current_turn_persisted_item_count
+        state.set_tool_use_tracker_snapshot(self._tool_use_tracker_snapshot)
 
         # If there are interruptions, set the current step
         if self.interruptions:
@@ -279,11 +291,32 @@ class RunResultStreaming(RunResultBase):
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
 
+    _current_turn_persisted_item_count: int = 0
+    """Number of items from new_items already persisted to session for the
+    current turn."""
+
+    _stream_input_persisted: bool = False
+    """Whether the input has been persisted to the session. Prevents double-saving."""
+
+    _original_input_for_persistence: list[TResponseInputItem] = field(default_factory=list)
+    """Original turn input before session history was merged, used for
+    persistence (matches JS sessionInputOriginalSnapshot)."""
+
     # Soft cancel state
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
 
+    _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
+    """The original input from the first turn. Unlike `input`, this is never updated during the run.
+    Used by to_state() to preserve the correct originalInput when serializing state."""
+    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    _state: Any = field(default=None, repr=False)
+    """Internal reference to the RunState for streaming results."""
+
     def __post_init__(self) -> None:
         self._current_agent_ref = weakref.ref(self.current_agent)
+        # Store the original input at creation time (it will be set via input field)
+        if self._original_input is None:
+            self._original_input = self.input
 
     @property
     def last_agent(self) -> Agent[Any]:
@@ -508,9 +541,11 @@ class RunResultStreaming(RunResultBase):
             ```
         """
         # Create a RunState from the current result
+        # Use _original_input (the input from the first turn) instead of input
+        # (which may have been updated during the run)
         state = RunState(
             context=self.context_wrapper,
-            original_input=self.input,
+            original_input=self._original_input if self._original_input is not None else self.input,
             starting_agent=self.last_agent,
             max_turns=self.max_turns,
         )
@@ -522,6 +557,8 @@ class RunResultStreaming(RunResultBase):
         state._output_guardrail_results = self.output_guardrail_results
         state._current_turn = self.current_turn
         state._last_processed_response = self._last_processed_response
+        state._current_turn_persisted_item_count = self._current_turn_persisted_item_count
+        state.set_tool_use_tracker_snapshot(self._tool_use_tracker_snapshot)
 
         # If there are interruptions, set the current step
         if self.interruptions:
