@@ -6,7 +6,7 @@ import copy
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, cast
+from typing import TYPE_CHECKING, Any, Generic, Optional, cast
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -741,7 +741,7 @@ class RunState(Generic[TContext, TAgent]):
     def _convert_output_item_to_protocol(self, raw_item_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert API-format tool output items to protocol format."""
         converted = dict(raw_item_dict)
-        call_id = cast(str | None, converted.get("call_id") or converted.get("callId"))
+        call_id = cast(Optional[str], converted.get("call_id") or converted.get("callId"))
 
         converted["type"] = "function_call_result"
 
@@ -761,13 +761,13 @@ class RunState(Generic[TContext, TAgent]):
         def _extract_name(raw: Any) -> str | None:
             candidate_call_id: str | None = None
             if isinstance(raw, dict):
-                candidate_call_id = cast(str | None, raw.get("call_id") or raw.get("callId"))
+                candidate_call_id = cast(Optional[str], raw.get("call_id") or raw.get("callId"))
                 if candidate_call_id == call_id:
                     name_value = raw.get("name", "")
                     return str(name_value) if name_value else ""
             else:
                 candidate_call_id = cast(
-                    str | None,
+                    Optional[str],
                     getattr(raw, "call_id", None) or getattr(raw, "callId", None),
                 )
                 if candidate_call_id == call_id:
@@ -800,7 +800,7 @@ class RunState(Generic[TContext, TAgent]):
                 if input_item.get("type") != "function_call":
                     continue
                 item_call_id = cast(
-                    str | None, input_item.get("call_id") or input_item.get("callId")
+                    Optional[str], input_item.get("call_id") or input_item.get("callId")
                 )
                 if item_call_id == call_id:
                     name_value = input_item.get("name", "")
