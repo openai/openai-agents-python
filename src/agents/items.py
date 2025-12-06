@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import json
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
@@ -56,6 +57,44 @@ from .tool import (
 )
 from .usage import Usage
 
+
+def normalize_function_call_output_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure function_call_output payloads conform to Responses API expectations."""
+
+    payload_type = payload.get("type")
+    if payload_type not in {"function_call_output", "function_call_result"}:
+        return payload
+
+    output_value = payload.get("output")
+
+    if output_value is None:
+        payload["output"] = ""
+        return payload
+
+    if isinstance(output_value, list):
+        if all(
+            isinstance(entry, dict) and entry.get("type") in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES
+            for entry in output_value
+        ):
+            return payload
+        payload["output"] = json.dumps(output_value)
+        return payload
+
+    if isinstance(output_value, dict):
+        entry_type = output_value.get("type")
+        if entry_type in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES:
+            payload["output"] = [output_value]
+        else:
+            payload["output"] = json.dumps(output_value)
+        return payload
+
+    if isinstance(output_value, str):
+        return payload
+
+    payload["output"] = json.dumps(output_value)
+    return payload
+
+
 if TYPE_CHECKING:
     from .agent import Agent
 
@@ -75,6 +114,15 @@ T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
+_ALLOWED_FUNCTION_CALL_OUTPUT_TYPES: set[str] = {
+    "input_text",
+    "input_image",
+    "output_text",
+    "refusal",
+    "input_file",
+    "computer_screenshot",
+    "summary_text",
+}
 
 
 @dataclass
@@ -220,6 +268,21 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
             # Preserve dataclass fields for repr/asdict while dropping strong refs.
             self.__dict__["target_agent"] = None
 
+    def to_input_item(self) -> TResponseInputItem:
+        """Convert handoff output into the API format expected by the model."""
+
+        if isinstance(self.raw_item, dict):
+            payload = dict(self.raw_item)
+            if payload.get("type") == "function_call_result":
+                payload["type"] = "function_call_output"
+                payload.pop("name", None)
+                payload.pop("status", None)
+
+            payload = normalize_function_call_output_payload(payload)
+            return cast(TResponseInputItem, payload)
+
+        return super().to_input_item()
+
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
@@ -273,15 +336,25 @@ class ToolCallOutputItem(RunItemBase[Any]):
         Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
         book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
         payload we send back to the model while keeping the original raw item intact.
+
+        Also converts protocol format (function_call_result) to API format (function_call_output).
         """
 
         if isinstance(self.raw_item, dict):
             payload = dict(self.raw_item)
             payload_type = payload.get("type")
-            if payload_type == "shell_call_output":
+            # Convert protocol format to API format
+            # Protocol uses function_call_result, API expects function_call_output
+            if payload_type == "function_call_result":
+                payload["type"] = "function_call_output"
+                # Remove fields that are in protocol format but not in API format
+                payload.pop("name", None)
+                payload.pop("status", None)
+            elif payload_type == "shell_call_output":
                 payload.pop("status", None)
                 payload.pop("shell_output", None)
                 payload.pop("provider_data", None)
+            payload = normalize_function_call_output_payload(payload)
             return cast(TResponseInputItem, payload)
 
         return super().to_input_item()
@@ -327,6 +400,83 @@ class MCPApprovalResponseItem(RunItemBase[McpApprovalResponse]):
     type: Literal["mcp_approval_response_item"] = "mcp_approval_response_item"
 
 
+# Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
+ToolApprovalRawItem: TypeAlias = Union[
+    ResponseFunctionToolCall,
+    McpCall,
+    LocalShellCall,
+    dict[str, Any],  # For flexibility with other tool types
+]
+
+
+@dataclass
+class ToolApprovalItem(RunItemBase[Any]):
+    """Represents a tool call that requires approval before execution.
+
+    When a tool has `needs_approval=True`, the run will be interrupted and this item will be
+    added to the interruptions list. You can then approve or reject the tool call using
+    RunState.approve() or RunState.reject() and resume the run.
+    """
+
+    raw_item: ToolApprovalRawItem
+    """The raw tool call that requires approval. Can be a function tool call, hosted tool call,
+    shell call, or other tool type.
+    """
+
+    tool_name: str | None = None
+    """Explicit tool name to use for approval tracking when not present on the raw item.
+    If not provided, falls back to raw_item.name.
+    """
+
+    type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    def __post_init__(self) -> None:
+        """Set tool_name from raw_item.name if not explicitly provided."""
+        if self.tool_name is None:
+            # Extract name from raw_item - handle different types
+            if isinstance(self.raw_item, dict):
+                self.tool_name = self.raw_item.get("name")
+            elif hasattr(self.raw_item, "name"):
+                self.tool_name = self.raw_item.name
+            else:
+                self.tool_name = None
+
+    @property
+    def name(self) -> str | None:
+        """Returns the tool name if available on the raw item or provided explicitly.
+
+        Kept for backwards compatibility with code that previously relied on raw_item.name.
+        """
+        return self.tool_name or (
+            getattr(self.raw_item, "name", None)
+            if not isinstance(self.raw_item, dict)
+            else self.raw_item.get("name")
+        )
+
+    @property
+    def arguments(self) -> str | None:
+        """Returns the arguments if the raw item has an arguments property, otherwise None.
+
+        This provides a safe way to access tool call arguments regardless of the raw_item type.
+        """
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("arguments")
+        elif hasattr(self.raw_item, "arguments"):
+            return self.raw_item.arguments
+        return None
+
+    def to_input_item(self) -> TResponseInputItem:
+        """ToolApprovalItem should never be converted to input items.
+
+        These items represent pending approvals and should be filtered out before
+        preparing input for the API. This method raises an error to prevent accidental usage.
+        """
+        raise AgentsException(
+            "ToolApprovalItem cannot be converted to an input item. "
+            "These items should be filtered out before preparing input for the API."
+        )
+
+
 RunItem: TypeAlias = Union[
     MessageOutputItem,
     HandoffCallItem,
@@ -337,6 +487,7 @@ RunItem: TypeAlias = Union[
     MCPListToolsItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
+    ToolApprovalItem,
 ]
 """An item generated by an agent."""
 
