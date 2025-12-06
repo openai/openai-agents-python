@@ -29,11 +29,42 @@ from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
     from .result import RunResult
     from .run import RunConfig
+
+# Per-process, ephemeral map linking a tool call ID to its nested
+# Agent run result within the same run; entry is removed after consumption.
+_agent_tool_run_results: dict[str, RunResult] = {}
+
+
+def save_agent_tool_run_result(
+    tool_call: ResponseFunctionToolCall | None,
+    run_result: RunResult,
+) -> None:
+    """Save the nested agent run result for later consumption.
+
+    This is used when an agent is used as a tool. The run result is stored
+    so that interruptions from the nested agent run can be collected.
+    """
+    if tool_call:
+        _agent_tool_run_results[tool_call.call_id] = run_result
+
+
+def consume_agent_tool_run_result(
+    tool_call: ResponseFunctionToolCall,
+) -> RunResult | None:
+    """Consume and return the nested agent run result for a tool call.
+
+    This retrieves and removes the stored run result. Returns None if
+    no result was stored for this tool call.
+    """
+    run_result = _agent_tool_run_results.pop(tool_call.call_id, None)
+    return run_result
 
 
 @dataclass
@@ -385,6 +416,8 @@ class Agent(AgentBase, Generic[TContext]):
         custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        needs_approval: bool
+        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
@@ -409,15 +442,24 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
+            needs_approval: Whether the tool needs approval before execution.
+                If True, the run will be interrupted and the tool call will need
+                to be approved using RunState.approve() or rejected using
+                RunState.reject() before continuing. Can be a bool
+                (always/never needs approval) or a function that takes
+                (run_context, tool_parameters, call_id) and returns whether this
+                specific call needs approval.
         """
 
         @function_tool(
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
             is_enabled=is_enabled,
+            needs_approval=needs_approval,
         )
         async def run_agent(context: RunContextWrapper, input: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
+            from .tool_context import ToolContext
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
 
@@ -432,12 +474,24 @@ class Agent(AgentBase, Generic[TContext]):
                 conversation_id=conversation_id,
                 session=session,
             )
+
+            # Store the run result keyed by tool_call_id so it can be retrieved later
+            # when the tool_call is available during result processing
+            # At runtime, context is actually a ToolContext which has tool_call_id
+            if isinstance(context, ToolContext):
+                _agent_tool_run_results[context.tool_call_id] = output
+
             if custom_output_extractor:
                 return await custom_output_extractor(output)
 
             return output.final_output
 
-        return run_agent
+        # Mark the function tool as an agent tool
+        run_agent_tool = run_agent
+        run_agent_tool._is_agent_tool = True
+        run_agent_tool._agent_instance = self
+
+        return run_agent_tool
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
         if isinstance(self.instructions, str):

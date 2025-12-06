@@ -13,17 +13,21 @@ from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
 )
-from openai.types.responses.response_output_item import McpApprovalRequest
+from openai.types.responses.response_output_item import (
+    McpApprovalRequest,
+)
 from openai.types.responses.tool_param import Mcp
 
 from agents import Agent, Runner, handoff
 from agents._run_impl import (
     NextStepInterruption,
     ProcessedResponse,
+    ToolRunApplyPatchCall,
     ToolRunComputerAction,
     ToolRunFunction,
     ToolRunHandoff,
     ToolRunMCPApprovalRequest,
+    ToolRunShellCall,
 )
 from agents.computer import Computer
 from agents.exceptions import UserError
@@ -47,7 +51,14 @@ from agents.run_state import (
     _deserialize_processed_response,
     _normalize_field_names,
 )
-from agents.tool import ComputerTool, FunctionTool, HostedMCPTool, function_tool
+from agents.tool import (
+    ApplyPatchTool,
+    ComputerTool,
+    FunctionTool,
+    HostedMCPTool,
+    ShellTool,
+    function_tool,
+)
 from agents.tool_context import ToolContext
 from agents.usage import Usage
 
@@ -76,6 +87,33 @@ class TestRunState:
         assert state._current_step is None
         assert state._context is not None
         assert state._context.context == {"foo": "bar"}
+
+    def test_set_tool_use_tracker_snapshot_filters_non_strings(self):
+        """Test that set_tool_use_tracker_snapshot filters out non-string agent names and tools."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+
+        # Create snapshot with non-string agent names and non-string tools
+        # Use Any to allow invalid types for testing the filtering logic
+        snapshot: dict[Any, Any] = {
+            "agent1": ["tool1", "tool2"],  # Valid
+            123: ["tool3"],  # Non-string agent name (should be filtered)
+            "agent2": ["tool4", 456, "tool5"],  # Non-string tool (should be filtered)
+            None: ["tool6"],  # None agent name (should be filtered)
+        }
+
+        state.set_tool_use_tracker_snapshot(cast(Any, snapshot))
+
+        # Verify non-string agent names are filtered out (line 828)
+        result = state.get_tool_use_tracker_snapshot()
+        assert "agent1" in result
+        assert result["agent1"] == ["tool1", "tool2"]
+        assert "agent2" in result
+        assert result["agent2"] == ["tool4", "tool5"]  # 456 should be filtered
+        # Verify non-string keys were filtered out
+        assert str(123) not in result
+        assert "None" not in result
 
     def test_to_json_and_to_string_produce_valid_json(self):
         """Test that toJSON and toString produce valid JSON with correct schema."""
@@ -241,6 +279,94 @@ class TestRunState:
 
         with pytest.raises(Exception, match="Cannot reject tool: RunState has no context"):
             state.reject(approval_item)
+
+    @pytest.mark.asyncio
+    async def test_generated_items_not_duplicated_by_last_processed_response(self):
+        """Ensure to_json doesn't duplicate tool calls from lastProcessedResponse (parity with JS)."""  # noqa: E501
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentDedup")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=2)
+
+        tool_call = get_function_tool_call(name="get_weather", call_id="call_1")
+        tool_call_item = ToolCallItem(raw_item=cast(Any, tool_call), agent=agent)
+
+        # Simulate a turn that produced a tool call and also stored it in last_processed_response
+        state._generated_items = [tool_call_item]
+        state._last_processed_response = ProcessedResponse(
+            new_items=[tool_call_item],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+            tools_used=[],
+            mcp_approval_requests=[],
+            interruptions=[],
+        )
+
+        json_data = state.to_json()
+        generated_items_json = json_data["generatedItems"]
+
+        # Only the original generated_items should be present (no duplicate from lastProcessedResponse)  # noqa: E501
+        assert len(generated_items_json) == 1
+        assert generated_items_json[0]["rawItem"]["callId"] == "call_1"
+
+        # Deserialization should also retain a single instance
+        restored = await RunState.from_json(agent, json_data)
+        assert len(restored._generated_items) == 1
+        raw_item = restored._generated_items[0].raw_item
+        if isinstance(raw_item, dict):
+            call_id = raw_item.get("call_id") or raw_item.get("callId")
+        else:
+            call_id = getattr(raw_item, "call_id", None)
+        assert call_id == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_to_json_deduplicates_items_with_direct_id_type_attributes(self):
+        """Test deduplication when items have id/type attributes directly (not just in raw_item)."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=2)
+
+        # Create a mock item that has id and type directly on the item (not in raw_item)
+        # This tests the fallback paths in _id_type_call (lines 472, 474)
+        class MockItemWithDirectAttributes:
+            def __init__(self, item_id: str, item_type: str):
+                self.id = item_id  # Direct id attribute (line 472)
+                self.type = item_type  # Direct type attribute (line 474)
+                # raw_item without id/type to force fallback to direct attributes
+                self.raw_item = {"content": "test"}
+                self.agent = agent
+
+        # Create items with direct id/type attributes
+        item1 = MockItemWithDirectAttributes("item_123", "message_output_item")
+        item2 = MockItemWithDirectAttributes("item_123", "message_output_item")
+        item3 = MockItemWithDirectAttributes("item_456", "tool_call_item")
+
+        # Add item1 to generated_items
+        state._generated_items = [item1]  # type: ignore[list-item]
+
+        # Add item2 (duplicate) and item3 (new) to last_processed_response.new_items
+        # item2 should be deduplicated by id/type (lines 489, 491)
+        state._last_processed_response = ProcessedResponse(
+            new_items=[item2, item3],  # type: ignore[list-item]
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[],
+            tools_used=[],
+            mcp_approval_requests=[],
+            interruptions=[],
+        )
+
+        json_data = state.to_json()
+        generated_items_json = json_data["generatedItems"]
+
+        # Should have 2 items: item1 and item3 (item2 should be deduplicated)
+        assert len(generated_items_json) == 2
 
     async def test_from_string_reconstructs_state_for_simple_agent(self):
         """Test that fromString correctly reconstructs state for a simple agent."""
@@ -624,6 +750,76 @@ class TestSerializationRoundTrip:
         assistant_msg = json_data["originalInput"][0]
         assert isinstance(assistant_msg["content"], list)
         assert assistant_msg["content"][0]["text"] == "Already array format"
+
+    async def test_from_string_normalizes_original_input_dict_items(self):
+        """Test that from_string normalizes original input dict items.
+
+        Removes providerData and converts protocol format to API format.
+        """
+        agent = Agent(name="TestAgent")
+
+        # Create state JSON with originalInput containing dict items with providerData
+        # and protocol format (function_call_result) that needs conversion to API format
+        state_json = {
+            "$schemaVersion": CURRENT_SCHEMA_VERSION,
+            "currentTurn": 0,
+            "currentAgent": {"name": "TestAgent"},
+            "originalInput": [
+                {
+                    "type": "function_call_result",  # Protocol format
+                    "callId": "call123",
+                    "name": "test_tool",
+                    "status": "completed",
+                    "output": "result",
+                    "providerData": {"foo": "bar"},  # Should be removed
+                    "provider_data": {"baz": "qux"},  # Should be removed
+                },
+                "simple_string",  # Non-dict item should pass through
+            ],
+            "modelResponses": [],
+            "context": {
+                "usage": {
+                    "requests": 0,
+                    "inputTokens": 0,
+                    "inputTokensDetails": [],
+                    "outputTokens": 0,
+                    "outputTokensDetails": [],
+                    "totalTokens": 0,
+                    "requestUsageEntries": [],
+                },
+                "approvals": {},
+                "context": {},
+            },
+            "toolUseTracker": {},
+            "maxTurns": 10,
+            "noActiveAgentRun": True,
+            "inputGuardrailResults": [],
+            "outputGuardrailResults": [],
+            "generatedItems": [],
+            "currentStep": None,
+            "lastModelResponse": None,
+            "lastProcessedResponse": None,
+            "currentTurnPersistedItemCount": 0,
+            "trace": None,
+        }
+
+        # Deserialize using from_json (which calls the same normalization logic as from_string)
+        state = await RunState.from_json(agent, state_json)
+
+        # Verify original_input was normalized
+        assert isinstance(state._original_input, list)
+        assert len(state._original_input) == 2
+        assert state._original_input[1] == "simple_string"
+
+        # First item should be converted to API format and have providerData removed
+        first_item = state._original_input[0]
+        assert isinstance(first_item, dict)
+        assert first_item["type"] == "function_call_output"  # Converted from function_call_result
+        assert "name" not in first_item  # Protocol-only field removed
+        assert "status" not in first_item  # Protocol-only field removed
+        assert "providerData" not in first_item  # Removed
+        assert "provider_data" not in first_item  # Removed
+        assert first_item["call_id"] == "call123"  # Normalized from callId
 
     async def test_serializes_original_input_with_non_dict_items(self):
         """Test that non-dict items in originalInput are preserved."""
@@ -1694,6 +1890,112 @@ class TestRunStateSerializationEdgeCases:
         assert "description" in computer_dict
         assert computer_dict["description"] == "Computer tool description"
 
+    async def test_serialize_shell_action_with_description(self):
+        """Test serialization of shell action with description."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        # Create a shell tool with description
+        async def shell_executor(request: Any) -> Any:
+            return {"output": "test output"}
+
+        shell_tool = ShellTool(executor=shell_executor)
+        shell_tool.description = "Shell tool description"  # type: ignore[attr-defined]
+
+        # ToolRunShellCall.tool_call is Any, so we can use a dict
+        tool_call = {
+            "id": "1",
+            "type": "shell_call",
+            "call_id": "call123",
+            "status": "completed",
+            "command": "echo test",
+        }
+
+        action_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[action_run],
+            apply_patch_calls=[],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        shell_actions = last_processed.get("shellActions", [])
+        assert len(shell_actions) == 1
+        # The shell action should have a shell field with description
+        assert "shell" in shell_actions[0]
+        shell_dict = shell_actions[0]["shell"]
+        assert "description" in shell_dict
+        assert shell_dict["description"] == "Shell tool description"
+
+    async def test_serialize_apply_patch_action_with_description(self):
+        """Test serialization of apply patch action with description."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        # Create an apply patch tool with description
+        class DummyEditor:
+            def create_file(self, operation: Any) -> Any:
+                return None
+
+            def update_file(self, operation: Any) -> Any:
+                return None
+
+            def delete_file(self, operation: Any) -> Any:
+                return None
+
+        apply_patch_tool = ApplyPatchTool(editor=DummyEditor())
+        apply_patch_tool.description = "Apply patch tool description"  # type: ignore[attr-defined]
+
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="apply_patch",
+            call_id="call123",
+            status="completed",
+            arguments=(
+                '{"operation": {"type": "update_file", "path": "test.md", "diff": "-a\\n+b\\n"}}'
+            ),
+        )
+
+        action_run = ToolRunApplyPatchCall(tool_call=tool_call, apply_patch_tool=apply_patch_tool)
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=[],
+            functions=[],
+            computer_actions=[],
+            local_shell_calls=[],
+            shell_calls=[],
+            apply_patch_calls=[action_run],
+            mcp_approval_requests=[],
+            tools_used=[],
+            interruptions=[],
+        )
+
+        state = RunState(context=context, original_input="input", starting_agent=agent, max_turns=3)
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        last_processed = json_data.get("lastProcessedResponse", {})
+        apply_patch_actions = last_processed.get("applyPatchActions", [])
+        assert len(apply_patch_actions) == 1
+        # The apply patch action should have an applyPatch field with description
+        assert "applyPatch" in apply_patch_actions[0]
+        apply_patch_dict = apply_patch_actions[0]["applyPatch"]
+        assert "description" in apply_patch_dict
+        assert apply_patch_dict["description"] == "Apply patch tool description"
+
     async def test_serialize_mcp_approval_request(self):
         """Test serialization of MCP approval request."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
@@ -2186,6 +2488,104 @@ class TestRunStateSerializationEdgeCases:
         )
         assert result is not None
         assert len(result.computer_actions) == 1
+
+    async def test_deserialize_processed_response_shell_action_with_validation_error(self):
+        """Test deserialization of ProcessedResponse with shell action ValidationError."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        async def shell_executor(request: Any) -> Any:
+            return {"output": "test output"}
+
+        shell_tool = ShellTool(executor=shell_executor)
+        agent.tools = [shell_tool]
+
+        # Create invalid tool_call_data that will cause ValidationError
+        # LocalShellCall requires specific fields, so we'll create invalid data
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [],
+            "computerActions": [],
+            "localShellCalls": [],
+            "shellActions": [
+                {
+                    "toolCall": {
+                        # Invalid data that will cause ValidationError
+                        "invalid_field": "invalid_value",
+                    },
+                    "shell": {"name": "shell"},
+                }
+            ],
+            "applyPatchActions": [],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger the ValidationError path (lines 1299-1302)
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert result is not None
+        # Should fall back to using tool_call_data directly when validation fails
+        assert len(result.shell_calls) == 1
+        # shell_call should have raw tool_call_data (dict) instead of validated LocalShellCall
+        assert isinstance(result.shell_calls[0].tool_call, dict)
+
+    async def test_deserialize_processed_response_apply_patch_action_with_exception(self):
+        """Test deserialization of ProcessedResponse with apply patch action Exception."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        class DummyEditor:
+            def create_file(self, operation: Any) -> Any:
+                return None
+
+            def update_file(self, operation: Any) -> Any:
+                return None
+
+            def delete_file(self, operation: Any) -> Any:
+                return None
+
+        apply_patch_tool = ApplyPatchTool(editor=DummyEditor())
+        agent.tools = [apply_patch_tool]
+
+        # Create invalid tool_call_data that will cause Exception when creating
+        # ResponseFunctionToolCall
+        processed_response_data = {
+            "newItems": [],
+            "handoffs": [],
+            "functions": [],
+            "computerActions": [],
+            "localShellCalls": [],
+            "shellActions": [],
+            "applyPatchActions": [
+                {
+                    "toolCall": {
+                        # Invalid data that will cause Exception
+                        "type": "function_call",
+                        # Missing required fields like name, call_id, status, arguments
+                        "invalid_field": "invalid_value",
+                    },
+                    "applyPatch": {"name": "apply_patch"},
+                }
+            ],
+            "mcpApprovalRequests": [],
+            "toolsUsed": [],
+            "interruptions": [],
+        }
+
+        # This should trigger the Exception path (lines 1314-1317)
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {"TestAgent": agent}
+        )
+        assert result is not None
+        # Should fall back to using tool_call_data directly when deserialization fails
+        assert len(result.apply_patch_calls) == 1
+        # tool_call should have raw tool_call_data (dict) instead of validated
+        # ResponseFunctionToolCall
+        assert isinstance(result.apply_patch_calls[0].tool_call, dict)
 
     async def test_deserialize_processed_response_mcp_approval_request_found(self):
         """Test deserialization of ProcessedResponse with MCP approval request found in map."""
