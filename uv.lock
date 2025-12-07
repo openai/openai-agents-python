@@ -1370,7 +1370,7 @@ wheels = [
 
 [[package]]
 name = "litellm"
-version = "1.80.7"
+version = "1.80.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1388,9 +1388,9 @@ dependencies = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a5/3f/af532014449c3931ae6cad2d97d267dd43d0de006060a8cbf0962e004024/litellm-1.80.7.tar.gz", hash = "sha256:3977a8d195aef842d01c18bf9e22984829363c6a4b54daf9a43c9dd9f190b42c", size = 12023127, upload-time = "2025-11-27T23:03:52.474Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/73/1258421bd221484b0337702c770e95f7027d585c6c8dec0e534763513901/litellm-1.80.8.tar.gz", hash = "sha256:8cdf0f08ae9c977cd99f78257550c02910c064ce6d29ae794ac22d16a5a99980", size = 12325368, upload-time = "2025-12-07T01:15:20.068Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/54/e0/2e60a0c09235fd7b55297390c557923f3c35a9cf001914222c26a7857d2b/litellm-1.80.7-py3-none-any.whl", hash = "sha256:f7d993f78c1e0e4e1202b2a925cc6540b55b6e5fb055dd342d88b145ab3102ed", size = 10848321, upload-time = "2025-11-27T23:03:50.002Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/54/0371456cf5317c1ebb95824ad38d607efa9e878adc1670f743c2de8953d8/litellm-1.80.8-py3-none-any.whl", hash = "sha256:8b04de6661d2c9646ad6c4e57a61a6cf549f52e72e6a41d8adbd5691f2f95b3b", size = 11045853, upload-time = "2025-12-07T01:15:16.96Z" },
 ]
 
 [[package]]
@@ -2160,7 +2160,7 @@ requires-dist = [
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
     { name = "griffe", specifier = ">=1.5.6,<2" },
     { name = "grpcio", marker = "extra == 'dapr'", specifier = ">=1.60.0" },
-    { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.80.7,<2" },
+    { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.80.8,<2" },
     { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.11.0,<2" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
     { name = "openai", specifier = ">=2.9.0,<3" },
