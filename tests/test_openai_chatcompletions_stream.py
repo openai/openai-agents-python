@@ -230,9 +230,7 @@ async def test_stream_response_includes_logprobs(monkeypatch) -> None:
     assert [lp.token for lp in text_delta_events[0].logprobs] == ["Hi"]
     assert [lp.token for lp in text_delta_events[1].logprobs] == [" there"]
 
-    completed_event = next(
-        event for event in output_events if event.type == "response.completed"
-    )
+    completed_event = next(event for event in output_events if event.type == "response.completed")
     assert isinstance(completed_event, ResponseCompletedEvent)
     completed_resp = completed_event.response
     assert isinstance(completed_resp.output[0], ResponseOutputMessage)

@@ -268,9 +268,12 @@ class ChatCmplStreamHandler:
                         type="response.content_part.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
-                delta_logprobs = ChatCmplHelpers.convert_logprobs_for_text_delta(
-                    choice_logprobs.content if choice_logprobs else None
-                ) or []
+                delta_logprobs = (
+                    ChatCmplHelpers.convert_logprobs_for_text_delta(
+                        choice_logprobs.content if choice_logprobs else None
+                    )
+                    or []
+                )
                 output_logprobs = ChatCmplHelpers.convert_logprobs_for_output_text(
                     choice_logprobs.content if choice_logprobs else None
                 )
