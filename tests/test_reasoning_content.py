@@ -4,7 +4,9 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
+from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionMessage
+from openai.types.chat.chat_completion import Choice as CompletionChoice
 from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
 from openai.types.completion_usage import (
     CompletionTokensDetails,
@@ -19,6 +21,7 @@ from openai.types.responses import (
 )
 
 from agents.model_settings import ModelSettings
+from agents.models.chatcmpl_converter import Converter
 from agents.models.interface import ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
@@ -340,3 +343,121 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
     assert isinstance(response_event.response.output[0], ResponseOutputMessage)
     assert isinstance(response_event.response.output[0].content[0], ResponseOutputText)
     assert response_event.response.output[0].content[0].text == "The answer is 42"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_openai_chatcompletions_includes_reasoning_for_deepseek(monkeypatch) -> None:
+    """
+    Ensure reasoning_content is forwarded when calling DeepSeek via OpenAI-compatible client.
+    """
+
+    def spy_items_to_messages(
+        items: Any, preserve_thinking_blocks: bool = False, include_reasoning_content: bool = False
+    ):
+        spy_items_to_messages.include_reasoning_content = include_reasoning_content  # type: ignore[attr-defined] # noqa: E501
+        return []
+
+    monkeypatch.setattr(Converter, "items_to_messages", staticmethod(spy_items_to_messages))
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="deepseek-reasoner",
+                object="chat.completion",
+                choices=[
+                    CompletionChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatCompletionMessage(role="assistant", content="Hi"),
+                    )
+                ],
+                usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+            )
+
+    class DummyChat:
+        def __init__(self):
+            self.completions = DummyCompletions()
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = DummyChat()
+            self.base_url = "https://api.deepseek.com"
+
+    model = OpenAIChatCompletionsModel("deepseek-reasoner", cast(AsyncOpenAI, DummyClient()))
+
+    await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert getattr(spy_items_to_messages, "include_reasoning_content", False) is True
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_openai_chatcompletions_reasoning_disabled_for_non_deepseek(monkeypatch) -> None:
+    """
+    Verify reasoning_content is not added for non-DeepSeek calls by default.
+    """
+
+    def spy_items_to_messages(
+        items: Any, preserve_thinking_blocks: bool = False, include_reasoning_content: bool = False
+    ):
+        spy_items_to_messages.include_reasoning_content = include_reasoning_content  # type: ignore[attr-defined] # noqa: E501
+        return []
+
+    monkeypatch.setattr(Converter, "items_to_messages", staticmethod(spy_items_to_messages))
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="gpt-4o",
+                object="chat.completion",
+                choices=[
+                    CompletionChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatCompletionMessage(role="assistant", content="Hi"),
+                    )
+                ],
+                usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+            )
+
+    class DummyChat:
+        def __init__(self):
+            self.completions = DummyCompletions()
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = DummyChat()
+            self.base_url = "https://api.openai.com"
+
+    model = OpenAIChatCompletionsModel("gpt-4o", cast(AsyncOpenAI, DummyClient()))
+
+    await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+
+    assert getattr(spy_items_to_messages, "include_reasoning_content", False) is False
