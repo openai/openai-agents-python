@@ -159,13 +159,9 @@ class _ServerConversationTracker:
     remaining_initial_input: list[TResponseInputItem] | None = None
 
     def __post_init__(self):
-        import traceback
-
-        stack = "".join(traceback.format_stack()[-5:-1])
-        logger.error(
+        logger.debug(
             "[SCT-CREATED] Created _ServerConversationTracker for "
-            f"conv_id={self.conversation_id}, prev_resp_id={self.previous_response_id}. "
-            f"Stack:\n{stack}"
+            f"conv_id={self.conversation_id}, prev_resp_id={self.previous_response_id}"
         )
 
     def prime_from_state(
