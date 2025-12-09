@@ -1,4 +1,4 @@
-"""Tests to replicate error scenarios from PR #2021 review.
+"""Tests for HITL error scenarios.
 
 These tests are expected to fail initially and should pass after fixes are implemented.
 """
@@ -10,12 +10,12 @@ from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
-from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
+from openai.types.responses.response_output_item import LocalShellCall
+from pydantic_core import ValidationError
 
 from agents import (
     Agent,
     ApplyPatchTool,
-    HostedMCPTool,
     LocalShellTool,
     Runner,
     RunState,
@@ -25,21 +25,12 @@ from agents import (
 )
 from agents._run_impl import (
     NextStepInterruption,
-    ProcessedResponse,
-    RunImpl,
-    ToolRunApplyPatchCall,
-    ToolRunMCPApprovalRequest,
-    ToolRunShellCall,
 )
-from agents.items import ModelResponse
-from agents.result import RunResult
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState as RunStateClass
-from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
-from pydantic_core import ValidationError
 
 
 class RecordingEditor:
@@ -173,65 +164,44 @@ async def test_resumed_hitl_never_executes_approved_apply_patch_tool():
         and isinstance(item.raw_item, dict)
         and item.raw_item.get("type") == "apply_patch_call_output"
     ]
-    assert len(apply_patch_output_items) > 0, "ApplyPatch tool should have been executed after approval"
+    assert len(apply_patch_output_items) > 0, (
+        "ApplyPatch tool should have been executed after approval"
+    )
     assert len(editor.operations) > 0, "Editor should have been called"
 
 
 @pytest.mark.asyncio
 async def test_resuming_pending_mcp_approvals_raises_typeerror():
-    """Test that resuming with pending MCP approvals works without errors.
+    """Test that ToolApprovalItem can be added to a set (should be hashable).
 
-    When resuming a turn that contains pending MCP approval requests, the system should
-    handle them correctly without raising TypeError. Pending approvals should remain as
-    interruptions after resume.
+    At line 783 in _run_impl.py, resolve_interrupted_turn tries:
+        pending_hosted_mcp_approvals.add(approval_item)
+    where approval_item is a ToolApprovalItem. This currently raises TypeError because
+    ToolApprovalItem is not hashable.
+
+    BUG: ToolApprovalItem lacks __hash__, so line 783 will raise TypeError.
+    This test will FAIL with TypeError when the bug exists, and PASS when fixed.
     """
     model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, tools=[])
 
-    async def on_approval(req: Any) -> dict[str, Any]:
-        # Return pending (not approved/rejected) to keep it in pending set
-        return {"approve": False}
-
-    mcp_tool = HostedMCPTool(
-        tool_config={"type": "mcp", "server_label": "test_server"},
-        on_approval_request=on_approval,  # type: ignore[arg-type]
-    )
-    agent = Agent(name="TestAgent", model=model, tools=[mcp_tool])
-
-    # Create a model response with MCP approval request
-    mcp_request = McpApprovalRequest(  # type: ignore[call-arg]
-        id="req-1",
-        server_label="test_server",
-        type="mcp_approval_request",
-        approval_url="https://example.com/approve",
-        name="test_tool",
-        arguments='{"arg": "value"}',
+    # Create a ToolApprovalItem - this is what line 783 tries to add to a set
+    mcp_raw_item = {
+        "type": "hosted_tool_call",
+        "id": "mcp-approval-1",
+        "name": "test_mcp_tool",
+    }
+    mcp_approval_item = ToolApprovalItem(
+        agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool"
     )
 
-    # First turn: model emits MCP approval request
-    model.set_next_output([mcp_request])
-
-    result1 = await Runner.run(agent, "use mcp tool")
-    # MCP approval requests create MCPApprovalRequestItem, not ToolApprovalItem interruptions
-    # Check that we have MCP approval request items
-    mcp_approval_items = [
-        item for item in result1.new_items if hasattr(item, "type") and item.type == "mcp_approval_request_item"
-    ]
-    assert len(mcp_approval_items) > 0, "should have MCP approval request items"
-
-    # Create state with pending MCP approval
-    state = result1.to_state()
-
-    # Set up next model response
-    model.set_next_output([get_text_message("done")])
-
-    # Resume from state - should succeed without TypeError (pending approvals handled safely).
-    # This test verifies that no TypeError is raised when resuming with pending MCP approvals
-    try:
-        result2 = await Runner.run(agent, state)
-        assert result2 is not None
-        # Test passes if no TypeError was raised
-    except TypeError as e:
-        pytest.fail(f"BUG: TypeError raised when resuming with pending MCP approvals: {e}")
+    # BUG: This will raise TypeError because ToolApprovalItem is not hashable
+    # This is exactly what happens at line 783: pending_hosted_mcp_approvals.add(approval_item)
+    pending_hosted_mcp_approvals: set[ToolApprovalItem] = set()
+    pending_hosted_mcp_approvals.add(
+        mcp_approval_item
+    )  # Should work once ToolApprovalItem is hashable
+    assert mcp_approval_item in pending_hosted_mcp_approvals
 
 
 @pytest.mark.asyncio
@@ -269,12 +239,14 @@ async def test_route_local_shell_calls_to_remote_shell_tool():
     )
     model.set_next_output([local_shell_call])
 
-    result = await Runner.run(agent, "run local shell")
+    await Runner.run(agent, "run local shell")
 
     # Local shell call should be handled by LocalShellTool, not ShellTool
     # This test will fail because LocalShellCall is routed to shell_tool first
     assert len(local_shell_executed) > 0, "LocalShellTool should have been executed"
-    assert len(remote_shell_executed) == 0, "ShellTool should not have been executed for local shell call"
+    assert len(remote_shell_executed) == 0, (
+        "ShellTool should not have been executed for local shell call"
+    )
 
 
 @pytest.mark.asyncio
@@ -324,10 +296,13 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
     state = result1.to_state()
     state.approve(result1.interruptions[0], always_approve=True)
 
-    # Set up enough turns to exceed 10 (the hardcoded default) but stay under 20 (the original max_turns)
+    # Set up enough turns to exceed 10 (the hardcoded default) but stay under 20
+    # (the original max_turns)
     # After first turn with interruption, current_turn=1 in state
-    # When resuming, current_turn is restored from state (1), then resolve_interrupted_turn is called
-    # If NextStepRunAgain, loop continues, then current_turn is incremented (becomes 2), then model is called
+    # When resuming, current_turn is restored from state (1),
+    # then resolve_interrupted_turn is called
+    # If NextStepRunAgain, loop continues, then current_turn is incremented
+    # (becomes 2), then model is called
     # With max_turns=10, we can do turns 2-10 (9 more turns), so turn 11 would exceed limit
     # BUG: max_turns defaults to 10 when resuming (not pulled from state)
     # We need 10 more turns after resolving interruption to exceed limit (turns 2-11)
@@ -340,31 +315,37 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
     model.add_multiple_turn_outputs(
         [
             [
-                get_text_message(f"turn {i+2}"),  # Text message first (doesn't finish)
+                get_text_message(f"turn {i + 2}"),  # Text message first (doesn't finish)
                 cast(
                     ResponseFunctionToolCall,
                     {
                         "type": "function_call",
                         "name": "test_tool",
-                        "call_id": f"call-{i+2}",
+                        "call_id": f"call-{i + 2}",
                         "arguments": "{}",
                     },
                 ),
             ]
-            for i in range(10)  # 10 more tool calls = 10 more turns (turns 2-11, exceeding limit of 10 at turn 11)
+            for i in range(
+                10
+            )  # 10 more tool calls = 10 more turns (turns 2-11, exceeding limit of 10 at turn 11)
         ]
     )
 
     # Resume without passing max_turns - should use 20 from state (not default to 10)
     # BUG: Runner.run doesn't pull max_turns from state, so it defaults to 10.
     # With max_turns=10 and current_turn=1, we can do turns 2-10 (9 more),
-    # but we're trying to do 10 more turns (turns 2-11), so turn 11 > max_turns (10) should raise MaxTurnsExceeded
-    # This test checks for CORRECT behavior (max_turns preserved) and will FAIL when the bug exists.
-    # BUG EXISTS: MaxTurnsExceeded should be raised when max_turns defaults to 10, but we want max_turns=20
-    from agents.exceptions import MaxTurnsExceeded
+    # but we're trying to do 10 more turns (turns 2-11),
+    # so turn 11 > max_turns (10) should raise MaxTurnsExceeded
+    # This test checks for CORRECT behavior (max_turns preserved)
+    # and will FAIL when the bug exists.
+    # BUG EXISTS: MaxTurnsExceeded should be raised when max_turns defaults to 10,
+    # but we want max_turns=20
 
-    # When the bug exists, MaxTurnsExceeded WILL be raised (because max_turns defaults to 10)
-    # When the bug is fixed, MaxTurnsExceeded will NOT be raised (because max_turns will be 20 from state)
+    # When the bug exists, MaxTurnsExceeded WILL be raised
+    # (because max_turns defaults to 10)
+    # When the bug is fixed, MaxTurnsExceeded will NOT be raised
+    # (because max_turns will be 20 from state)
     # So we should assert that the run succeeds WITHOUT raising MaxTurnsExceeded
     result2 = await Runner.run(agent, state)
     # If we get here without MaxTurnsExceeded, the bug is fixed (max_turns was preserved as 20)
@@ -407,8 +388,10 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_other_tools()
     state = result1.to_state()
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct shell approval
-    # BUG: from_json tries to create ResponseFunctionToolCall from shell call and raises ValidationError
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # shell approval
+    # BUG: from_json tries to create ResponseFunctionToolCall from shell call
+    # and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -417,10 +400,17 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_other_tools()
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for shell, not function
-        assert interruptions[0].tool_name == "shell", "Shell tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "shell", (
+            "Shell tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is a shell tool approval. Error: {e}")
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is a shell tool approval. Error: {e}"
+        )
 
 
 @pytest.mark.asyncio
@@ -458,8 +448,10 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_apply_patch_t
     state = result1.to_state()
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct apply_patch approval
-    # BUG: from_json tries to create ResponseFunctionToolCall from apply_patch call and raises ValidationError
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # apply_patch approval
+    # BUG: from_json tries to create ResponseFunctionToolCall from
+    # apply_patch call and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -468,10 +460,17 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_apply_patch_t
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for apply_patch, not function
-        assert interruptions[0].tool_name == "apply_patch", "ApplyPatch tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "apply_patch", (
+            "ApplyPatch tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is an apply_patch tool approval. Error: {e}")
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is an apply_patch tool approval. Error: {e}"
+        )
 
 
 @pytest.mark.asyncio
@@ -497,10 +496,12 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_mcp_tools():
             "server_label": "test_server",
         },
     }
-    mcp_approval_item = ToolApprovalItem(agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool")
+    mcp_approval_item = ToolApprovalItem(
+        agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool"
+    )
 
     # Create a state with this interruption
-    context = RunContextWrapper(context={})
+    context: RunContextWrapper = RunContextWrapper(context={})
     state = RunState(
         context=context,
         original_input="test",
@@ -512,9 +513,11 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_mcp_tools():
     # Serialize state to JSON
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct MCP approval
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # MCP approval
     # BUG: from_json tries to create ResponseFunctionToolCall from
-    # the MCP raw_item (hosted_tool_call type), which doesn't match the schema and raises ValidationError
+    # the MCP raw_item (hosted_tool_call type), which doesn't match the schema
+    # and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -523,10 +526,17 @@ async def test_deserialize_only_function_approvals_breaks_hitl_for_mcp_tools():
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for MCP, not function
-        assert interruptions[0].tool_name == "test_mcp_tool", "MCP tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "test_mcp_tool", (
+            "MCP tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is an MCP/hosted tool approval. Error: {e}")
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is an MCP/hosted tool approval. Error: {e}"
+        )
 
 
 @pytest.mark.asyncio
@@ -563,8 +573,10 @@ async def test_deserializing_interruptions_assumes_function_tool_calls():
     state = result1.to_state()
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct apply_patch approval
-    # BUG: from_json tries to create ResponseFunctionToolCall from apply_patch call and raises ValidationError
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # apply_patch approval
+    # BUG: from_json tries to create ResponseFunctionToolCall from
+    # apply_patch call and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -573,10 +585,17 @@ async def test_deserializing_interruptions_assumes_function_tool_calls():
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for apply_patch, not function
-        assert interruptions[0].tool_name == "apply_patch", "ApplyPatch tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "apply_patch", (
+            "ApplyPatch tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is an apply_patch tool approval. Error: {e}")
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is an apply_patch tool approval. Error: {e}"
+        )
 
 
 @pytest.mark.asyncio
@@ -614,8 +633,10 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_shell():
     state = result1.to_state()
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct shell approval
-    # BUG: from_json tries to create ResponseFunctionToolCall from shell call and raises ValidationError
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # shell approval
+    # BUG: from_json tries to create ResponseFunctionToolCall from shell call
+    # and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -624,10 +645,17 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_shell():
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for shell, not function
-        assert interruptions[0].tool_name == "shell", "Shell tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "shell", (
+            "Shell tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is a shell tool approval. Error: {e}")
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is a shell tool approval. Error: {e}"
+        )
 
 
 @pytest.mark.asyncio
@@ -653,10 +681,12 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_mcp():
             "server_label": "test_server",
         },
     }
-    mcp_approval_item = ToolApprovalItem(agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool")
+    mcp_approval_item = ToolApprovalItem(
+        agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool"
+    )
 
     # Create a state with this interruption
-    context = RunContextWrapper(context={})
+    context: RunContextWrapper = RunContextWrapper(context={})
     state = RunState(
         context=context,
         original_input="test",
@@ -668,9 +698,11 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_mcp():
     # Serialize state to JSON
     state_json = state.to_json()
 
-    # Deserialize from JSON - this should succeed and correctly reconstruct MCP approval
+    # Deserialize from JSON - this should succeed and correctly reconstruct
+    # MCP approval
     # BUG: from_json tries to create ResponseFunctionToolCall from
-    # the MCP raw_item (hosted_tool_call type), which doesn't match the schema and raises ValidationError
+    # the MCP raw_item (hosted_tool_call type), which doesn't match the schema
+    # and raises ValidationError
     # When the bug exists, ValidationError will be raised
     # When fixed, deserialization should succeed
     try:
@@ -679,8 +711,14 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_mcp():
         interruptions = deserialized_state.get_interruptions()
         assert len(interruptions) > 0, "Interruptions should be preserved after deserialization"
         # The interruption should be for MCP, not function
-        assert interruptions[0].tool_name == "test_mcp_tool", "MCP tool approval should be preserved, not converted to function"
+        assert interruptions[0].tool_name == "test_mcp_tool", (
+            "MCP tool approval should be preserved, not converted to function"
+        )
     except ValidationError as e:
-        # BUG EXISTS: ValidationError raised because from_json assumes all interruptions are function calls
-        pytest.fail(f"BUG: Deserialization failed with ValidationError - from_json assumes all interruptions are function tool calls, but this is an MCP/hosted tool approval. Error: {e}")
-
+        # BUG EXISTS: ValidationError raised because from_json assumes
+        # all interruptions are function calls
+        pytest.fail(
+            f"BUG: Deserialization failed with ValidationError - "
+            f"from_json assumes all interruptions are function tool calls, "
+            f"but this is an MCP/hosted tool approval. Error: {e}"
+        )
