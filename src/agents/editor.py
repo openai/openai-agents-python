@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 from .run_context import RunContextWrapper
-
 from .util._types import MaybeAwaitable
 
 ApplyPatchOperationType = Literal["create_file", "update_file", "delete_file"]
