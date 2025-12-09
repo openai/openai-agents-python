@@ -162,6 +162,8 @@ class RunResult(RunResultBase):
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
     """The original input from the first turn. Unlike `input`, this is never updated during the run.
     Used by to_state() to preserve the correct originalInput when serializing state."""
+    max_turns: int = 10
+    """The maximum number of turns allowed for this run."""
 
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
@@ -218,7 +220,7 @@ class RunResult(RunResultBase):
             if original_input_for_state is not None
             else self.input,
             starting_agent=self.last_agent,
-            max_turns=10,  # This will be overridden by the runner
+            max_turns=self.max_turns,
         )
 
         # Populate the state with data from the result

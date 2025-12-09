@@ -696,6 +696,33 @@ class RunImpl:
             config=run_config,
         )
 
+        # Execute shell calls that were approved
+        shell_results = await cls.execute_shell_calls(
+            agent=agent,
+            calls=processed_response.shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        # Execute local shell calls that were approved
+        local_shell_results = await cls.execute_local_shell_calls(
+            agent=agent,
+            calls=processed_response.local_shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        # Execute apply_patch calls that were approved
+        apply_patch_results = await cls.execute_apply_patch_calls(
+            agent=agent,
+            calls=processed_response.apply_patch_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
         # When resuming we receive the original RunItem references; suppress duplicates
         # so history and streaming do not double-emit the same items.
         # Use object IDs since RunItem objects are not hashable
@@ -715,6 +742,15 @@ class RunImpl:
 
         for computer_result in computer_results:
             append_if_new(computer_result)
+
+        for shell_result in shell_results:
+            append_if_new(shell_result)
+
+        for local_shell_result in local_shell_results:
+            append_if_new(local_shell_result)
+
+        for apply_patch_result in apply_patch_results:
+            append_if_new(apply_patch_result)
 
         # Run MCP tools that require approval after they get their approval results
         # Find MCP approval requests that have corresponding ToolApprovalItems in interruptions
@@ -1060,23 +1096,24 @@ class RunImpl:
                 tools_used.append("code_interpreter")
             elif isinstance(output, LocalShellCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
-                if shell_tool:
+                if local_shell_tool:
+                    tools_used.append("local_shell")
+                    local_shell_calls.append(
+                        ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    )
+                elif shell_tool:
                     tools_used.append(shell_tool.name)
                     shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
                 else:
                     tools_used.append("local_shell")
-                    if not local_shell_tool:
-                        _error_tracing.attach_error_to_current_span(
-                            SpanError(
-                                message="Local shell tool not found",
-                                data={},
-                            )
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Local shell tool not found",
+                            data={},
                         )
-                        raise ModelBehaviorError(
-                            "Model produced local shell call without a local shell tool."
-                        )
-                    local_shell_calls.append(
-                        ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced local shell call without a local shell tool."
                     )
             elif isinstance(output, ResponseCustomToolCall) and _is_apply_patch_name(
                 output.name, apply_patch_tool

@@ -919,6 +919,9 @@ class AgentRunner:
             # Override context with the state's context if not provided
             if context is None and run_state._context is not None:
                 context = run_state._context.context
+
+            # Override max_turns with the state's max_turns to preserve it across resumption
+            max_turns = run_state._max_turns
         else:
             # Keep original user input separate from session-prepared input
             raw_input = cast(Union[str, list[TResponseInputItem]], input)
@@ -1240,6 +1243,7 @@ class AgentRunner:
                                     _tool_use_tracker_snapshot=self._serialize_tool_use_tracker(
                                         tool_use_tracker
                                     ),
+                                    max_turns=max_turns,
                                 )
                                 result._original_input = _copy_str_or_list(original_input)
                                 return result
@@ -1284,6 +1288,7 @@ class AgentRunner:
                                     _tool_use_tracker_snapshot=self._serialize_tool_use_tracker(
                                         tool_use_tracker
                                     ),
+                                    max_turns=max_turns,
                                 )
                                 if server_conversation_tracker is None:
                                     # Save both input and output items together at the end.
@@ -1651,6 +1656,7 @@ class AgentRunner:
                                 _tool_use_tracker_snapshot=self._serialize_tool_use_tracker(
                                     tool_use_tracker
                                 ),
+                                max_turns=max_turns,
                             )
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
@@ -1705,6 +1711,7 @@ class AgentRunner:
                                 _tool_use_tracker_snapshot=self._serialize_tool_use_tracker(
                                     tool_use_tracker
                                 ),
+                                max_turns=max_turns,
                             )
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
@@ -1947,6 +1954,10 @@ class AgentRunner:
             # Use context from RunState if not provided
             if context is None and run_state._context is not None:
                 context = run_state._context.context
+
+            # Override max_turns with the state's max_turns to preserve it across resumption
+            max_turns = run_state._max_turns
+
             # Use context wrapper from RunState
             context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
         else:
