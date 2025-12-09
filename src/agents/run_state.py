@@ -681,22 +681,27 @@ class RunState(Generic[TContext, TAgent]):
             return None
 
         # Interruptions are wrapped in a "data" field
+        interruptions_data = []
+        for item in self._current_step.interruptions:
+            if isinstance(item, ToolApprovalItem):
+                interruption_dict = {
+                    "type": "tool_approval_item",
+                    "rawItem": self._camelize_field_names(
+                        item.raw_item.model_dump(exclude_unset=True)
+                        if hasattr(item.raw_item, "model_dump")
+                        else item.raw_item
+                    ),
+                    "agent": {"name": item.agent.name},
+                }
+                # Include tool_name if present
+                if item.tool_name is not None:
+                    interruption_dict["toolName"] = item.tool_name
+                interruptions_data.append(interruption_dict)
+
         return {
             "type": "next_step_interruption",
             "data": {
-                "interruptions": [
-                    {
-                        "type": "tool_approval_item",
-                        "rawItem": self._camelize_field_names(
-                            item.raw_item.model_dump(exclude_unset=True)
-                            if hasattr(item.raw_item, "model_dump")
-                            else item.raw_item
-                        ),
-                        "agent": {"name": item.agent.name},
-                    }
-                    for item in self._current_step.interruptions
-                    if isinstance(item, ToolApprovalItem)
-                ],
+                "interruptions": interruptions_data,
             },
         }
 
@@ -994,8 +999,44 @@ class RunState(Generic[TContext, TAgent]):
                     # Normalize field names from JSON format (camelCase)
                     # to Python format (snake_case)
                     normalized_raw_item = _normalize_field_names(item_data["rawItem"])
-                    raw_item = ResponseFunctionToolCall(**normalized_raw_item)
-                    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+                    # Extract tool_name if present (for backwards compatibility)
+                    tool_name = item_data.get("toolName")
+
+                    # Tool call items can be function calls, shell calls, apply_patch calls,
+                    # MCP calls, etc. Check the type field to determine which type to deserialize as
+                    tool_type = normalized_raw_item.get("type")
+
+                    # Try to deserialize based on the type field
+                    try:
+                        if tool_type == "function_call":
+                            raw_item = ResponseFunctionToolCall(**normalized_raw_item)
+                        elif tool_type == "shell_call":
+                            # Shell calls use dict format, not a specific type
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "apply_patch_call":
+                            # Apply patch calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "hosted_tool_call":
+                            # MCP/hosted tool calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "local_shell_call":
+                            # Local shell calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        else:
+                            # Default to trying ResponseFunctionToolCall for backwards compatibility
+                            try:
+                                raw_item = ResponseFunctionToolCall(**normalized_raw_item)
+                            except Exception:
+                                # If that fails, use dict as-is
+                                raw_item = normalized_raw_item  # type: ignore[assignment]
+                    except Exception:
+                        # If deserialization fails, use dict for flexibility
+                        raw_item = normalized_raw_item  # type: ignore[assignment]
+
+                    approval_item = ToolApprovalItem(
+                        agent=agent, raw_item=raw_item, tool_name=tool_name
+                    )
                     interruptions.append(approval_item)
 
             # Import at runtime to avoid circular import
@@ -1172,8 +1213,44 @@ class RunState(Generic[TContext, TAgent]):
                     # Normalize field names from JSON format (camelCase)
                     # to Python format (snake_case)
                     normalized_raw_item = _normalize_field_names(item_data["rawItem"])
-                    raw_item = ResponseFunctionToolCall(**normalized_raw_item)
-                    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+                    # Extract tool_name if present (for backwards compatibility)
+                    tool_name = item_data.get("toolName")
+
+                    # Tool call items can be function calls, shell calls, apply_patch calls,
+                    # MCP calls, etc. Check the type field to determine which type to deserialize as
+                    tool_type = normalized_raw_item.get("type")
+
+                    # Try to deserialize based on the type field
+                    try:
+                        if tool_type == "function_call":
+                            raw_item = ResponseFunctionToolCall(**normalized_raw_item)
+                        elif tool_type == "shell_call":
+                            # Shell calls use dict format, not a specific type
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "apply_patch_call":
+                            # Apply patch calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "hosted_tool_call":
+                            # MCP/hosted tool calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        elif tool_type == "local_shell_call":
+                            # Local shell calls use dict format
+                            raw_item = normalized_raw_item  # type: ignore[assignment]
+                        else:
+                            # Default to trying ResponseFunctionToolCall for backwards compatibility
+                            try:
+                                raw_item = ResponseFunctionToolCall(**normalized_raw_item)
+                            except Exception:
+                                # If that fails, use dict as-is
+                                raw_item = normalized_raw_item  # type: ignore[assignment]
+                    except Exception:
+                        # If deserialization fails, use dict for flexibility
+                        raw_item = normalized_raw_item  # type: ignore[assignment]
+
+                    approval_item = ToolApprovalItem(
+                        agent=agent, raw_item=raw_item, tool_name=tool_name
+                    )
                     interruptions.append(approval_item)
 
             # Import at runtime to avoid circular import
@@ -1575,8 +1652,40 @@ def _deserialize_items(
                 result.append(MessageOutputItem(agent=agent, raw_item=raw_item_msg))
 
             elif item_type == "tool_call_item":
-                raw_item_tool = ResponseFunctionToolCall(**normalized_raw_item)
-                result.append(ToolCallItem(agent=agent, raw_item=raw_item_tool))
+                # Tool call items can be function calls, shell calls, apply_patch calls,
+                # MCP calls, etc. Check the type field to determine which type to deserialize as
+                tool_type = normalized_raw_item.get("type")
+
+                # Try to deserialize based on the type field
+                # If deserialization fails, fall back to using the dict as-is
+                try:
+                    if tool_type == "function_call":
+                        raw_item_tool = ResponseFunctionToolCall(**normalized_raw_item)
+                    elif tool_type == "shell_call":
+                        # Shell calls use dict format, not a specific type
+                        raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+                    elif tool_type == "apply_patch_call":
+                        # Apply patch calls use dict format
+                        raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+                    elif tool_type == "hosted_tool_call":
+                        # MCP/hosted tool calls use dict format
+                        raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+                    elif tool_type == "local_shell_call":
+                        # Local shell calls use dict format
+                        raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+                    else:
+                        # Default to trying ResponseFunctionToolCall for backwards compatibility
+                        try:
+                            raw_item_tool = ResponseFunctionToolCall(**normalized_raw_item)
+                        except Exception:
+                            # If that fails, use dict as-is
+                            raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+
+                    result.append(ToolCallItem(agent=agent, raw_item=raw_item_tool))
+                except Exception:
+                    # If deserialization fails, use dict for flexibility
+                    raw_item_tool = normalized_raw_item  # type: ignore[assignment]
+                    result.append(ToolCallItem(agent=agent, raw_item=raw_item_tool))
 
             elif item_type == "tool_call_output_item":
                 # For tool call outputs, validate and convert the raw dict

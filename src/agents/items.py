@@ -441,6 +441,43 @@ class ToolApprovalItem(RunItemBase[Any]):
             else:
                 self.tool_name = None
 
+    def __hash__(self) -> int:
+        """Make ToolApprovalItem hashable so it can be added to sets.
+
+        This is required for line 783 in _run_impl.py where pending_hosted_mcp_approvals.add()
+        is called with a ToolApprovalItem.
+        """
+        # Extract call_id or id from raw_item for hashing
+        if isinstance(self.raw_item, dict):
+            call_id = self.raw_item.get("call_id") or self.raw_item.get("id")
+        else:
+            call_id = getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+
+        # Hash using call_id and tool_name for uniqueness
+        return hash((call_id, self.tool_name))
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality based on call_id and tool_name."""
+        if not isinstance(other, ToolApprovalItem):
+            return False
+
+        # Extract call_id from both items
+        if isinstance(self.raw_item, dict):
+            self_call_id = self.raw_item.get("call_id") or self.raw_item.get("id")
+        else:
+            self_call_id = getattr(self.raw_item, "call_id", None) or getattr(
+                self.raw_item, "id", None
+            )
+
+        if isinstance(other.raw_item, dict):
+            other_call_id = other.raw_item.get("call_id") or other.raw_item.get("id")
+        else:
+            other_call_id = getattr(other.raw_item, "call_id", None) or getattr(
+                other.raw_item, "id", None
+            )
+
+        return self_call_id == other_call_id and self.tool_name == other.tool_name
+
     @property
     def name(self) -> str | None:
         """Returns the tool name if available on the raw item or provided explicitly.
