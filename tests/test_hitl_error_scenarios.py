@@ -26,8 +26,10 @@ from agents import (
 from agents._run_impl import (
     NextStepInterruption,
 )
+from agents.items import MessageOutputItem, ModelResponse
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState as RunStateClass
+from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -174,18 +176,18 @@ async def test_resumed_hitl_never_executes_approved_apply_patch_tool():
 async def test_resuming_pending_mcp_approvals_raises_typeerror():
     """Test that ToolApprovalItem can be added to a set (should be hashable).
 
-    At line 783 in _run_impl.py, resolve_interrupted_turn tries:
+    In resolve_interrupted_turn, the code tries:
         pending_hosted_mcp_approvals.add(approval_item)
     where approval_item is a ToolApprovalItem. This currently raises TypeError because
     ToolApprovalItem is not hashable.
 
-    BUG: ToolApprovalItem lacks __hash__, so line 783 will raise TypeError.
+    BUG: ToolApprovalItem lacks __hash__, so adding it to a set will raise TypeError.
     This test will FAIL with TypeError when the bug exists, and PASS when fixed.
     """
     model = FakeModel()
     agent = Agent(name="TestAgent", model=model, tools=[])
 
-    # Create a ToolApprovalItem - this is what line 783 tries to add to a set
+    # Create a ToolApprovalItem - this is what the code tries to add to a set
     mcp_raw_item = {
         "type": "hosted_tool_call",
         "id": "mcp-approval-1",
@@ -196,7 +198,7 @@ async def test_resuming_pending_mcp_approvals_raises_typeerror():
     )
 
     # BUG: This will raise TypeError because ToolApprovalItem is not hashable
-    # This is exactly what happens at line 783: pending_hosted_mcp_approvals.add(approval_item)
+    # This is exactly what happens: pending_hosted_mcp_approvals.add(approval_item)
     pending_hosted_mcp_approvals: set[ToolApprovalItem] = set()
     pending_hosted_mcp_approvals.add(
         mcp_approval_item
@@ -775,3 +777,91 @@ async def test_deserializing_interruptions_assumes_function_tool_calls_mcp():
             f"from_json assumes all interruptions are function tool calls, "
             f"but this is an MCP/hosted tool approval. Error: {e}"
         )
+
+
+@pytest.mark.asyncio
+async def test_preserve_persisted_item_counter_when_resuming_streamed_runs():
+    """Test that persisted-item counter is preserved when resuming streamed runs.
+
+    When constructing RunResultStreaming from a RunState, _current_turn_persisted_item_count
+    should be preserved from the state, not reset to len(run_state._generated_items). This is
+    critical for Python-to-Python resumes where the counter accurately reflects how many items
+    were actually persisted before the interruption.
+
+    BUG: When run_state._generated_items is truthy, the code always sets
+    _current_turn_persisted_item_count to len(run_state._generated_items), overriding the actual
+    persisted count saved in the state. This causes missing history in sessions when a turn was
+    interrupted mid-persistence (e.g., 5 items generated but only 3 persisted).
+    """
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model)
+
+    # Create a RunState with 5 generated items but only 3 persisted
+    # This simulates a scenario where a turn was interrupted mid-persistence:
+    # - 5 items were generated
+    # - Only 3 items were persisted to the session before interruption
+    # - The state correctly tracks _current_turn_persisted_item_count=3
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="test input",
+        starting_agent=agent,
+        max_turns=10,
+    )
+
+    # Create 5 generated items (simulating multiple outputs before interruption)
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    for i in range(5):
+        message_item = MessageOutputItem(
+            agent=agent,
+            raw_item=ResponseOutputMessage(
+                id=f"msg_{i}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text=f"Message {i}", annotations=[], logprobs=[]
+                    )
+                ],
+            ),
+        )
+        state._generated_items.append(message_item)
+
+    # Set the persisted count to 3 (only 3 items were persisted before interruption)
+    state._current_turn_persisted_item_count = 3
+
+    # Add a model response so the state is valid for resumption
+    state._model_responses = [
+        ModelResponse(
+            output=[get_text_message("test")],
+            usage=Usage(),
+            response_id="resp_1",
+        )
+    ]
+
+    # Set up model to return final output immediately (so the run completes)
+    model.set_next_output([get_text_message("done")])
+
+    # Resume from state using run_streamed
+    # BUG: When constructing RunResultStreaming, the code will incorrectly set
+    # _current_turn_persisted_item_count to len(_generated_items)=5 instead of preserving
+    # the actual persisted count of 3
+    result = Runner.run_streamed(agent, state)
+
+    # The persisted count should be preserved as 3, not reset to 5
+    # This test will FAIL when the bug exists (count will be 5)
+    # and PASS when fixed (count will be 3)
+    assert result._current_turn_persisted_item_count == 3, (
+        f"Expected _current_turn_persisted_item_count=3 (the actual persisted count), "
+        f"but got {result._current_turn_persisted_item_count}. "
+        f"The bug incorrectly resets the counter to "
+        f"len(run_state._generated_items)={len(state._generated_items)} instead of "
+        f"preserving the actual persisted count from the state. This causes missing "
+        f"history in sessions when resuming after mid-persistence interruptions."
+    )
+
+    # Consume events to complete the run
+    async for _ in result.stream_events():
+        pass
