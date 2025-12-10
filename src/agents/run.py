@@ -2003,8 +2003,6 @@ class AgentRunner:
             _current_turn_persisted_item_count=(
                 (
                     len(run_state._generated_items)
-                    if run_state._generated_items
-                    else 0
                     if run_state._current_turn_persisted_item_count == 0
                     and run_state._generated_items
                     else run_state._current_turn_persisted_item_count
