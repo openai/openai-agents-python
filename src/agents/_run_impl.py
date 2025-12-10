@@ -2468,7 +2468,10 @@ class ApplyPatchAction:
         config: RunConfig,
     ) -> RunItem:
         apply_patch_tool = call.apply_patch_tool
-        operation = _coerce_apply_patch_operation(call.tool_call)
+        operation = _coerce_apply_patch_operation(
+            call.tool_call,
+            context_wrapper=context_wrapper,
+        )
 
         # Extract call_id from tool_call
         call_id = _extract_apply_patch_call_id(call.tool_call)
