@@ -1241,6 +1241,7 @@ class AgentRunner:
                                     ),
                                     max_turns=max_turns,
                                 )
+                                result._current_turn = current_turn
                                 result._original_input = _copy_str_or_list(original_input)
                                 return result
 
@@ -1286,6 +1287,7 @@ class AgentRunner:
                                     ),
                                     max_turns=max_turns,
                                 )
+                                result._current_turn = current_turn
                                 if server_conversation_tracker is None:
                                     # Save both input and output items together at the end.
                                     # When resuming from state, session_input_items_for_save
@@ -1651,6 +1653,7 @@ class AgentRunner:
                                 ),
                                 max_turns=max_turns,
                             )
+                            result._current_turn = current_turn
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
@@ -1706,6 +1709,7 @@ class AgentRunner:
                                 ),
                                 max_turns=max_turns,
                             )
+                            result._current_turn = current_turn
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
