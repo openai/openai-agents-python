@@ -544,8 +544,9 @@ class Converter:
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
-                    "content": cls.extract_text_content(output_content),
+                    "content": cls.extract_all_content(output_content),
                 }
+
                 result.append(msg)
 
             # 6) item reference => handle or raise
