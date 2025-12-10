@@ -159,6 +159,8 @@ class RunResult(RunResultBase):
     _current_turn_persisted_item_count: int = 0
     """Number of items from new_items already persisted to session for the
     current turn."""
+    _current_turn: int = 0
+    """The current turn number. This is preserved when converting to RunState."""
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
     """The original input from the first turn. Unlike `input`, this is never updated during the run.
     Used by to_state() to preserve the correct originalInput when serializing state."""
@@ -229,6 +231,7 @@ class RunResult(RunResultBase):
         state._input_guardrail_results = self.input_guardrail_results
         state._output_guardrail_results = self.output_guardrail_results
         state._last_processed_response = self._last_processed_response
+        state._current_turn = self._current_turn
         state._current_turn_persisted_item_count = self._current_turn_persisted_item_count
         state.set_tool_use_tracker_snapshot(self._tool_use_tracker_snapshot)
 
