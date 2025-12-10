@@ -354,6 +354,59 @@ async def test_preserve_max_turns_when_resuming_from_runresult_state():
 
 
 @pytest.mark.asyncio
+async def test_current_turn_not_preserved_in_to_state():
+    """Test that current turn counter is preserved when converting RunResult to RunState.
+
+    When a run is interrupted after one or more turns and converted to state via result.to_state(),
+    the current turn counter should be preserved. This ensures:
+    1. Turn numbers are reported correctly in resumed execution
+    2. max_turns enforcement works correctly across resumption
+
+    BUG: to_state() initializes RunState with _current_turn=0 instead of preserving
+    the actual current turn from the result.
+    """
+    model = FakeModel()
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    async def needs_approval(_ctx, _params, _call_id) -> bool:
+        return True
+
+    tool = function_tool(test_tool, needs_approval=needs_approval)
+    agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+    # Model emits a tool call requiring approval
+    model.set_next_output(
+        [
+            cast(
+                ResponseFunctionToolCall,
+                {
+                    "type": "function_call",
+                    "name": "test_tool",
+                    "call_id": "call-1",
+                    "arguments": "{}",
+                },
+            )
+        ]
+    )
+
+    # First turn with interruption
+    result1 = await Runner.run(agent, "call test_tool")
+    assert result1.interruptions, "should have interruption on turn 1"
+
+    # Convert to state - this should preserve current_turn=1
+    state1 = result1.to_state()
+
+    # BUG: state1._current_turn should be 1, but to_state() resets it to 0
+    # This will fail when the bug exists
+    assert state1._current_turn == 1, (
+        f"Expected current_turn=1 after 1 turn, got {state1._current_turn}. "
+        "to_state() should preserve the current turn counter."
+    )
+
+
+@pytest.mark.asyncio
 async def test_deserialize_only_function_approvals_breaks_hitl_for_other_tools():
     """Test that deserialization correctly reconstructs shell tool approvals.
 
