@@ -469,13 +469,15 @@ class Converter:
             }
             includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
-            # TODO: revist the type: ignore comment when ToolParam is updated in the future
-            converted_tool = {
+            converted_tool_dict: dict[str, Any] = {
                 "type": "web_search",
-                "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
+                "filters": tool.filters.model_dump() if tool.filters is not None else None,
                 "user_location": tool.user_location,
                 "search_context_size": tool.search_context_size,
             }
+            if tool.external_web_access is not None:
+                converted_tool_dict["external_web_access"] = tool.external_web_access
+            converted_tool = cast(ToolParam, converted_tool_dict)
             includes = None
         elif isinstance(tool, FileSearchTool):
             converted_tool = {

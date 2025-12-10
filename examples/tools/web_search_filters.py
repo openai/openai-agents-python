@@ -36,6 +36,8 @@ async def main():
                     ],
                 ),
                 search_context_size="medium",
+                # https://platform.openai.com/docs/guides/tools-web-search?api-mode=responses#live-internet-access
+                # external_web_access=False,
             )
         ],
         model_settings=ModelSettings(
