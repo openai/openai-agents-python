@@ -10,6 +10,10 @@ from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
+from openai.types.responses.response_input_param import (
+    ComputerCallOutput,
+    LocalShellCallOutput,
+)
 from openai.types.responses.response_output_item import LocalShellCall
 from pydantic_core import ValidationError
 
@@ -26,7 +30,7 @@ from agents import (
 from agents._run_impl import (
     NextStepInterruption,
 )
-from agents.items import MessageOutputItem, ModelResponse
+from agents.items import MessageOutputItem, ModelResponse, ToolCallOutputItem
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState as RunStateClass
 from agents.usage import Usage
@@ -865,3 +869,159 @@ async def test_preserve_persisted_item_counter_when_resuming_streamed_runs():
     # Consume events to complete the run
     async for _ in result.stream_events():
         pass
+
+
+@pytest.mark.asyncio
+async def test_preserve_tool_output_types_during_serialization():
+    """Test that tool output types are preserved during run state serialization.
+
+    When serializing a run state, `_convert_output_item_to_protocol` unconditionally
+    overwrites every tool output's `type` with `function_call_result`. On restore,
+    `_deserialize_items` dispatches on this `type` to choose between
+    `FunctionCallOutput`, `ComputerCallOutput`, or `LocalShellCallOutput`, so
+    computer/shell/apply_patch outputs that were originally
+    `computer_call_output`/`local_shell_call_output` are rehydrated as
+    `function_call_output` (or fail validation), losing the tool-specific payload
+    and breaking resumption for those tools.
+
+    This test will FAIL when the bug exists (output type will be function_call_result)
+    and PASS when fixed (output type will be preserved as computer_call_output or
+    local_shell_call_output).
+    """
+
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, tools=[])
+
+    # Create a RunState with a computer tool output
+    context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+    state = RunState(context=context, original_input="test", starting_agent=agent, max_turns=3)
+
+    # Create a computer_call_output item
+    computer_output: ComputerCallOutput = {
+        "type": "computer_call_output",
+        "call_id": "call_computer_1",
+        "output": {"type": "computer_screenshot", "image_url": "base64_screenshot_data"},
+    }
+    computer_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item=computer_output,
+        output="screenshot_data",
+    )
+    state._generated_items = [computer_output_item]
+
+    # Serialize and deserialize the state
+    json_data = state.to_json()
+
+    # Check what was serialized - the bug converts computer_call_output to function_call_result
+    generated_items_json = json_data.get("generatedItems", [])
+    assert len(generated_items_json) == 1, "Computer output item should be serialized"
+    raw_item_json = generated_items_json[0].get("rawItem", {})
+    serialized_type = raw_item_json.get("type")
+
+    # The bug: _convert_output_item_to_protocol converts all tool outputs to function_call_result
+    # This test will FAIL when the bug exists (type will be function_call_result)
+    # and PASS when fixed (type will be computer_call_output)
+    assert serialized_type == "computer_call_output", (
+        f"Expected computer_call_output in serialized JSON, but got {serialized_type}. "
+        f"The bug in _convert_output_item_to_protocol converts all tool outputs to "
+        f"function_call_result during serialization, causing them to be incorrectly "
+        f"deserialized as FunctionCallOutput instead of ComputerCallOutput."
+    )
+
+    deserialized_state = await RunStateClass.from_json(agent, json_data)
+
+    # Verify that the computer output type is preserved after deserialization
+    # When the bug exists, the item may be skipped due to validation errors
+    # When fixed, it should deserialize correctly
+    assert len(deserialized_state._generated_items) == 1, (
+        "Computer output item should be deserialized. When the bug exists, it may be skipped "
+        "due to validation errors when trying to deserialize as FunctionCallOutput instead "
+        "of ComputerCallOutput."
+    )
+    deserialized_item = deserialized_state._generated_items[0]
+    assert isinstance(deserialized_item, ToolCallOutputItem)
+
+    # The raw_item should still be a ComputerCallOutput, not FunctionCallOutput
+    raw_item = deserialized_item.raw_item
+    if isinstance(raw_item, dict):
+        output_type = raw_item.get("type")
+        assert output_type == "computer_call_output", (
+            f"Expected computer_call_output, but got {output_type}. "
+            f"The bug converts all tool outputs to function_call_result during serialization, "
+            f"causing them to be incorrectly deserialized as FunctionCallOutput."
+        )
+    else:
+        # If it's a Pydantic model, check the type attribute
+        assert hasattr(raw_item, "type")
+        assert raw_item.type == "computer_call_output", (
+            f"Expected computer_call_output, but got {raw_item.type}. "
+            f"The bug converts all tool outputs to function_call_result during serialization, "
+            f"causing them to be incorrectly deserialized as FunctionCallOutput."
+        )
+
+    # Test with local_shell_call_output as well
+    # Note: The TypedDict definition requires "id" but runtime uses "call_id"
+    # We use cast to match the actual runtime structure
+    shell_output = cast(
+        LocalShellCallOutput,
+        {
+            "type": "local_shell_call_output",
+            "id": "shell_1",
+            "call_id": "call_shell_1",
+            "output": "command output",
+        },
+    )
+    shell_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item=shell_output,
+        output="command output",
+    )
+    state._generated_items = [shell_output_item]
+
+    # Serialize and deserialize again
+    json_data = state.to_json()
+
+    # Check what was serialized - the bug converts local_shell_call_output to function_call_result
+    generated_items_json = json_data.get("generatedItems", [])
+    assert len(generated_items_json) == 1, "Shell output item should be serialized"
+    raw_item_json = generated_items_json[0].get("rawItem", {})
+    serialized_type = raw_item_json.get("type")
+
+    # The bug: _convert_output_item_to_protocol converts all tool outputs to function_call_result
+    # This test will FAIL when the bug exists (type will be function_call_result)
+    # and PASS when fixed (type will be local_shell_call_output)
+    assert serialized_type == "local_shell_call_output", (
+        f"Expected local_shell_call_output in serialized JSON, but got {serialized_type}. "
+        f"The bug in _convert_output_item_to_protocol converts all tool outputs to "
+        f"function_call_result during serialization, causing them to be incorrectly "
+        f"deserialized as FunctionCallOutput instead of LocalShellCallOutput."
+    )
+
+    deserialized_state = await RunStateClass.from_json(agent, json_data)
+
+    # Verify that the shell output type is preserved after deserialization
+    # When the bug exists, the item may be skipped due to validation errors
+    # When fixed, it should deserialize correctly
+    assert len(deserialized_state._generated_items) == 1, (
+        "Shell output item should be deserialized. When the bug exists, it may be skipped "
+        "due to validation errors when trying to deserialize as FunctionCallOutput instead "
+        "of LocalShellCallOutput."
+    )
+    deserialized_item = deserialized_state._generated_items[0]
+    assert isinstance(deserialized_item, ToolCallOutputItem)
+
+    raw_item = deserialized_item.raw_item
+    if isinstance(raw_item, dict):
+        output_type = raw_item.get("type")
+        assert output_type == "local_shell_call_output", (
+            f"Expected local_shell_call_output, but got {output_type}. "
+            f"The bug converts all tool outputs to function_call_result during serialization, "
+            f"causing them to be incorrectly deserialized as FunctionCallOutput."
+        )
+    else:
+        assert hasattr(raw_item, "type")
+        assert raw_item.type == "local_shell_call_output", (
+            f"Expected local_shell_call_output, but got {raw_item.type}. "
+            f"The bug converts all tool outputs to function_call_result during serialization, "
+            f"causing them to be incorrectly deserialized as FunctionCallOutput."
+        )
