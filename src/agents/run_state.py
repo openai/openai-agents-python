@@ -744,17 +744,27 @@ class RunState(Generic[TContext, TAgent]):
         return result
 
     def _convert_output_item_to_protocol(self, raw_item_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert API-format tool output items to protocol format."""
+        """Convert API-format tool output items to protocol format.
+
+        Only converts function_call_output to function_call_result (protocol format).
+        Preserves computer_call_output and local_shell_call_output types as-is.
+        """
         converted = dict(raw_item_dict)
-        call_id = cast(Optional[str], converted.get("call_id") or converted.get("callId"))
+        original_type = converted.get("type")
 
-        converted["type"] = "function_call_result"
+        # Only convert function_call_output to function_call_result (protocol format)
+        # Preserve computer_call_output and local_shell_call_output types
+        if original_type == "function_call_output":
+            converted["type"] = "function_call_result"
+            call_id = cast(Optional[str], converted.get("call_id") or converted.get("callId"))
 
-        if not converted.get("name"):
-            converted["name"] = self._lookup_function_name(call_id or "")
+            if not converted.get("name"):
+                converted["name"] = self._lookup_function_name(call_id or "")
 
-        if not converted.get("status"):
-            converted["status"] = "completed"
+            if not converted.get("status"):
+                converted["status"] = "completed"
+        # For computer_call_output and local_shell_call_output, preserve the type
+        # No conversion needed - they should remain as-is
 
         return converted
 
