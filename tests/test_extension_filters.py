@@ -1,7 +1,11 @@
 from copy import deepcopy
 from typing import Any, cast
 
-from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from agents import (
@@ -17,6 +21,7 @@ from agents.items import (
     HandoffOutputItem,
     MessageOutputItem,
     ReasoningItem,
+    ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
@@ -78,6 +83,19 @@ def _get_tool_output_run_item(content: str) -> ToolCallOutputItem:
             "type": "function_call_output",
         },
         output=content,
+    )
+
+
+def _get_tool_call_run_item(name: str = "transfer_to_agent") -> ToolCallItem:
+    return ToolCallItem(
+        agent=fake_agent(),
+        raw_item=ResponseFunctionToolCall(
+            id="call-1",
+            arguments="{}",
+            call_id="call-1",
+            name=name,
+            type="function_call",
+        ),
     )
 
 
@@ -273,7 +291,36 @@ def test_nest_handoff_history_wraps_transcript() -> None:
     assert "Assist reply" in summary_content
     assert "Hello" in summary_content
     assert len(nested.pre_handoff_items) == 0
-    assert nested.new_items == data.new_items
+    assert len(nested.new_items) == 1
+    assert isinstance(nested.new_items[0], MessageOutputItem)
+
+
+def test_nest_handoff_history_filters_tool_calls_and_outputs() -> None:
+    data = HandoffInputData(
+        input_history=(_get_user_input_item("Hello"),),
+        pre_handoff_items=(
+            _get_tool_call_run_item(),
+            _get_tool_output_run_item("result"),
+        ),
+        new_items=(
+            _get_message_output_run_item("Handoff request"),
+            _get_handoff_output_run_item("transfer"),
+        ),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    assert len(nested.input_history) == 1
+    summary = _as_message(nested.input_history[0])
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "function_call" in summary_content
+    assert "function_call_output" in summary_content
+    assert nested.pre_handoff_items == ()
+    assert len(nested.new_items) == 1
+    assert isinstance(nested.new_items[0], MessageOutputItem)
 
 
 def test_nest_handoff_history_handles_missing_user() -> None:
