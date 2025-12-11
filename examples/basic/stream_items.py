@@ -31,7 +31,7 @@ async def main():
             continue
         elif event.type == "run_item_stream_event":
             if event.item.type == "tool_call_item":
-                print(f"-- Tool was called: {event.item.raw_item.name}")
+                print(f"-- Tool was called: {getattr(event.item.raw_item, 'name', 'Unknown Tool')}")
             elif event.item.type == "tool_call_output_item":
                 print(f"-- Tool output: {event.item.output}")
             elif event.item.type == "message_output_item":
