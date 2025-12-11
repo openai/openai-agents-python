@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 from openai import BadRequestError
 from openai.types.responses import (
     ResponseComputerToolCall,
+    ResponseCustomToolCall,
 )
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_output_item import (
@@ -1129,15 +1131,11 @@ async def test_resume_sets_persisted_item_count_when_zero(monkeypatch):
             "shell call without a shell tool",
         ),
         (
-            cast(
-                Any,
-                {
-                    "id": "p1",
-                    "call_id": "call1",
-                    "type": "apply_patch_call",
-                    "patch": "diff",
-                    "status": "in_progress",
-                },
+            ResponseCustomToolCall(
+                type="custom_tool_call",
+                name="apply_patch",
+                call_id="call1",
+                input=json.dumps({"patch": "diff"}),
             ),
             "apply_patch call without an apply_patch tool",
         ),
