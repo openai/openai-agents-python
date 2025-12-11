@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .result import RunResult, RunResultStreaming
     from .run import RunConfig
     from .stream_events import StreamEvent
+    from .tool_context import ToolContext
 
 
 @dataclass
@@ -57,19 +58,6 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
 """A function that takes a run context and a list of tool results, and returns a
 `ToolsToFinalOutputResult`.
 """
-
-
-class AgentToolStreamEvent(TypedDict):
-    """Streaming event emitted when an agent is invoked as a tool."""
-
-    event: StreamEvent
-    """The streaming event from the nested agent run."""
-
-    agent_name: str
-    """The name of the nested agent emitting the event."""
-
-    tool_call_id: str | None
-    """The originating tool call ID, if available."""
 
 
 class StopAtTools(TypedDict):
@@ -401,7 +389,7 @@ class Agent(AgentBase, Generic[TContext]):
         ) = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
-        on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
+        on_stream: Callable[[StreamEvent, ToolContext], MaybeAwaitable[None]] | None = None,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
@@ -428,6 +416,8 @@ class Agent(AgentBase, Generic[TContext]):
                 from the LLM at runtime.
             on_stream: Optional callback (sync or async) to receive streaming events from the nested
                 agent run. When provided, the nested agent is executed in streaming mode.
+                The callback receives (event, caller_tool_context) where caller_tool_context
+                provides access to the calling agent via caller_agent field.
         """
 
         @function_tool(
@@ -454,13 +444,8 @@ class Agent(AgentBase, Generic[TContext]):
                     session=session,
                 )
                 async for event in run_result.stream_events():
-                    payload: AgentToolStreamEvent = {
-                        "event": event,
-                        "agent_name": self.name,
-                        "tool_call_id": getattr(context, "tool_call_id", None),
-                    }
                     try:
-                        maybe_result = on_stream(payload)
+                        maybe_result = on_stream(event, cast("ToolContext", context))
                         if inspect.isawaitable(maybe_result):
                             await maybe_result
                     except Exception:

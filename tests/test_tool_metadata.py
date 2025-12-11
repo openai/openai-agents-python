@@ -4,6 +4,7 @@ from typing import cast
 
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
 
+from agents import Agent
 from agents.computer import Computer
 from agents.run_context import RunContextWrapper
 from agents.tool import (
@@ -57,6 +58,7 @@ def test_shell_command_output_status_property() -> None:
 
 def test_tool_context_from_agent_context() -> None:
     ctx = RunContextWrapper(context={"foo": "bar"})
+    test_agent = Agent(name="test_agent")
     tool_call = ToolContext.from_agent_context(
         ctx,
         tool_call_id="123",
@@ -68,5 +70,6 @@ def test_tool_context_from_agent_context() -> None:
                 "arguments": "{}",
             },
         )(),
+        caller_agent=test_agent,
     )
     assert tool_call.tool_name == "demo"

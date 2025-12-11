@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     AgentBase,
-    AgentToolStreamEvent,
     FunctionTool,
     MessageOutputItem,
     RunConfig,
@@ -19,8 +18,10 @@ from agents import (
     Session,
     TResponseInputItem,
 )
-from agents.stream_events import RawResponsesStreamEvent
+from agents.stream_events import RawResponsesStreamEvent, StreamEvent
 from agents.tool_context import ToolContext
+
+_caller_agent = Agent(name="test_caller_agent")
 
 
 class BoolCtx(BaseModel):
@@ -269,6 +270,7 @@ async def test_agent_as_tool_returns_final_output(monkeypatch: pytest.MonkeyPatc
         tool_name="story_tool",
         tool_call_id="call_1",
         tool_arguments='{"input": "hello"}',
+        caller_agent=_caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
 
@@ -371,6 +373,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
         tool_name="summary_tool",
         tool_call_id="call_2",
         tool_arguments='{"input": "summarize this"}',
+        caller_agent=_caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
@@ -432,10 +435,10 @@ async def test_agent_as_tool_streams_events_with_on_stream(
     monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
     monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
 
-    received_events: list[AgentToolStreamEvent] = []
+    received_events: list[tuple[StreamEvent, ToolContext | None]] = []
 
-    async def on_stream(payload: AgentToolStreamEvent) -> None:
-        received_events.append(payload)
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        received_events.append((event, caller_tool_context))
 
     tool = cast(
         FunctionTool,
@@ -446,19 +449,24 @@ async def test_agent_as_tool_streams_events_with_on_stream(
         ),
     )
 
+    caller_agent = Agent(name="caller_agent")
     tool_context = ToolContext(
         context=None,
         tool_name="stream_tool",
         tool_call_id="call-123",
         tool_arguments='{"input": "run streaming"}',
+        caller_agent=caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "run streaming"}')
 
     assert output == "streamed output"
     assert len(received_events) == len(stream_events)
-    assert received_events[0]["agent_name"] == "streamer"
-    assert received_events[0]["tool_call_id"] == "call-123"
-    assert received_events[0]["event"] == stream_events[0]
+    assert received_events[0][1] is not None
+    assert received_events[0][1].tool_call_id == "call-123"
+    assert received_events[0][1].tool_name == "stream_tool"
+    assert received_events[0][1].caller_agent is not None
+    assert received_events[0][1].caller_agent.name == "caller_agent"
+    assert received_events[0][0] == stream_events[0]
     assert run_calls[0]["input"] == "run streaming"
 
 
@@ -510,8 +518,8 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
 
     callbacks: list[Any] = []
 
-    async def on_stream(payload: AgentToolStreamEvent) -> None:
-        callbacks.append(payload["event"])
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        callbacks.append(event)
 
     tool = cast(
         FunctionTool,
@@ -528,6 +536,7 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
         tool_name="stream_tool",
         tool_call_id="call-abc",
         tool_arguments='{"input": "stream please"}',
+        caller_agent=_caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "stream please"}')
 
@@ -560,8 +569,8 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
 
     calls: list[str] = []
 
-    def sync_handler(event: AgentToolStreamEvent) -> None:
-        calls.append(event["event"].type)
+    def sync_handler(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        calls.append(event.type)
 
     tool = cast(
         FunctionTool,
@@ -576,6 +585,7 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
         tool_name="sync_tool",
         tool_call_id="call-sync",
         tool_arguments='{"input": "go"}',
+        caller_agent=_caller_agent,
     )
 
     output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
@@ -606,7 +616,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
     )
 
-    def bad_handler(event: AgentToolStreamEvent) -> None:
+    def bad_handler(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
         raise RuntimeError("boom")
 
     tool = cast(
@@ -622,6 +632,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         tool_name="error_tool",
         tool_call_id="call-bad",
         tool_arguments='{"input": "go"}',
+        caller_agent=_caller_agent,
     )
 
     output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
@@ -677,6 +688,7 @@ async def test_agent_as_tool_without_stream_uses_run(
         tool_name="nostream_tool",
         tool_call_id="call-no",
         tool_arguments='{"input": "plain"}',
+        caller_agent=_caller_agent,
     )
 
     output = await tool.on_invoke_tool(tool_context, '{"input": "plain"}')
@@ -707,10 +719,10 @@ async def test_agent_as_tool_streaming_sets_tool_call_id_from_context(
         classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
     )
 
-    captured: list[AgentToolStreamEvent] = []
+    captured: list[tuple[StreamEvent, ToolContext | None]] = []
 
-    async def on_stream(event: AgentToolStreamEvent) -> None:
-        captured.append(event)
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        captured.append((event, caller_tool_context))
 
     tool = cast(
         FunctionTool,
@@ -720,14 +732,20 @@ async def test_agent_as_tool_streaming_sets_tool_call_id_from_context(
             on_stream=on_stream,
         ),
     )
+    caller_agent = Agent(name="caller_agent")
     tool_context = ToolContext(
         context=None,
         tool_name="direct_stream_tool",
         tool_call_id="direct-call-id",
         tool_arguments='{"input": "hi"}',
+        caller_agent=caller_agent,
     )
 
     output = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
 
     assert output == "ok"
-    assert captured[0]["tool_call_id"] == "direct-call-id"
+    assert captured[0][1] is not None
+    assert captured[0][1].tool_call_id == "direct-call-id"
+    assert captured[0][1].tool_name == "direct_stream_tool"
+    assert captured[0][1].caller_agent is not None
+    assert captured[0][1].caller_agent.name == "caller_agent"

@@ -8,7 +8,6 @@ from . import _config
 from .agent import (
     Agent,
     AgentBase,
-    AgentToolStreamEvent,
     StopAtTools,
     ToolsToFinalOutputFunction,
     ToolsToFinalOutputResult,
@@ -215,7 +214,6 @@ def enable_verbose_stdout_logging():
 __all__ = [
     "Agent",
     "AgentBase",
-    "AgentToolStreamEvent",
     "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",

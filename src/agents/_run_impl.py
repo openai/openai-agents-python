@@ -926,6 +926,7 @@ class RunImpl:
                     context_wrapper,
                     tool_call.call_id,
                     tool_call=tool_call,
+                    caller_agent=agent,
                 )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments

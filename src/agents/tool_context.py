@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field, fields
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from openai.types.responses import ResponseFunctionToolCall
 
 from .run_context import RunContextWrapper, TContext
+
+if TYPE_CHECKING:
+    from .agent import AgentBase
 
 
 def _assert_must_pass_tool_call_id() -> str:
@@ -16,6 +19,10 @@ def _assert_must_pass_tool_name() -> str:
 
 def _assert_must_pass_tool_arguments() -> str:
     raise ValueError("tool_arguments must be passed to ToolContext")
+
+
+def _assert_must_pass_caller_agent() -> "AgentBase":
+    raise ValueError("caller_agent must be passed to ToolContext")
 
 
 @dataclass
@@ -31,11 +38,15 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_arguments: str = field(default_factory=_assert_must_pass_tool_arguments)
     """The raw arguments string of the tool call."""
 
+    caller_agent: "AgentBase" = field(default_factory=_assert_must_pass_caller_agent)
+    """The agent that called this tool."""
+
     @classmethod
     def from_agent_context(
         cls,
         context: RunContextWrapper[TContext],
         tool_call_id: str,
+        caller_agent: "AgentBase",
         tool_call: Optional[ResponseFunctionToolCall] = None,
     ) -> "ToolContext":
         """
@@ -51,5 +62,9 @@ class ToolContext(RunContextWrapper[TContext]):
         )
 
         return cls(
-            tool_name=tool_name, tool_call_id=tool_call_id, tool_arguments=tool_args, **base_values
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_arguments=tool_args,
+            caller_agent=caller_agent,
+            **base_values,
         )
