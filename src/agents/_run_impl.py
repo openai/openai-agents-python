@@ -1826,7 +1826,10 @@ class ApplyPatchAction:
         output_text = ""
 
         try:
-            operation = _coerce_apply_patch_operation(call.tool_call)
+            operation = _coerce_apply_patch_operation(
+                call.tool_call,
+                context_wrapper=context_wrapper,
+            )
             editor = apply_patch_tool.editor
             if operation.type == "create_file":
                 result = editor.create_file(operation)
@@ -2093,7 +2096,9 @@ def _extract_apply_patch_call_id(tool_call: Any) -> str:
     return str(value)
 
 
-def _coerce_apply_patch_operation(tool_call: Any) -> ApplyPatchOperation:
+def _coerce_apply_patch_operation(
+    tool_call: Any, *, context_wrapper: RunContextWrapper[Any]
+) -> ApplyPatchOperation:
     raw_operation = _get_mapping_or_attr(tool_call, "operation")
     if raw_operation is None:
         raise ModelBehaviorError("Apply patch call is missing an operation payload.")
@@ -2117,7 +2122,12 @@ def _coerce_apply_patch_operation(tool_call: Any) -> ApplyPatchOperation:
     else:
         diff = None
 
-    return ApplyPatchOperation(type=op_type_literal, path=str(path), diff=diff)
+    return ApplyPatchOperation(
+        type=op_type_literal,
+        path=str(path),
+        diff=diff,
+        ctx_wrapper=context_wrapper,
+    )
 
 
 def _normalize_apply_patch_result(

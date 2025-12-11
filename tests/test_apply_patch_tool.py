@@ -63,6 +63,7 @@ async def test_apply_patch_tool_success() -> None:
     assert raw_item["status"] == "completed"
     assert raw_item["call_id"] == "call_apply"
     assert editor.operations[0].type == "update_file"
+    assert editor.operations[0].ctx_wrapper is context_wrapper
     assert isinstance(raw_item["output"], str)
     assert raw_item["output"].startswith("Updated tasks.md")
     input_payload = result.to_input_item()
@@ -137,3 +138,4 @@ async def test_apply_patch_tool_accepts_mapping_call() -> None:
     raw_item = cast(dict[str, Any], result.raw_item)
     assert raw_item["call_id"] == "call_mapping"
     assert editor.operations[0].path == "notes.md"
+    assert editor.operations[0].ctx_wrapper is context_wrapper
