@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     AgentBase,
+    AgentToolStreamEvent,
     FunctionTool,
     MessageOutputItem,
     RunConfig,
@@ -382,8 +383,8 @@ async def test_agent_as_tool_streams_events_with_on_stream(
 ) -> None:
     agent = Agent(name="streamer")
     stream_events = [
-        RawResponsesStreamEvent(data={"type": "response_started"}),
-        RawResponsesStreamEvent(data={"type": "output_text_delta", "delta": "hi"}),
+        RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"})),
+        RawResponsesStreamEvent(data=cast(Any, {"type": "output_text_delta", "delta": "hi"})),
     ]
 
     class DummyStreamingResult:
@@ -431,15 +432,18 @@ async def test_agent_as_tool_streams_events_with_on_stream(
     monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
     monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
 
-    received_events: list[dict[str, Any]] = []
+    received_events: list[AgentToolStreamEvent] = []
 
-    async def on_stream(payload: dict[str, Any]) -> None:
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
         received_events.append(payload)
 
-    tool = agent.as_tool(
-        tool_name="stream_tool",
-        tool_description="Streams events",
-        on_stream=on_stream,
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="stream_tool",
+            tool_description="Streams events",
+            on_stream=on_stream,
+        ),
     )
 
     tool_context = ToolContext(
@@ -463,7 +467,8 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = Agent(name="streamer")
-    stream_events = [RawResponsesStreamEvent(data={"type": "response_started"})]
+    stream_events = [RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))]
+    stream_events = [RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))]
 
     class DummyStreamingResult:
         def __init__(self) -> None:
@@ -505,14 +510,17 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
 
     callbacks: list[Any] = []
 
-    async def on_stream(payload: dict[str, Any]) -> None:
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
         callbacks.append(payload["event"])
 
-    tool = agent.as_tool(
-        tool_name="stream_tool",
-        tool_description="Streams events",
-        custom_output_extractor=extractor,
-        on_stream=on_stream,
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="stream_tool",
+            tool_description="Streams events",
+            custom_output_extractor=extractor,
+            on_stream=on_stream,
+        ),
     )
 
     tool_context = ToolContext(
@@ -539,7 +547,7 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
             self.final_output = "ok"
 
         async def stream_events(self):
-            yield RawResponsesStreamEvent(data={"type": "response_started"})
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
 
     monkeypatch.setattr(
         Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
@@ -552,13 +560,16 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
 
     calls: list[str] = []
 
-    def sync_handler(event: dict[str, Any]) -> None:
+    def sync_handler(event: AgentToolStreamEvent) -> None:
         calls.append(event["event"].type)
 
-    tool = agent.as_tool(
-        tool_name="sync_tool",
-        tool_description="Uses sync handler",
-        on_stream=sync_handler,
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="sync_tool",
+            tool_description="Uses sync handler",
+            on_stream=sync_handler,
+        ),
     )
     tool_context = ToolContext(
         context=None,
@@ -584,7 +595,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
             self.final_output = "ok"
 
         async def stream_events(self):
-            yield RawResponsesStreamEvent(data={"type": "response_started"})
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
 
     monkeypatch.setattr(
         Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
@@ -595,13 +606,16 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
         classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
     )
 
-    def bad_handler(event: dict[str, Any]) -> None:
+    def bad_handler(event: AgentToolStreamEvent) -> None:
         raise RuntimeError("boom")
 
-    tool = agent.as_tool(
-        tool_name="error_tool",
-        tool_description="Handler throws",
-        on_stream=bad_handler,
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="error_tool",
+            tool_description="Handler throws",
+            on_stream=bad_handler,
+        ),
     )
     tool_context = ToolContext(
         context=None,
@@ -651,9 +665,12 @@ async def test_agent_as_tool_without_stream_uses_run(
         classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no stream"))),
     )
 
-    tool = agent.as_tool(
-        tool_name="nostream_tool",
-        tool_description="No streaming path",
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="nostream_tool",
+            tool_description="No streaming path",
+        ),
     )
     tool_context = ToolContext(
         context=None,
@@ -669,7 +686,7 @@ async def test_agent_as_tool_without_stream_uses_run(
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_streaming_sets_tool_call_id_none_for_direct_invocation(
+async def test_agent_as_tool_streaming_sets_tool_call_id_from_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     agent = Agent(name="direct_invocation_agent")
@@ -679,7 +696,7 @@ async def test_agent_as_tool_streaming_sets_tool_call_id_none_for_direct_invocat
             self.final_output = "ok"
 
         async def stream_events(self):
-            yield RawResponsesStreamEvent(data={"type": "response_started"})
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
 
     monkeypatch.setattr(
         Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
@@ -690,24 +707,27 @@ async def test_agent_as_tool_streaming_sets_tool_call_id_none_for_direct_invocat
         classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
     )
 
-    captured: list[dict[str, Any]] = []
+    captured: list[AgentToolStreamEvent] = []
 
-    async def on_stream(event: dict[str, Any]) -> None:
+    async def on_stream(event: AgentToolStreamEvent) -> None:
         captured.append(event)
 
-    tool = agent.as_tool(
-        tool_name="direct_stream_tool",
-        tool_description="Direct invocation",
-        on_stream=on_stream,
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="direct_stream_tool",
+            tool_description="Direct invocation",
+            on_stream=on_stream,
+        ),
     )
     tool_context = ToolContext(
         context=None,
         tool_name="direct_stream_tool",
-        tool_call_id=None,  # Direct invoke path does not have a tool call ID.
+        tool_call_id="direct-call-id",
         tool_arguments='{"input": "hi"}',
     )
 
     output = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
 
     assert output == "ok"
-    assert captured[0]["tool_call_id"] is None
+    assert captured[0]["tool_call_id"] == "direct-call-id"

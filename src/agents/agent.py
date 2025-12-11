@@ -439,6 +439,7 @@ class Agent(AgentBase, Generic[TContext]):
             from .run import DEFAULT_MAX_TURNS, Runner
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
+            run_result: RunResult | RunResultStreaming
 
             if on_stream is not None:
                 run_result = Runner.run_streamed(
