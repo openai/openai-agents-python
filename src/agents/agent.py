@@ -32,8 +32,9 @@ if TYPE_CHECKING:
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
-    from .result import RunResult
+    from .result import RunResult, RunResultStreaming
     from .run import RunConfig
+    from .stream_events import StreamEvent
 
 
 @dataclass
@@ -56,6 +57,19 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
 """A function that takes a run context and a list of tool results, and returns a
 `ToolsToFinalOutputResult`.
 """
+
+
+class AgentToolStreamEvent(TypedDict):
+    """Streaming event emitted when an agent is invoked as a tool."""
+
+    event: StreamEvent
+    """The streaming event from the nested agent run."""
+
+    agent_name: str
+    """The name of the nested agent emitting the event."""
+
+    tool_call_id: str | None
+    """The originating tool call ID, if available."""
 
 
 class StopAtTools(TypedDict):
@@ -382,9 +396,12 @@ class Agent(AgentBase, Generic[TContext]):
         self,
         tool_name: str | None,
         tool_description: str | None,
-        custom_output_extractor: Callable[[RunResult], Awaitable[str]] | None = None,
+        custom_output_extractor: (
+            Callable[[RunResult | RunResultStreaming], Awaitable[str]] | None
+        ) = None,
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
+        on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
@@ -409,6 +426,8 @@ class Agent(AgentBase, Generic[TContext]):
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
+            on_stream: Optional callback (sync or async) to receive streaming events from the nested
+                agent run. When provided, the nested agent is executed in streaming mode.
         """
 
         @function_tool(
@@ -421,21 +440,49 @@ class Agent(AgentBase, Generic[TContext]):
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
 
-            output = await Runner.run(
-                starting_agent=self,
-                input=input,
-                context=context.context,
-                run_config=run_config,
-                max_turns=resolved_max_turns,
-                hooks=hooks,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-                session=session,
-            )
+            if on_stream is not None:
+                run_result = Runner.run_streamed(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                    run_config=run_config,
+                    max_turns=resolved_max_turns,
+                    hooks=hooks,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    session=session,
+                )
+                async for event in run_result.stream_events():
+                    payload: AgentToolStreamEvent = {
+                        "event": event,
+                        "agent_name": self.name,
+                        "tool_call_id": getattr(context, "tool_call_id", None),
+                    }
+                    try:
+                        maybe_result = on_stream(payload)
+                        if inspect.isawaitable(maybe_result):
+                            await maybe_result
+                    except Exception:
+                        logger.exception(
+                            "Error while handling on_stream event for agent tool %s.",
+                            self.name,
+                        )
+            else:
+                run_result = await Runner.run(
+                    starting_agent=self,
+                    input=input,
+                    context=context.context,
+                    run_config=run_config,
+                    max_turns=resolved_max_turns,
+                    hooks=hooks,
+                    previous_response_id=previous_response_id,
+                    conversation_id=conversation_id,
+                    session=session,
+                )
             if custom_output_extractor:
-                return await custom_output_extractor(output)
+                return await custom_output_extractor(run_result)
 
-            return output.final_output
+            return run_result.final_output
 
         return run_agent
 
