@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 from collections.abc import Awaitable
@@ -179,6 +180,10 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    _func: ToolFunction[...] | None = field(default=None, repr=False)
+    """The function that implements the tool. Ensures that a reference to the
+    original function exists when @function_tool is used."""
+
     # Tool-specific guardrails
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
     """Optional list of input guardrails to run before invoking this tool."""
@@ -189,6 +194,17 @@ class FunctionTool:
     def __post_init__(self):
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
+
+        if self._func:
+            functools.update_wrapper(self, self._func)
+
+    def __call__(self, *args, **kwargs):
+        if not self._func:
+            raise AttributeError("""FunctionTool has no attribute `_func` and is not callable.
+                                 Likely because it was created directly without the
+                                 @function_tool decorator.""")
+
+        return self._func(*args, **kwargs)
 
 
 @dataclass
@@ -661,6 +677,7 @@ def function_tool(
             on_invoke_tool=_on_invoke_tool,
             strict_json_schema=strict_mode,
             is_enabled=is_enabled,
+            _func=func,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses

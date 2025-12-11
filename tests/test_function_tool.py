@@ -1,4 +1,6 @@
+import inspect
 import json
+from dataclasses import asdict
 from typing import Any
 
 import pytest
@@ -81,6 +83,44 @@ async def test_simple_function():
             ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
         )
 
+    # Direct call
+    result = tool(2, 2)
+    assert result == 4
+
+
+async def async_function(a: int, b: int = 5):
+    return a + b
+
+
+@pytest.mark.asyncio
+async def test_async_function():
+    tool = function_tool(async_function, failure_error_function=None)
+    assert tool.name == "async_function"
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1}'),
+        '{"a": 1}',
+    )
+    assert result == 6
+
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 1, "b": 2}'),
+        '{"a": 1, "b": 2}',
+    )
+    assert result == 3
+
+    # Missing required argument should raise an error
+    with pytest.raises(ModelBehaviorError):
+        await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
+        )
+
+    # Direct call
+    result = await tool(2, 2)
+    assert result == 4
+
+    assert not inspect.iscoroutinefunction(tool.__call__), "tool.__call__ should sync."
+
 
 class Foo(BaseModel):
     a: int
@@ -146,6 +186,16 @@ async def test_complex_args_function():
             ),
             '{"foo": {"a": 1}}',
         )
+
+
+def test_absent_func_tool():
+    tool = function_tool(simple_function)
+    kwargs = asdict(tool)
+    kwargs.pop("_func")
+    manually_defined_tool = FunctionTool(**kwargs)
+
+    with pytest.raises(AttributeError, match="not callable"):
+        manually_defined_tool(1, 1)
 
 
 def test_function_config_overrides():
