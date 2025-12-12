@@ -320,6 +320,32 @@ agent = Agent(
 )
 ```
 
+## Resources
+
+MCP servers can expose resources that provide context data to agents. Resources are URI-addressable pieces of data (such as configuration files, documentation, or metrics) that agents can read and use. Servers that support resources expose two methods:
+
+- `list_resources()` enumerates the available resources.
+- `read_resource(uri)` fetches the content of a specific resource by its URI.
+
+```python
+from agents import Agent
+
+resources_result = await server.list_resources()
+for resource in resources_result.resources:
+    print(f"Resource: {resource.name} ({resource.uri})")
+
+resource_result = await server.read_resource("config://app/settings")
+config_content = resource_result.contents[0].text
+
+agent = Agent(
+    name="Config Assistant",
+    instructions=f"You are a helpful assistant. Current configuration:\n{config_content}",
+    mcp_servers=[server],
+)
+```
+
+Resources can use any URI scheme (e.g., `file://`, `http://`, `config://`, `docs://`) and can contain text or binary data. Unlike prompts which generate instructions, resources provide raw context data that agents can reference during execution.
+
 ## Caching
 
 Every agent run calls `list_tools()` on each MCP server. Remote servers can introduce noticeable latency, so all of the MCP

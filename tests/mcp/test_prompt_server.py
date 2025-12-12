@@ -66,6 +66,14 @@ class FakeMCPPromptServer(MCPServer):
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None):
         raise NotImplementedError("This fake server doesn't support tools")
 
+    async def list_resources(self, run_context=None, agent=None):
+        from mcp.types import ListResourcesResult
+
+        return ListResourcesResult(resources=[])
+
+    async def read_resource(self, uri: str):
+        raise NotImplementedError("This fake server doesn't support resources")
+
     @property
     def name(self) -> str:
         return self._server_name
