@@ -319,6 +319,34 @@ json_tool = data_agent.as_tool(
 )
 ```
 
+### Streaming nested agent runs
+
+Pass an `on_stream` callback to `as_tool` to listen to streaming events emitted by the nested agent while still returning its final output once the stream completes.
+
+```python
+from agents import AgentToolStreamEvent
+
+
+async def handle_stream(event: AgentToolStreamEvent) -> None:
+    # Inspect the underlying StreamEvent along with agent metadata.
+    print(f"[stream] {event['agent_name']} :: {event['event'].type}")
+
+
+billing_agent_tool = billing_agent.as_tool(
+    tool_name="billing_helper",
+    tool_description="Answer billing questions.",
+    on_stream=handle_stream,  # Can be sync or async.
+)
+```
+
+What to expect:
+
+- Event types mirror `StreamEvent["type"]`: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`.
+- Providing `on_stream` automatically runs the nested agent in streaming mode and drains the stream before returning the final output.
+- The handler may be synchronous or asynchronous; each event is delivered in order as it arrives.
+- `tool_call_id` is present when the tool is invoked via a model tool call; direct calls may leave it `None`.
+- See `examples/agent_patterns/agents_as_tools_streaming.py` for a complete runnable sample.
+
 ### Conditional tool enabling
 
 You can conditionally enable or disable agent tools at runtime using the `is_enabled` parameter. This allows you to dynamically filter which tools are available to the LLM based on context, user preferences, or runtime conditions.
