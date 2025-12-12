@@ -348,7 +348,7 @@ class OpenAIChatCompletionsModel(Model):
             isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body
         ) or (model_settings.extra_args and "thinking" in model_settings.extra_args)
 
-        if "deepseek-reasoner" in model_name or "deepseek-r1" in model_name:
+        if "deepseek-reasoner" in model_name:
             return True
 
         if "deepseek" in model_name and thinking_param_enabled:
