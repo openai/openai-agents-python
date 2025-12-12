@@ -245,7 +245,10 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+        include_reasoning_content = self._should_include_reasoning_content(model_settings)
+        converted_messages = Converter.items_to_messages(
+            input, include_reasoning_content=include_reasoning_content
+        )
 
         if system_instructions:
             converted_messages.insert(
@@ -363,6 +366,22 @@ class OpenAIChatCompletionsModel(Model):
             reasoning=model_settings.reasoning,
         )
         return response, ret
+
+    def _should_include_reasoning_content(self, model_settings: ModelSettings) -> bool:
+        """Determine whether to forward reasoning_content on assistant messages."""
+        model_name = str(self.model).lower()
+
+        thinking_param_enabled = (
+            isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body
+        ) or (model_settings.extra_args and "thinking" in model_settings.extra_args)
+
+        if "deepseek-reasoner" in model_name:
+            return True
+
+        if "deepseek" in model_name and thinking_param_enabled:
+            return True
+
+        return False
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
