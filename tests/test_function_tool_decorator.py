@@ -5,9 +5,11 @@ from typing import Any, Optional
 import pytest
 from inline_snapshot import snapshot
 
-from agents import function_tool
+from agents import Agent, function_tool
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
+
+_test_agent = Agent(name="test_agent")
 
 
 class DummyContext:
@@ -17,7 +19,11 @@ class DummyContext:
 
 def ctx_wrapper() -> ToolContext[DummyContext]:
     return ToolContext(
-        context=DummyContext(), tool_name="dummy", tool_call_id="1", tool_arguments=""
+        context=DummyContext(),
+        tool_name="dummy",
+        tool_call_id="1",
+        tool_arguments="",
+        caller_agent=_test_agent,
     )
 
 

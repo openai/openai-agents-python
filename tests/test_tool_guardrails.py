@@ -19,6 +19,8 @@ from agents import (
 from agents.tool_context import ToolContext
 from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 
+_test_agent = Agent(name="test_agent")
+
 
 def get_mock_tool_context(tool_arguments: str = '{"param": "value"}') -> ToolContext:
     """Helper to create a mock tool context for testing."""
@@ -27,6 +29,7 @@ def get_mock_tool_context(tool_arguments: str = '{"param": "value"}') -> ToolCon
         tool_name="test_tool",
         tool_call_id="call_123",
         tool_arguments=tool_arguments,
+        caller_agent=_test_agent,
     )
 
 

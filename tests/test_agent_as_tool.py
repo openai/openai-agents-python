@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
@@ -18,7 +18,10 @@ from agents import (
     Session,
     TResponseInputItem,
 )
+from agents.stream_events import RawResponsesStreamEvent, StreamEvent
 from agents.tool_context import ToolContext
+
+_caller_agent = Agent(name="test_caller_agent")
 
 
 class BoolCtx(BaseModel):
@@ -267,6 +270,7 @@ async def test_agent_as_tool_returns_final_output(monkeypatch: pytest.MonkeyPatc
         tool_name="story_tool",
         tool_call_id="call_1",
         tool_arguments='{"input": "hello"}',
+        caller_agent=_caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
 
@@ -369,7 +373,379 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
         tool_name="summary_tool",
         tool_call_id="call_2",
         tool_arguments='{"input": "summarize this"}',
+        caller_agent=_caller_agent,
     )
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
     assert output == "custom output"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streams_events_with_on_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_events = [
+        RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"})),
+        RawResponsesStreamEvent(data=cast(Any, {"type": "output_text_delta", "delta": "hi"})),
+    ]
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "streamed output"
+
+        async def stream_events(self):
+            for ev in stream_events:
+                yield ev
+
+    run_calls: list[dict[str, Any]] = []
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        run_calls.append(
+            {
+                "starting_agent": starting_agent,
+                "input": input,
+                "context": context,
+                "max_turns": max_turns,
+                "hooks": hooks,
+                "run_config": run_config,
+                "previous_response_id": previous_response_id,
+                "conversation_id": conversation_id,
+                "session": session,
+            }
+        )
+        return DummyStreamingResult()
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    received_events: list[tuple[StreamEvent, ToolContext | None]] = []
+
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        received_events.append((event, caller_tool_context))
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="stream_tool",
+            tool_description="Streams events",
+            on_stream=on_stream,
+        ),
+    )
+
+    caller_agent = Agent(name="caller_agent")
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id="call-123",
+        tool_arguments='{"input": "run streaming"}',
+        caller_agent=caller_agent,
+    )
+    output = await tool.on_invoke_tool(tool_context, '{"input": "run streaming"}')
+
+    assert output == "streamed output"
+    assert len(received_events) == len(stream_events)
+    assert received_events[0][1] is not None
+    assert received_events[0][1].tool_call_id == "call-123"
+    assert received_events[0][1].tool_name == "stream_tool"
+    assert received_events[0][1].caller_agent is not None
+    assert received_events[0][1].caller_agent.name == "caller_agent"
+    assert received_events[0][0] == stream_events[0]
+    assert run_calls[0]["input"] == "run streaming"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_works_with_custom_extractor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="streamer")
+    stream_events = [RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))]
+    stream_events = [RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))]
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "raw output"
+
+        async def stream_events(self):
+            for ev in stream_events:
+                yield ev
+
+    streamed_instance = DummyStreamingResult()
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return streamed_instance
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called when on_stream is provided.")
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    received: list[Any] = []
+
+    async def extractor(result) -> str:
+        received.append(result)
+        return "custom value"
+
+    callbacks: list[Any] = []
+
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        callbacks.append(event)
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="stream_tool",
+            tool_description="Streams events",
+            custom_output_extractor=extractor,
+            on_stream=on_stream,
+        ),
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id="call-abc",
+        tool_arguments='{"input": "stream please"}',
+        caller_agent=_caller_agent,
+    )
+    output = await tool.on_invoke_tool(tool_context, '{"input": "stream please"}')
+
+    assert output == "custom value"
+    assert received == [streamed_instance]
+    assert callbacks == stream_events
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_accepts_sync_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="sync_handler_agent")
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+        async def stream_events(self):
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    calls: list[str] = []
+
+    def sync_handler(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        calls.append(event.type)
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="sync_tool",
+            tool_description="Uses sync handler",
+            on_stream=sync_handler,
+        ),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="sync_tool",
+        tool_call_id="call-sync",
+        tool_arguments='{"input": "go"}',
+        caller_agent=_caller_agent,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert output == "ok"
+    assert calls == ["raw_response_event"]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="handler_error_agent")
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+        async def stream_events(self):
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    def bad_handler(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        raise RuntimeError("boom")
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="error_tool",
+            tool_description="Handler throws",
+            on_stream=bad_handler,
+        ),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="error_tool",
+        tool_call_id="call-bad",
+        tool_arguments='{"input": "go"}',
+        caller_agent=_caller_agent,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    assert output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_without_stream_uses_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="nostream_agent")
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "plain"
+
+    run_calls: list[dict[str, Any]] = []
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        run_calls.append({"input": input})
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+    monkeypatch.setattr(
+        Runner,
+        "run_streamed",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no stream"))),
+    )
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="nostream_tool",
+            tool_description="No streaming path",
+        ),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="nostream_tool",
+        tool_call_id="call-no",
+        tool_arguments='{"input": "plain"}',
+        caller_agent=_caller_agent,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "plain"}')
+
+    assert output == "plain"
+    assert run_calls == [{"input": "plain"}]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_sets_tool_call_id_from_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="direct_invocation_agent")
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+        async def stream_events(self):
+            yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+
+    monkeypatch.setattr(
+        Runner, "run_streamed", classmethod(lambda *args, **kwargs: DummyStreamingResult())
+    )
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    captured: list[tuple[StreamEvent, ToolContext | None]] = []
+
+    async def on_stream(event: StreamEvent, caller_tool_context: ToolContext | None) -> None:
+        captured.append((event, caller_tool_context))
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="direct_stream_tool",
+            tool_description="Direct invocation",
+            on_stream=on_stream,
+        ),
+    )
+    caller_agent = Agent(name="caller_agent")
+    tool_context = ToolContext(
+        context=None,
+        tool_name="direct_stream_tool",
+        tool_call_id="direct-call-id",
+        tool_arguments='{"input": "hi"}',
+        caller_agent=caller_agent,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
+
+    assert output == "ok"
+    assert captured[0][1] is not None
+    assert captured[0][1].tool_call_id == "direct-call-id"
+    assert captured[0][1].tool_name == "direct_stream_tool"
+    assert captured[0][1].caller_agent is not None
+    assert captured[0][1].caller_agent.name == "caller_agent"
