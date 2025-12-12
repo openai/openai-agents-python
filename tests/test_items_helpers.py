@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import weakref
+from typing import cast
 
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -40,6 +41,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
+from agents.items import normalize_function_call_output_payload
 
 
 def make_message(
@@ -207,6 +209,71 @@ def test_handoff_output_item_retains_agents_until_gc() -> None:
     assert item.agent is None
     assert item.source_agent is None
     assert item.target_agent is None
+
+
+def test_handoff_output_item_converts_protocol_payload() -> None:
+    raw_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_result",
+            "call_id": "call-123",
+            "name": "transfer_to_weather",
+            "status": "completed",
+            "output": "ok",
+        },
+    )
+    owner_agent = Agent(name="owner")
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    item = HandoffOutputItem(
+        agent=owner_agent,
+        raw_item=raw_item,
+        source_agent=source_agent,
+        target_agent=target_agent,
+    )
+
+    converted = item.to_input_item()
+    assert converted["type"] == "function_call_output"
+    assert converted["call_id"] == "call-123"
+    assert "status" not in converted
+    assert "name" not in converted
+
+
+def test_handoff_output_item_stringifies_object_output() -> None:
+    raw_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_result",
+            "call_id": "call-obj",
+            "name": "transfer_to_weather",
+            "status": "completed",
+            "output": {"assistant": "Weather Assistant"},
+        },
+    )
+    owner_agent = Agent(name="owner")
+    source_agent = Agent(name="source")
+    target_agent = Agent(name="target")
+    item = HandoffOutputItem(
+        agent=owner_agent,
+        raw_item=raw_item,
+        source_agent=source_agent,
+        target_agent=target_agent,
+    )
+
+    converted = item.to_input_item()
+    assert converted["type"] == "function_call_output"
+    assert isinstance(converted["output"], str)
+    assert "Weather Assistant" in converted["output"]
+
+
+def test_normalize_function_call_output_payload_handles_lists() -> None:
+    payload = {
+        "type": "function_call_output",
+        "output": [{"type": "text", "text": "value"}],
+    }
+    normalized = normalize_function_call_output_payload(payload)
+    assert isinstance(normalized["output"], str)
+    assert "value" in normalized["output"]
 
 
 def test_tool_call_output_item_constructs_function_call_output_dict():
