@@ -1,13 +1,13 @@
 [project]
 name = "openai-agents"
-version = "0.6.2"
+version = "0.6.3"
 description = "OpenAI Agents SDK"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
-    "openai>=2.8.0,<3",
+    "openai>=2.9.0,<3",
     "pydantic>=2.12.3, <3",
     "griffe>=1.5.6, <2",
     "typing-extensions>=4.12.2, <5",

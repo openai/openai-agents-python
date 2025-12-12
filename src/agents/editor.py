@@ -4,6 +4,7 @@ import sys
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
+from .run_context import RunContextWrapper
 from .util._types import MaybeAwaitable
 
 ApplyPatchOperationType = Literal["create_file", "update_file", "delete_file"]
@@ -18,6 +19,7 @@ class ApplyPatchOperation:
     type: ApplyPatchOperationType
     path: str
     diff: str | None = None
+    ctx_wrapper: RunContextWrapper | None = None
 
 
 @dataclass(**_DATACLASS_KWARGS)
