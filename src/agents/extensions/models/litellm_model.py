@@ -442,17 +442,19 @@ class LitellmModel(Model):
         """Determine whether to forward reasoning_content on assistant messages.
 
         DeepSeek thinking mode requires reasoning_content to be present on messages with tool
-        calls, otherwise the API returns a 400.
+        calls, otherwise the API returns a 400. Restrict this to DeepSeek models to avoid
+        regressions with other providers.
         """
         model_name = str(self.model).lower()
-        base_url = (self.base_url or "").lower()
 
-        if "deepseek" in model_name or "deepseek.com" in base_url:
+        thinking_param_enabled = (
+            isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body
+        ) or (model_settings.extra_args and "thinking" in model_settings.extra_args)
+
+        if "deepseek-reasoner" in model_name or "deepseek-r1" in model_name:
             return True
 
-        if isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body:
-            return True
-        if model_settings.extra_args and "thinking" in model_settings.extra_args:
+        if "deepseek" in model_name and thinking_param_enabled:
             return True
 
         return False

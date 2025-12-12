@@ -343,14 +343,15 @@ class OpenAIChatCompletionsModel(Model):
     def _should_include_reasoning_content(self, model_settings: ModelSettings) -> bool:
         """Determine whether to forward reasoning_content on assistant messages."""
         model_name = str(self.model).lower()
-        base_url = str(getattr(self._client, "base_url", "") or "").lower()
 
-        if "deepseek" in model_name or "deepseek.com" in base_url:
+        thinking_param_enabled = (
+            isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body
+        ) or (model_settings.extra_args and "thinking" in model_settings.extra_args)
+
+        if "deepseek-reasoner" in model_name or "deepseek-r1" in model_name:
             return True
 
-        if isinstance(model_settings.extra_body, dict) and "thinking" in model_settings.extra_body:
-            return True
-        if model_settings.extra_args and "thinking" in model_settings.extra_args:
+        if "deepseek" in model_name and thinking_param_enabled:
             return True
 
         return False

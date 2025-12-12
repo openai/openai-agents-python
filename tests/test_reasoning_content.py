@@ -461,3 +461,77 @@ async def test_openai_chatcompletions_reasoning_disabled_for_non_deepseek(monkey
     )
 
     assert getattr(spy_items_to_messages, "include_reasoning_content", False) is False
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_openai_chatcompletions_deepseek_chat_requires_thinking(monkeypatch) -> None:
+    """
+    DeepSeek chat models only include reasoning when thinking parameter is explicitly set.
+    """
+
+    def spy_items_to_messages(
+        items: Any, preserve_thinking_blocks: bool = False, include_reasoning_content: bool = False
+    ):
+        spy_items_to_messages.include_reasoning_content = include_reasoning_content  # type: ignore[attr-defined] # noqa: E501
+        return []
+
+    monkeypatch.setattr(Converter, "items_to_messages", staticmethod(spy_items_to_messages))
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="deepseek-chat",
+                object="chat.completion",
+                choices=[
+                    CompletionChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=ChatCompletionMessage(role="assistant", content="Hi"),
+                    )
+                ],
+                usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+            )
+
+    class DummyChat:
+        def __init__(self):
+            self.completions = DummyCompletions()
+
+    class DummyClient:
+        def __init__(self):
+            self.chat = DummyChat()
+            self.base_url = "https://api.deepseek.com"
+
+    model = OpenAIChatCompletionsModel("deepseek-chat", cast(AsyncOpenAI, DummyClient()))
+
+    # Without thinking -> should be False
+    await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    assert getattr(spy_items_to_messages, "include_reasoning_content", False) is False
+
+    # With thinking -> should be True
+    await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(extra_body={"thinking": {"type": "enabled"}}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    assert getattr(spy_items_to_messages, "include_reasoning_content", False) is True
