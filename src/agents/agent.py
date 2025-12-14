@@ -24,7 +24,14 @@ from .models.default_models import (
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
-from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
+from .tool import (
+    FunctionTool,
+    FunctionToolResult,
+    Tool,
+    ToolErrorFunction,
+    default_tool_error_function,
+    function_tool,
+)
 from .tool_context import ToolContext
 from .util import _transforms
 from .util._types import MaybeAwaitable
@@ -411,6 +418,7 @@ class Agent(AgentBase, Generic[TContext]):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         session: Session | None = None,
+        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -433,12 +441,15 @@ class Agent(AgentBase, Generic[TContext]):
                 agent run. The callback receives an `AgentToolStreamEvent` containing the nested
                 agent, the originating tool call (when available), and each stream event. When
                 provided, the nested agent is executed in streaming mode.
+            failure_error_function: If provided, generate an error message when the tool (agent) run
+                fails. The message is sent to the LLM. If None, the exception is raised instead.
         """
 
         @function_tool(
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
             is_enabled=is_enabled,
+            failure_error_function=failure_error_function,
         )
         async def run_agent(context: ToolContext, input: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
