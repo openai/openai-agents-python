@@ -1,5 +1,4 @@
 from agents import Agent, WebSearchTool
-from agents.model_settings import ModelSettings
 
 INSTRUCTIONS = (
     "You are a research assistant. Given a search term, you search the web for that term and "
