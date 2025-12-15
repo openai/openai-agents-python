@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -610,6 +611,88 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
 
     assert output == "ok"
     assert calls == ["raw_response_event"]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_dispatches_without_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_stream handlers should not block streaming iteration."""
+    agent = Agent(name="nonblocking_agent")
+
+    first_handler_started = asyncio.Event()
+    allow_handler_to_continue = asyncio.Event()
+    second_event_yielded = asyncio.Event()
+    second_event_handled = asyncio.Event()
+
+    first_event = RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
+    second_event = RawResponsesStreamEvent(
+        data=cast(Any, {"type": "output_text_delta", "delta": "hi"})
+    )
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+        async def stream_events(self):
+            yield first_event
+            second_event_yielded.set()
+            yield second_event
+
+    dummy_result = DummyStreamingResult()
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(lambda *args, **kwargs: dummy_result))
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        if payload["event"] is first_event:
+            first_handler_started.set()
+            await allow_handler_to_continue.wait()
+        else:
+            second_event_handled.set()
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_nonblocking",
+        arguments='{"input": "go"}',
+        call_id="call-nonblocking",
+        name="nonblocking_tool",
+        type="function_call",
+    )
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="nonblocking_tool",
+            tool_description="Uses non-blocking streaming handler",
+            on_stream=on_stream,
+        ),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="nonblocking_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    async def _invoke_tool() -> Any:
+        return await tool.on_invoke_tool(tool_context, '{"input": "go"}')
+
+    invoke_task: asyncio.Task[Any] = asyncio.create_task(_invoke_tool())
+
+    await asyncio.wait_for(first_handler_started.wait(), timeout=1.0)
+    await asyncio.wait_for(second_event_yielded.wait(), timeout=1.0)
+    assert invoke_task.done() is False
+
+    allow_handler_to_continue.set()
+    await asyncio.wait_for(second_event_handled.wait(), timeout=1.0)
+    output = await asyncio.wait_for(invoke_task, timeout=1.0)
+
+    assert output == "ok"
 
 
 @pytest.mark.asyncio

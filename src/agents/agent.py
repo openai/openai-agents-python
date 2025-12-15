@@ -457,12 +457,12 @@ class Agent(AgentBase, Generic[TContext]):
                     conversation_id=conversation_id,
                     session=session,
                 )
-                async for event in run_result.stream_events():
-                    payload: AgentToolStreamEvent = {
-                        "event": event,
-                        "agent": self,
-                        "tool_call": getattr(context, "tool_call", None),
-                    }
+                # Dispatch callbacks in the background so slow handlers do not block
+                # event consumption.
+                event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue()
+
+                async def _run_handler(payload: AgentToolStreamEvent) -> None:
+                    """Execute the user callback while capturing exceptions."""
                     try:
                         maybe_result = on_stream(payload)
                         if inspect.isawaitable(maybe_result):
@@ -472,6 +472,34 @@ class Agent(AgentBase, Generic[TContext]):
                             "Error while handling on_stream event for agent tool %s.",
                             self.name,
                         )
+
+                async def dispatch_stream_events() -> None:
+                    while True:
+                        payload = await event_queue.get()
+                        is_sentinel = payload is None  # None marks the end of the stream.
+                        try:
+                            if payload is not None:
+                                await _run_handler(payload)
+                        finally:
+                            event_queue.task_done()
+
+                        if is_sentinel:
+                            break
+
+                dispatch_task = asyncio.create_task(dispatch_stream_events())
+
+                try:
+                    async for event in run_result.stream_events():
+                        payload: AgentToolStreamEvent = {
+                            "event": event,
+                            "agent": self,
+                            "tool_call": getattr(context, "tool_call", None),
+                        }
+                        await event_queue.put(payload)
+                finally:
+                    await event_queue.put(None)
+                    await event_queue.join()
+                    await dispatch_task
             else:
                 run_result = await Runner.run(
                     starting_agent=self,
