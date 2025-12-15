@@ -25,6 +25,7 @@ from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
 from .tool import FunctionTool, FunctionToolResult, Tool, function_tool
+from .tool_context import ToolContext
 from .util import _transforms
 from .util._types import MaybeAwaitable
 
@@ -439,7 +440,7 @@ class Agent(AgentBase, Generic[TContext]):
             description_override=tool_description or "",
             is_enabled=is_enabled,
         )
-        async def run_agent(context: RunContextWrapper, input: str) -> Any:
+        async def run_agent(context: ToolContext, input: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
@@ -491,7 +492,7 @@ class Agent(AgentBase, Generic[TContext]):
                 try:
                     from .stream_events import AgentUpdatedStreamEvent
 
-                    current_agent = getattr(run_result, "current_agent", self)
+                    current_agent = run_result.current_agent
                     async for event in run_result.stream_events():
                         if isinstance(event, AgentUpdatedStreamEvent):
                             current_agent = event.new_agent
@@ -499,7 +500,7 @@ class Agent(AgentBase, Generic[TContext]):
                         payload: AgentToolStreamEvent = {
                             "event": event,
                             "agent": current_agent,
-                            "tool_call": getattr(context, "tool_call", None),
+                            "tool_call": context.tool_call,
                         }
                         await event_queue.put(payload)
                 finally:

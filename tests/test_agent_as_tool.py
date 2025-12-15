@@ -392,6 +392,7 @@ async def test_agent_as_tool_streams_events_with_on_stream(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "streamed output"
+            self.current_agent = agent
 
         async def stream_events(self):
             for ev in stream_events:
@@ -490,6 +491,7 @@ async def test_agent_as_tool_streaming_updates_agent_on_handoff(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "delegated output"
+            self.current_agent = first_agent
 
         async def stream_events(self):
             for ev in events:
@@ -564,6 +566,7 @@ async def test_agent_as_tool_streaming_works_with_custom_extractor(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "raw output"
+            self.current_agent = agent
 
         async def stream_events(self):
             for ev in stream_events:
@@ -645,6 +648,7 @@ async def test_agent_as_tool_streaming_accepts_sync_handler(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "ok"
+            self.current_agent = agent
 
         async def stream_events(self):
             yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
@@ -713,6 +717,7 @@ async def test_agent_as_tool_streaming_dispatches_without_blocking(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "ok"
+            self.current_agent = agent
 
         async def stream_events(self):
             yield first_event
@@ -784,6 +789,7 @@ async def test_agent_as_tool_streaming_handler_exception_does_not_fail_call(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "ok"
+            self.current_agent = agent
 
         async def stream_events(self):
             yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
@@ -894,6 +900,7 @@ async def test_agent_as_tool_streaming_sets_tool_call_from_context(
     class DummyStreamingResult:
         def __init__(self) -> None:
             self.final_output = "ok"
+            self.current_agent = agent
 
         async def stream_events(self):
             yield RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"}))
