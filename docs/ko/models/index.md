@@ -11,9 +11,9 @@ Agents SDK는 OpenAI 모델을 다음 두 가지 방식으로 즉시 지원합�
 
 ## OpenAI 모델
 
-`Agent`를 초기화할 때 모델을 지정하지 않으면 기본 모델이 사용됩니다. 현재 기본값은 [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1)로, 에이전트형 워크플로에 대한 예측 가능성과 낮은 지연 시간의 균형이 뛰어납니다.
+`Agent`를 초기화할 때 모델을 지정하지 않으면 기본 모델이 사용됩니다. 현재 기본값은 [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1)로, 에이전트형 워크플로에 대한 예측 가능성과 낮은 지연 시간의 균형이 뛰어납니다. 접근 권한이 있다면 더 높은 품질을 위해 [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2)로 설정하는 것을 권장합니다.
 
-[`gpt-5`](https://platform.openai.com/docs/models/gpt-5)와 같은 다른 모델로 전환하려면 다음 섹션의 단계를 따르세요.
+[`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2)와 같은 다른 모델로 전환하려면 다음 섹션의 단계를 따르세요.
 
 ### 기본 OpenAI 모델
 

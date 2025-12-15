@@ -12,8 +12,9 @@ INSTRUCTIONS = (
 
 search_agent = Agent(
     name="FinancialSearchAgent",
-    model="gpt-4.1",
+    model="gpt-5.2",
     instructions=INSTRUCTIONS,
     tools=[WebSearchTool()],
-    model_settings=ModelSettings(tool_choice="required"),
+    # gpt-5.2 does not support tool_choice="required"; use "auto" to allow tool use.
+    model_settings=ModelSettings(tool_choice="auto"),
 )

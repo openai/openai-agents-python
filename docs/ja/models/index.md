@@ -11,9 +11,9 @@ Agents SDK には、2 種類の OpenAI モデルが標準でサポートされ�
 
 ## OpenAI モデル
 
-`Agent` を初期化する際にモデルを指定しない場合、デフォルトのモデルが使用されます。現在のデフォルトは [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1) で、エージェント型ワークフローの予測可能性と低レイテンシのバランスに優れています。
+`Agent` を初期化する際にモデルを指定しない場合、デフォルトのモデルが使用されます。現在のデフォルトは互換性のため [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1) です。利用可能であれば、より高品質のために [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) に設定することを推奨します。
 
-[`gpt-5`](https://platform.openai.com/docs/models/gpt-5) などの他のモデルに切り替えたい場合は、次のセクションの手順に従ってください。
+[`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) などの他のモデルに切り替えたい場合は、次のセクションの手順に従ってください。
 
 ### 既定の OpenAI モデル
 

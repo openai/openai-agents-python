@@ -14,9 +14,9 @@ def _get_field(obj: Any, key: str) -> Any:
 async def main():
     agent = Agent(
         name="Code interpreter",
-        # Note that using gpt-5 model with streaming for this tool requires org verification
-        # Also, code interpreter tool does not support gpt-5's minimal reasoning effort
-        model="gpt-4.1",
+        # Note: using gpt-5-class models with streaming for this tool may require org verification.
+        # Code interpreter does not support gpt-5 minimal reasoning effort; use default effort.
+        model="gpt-5.2",
         instructions="You love doing math.",
         tools=[
             CodeInterpreterTool(

@@ -12,10 +12,9 @@ INSTRUCTIONS = (
 
 search_agent = Agent(
     name="Search agent",
-    model="gpt-4.1",
+    model="gpt-5.2",
     instructions=INSTRUCTIONS,
     tools=[WebSearchTool()],
-    # Note that gpt-5 model does not support tool_choice="required",
-    # so if you want to migrate to gpt-5, you'll need to use "auto" instead
-    model_settings=ModelSettings(tool_choice="required"),
+    # gpt-5.2 does not support tool_choice="required"; use "auto" to allow tool use.
+    model_settings=ModelSettings(tool_choice="auto"),
 )

@@ -11,9 +11,9 @@ Agents SDK 自带两种对 OpenAI 模型的开箱即用支持：
 
 ## OpenAI 模型
 
-当你在初始化一个 `Agent` 时未指定模型，将使用默认模型。当前默认模型为 [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1)，它在面向智能体工作流的可预测性与低延迟之间提供了良好平衡。
+当你在初始化一个 `Agent` 时未指定模型，将使用默认模型。当前默认模型为 [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1)，它在面向智能体工作流的可预测性与低延迟之间提供了良好平衡。如果有权限，建议设置为更高质量的 [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2)。
 
-如果你想切换到其他模型，例如 [`gpt-5`](https://platform.openai.com/docs/models/gpt-5)，请按照下一节的步骤操作。
+如果你想切换到其他模型，例如 [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2)，请按照下一节的步骤操作。
 
 ### 默认 OpenAI 模型
 
