@@ -4,14 +4,14 @@ search:
 ---
 # 暗号化セッション
 
-`EncryptedSession` はあらゆるセッション実装に透過的な暗号化を提供し、自動で古い項目を期限切れとして扱って会話データを保護します。
+`EncryptedSession` は、任意のセッション実装に対して透過的な暗号化を提供し、自動期限切れにより古い項目を保護します。
 
 ## 機能
 
-- **透過的な暗号化**: どんなセッションでも Fernet 暗号化でラップします
-- **セッションごとの鍵**: 一意の暗号化のために HKDF で鍵導出を行います
-- **自動期限切れ**: TTL が切れた古い項目は静かにスキップされます
-- **そのまま置き換え可能**: 既存のあらゆるセッション実装で動作します
+- **透過的な暗号化**: 任意のセッションを Fernet 暗号化でラップします
+- **セッションごとのキー**: HKDF キー導出によりセッションごとに一意の暗号鍵を使用します
+- **自動期限切れ**: TTL の有効期限切れ時には古い項目を静かにスキップします
+- **差し替え可能**: 既存の任意のセッション実装で動作します
 
 ## インストール
 
@@ -55,9 +55,9 @@ if __name__ == "__main__":
 
 ## 設定
 
-### 暗号鍵
+### 暗号化キー
 
-暗号鍵は Fernet キーまたは任意の文字列を使用できます:
+暗号化キーは Fernet キーでも、任意の文字列でも構いません:
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -79,9 +79,9 @@ session = EncryptedSession(
 )
 ```
 
-### TTL ( Time To Live )
+### TTL (Time To Live)
 
-暗号化された項目が有効な期間を設定します:
+暗号化された項目の有効期間を設定します:
 
 ```python
 # Items expire after 1 hour
@@ -140,30 +140,30 @@ session = EncryptedSession(
 
 !!! warning "高度なセッション機能"
 
-    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合は、次に注意してください。
+    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合、次の点に注意してください:
 
     - メッセージ内容が暗号化されるため、`find_turns_by_content()` のようなメソッドは有効に機能しません
-    - 内容ベースの検索は暗号化データ上で行われるため、その有効性は制限されます
+    - コンテンツベースの検索は暗号化データ上で行われるため、有効性が制限されます
 
 
 
-## 鍵導出
+## キー導出
 
-EncryptedSession は HKDF ( HMAC-based Key Derivation Function ) を使用して、セッションごとに一意の暗号鍵を導出します。
+EncryptedSession は HKDF (HMAC-based Key Derivation Function) を使用して、セッションごとに一意の暗号化キーを導出します:
 
-- **マスターキー**: あなたが提供する暗号鍵
+- **マスターキー**: 供給された暗号化キー
 - **セッションソルト**: セッション ID
 - **Info 文字列**: `"agents.session-store.hkdf.v1"`
-- **出力**: 32-byte Fernet キー
+- **出力**: 32 バイトの Fernet キー
 
-これにより、次のことが保証されます。
-- 各セッションには一意の暗号鍵が割り当てられます
-- マスターキーなしに鍵を導出することはできません
-- 異なるセッション間でデータを復号することはできません
+これにより次が保証されます:
+- 各セッションは一意の暗号化キーを持ちます
+- マスターキーがなければ鍵は導出できません
+- 異なるセッション間でセッションデータは復号できません
 
 ## 自動期限切れ
 
-項目が TTL を超えた場合、取得時に自動的にスキップされます。
+項目が TTL を超えた場合、取得時に自動的にスキップされます:
 
 ```python
 # Items older than TTL are silently ignored
@@ -173,7 +173,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API リファレンス
+## API 参照
 
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - メインクラス
-- [`Session`][agents.memory.session.Session] - ベースセッションプロトコル
+- [`Session`][agents.memory.session.Session] - 基本セッションプロトコル
