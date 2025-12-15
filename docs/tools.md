@@ -329,7 +329,7 @@ from agents import AgentToolStreamEvent
 
 async def handle_stream(event: AgentToolStreamEvent) -> None:
     # Inspect the underlying StreamEvent along with agent metadata.
-    print(f"[stream] {event['agent_name']} :: {event['event'].type}")
+    print(f"[stream] {event['agent']['name']} :: {event['event'].type}")
 
 
 billing_agent_tool = billing_agent.as_tool(
