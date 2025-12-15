@@ -21,7 +21,7 @@ from agents import (
     Session,
     TResponseInputItem,
 )
-from agents.stream_events import RawResponsesStreamEvent
+from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
 
 
@@ -471,6 +471,86 @@ async def test_agent_as_tool_streams_events_with_on_stream(
     assert received_events[0]["tool_call"] is tool_call
     assert received_events[0]["event"] == stream_events[0]
     assert run_calls[0]["input"] == "run streaming"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_streaming_updates_agent_on_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_agent = Agent(name="primary")
+    handed_off_agent = Agent(name="delegate")
+
+    events = [
+        AgentUpdatedStreamEvent(new_agent=first_agent),
+        RawResponsesStreamEvent(data=cast(Any, {"type": "response_started"})),
+        AgentUpdatedStreamEvent(new_agent=handed_off_agent),
+        RawResponsesStreamEvent(data=cast(Any, {"type": "output_text_delta", "delta": "hello"})),
+    ]
+
+    class DummyStreamingResult:
+        def __init__(self) -> None:
+            self.final_output = "delegated output"
+
+        async def stream_events(self):
+            for ev in events:
+                yield ev
+
+    def fake_run_streamed(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        auto_previous_response_id=False,
+        conversation_id,
+        session,
+    ):
+        return DummyStreamingResult()
+
+    monkeypatch.setattr(Runner, "run_streamed", classmethod(fake_run_streamed))
+    monkeypatch.setattr(
+        Runner,
+        "run",
+        classmethod(lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no run"))),
+    )
+
+    seen_agents: list[Agent[Any]] = []
+
+    async def on_stream(payload: AgentToolStreamEvent) -> None:
+        seen_agents.append(payload["agent"])
+
+    tool = cast(
+        FunctionTool,
+        first_agent.as_tool(
+            tool_name="delegate_tool",
+            tool_description="Streams handoff events",
+            on_stream=on_stream,
+        ),
+    )
+
+    tool_call = ResponseFunctionToolCall(
+        id="call_delegate",
+        arguments='{"input": "handoff"}',
+        call_id="call-delegate",
+        name="delegate_tool",
+        type="function_call",
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="delegate_tool",
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input": "handoff"}')
+
+    assert output == "delegated output"
+    assert seen_agents == [first_agent, first_agent, handed_off_agent, handed_off_agent]
 
 
 @pytest.mark.asyncio

@@ -489,10 +489,16 @@ class Agent(AgentBase, Generic[TContext]):
                 dispatch_task = asyncio.create_task(dispatch_stream_events())
 
                 try:
+                    from .stream_events import AgentUpdatedStreamEvent
+
+                    current_agent = getattr(run_result, "current_agent", self)
                     async for event in run_result.stream_events():
+                        if isinstance(event, AgentUpdatedStreamEvent):
+                            current_agent = event.new_agent
+
                         payload: AgentToolStreamEvent = {
                             "event": event,
-                            "agent": self,
+                            "agent": current_agent,
                             "tool_call": getattr(context, "tool_call", None),
                         }
                         await event_queue.put(payload)
