@@ -18,7 +18,9 @@ def billing_status_checker(customer_id: str | None = None, question: str = "") -
 def handle_stream(event: AgentToolStreamEvent) -> None:
     """Print streaming events emitted by the nested billing agent."""
     stream = event["event"]
-    print(f"[stream] agent={event['agent_name']} type={stream.type} {stream}")
+    tool_call = event.get("tool_call")
+    tool_call_info = tool_call.call_id if tool_call is not None else "unknown"
+    print(f"[stream] agent={event['agent'].name} call={tool_call_info} type={stream.type} {stream}")
 
 
 async def main() -> None:

@@ -29,6 +29,8 @@ from .util import _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
+
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
@@ -65,11 +67,11 @@ class AgentToolStreamEvent(TypedDict):
     event: StreamEvent
     """The streaming event from the nested agent run."""
 
-    agent_name: str
-    """The name of the nested agent emitting the event."""
+    agent: Agent[Any]
+    """The nested agent emitting the event."""
 
-    tool_call_id: str | None
-    """The originating tool call ID, if available."""
+    tool_call: ResponseFunctionToolCall | None
+    """The originating tool call, if available."""
 
 
 class StopAtTools(TypedDict):
@@ -427,7 +429,9 @@ class Agent(AgentBase, Generic[TContext]):
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
                 from the LLM at runtime.
             on_stream: Optional callback (sync or async) to receive streaming events from the nested
-                agent run. When provided, the nested agent is executed in streaming mode.
+                agent run. The callback receives an `AgentToolStreamEvent` containing the nested
+                agent, the originating tool call (when available), and each stream event. When
+                provided, the nested agent is executed in streaming mode.
         """
 
         @function_tool(
@@ -456,8 +460,8 @@ class Agent(AgentBase, Generic[TContext]):
                 async for event in run_result.stream_events():
                     payload: AgentToolStreamEvent = {
                         "event": event,
-                        "agent_name": self.name,
-                        "tool_call_id": getattr(context, "tool_call_id", None),
+                        "agent": self,
+                        "tool_call": getattr(context, "tool_call", None),
                     }
                     try:
                         maybe_result = on_stream(payload)
