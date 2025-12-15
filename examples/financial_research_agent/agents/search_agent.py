@@ -15,6 +15,4 @@ search_agent = Agent(
     model="gpt-5.2",
     instructions=INSTRUCTIONS,
     tools=[WebSearchTool()],
-    # gpt-5.2 does not support tool_choice="required"; use "auto" to allow tool use.
-    model_settings=ModelSettings(tool_choice="auto"),
 )
