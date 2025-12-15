@@ -1,5 +1,4 @@
 from agents import Agent, WebSearchTool
-from agents.model_settings import ModelSettings
 
 # Given a search term, use web search to pull back a brief summary.
 # Summaries should be concise but capture the main financial points.
