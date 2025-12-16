@@ -160,7 +160,7 @@ class ToolRunFunction:
 @dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
-    computer_tool: ComputerTool
+    computer_tool: ComputerTool[Any]
 
 
 @dataclass
@@ -1546,9 +1546,7 @@ class ComputerAction:
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
-        computer = await resolve_computer(
-            tool=action.computer_tool, run_context=context_wrapper
-        )
+        computer = await resolve_computer(tool=action.computer_tool, run_context=context_wrapper)
         output_func = (
             cls._get_screenshot_async(computer, action.tool_call)
             if isinstance(computer, AsyncComputer)

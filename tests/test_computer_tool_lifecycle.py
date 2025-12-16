@@ -106,7 +106,7 @@ async def test_runner_disposes_computer_after_run() -> None:
     create = AsyncMock(return_value=created)
     dispose = AsyncMock()
 
-    tool = ComputerTool(computer=ComputerProvider(create=create, dispose=dispose))
+    tool = ComputerTool(computer=ComputerProvider[FakeComputer](create=create, dispose=dispose))
     model = FakeModel(initial_output=[_make_message("done")])
     agent = Agent(name="ComputerAgent", model=model, tools=[tool])
 
@@ -124,7 +124,7 @@ async def test_streamed_run_disposes_computer_after_completion() -> None:
     create = AsyncMock(return_value=created)
     dispose = AsyncMock()
 
-    tool = ComputerTool(computer=ComputerProvider(create=create, dispose=dispose))
+    tool = ComputerTool(computer=ComputerProvider[FakeComputer](create=create, dispose=dispose))
     model = FakeModel(initial_output=[_make_message("done")])
     agent = Agent(name="ComputerAgent", model=model, tools=[tool])
 
@@ -135,6 +135,4 @@ async def test_streamed_run_disposes_computer_after_completion() -> None:
     assert streamed_result.final_output == "done"
     create.assert_awaited_once()
     dispose.assert_awaited_once()
-    dispose.assert_awaited_with(
-        run_context=streamed_result.context_wrapper, computer=created
-    )
+    dispose.assert_awaited_with(run_context=streamed_result.context_wrapper, computer=created)

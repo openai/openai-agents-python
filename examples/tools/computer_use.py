@@ -28,50 +28,6 @@ from agents import (
 # logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
 
 
-async def run_agent(computer_config: ComputerProvider[Any, AsyncComputer] | AsyncComputer) -> None:
-    with trace("Computer use example"):
-        agent = Agent(
-            name="Browser user",
-            instructions="You are a helpful agent. Find the current weather in Tokyo.",
-            tools=[ComputerTool(computer=computer_config)],
-            # Use the computer using model, and set truncation to auto because it is required.
-            model="computer-use-preview",
-            model_settings=ModelSettings(truncation="auto"),
-        )
-        result = await Runner.run(agent, "What is the weather in Tokyo right now?")
-        print(result.final_output)
-
-
-async def singleton_computer() -> None:
-    # Use a shared computer when you do not expect to run multiple agents concurrently.
-    async with LocalPlaywrightComputer() as computer:
-        await run_agent(computer)
-
-
-async def computer_per_request() -> None:
-    # Initialize a new computer per request to avoid sharing state between runs.
-    async def create_computer(
-        *, run_context: RunContextWrapper[Any]
-    ) -> LocalPlaywrightComputer:
-        print(f"Creating computer for run context: {run_context}")
-        return await LocalPlaywrightComputer().open()
-
-    async def dispose_computer(
-        *,
-        run_context: RunContextWrapper[Any],
-        computer: LocalPlaywrightComputer,
-    ) -> None:
-        print(f"Disposing computer for run context: {run_context}")
-        await computer.close()
-
-    await run_agent(
-        ComputerProvider(
-            create=create_computer,
-            dispose=dispose_computer,
-        )
-    )
-
-
 CUA_KEY_TO_PLAYWRIGHT_KEY = {
     "/": "Divide",
     "\\": "Backslash",
@@ -208,6 +164,50 @@ class LocalPlaywrightComputer(AsyncComputer):
         for px, py in path[1:]:
             await self.page.mouse.move(px, py)
         await self.page.mouse.up()
+
+
+async def run_agent(
+    computer_config: ComputerProvider[LocalPlaywrightComputer] | AsyncComputer,
+) -> None:
+    with trace("Computer use example"):
+        agent = Agent(
+            name="Browser user",
+            instructions="You are a helpful agent. Find the current weather in Tokyo.",
+            tools=[ComputerTool(computer=computer_config)],
+            # Use the computer using model, and set truncation to auto because it is required.
+            model="computer-use-preview",
+            model_settings=ModelSettings(truncation="auto"),
+        )
+        result = await Runner.run(agent, "What is the weather in Tokyo right now?")
+        print(result.final_output)
+
+
+async def singleton_computer() -> None:
+    # Use a shared computer when you do not expect to run multiple agents concurrently.
+    async with LocalPlaywrightComputer() as computer:
+        await run_agent(computer)
+
+
+async def computer_per_request() -> None:
+    # Initialize a new computer per request to avoid sharing state between runs.
+    async def create_computer(*, run_context: RunContextWrapper[Any]) -> LocalPlaywrightComputer:
+        print(f"Creating computer for run context: {run_context}")
+        return await LocalPlaywrightComputer().open()
+
+    async def dispose_computer(
+        *,
+        run_context: RunContextWrapper[Any],
+        computer: LocalPlaywrightComputer,
+    ) -> None:
+        print(f"Disposing computer for run context: {run_context}")
+        await computer.close()
+
+    await run_agent(
+        ComputerProvider[LocalPlaywrightComputer](
+            create=create_computer,
+            dispose=dispose_computer,
+        )
+    )
 
 
 if __name__ == "__main__":
