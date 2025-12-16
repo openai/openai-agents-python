@@ -298,6 +298,9 @@ class RunOptions(TypedDict, Generic[TContext]):
     session: NotRequired[Session | None]
     """The session for the run."""
 
+    session_limit: NotRequired[int | None]
+    """The maximum number of items to generate."""
+
 
 class Runner:
     @classmethod
@@ -314,6 +317,7 @@ class Runner:
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
+        session_limit: int | None = None,
     ) -> RunResult:
         """
         Run a workflow starting at the given agent.
@@ -356,6 +360,10 @@ class Runner:
                 other model providers don't write to the Conversation object,
                 so you'll end up having partial conversations stored.
             session: A session for automatic conversation history management.
+            session_limit: Maximum number of conversation history items to retrieve
+                from the session. Only applicable when using a session. If None,
+                retrieves the entire history. Useful for managing context window size
+                and controlling token costs.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -375,6 +383,7 @@ class Runner:
             auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
             session=session,
+            session_limit=session_limit,
         )
 
     @classmethod
@@ -391,6 +400,7 @@ class Runner:
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
+        session_limit: int | None = None,
     ) -> RunResult:
         """
         Run a workflow synchronously, starting at the given agent.
@@ -431,6 +441,10 @@ class Runner:
                 from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
+            session_limit: Maximum number of conversation history items to retrieve
+                from the session. Only applicable when using a session. If None,
+                retrieves the entire history. Useful for managing context window size
+                and controlling token costs.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -450,6 +464,7 @@ class Runner:
             conversation_id=conversation_id,
             session=session,
             auto_previous_response_id=auto_previous_response_id,
+            session_limit=session_limit,
         )
 
     @classmethod
@@ -465,6 +480,7 @@ class Runner:
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
+        session_limit: int | None = None,
     ) -> RunResultStreaming:
         """
         Run a workflow starting at the given agent in streaming mode.
@@ -503,6 +519,10 @@ class Runner:
                 from the previous turn.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
+            session_limit: Maximum number of conversation history items to retrieve
+                from the session. Only applicable when using a session. If None,
+                retrieves the entire history. Useful for managing context window size
+                and controlling token costs.
 
         Returns:
             A result object that contains data about the run, as well as a method to
@@ -521,6 +541,7 @@ class Runner:
             auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
             session=session,
+            session_limit=session_limit,
         )
 
 
@@ -544,6 +565,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        session_limit = kwargs.get("session_limit")
 
         if run_config is None:
             run_config = RunConfig()
@@ -565,7 +587,10 @@ class AgentRunner:
         # Keep original user input separate from session-prepared input
         original_user_input = input
         prepared_input = await self._prepare_input_with_session(
-            input, session, run_config.session_input_callback
+            input,
+            session,
+            run_config.session_input_callback,
+            session_limit=session_limit,
         )
 
         tool_use_tracker = AgentToolUseTracker()
@@ -799,6 +824,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        session_limit = kwargs.get("session_limit")
 
         # Python 3.14 stopped implicitly wiring up a default event loop
         # when synchronous code touches asyncio APIs for the first time.
@@ -845,6 +871,7 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
+                session_limit=session_limit,
             )
         )
 
@@ -880,6 +907,7 @@ class AgentRunner:
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
+        session_limit = kwargs.get("session_limit")
 
         if run_config is None:
             run_config = RunConfig()
@@ -936,6 +964,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
                 session=session,
+                session_limit=session_limit,
             )
         )
         return streamed_result
@@ -1065,6 +1094,7 @@ class AgentRunner:
         auto_previous_response_id: bool,
         conversation_id: str | None,
         session: Session | None,
+        session_limit: int | None = None,
     ):
         if streamed_result.trace:
             streamed_result.trace.start(mark_as_current=True)
@@ -1094,7 +1124,10 @@ class AgentRunner:
         try:
             # Prepare input with session if enabled
             prepared_input = await AgentRunner._prepare_input_with_session(
-                starting_input, session, run_config.session_input_callback
+                starting_input,
+                session,
+                run_config.session_input_callback,
+                session_limit,
             )
 
             # Update the streamed result with the prepared input
@@ -1942,6 +1975,7 @@ class AgentRunner:
         input: str | list[TResponseInputItem],
         session: Session | None,
         session_input_callback: SessionInputCallback | None,
+        session_limit: int | None = None,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
@@ -1958,7 +1992,9 @@ class AgentRunner:
             )
 
         # Get previous conversation history
-        history = await session.get_items()
+        history = await session.get_items(
+            limit=session_limit,
+        )
 
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
