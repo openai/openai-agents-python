@@ -141,9 +141,7 @@ class Usage:
             else 0
         )
 
-        self.input_tokens_details = InputTokensDetails(
-            cached_tokens=self_cached + other_cached
-        )
+        self.input_tokens_details = InputTokensDetails(cached_tokens=self_cached + other_cached)
 
         self.output_tokens_details = OutputTokensDetails(
             reasoning_tokens=self_reasoning + other_reasoning
@@ -152,12 +150,8 @@ class Usage:
         # Automatically preserve request_usage_entries.
         # If the other Usage represents a single request with tokens, record it.
         if other.requests == 1 and other.total_tokens > 0:
-            input_details = (
-                other.input_tokens_details or InputTokensDetails(cached_tokens=0)
-            )
-            output_details = (
-                other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
-            )
+            input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
+            output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
             request_usage = RequestUsage(
                 input_tokens=other.input_tokens,
                 output_tokens=other.output_tokens,
