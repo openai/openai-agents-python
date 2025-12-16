@@ -1,6 +1,11 @@
+# How to run this example:
+# uv run python -m playwright install chromium
+# uv run -m examples.tools.computer_use
+
 import asyncio
 import base64
-from typing import Literal, Union
+import sys
+from typing import Any, Literal, Union
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
@@ -8,9 +13,11 @@ from agents import (
     Agent,
     AsyncComputer,
     Button,
+    ComputerProvider,
     ComputerTool,
     Environment,
     ModelSettings,
+    RunContextWrapper,
     Runner,
     trace,
 )
@@ -21,19 +28,48 @@ from agents import (
 # logging.getLogger("openai.agents").addHandler(logging.StreamHandler())
 
 
-async def main():
+async def run_agent(computer_config: ComputerProvider[Any, AsyncComputer] | AsyncComputer) -> None:
+    with trace("Computer use example"):
+        agent = Agent(
+            name="Browser user",
+            instructions="You are a helpful agent. Find the current weather in Tokyo.",
+            tools=[ComputerTool(computer=computer_config)],
+            # Use the computer using model, and set truncation to auto because it is required.
+            model="computer-use-preview",
+            model_settings=ModelSettings(truncation="auto"),
+        )
+        result = await Runner.run(agent, "What is the weather in Tokyo right now?")
+        print(result.final_output)
+
+
+async def singleton_computer() -> None:
+    # Use a shared computer when you do not expect to run multiple agents concurrently.
     async with LocalPlaywrightComputer() as computer:
-        with trace("Computer use example"):
-            agent = Agent(
-                name="Browser user",
-                instructions="You are a helpful agent.",
-                tools=[ComputerTool(computer)],
-                # Use the computer using model, and set truncation to auto because its required
-                model="computer-use-preview",
-                model_settings=ModelSettings(truncation="auto"),
-            )
-            result = await Runner.run(agent, "Search for SF sports news and summarize.")
-            print(result.final_output)
+        await run_agent(computer)
+
+
+async def computer_per_request() -> None:
+    # Initialize a new computer per request to avoid sharing state between runs.
+    async def create_computer(
+        *, run_context: RunContextWrapper[Any]
+    ) -> LocalPlaywrightComputer:
+        print(f"Creating computer for run context: {run_context}")
+        return await LocalPlaywrightComputer().open()
+
+    async def dispose_computer(
+        *,
+        run_context: RunContextWrapper[Any],
+        computer: LocalPlaywrightComputer,
+    ) -> None:
+        print(f"Disposing computer for run context: {run_context}")
+        await computer.close()
+
+    await run_agent(
+        ComputerProvider(
+            create=create_computer,
+            dispose=dispose_computer,
+        )
+    )
 
 
 CUA_KEY_TO_PLAYWRIGHT_KEY = {
@@ -93,6 +129,16 @@ class LocalPlaywrightComputer(AsyncComputer):
             await self._browser.close()
         if self._playwright:
             await self._playwright.stop()
+        return None
+
+    async def open(self) -> "LocalPlaywrightComputer":
+        """Open resources without using a context manager."""
+        await self.__aenter__()
+        return self
+
+    async def close(self) -> None:
+        """Close resources without using a context manager."""
+        await self.__aexit__(None, None, None)
 
     @property
     def playwright(self) -> Playwright:
@@ -165,4 +211,8 @@ class LocalPlaywrightComputer(AsyncComputer):
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    mode = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
+    if mode == "singleton":
+        asyncio.run(singleton_computer())
+    else:
+        asyncio.run(computer_per_request())

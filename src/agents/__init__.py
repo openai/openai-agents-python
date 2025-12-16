@@ -88,6 +88,7 @@ from .tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
+    ComputerProvider,
     FileSearchTool,
     FunctionTool,
     FunctionToolResult,
@@ -116,7 +117,9 @@ from .tool import (
     ToolOutputTextDict,
     WebSearchTool,
     default_tool_error_function,
+    dispose_resolved_computers,
     function_tool,
+    resolve_computer,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
