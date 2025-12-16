@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, SQLiteSession
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 from tests.test_session import run_agent_async
@@ -54,7 +54,8 @@ async def test_session_limit_parameter(runner_method):
         assert len(last_input) == 3
         # First item should be "Message 3" (not Message 1 or 2)
         assert last_input[0].get("content") == "Message 3"
-        assert last_input[1].get("content")[0]["text"] == "Reply 3"  # Assistant message has content as a list
+        # Assistant message has content as a list
+        assert last_input[1].get("content")[0]["text"] == "Reply 3"
         assert last_input[2].get("content") == "Message 4"
 
         session.close()
@@ -167,7 +168,8 @@ async def test_session_limit_larger_than_history(runner_method):
         last_input = model.last_turn_args["input"]
         assert len(last_input) == 3  # 2 history + 1 new
         assert last_input[0].get("content") == "Message 1"
-        assert last_input[1].get("content")[0]["text"] == "Reply 1"  # Assistant message has content as a list
+        # Assistant message has content as a list
+        assert last_input[1].get("content")[0]["text"] == "Reply 1"
         assert last_input[2].get("content") == "Message 2"
 
         session.close()
