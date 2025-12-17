@@ -36,10 +36,30 @@ class OpenAIConversationsSession(SessionABC):
         # this never be None here
         self._openai_client: AsyncOpenAI = _openai_client
 
+    @property
+    def session_id(self) -> str:
+        """Get the session ID (conversation ID).
+
+        Returns:
+            The conversation ID for this session.
+
+        Raises:
+            ValueError: If the session has not been initialized yet.
+                Call any session method (get_items, add_items, etc.) first
+                to trigger lazy initialization.
+        """
+        if self._session_id is None:
+            raise ValueError(
+                "Session ID not yet available. The session is lazily initialized "
+                "on first API call. Call get_items(), add_items(), or similar first."
+            )
+        return self._session_id
+
     async def _get_session_id(self) -> str:
         if self._session_id is None:
             self._session_id = await start_openai_conversations_session(self._openai_client)
         return self._session_id
+
 
     async def _clear_session_id(self) -> None:
         self._session_id = None
