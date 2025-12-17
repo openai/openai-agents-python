@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
+    from .session_settings import SessionSettings
 
 
 @runtime_checkable
@@ -16,6 +17,7 @@ class Session(Protocol):
     """
 
     session_id: str
+    session_settings: SessionSettings
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -61,6 +63,7 @@ class SessionABC(ABC):
     """
 
     session_id: str
+    session_settings: SessionSettings
 
     @abstractmethod
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
