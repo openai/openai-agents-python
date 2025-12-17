@@ -25,6 +25,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         db_path: str | Path = ":memory:",
         create_tables: bool = False,
         logger: logging.Logger | None = None,
+        session_settings: SessionSettings | None = None,
         **kwargs,
     ):
         """Initialize the AdvancedSQLiteSession.
@@ -36,7 +37,12 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
-        super().__init__(session_id, db_path, **kwargs)
+        super().__init__(
+            session_id=session_id,
+            db_path=db_path,
+            session_settings=session_settings,
+            **kwargs,
+        )
         if create_tables:
             self._init_structure_tables()
         self._current_branch_id = "main"
