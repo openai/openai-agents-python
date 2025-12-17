@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agents.items import TResponseInputItem
 from agents.memory.session import Session
+from agents.memory.session_settings import SessionSettings
 
 
 class SimpleListSession(Session):
@@ -9,7 +10,9 @@ class SimpleListSession(Session):
 
     def __init__(self, session_id: str = "test") -> None:
         self.session_id = session_id
+        self.session_settings = SessionSettings()
         self._items: list[TResponseInputItem] = []
+
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         if limit is None:

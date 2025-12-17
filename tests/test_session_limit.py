@@ -1,11 +1,12 @@
-"""Test session_limit parameter functionality."""
+"""Test session_limit parameter functionality via SessionSettings."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from agents import Agent, SQLiteSession
+from agents import Agent, RunConfig, SQLiteSession
+from agents.memory import SessionSettings
 from tests.fake_model import FakeModel
 from tests.test_responses import get_text_message
 from tests.test_session import run_agent_async
@@ -38,14 +39,14 @@ async def test_session_limit_parameter(runner_method):
         all_items = await session.get_items()
         assert len(all_items) == 6
 
-        # Now test session_limit parameter - should only get last 2 history items + new input
+        # Now test session_limit parameter via RunConfig - should only get last 2 history items + new input
         model.set_next_output([get_text_message("Reply 4")])
         await run_agent_async(
             runner_method,
             agent,
             "Message 4",
             session=session,
-            session_limit=2,  # Only get last 2 history items
+            run_config=RunConfig(session_settings=SessionSettings(limit=2)),
         )
 
         # Verify model received limited history
@@ -87,7 +88,7 @@ async def test_session_limit_zero(runner_method):
             agent,
             "Message 3",
             session=session,
-            session_limit=0,
+            run_config=RunConfig(session_settings=SessionSettings(limit=0)),
         )
 
         # Verify model received only the new message
@@ -126,7 +127,7 @@ async def test_session_limit_none_gets_all_history(runner_method):
             agent,
             "Message 6",
             session=session,
-            session_limit=None,  # Explicit None = get all
+            run_config=RunConfig(session_settings=SessionSettings(limit=None)),
         )
 
         # Verify model received all history + new message
@@ -161,7 +162,7 @@ async def test_session_limit_larger_than_history(runner_method):
             agent,
             "Message 2",
             session=session,
-            session_limit=100,
+            run_config=RunConfig(session_settings=SessionSettings(limit=100)),
         )
 
         # Verify model received all available history + new message
