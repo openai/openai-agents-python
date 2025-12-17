@@ -198,6 +198,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._playback_tracker: RealtimePlaybackTracker | None = None
         self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
+        self._call_id: str | None = None
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -220,6 +221,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if model_name:
             self.model = model_name
 
+        self._call_id = call_id
         api_key = await get_api_key(options.get("api_key"))
 
         if "tracing" in model_settings:
@@ -346,7 +348,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
     async def _send_raw_message(self, event: OpenAIRealtimeClientEvent) -> None:
         """Send a raw message to the model."""
         assert self._websocket is not None, "Not connected"
-        payload = event.model_dump_json(exclude_none=True, exclude_unset=True)
+        payload = event.model_dump_json(exclude_unset=True)
         await self._websocket.send(payload)
 
     async def _send_user_input(self, event: RealtimeModelSendUserInput) -> None:
@@ -844,85 +846,63 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self, model_settings: RealtimeSessionModelSettings
     ) -> OpenAISessionCreateRequest:
         """Get the session config."""
-        model_name = (model_settings.get("model_name") or self.model) or "gpt-realtime"
+        audio_input_args = {}
 
-        voice = model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice"))
-        speed = model_settings.get("speed")
-        modalities = model_settings.get("modalities", DEFAULT_MODEL_SETTINGS.get("modalities"))
-
-        input_audio_format = model_settings.get(
-            "input_audio_format",
-            DEFAULT_MODEL_SETTINGS.get("input_audio_format"),
-        )
-        input_audio_transcription = model_settings.get(
-            "input_audio_transcription",
-            DEFAULT_MODEL_SETTINGS.get("input_audio_transcription"),
-        )
-        turn_detection = model_settings.get(
-            "turn_detection",
-            DEFAULT_MODEL_SETTINGS.get("turn_detection"),
-        )
-        output_audio_format = model_settings.get(
-            "output_audio_format",
-            DEFAULT_MODEL_SETTINGS.get("output_audio_format"),
-        )
-        input_audio_noise_reduction = model_settings.get(
-            "input_audio_noise_reduction",
-            DEFAULT_MODEL_SETTINGS.get("input_audio_noise_reduction"),
-        )
-
-        input_audio_config = None
-        if any(
-            value is not None
-            for value in [
-                input_audio_format,
-                input_audio_noise_reduction,
-                input_audio_transcription,
-                turn_detection,
-            ]
-        ):
-            input_audio_config = OpenAIRealtimeAudioInput(
-                format=to_realtime_audio_format(input_audio_format),
-                noise_reduction=cast(Any, input_audio_noise_reduction),
-                transcription=cast(Any, input_audio_transcription),
-                turn_detection=cast(Any, turn_detection),
+        if self._call_id:
+            audio_input_args["format"] = to_realtime_audio_format(
+                model_settings.get("input_audio_format")
+            )
+        else:
+            audio_input_args["format"] = to_realtime_audio_format(
+                model_settings.get(
+                    "input_audio_format", DEFAULT_MODEL_SETTINGS.get("input_audio_format")
+                )
             )
 
-        output_audio_config = None
-        if any(value is not None for value in [output_audio_format, speed, voice]):
-            output_audio_config = OpenAIRealtimeAudioOutput(
-                format=to_realtime_audio_format(output_audio_format),
-                speed=speed,
-                voice=voice,
+        if "input_audio_noise_reduction" in model_settings:
+            audio_input_args["noise_reduction"] = model_settings.get("input_audio_noise_reduction")  # type: ignore[assignment]
+
+        if "input_audio_transcription" in model_settings:
+            audio_input_args["transcription"] = model_settings.get("input_audio_transcription")  # type: ignore[assignment]
+        else:
+            audio_input_args["transcription"] = DEFAULT_MODEL_SETTINGS.get(  # type: ignore[assignment]
+                "input_audio_transcription"
             )
 
-        audio_config = None
-        if input_audio_config or output_audio_config:
-            audio_config = OpenAIRealtimeAudioConfig(
-                input=input_audio_config,
-                output=output_audio_config,
+        if "turn_detection" in model_settings:
+            audio_input_args["turn_detection"] = model_settings.get("turn_detection")  # type: ignore[assignment]
+        else:
+            audio_input_args["turn_detection"] = DEFAULT_MODEL_SETTINGS.get("turn_detection")  # type: ignore[assignment]
+
+        audio_output_args = {
+            "voice": model_settings.get("voice", DEFAULT_MODEL_SETTINGS.get("voice")),
+        }
+
+        if self._call_id:
+            audio_output_args["format"] = to_realtime_audio_format(  # type: ignore[assignment]
+                model_settings.get("output_audio_format")
+            )
+        else:
+            audio_output_args["format"] = to_realtime_audio_format(  # type: ignore[assignment]
+                model_settings.get(
+                    "output_audio_format", DEFAULT_MODEL_SETTINGS.get("output_audio_format")
+                )
             )
 
-        prompt: ResponsePrompt | None = None
-        if model_settings.get("prompt") is not None:
-            _passed_prompt: Prompt = model_settings["prompt"]
-            variables: dict[str, Any] | None = _passed_prompt.get("variables")
-            prompt = ResponsePrompt(
-                id=_passed_prompt["id"],
-                variables=variables,
-                version=_passed_prompt.get("version"),
-            )
+        if "speed" in model_settings:
+            audio_output_args["speed"] = model_settings.get("speed")  # type: ignore[assignment]
 
         # Construct full session object. `type` will be excluded at serialization time for updates.
-        return OpenAISessionCreateRequest(
-            model=model_name,
+        session_create_request = OpenAISessionCreateRequest(
             type="realtime",
-            instructions=model_settings.get("instructions"),
-            prompt=prompt,
-            output_modalities=modalities,
-            audio=audio_config,
-            max_output_tokens=cast(Any, model_settings.get("max_output_tokens")),
-            tool_choice=cast(Any, model_settings.get("tool_choice")),
+            model=(model_settings.get("model_name") or self.model) or "gpt-realtime",
+            output_modalities=model_settings.get(
+                "modalities", DEFAULT_MODEL_SETTINGS.get("modalities")
+            ),
+            audio=OpenAIRealtimeAudioConfig(
+                input=OpenAIRealtimeAudioInput(**audio_input_args),  # type: ignore[arg-type]
+                output=OpenAIRealtimeAudioOutput(**audio_output_args),  # type: ignore[arg-type]
+            ),
             tools=cast(
                 Any,
                 self._tools_to_session_tools(
@@ -931,6 +911,28 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 ),
             ),
         )
+
+        if "instructions" in model_settings:
+            session_create_request.instructions = model_settings.get("instructions")
+
+        if "prompt" in model_settings:
+            _passed_prompt: Prompt = model_settings["prompt"]
+            variables: dict[str, Any] | None = _passed_prompt.get("variables")
+            session_create_request.prompt = ResponsePrompt(
+                id=_passed_prompt["id"],
+                variables=variables,
+                version=_passed_prompt.get("version"),
+            )
+
+        if "max_output_tokens" in model_settings:
+            session_create_request.max_output_tokens = cast(
+                Any, model_settings.get("max_output_tokens")
+            )
+
+        if "tool_choice" in model_settings:
+            session_create_request.tool_choice = cast(Any, model_settings.get("tool_choice"))
+
+        return session_create_request
 
     def _tools_to_session_tools(
         self, tools: list[Tool], handoffs: list[Handoff]

@@ -339,10 +339,23 @@ class LitellmModel(Model):
                 f"Response format: {response_format}\n"
             )
 
-        reasoning_effort = model_settings.reasoning.effort if model_settings.reasoning else None
+        # Build reasoning_effort - use dict only when summary is present (OpenAI feature)
+        # Otherwise pass string for backward compatibility with all providers
+        reasoning_effort: dict[str, Any] | str | None = None
+        if model_settings.reasoning:
+            if model_settings.reasoning.summary is not None:
+                # Dict format when summary is needed (OpenAI only)
+                reasoning_effort = {
+                    "effort": model_settings.reasoning.effort,
+                    "summary": model_settings.reasoning.summary,
+                }
+            elif model_settings.reasoning.effort is not None:
+                # String format for compatibility with all providers
+                reasoning_effort = model_settings.reasoning.effort
+
         # Enable developers to pass non-OpenAI compatible reasoning_effort data like "none"
         # Priority order:
-        #  1. model_settings.reasoning.effort
+        #  1. model_settings.reasoning (effort + summary)
         #  2. model_settings.extra_body["reasoning_effort"]
         #  3. model_settings.extra_args["reasoning_effort"]
         if (

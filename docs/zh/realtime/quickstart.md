@@ -4,12 +4,12 @@ search:
 ---
 # 快速开始
 
-实时智能体允许你使用 OpenAI 的 Realtime API 为你的 AI 智能体启用语音对话。本指南将带你创建你的第一个实时语音智能体。
+实时智能体通过 OpenAI 的 Realtime API 为你的 AI 智能体启用语音对话。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "测试版功能"
-实时智能体目前为测试版。在我们改进实现的过程中，可能会有不兼容的变更。
+实时智能体目前为测试版。在我们改进实现时，可能会有不兼容的变更。
 
-## 前提条件
+## 先决条件
 
 - Python 3.9 或更高版本
 - OpenAI API key
@@ -17,7 +17,7 @@ search:
 
 ## 安装
 
-如果尚未安装，请安装 OpenAI Agents SDK：
+如果尚未安装，请先安装 OpenAI Agents SDK：
 
 ```bash
 pip install openai-agents
@@ -193,7 +193,7 @@ if __name__ == "__main__":
 ### 模型设置
 
 - `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
-- `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+- `voice`: 选择音色（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 - `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
@@ -204,28 +204,28 @@ if __name__ == "__main__":
 
 ### 轮次检测
 
-- `type`: 检测方法（`server_vad`、`semantic_vad`）
+- `type`: 检测方式（`server_vad`、`semantic_vad`）
 - `threshold`: 语音活动阈值（0.0-1.0）
-- `silence_duration_ms`: 用于检测轮次结束的静音时长
+- `silence_duration_ms`: 检测说话结束的静音时长
 - `prefix_padding_ms`: 语音前的音频填充
 
-## 后续步骤
+## 下一步
 
 - [进一步了解实时智能体](guide.md)
 - 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹查看可用的示例
 - 为你的智能体添加工具
 - 在智能体之间实现任务转移
-- 设置安全防护措施以提升安全性
+- 设置安全防护措施以确保安全
 
 ## 身份验证
 
-确保在环境中设置了你的 OpenAI API key：
+请确保已在环境中设置你的 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传入：
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

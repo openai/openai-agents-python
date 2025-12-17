@@ -31,6 +31,9 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_arguments: str = field(default_factory=_assert_must_pass_tool_arguments)
     """The raw arguments string of the tool call."""
 
+    tool_call: Optional[ResponseFunctionToolCall] = None
+    """The tool call object associated with this invocation."""
+
     @classmethod
     def from_agent_context(
         cls,
@@ -50,6 +53,11 @@ class ToolContext(RunContextWrapper[TContext]):
             tool_call.arguments if tool_call is not None else _assert_must_pass_tool_arguments()
         )
 
-        return cls(
-            tool_name=tool_name, tool_call_id=tool_call_id, tool_arguments=tool_args, **base_values
+        tool_context = cls(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_arguments=tool_args,
+            tool_call=tool_call,
+            **base_values,
         )
+        return tool_context

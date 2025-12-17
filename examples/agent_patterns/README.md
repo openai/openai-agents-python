@@ -28,6 +28,7 @@ The mental model for handoffs is that the new agent "takes over". It sees the pr
 For example, you could model the translation task above as tool calls instead: rather than handing over to the language-specific agent, you could call the agent as a tool, and then use the result in the next step. This enables things like translating multiple languages at once.
 
 See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
+See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
 
 ## LLM-as-a-judge
 

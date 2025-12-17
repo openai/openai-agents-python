@@ -25,7 +25,6 @@ import asyncio
 import json
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 try:
     import redis.asyncio as redis
@@ -95,11 +94,6 @@ class RedisSession(SessionABC):
             RedisSession: An instance of RedisSession connected to the specified Redis server.
         """
         redis_kwargs = redis_kwargs or {}
-
-        # Parse URL to determine if we need SSL
-        parsed = urlparse(url)
-        if parsed.scheme == "rediss":
-            redis_kwargs.setdefault("ssl", True)
 
         redis_client = redis.from_url(url, **redis_kwargs)
         session = cls(session_id, redis_client=redis_client, **kwargs)
@@ -261,7 +255,7 @@ class RedisSession(SessionABC):
             True if Redis is reachable, False otherwise.
         """
         try:
-            await self._redis.ping()
+            await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
             return True
         except Exception:
             return False

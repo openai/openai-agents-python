@@ -74,7 +74,7 @@ def realtime_handoff(
     """Create a handoff from a RealtimeAgent.
 
     Args:
-        agent: The RealtimeAgent to handoff to, or a function that returns a RealtimeAgent.
+        agent: The RealtimeAgent to handoff to.
         tool_name_override: Optional override for the name of the tool that represents the handoff.
         tool_description_override: Optional override for the description of the tool that
             represents the handoff.

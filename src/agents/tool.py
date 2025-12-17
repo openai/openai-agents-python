@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
@@ -20,6 +20,7 @@ from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from .computer import AsyncComputer, Computer
+from .editor import ApplyPatchEditor
 from .exceptions import ModelBehaviorError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
@@ -373,12 +374,109 @@ class LocalShellTool:
         return "local_shell"
 
 
+@dataclass
+class ShellCallOutcome:
+    """Describes the terminal condition of a shell command."""
+
+    type: Literal["exit", "timeout"]
+    exit_code: int | None = None
+
+
+def _default_shell_outcome() -> ShellCallOutcome:
+    return ShellCallOutcome(type="exit")
+
+
+@dataclass
+class ShellCommandOutput:
+    """Structured output for a single shell command execution."""
+
+    stdout: str = ""
+    stderr: str = ""
+    outcome: ShellCallOutcome = field(default_factory=_default_shell_outcome)
+    command: str | None = None
+    provider_data: dict[str, Any] | None = None
+
+    @property
+    def exit_code(self) -> int | None:
+        return self.outcome.exit_code
+
+    @property
+    def status(self) -> Literal["completed", "timeout"]:
+        return "timeout" if self.outcome.type == "timeout" else "completed"
+
+
+@dataclass
+class ShellResult:
+    """Result returned by a shell executor."""
+
+    output: list[ShellCommandOutput]
+    max_output_length: int | None = None
+    provider_data: dict[str, Any] | None = None
+
+
+@dataclass
+class ShellActionRequest:
+    """Action payload for a next-generation shell call."""
+
+    commands: list[str]
+    timeout_ms: int | None = None
+    max_output_length: int | None = None
+
+
+@dataclass
+class ShellCallData:
+    """Normalized shell call data provided to shell executors."""
+
+    call_id: str
+    action: ShellActionRequest
+    status: Literal["in_progress", "completed"] | None = None
+    raw: Any | None = None
+
+
+@dataclass
+class ShellCommandRequest:
+    """A request to execute a modern shell call."""
+
+    ctx_wrapper: RunContextWrapper[Any]
+    data: ShellCallData
+
+
+ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[Union[str, ShellResult]]]
+"""Executes a shell command sequence and returns either text or structured output."""
+
+
+@dataclass
+class ShellTool:
+    """Next-generation shell tool. LocalShellTool will be deprecated in favor of this."""
+
+    executor: ShellExecutor
+    name: str = "shell"
+
+    @property
+    def type(self) -> str:
+        return "shell"
+
+
+@dataclass
+class ApplyPatchTool:
+    """Hosted apply_patch tool. Lets the model request file mutations via unified diffs."""
+
+    editor: ApplyPatchEditor
+    name: str = "apply_patch"
+
+    @property
+    def type(self) -> str:
+        return "apply_patch"
+
+
 Tool = Union[
     FunctionTool,
     FileSearchTool,
     WebSearchTool,
     ComputerTool,
     HostedMCPTool,
+    ShellTool,
+    ApplyPatchTool,
     LocalShellTool,
     ImageGenerationTool,
     CodeInterpreterTool,
@@ -547,6 +645,13 @@ def function_tool(
                         },
                     )
                 )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool {schema.name} failed")
+                else:
+                    logger.error(
+                        f"Tool {schema.name} failed: {input} {e}",
+                        exc_info=e,
+                    )
                 return result
 
         return FunctionTool(

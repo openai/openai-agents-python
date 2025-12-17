@@ -4,18 +4,18 @@ search:
 ---
 # 暗号化セッション
 
-`EncryptedSession` は任意のセッション実装に透過的な暗号化を提供し、会話データを保護しつつ、古い項目を自動的に期限切れにします。
+`EncryptedSession` は、任意のセッション実装に対して透過的な暗号化を提供し、自動期限切れにより古い項目を保護します。
 
 ## 機能
 
 - **透過的な暗号化**: 任意のセッションを Fernet 暗号化でラップします
-- **セッションごとのキー**: HKDF 鍵導出によりセッションごとに一意の暗号化を行います
-- **自動失効**: TTL が失効した古い項目は静かにスキップされます
-- **ドロップイン置換**: 既存のあらゆるセッション実装で機能します
+- **セッションごとのキー**: HKDF キー導出によりセッションごとに一意の暗号鍵を使用します
+- **自動期限切れ**: TTL の有効期限切れ時には古い項目を静かにスキップします
+- **差し替え可能**: 既存の任意のセッション実装で動作します
 
 ## インストール
 
-暗号化セッションには `encrypt` 追加コンポーネントが必要です:
+暗号化セッションには `encrypt` エクストラが必要です:
 
 ```bash
 pip install openai-agents[encrypt]
@@ -101,7 +101,7 @@ session = EncryptedSession(
 )
 ```
 
-## 異なるセッション種別での使用
+## さまざまなセッションタイプでの使用
 
 ### SQLite セッションでの使用
 
@@ -140,28 +140,28 @@ session = EncryptedSession(
 
 !!! warning "高度なセッション機能"
 
-    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合は、次の点に注意してください。
+    `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合、次の点に注意してください:
 
-    - メッセージ内容が暗号化されるため、`find_turns_by_content()` のようなメソッドは効果的に機能しません
-    - 内容に基づく検索は暗号化データに対して行われるため、効果が制限されます
+    - メッセージ内容が暗号化されるため、`find_turns_by_content()` のようなメソッドは有効に機能しません
+    - コンテンツベースの検索は暗号化データ上で行われるため、有効性が制限されます
 
 
 
-## 鍵導出
+## キー導出
 
-EncryptedSession は HKDF ( HMAC-based Key Derivation Function ) を用いて、セッションごとに一意の暗号化キーを導出します。
+EncryptedSession は HKDF (HMAC-based Key Derivation Function) を使用して、セッションごとに一意の暗号化キーを導出します:
 
-- **マスターキー**: 提供した暗号化キー
+- **マスターキー**: 供給された暗号化キー
 - **セッションソルト**: セッション ID
-- **情報文字列**: `"agents.session-store.hkdf.v1"`
+- **Info 文字列**: `"agents.session-store.hkdf.v1"`
 - **出力**: 32 バイトの Fernet キー
 
-これにより、次が保証されます:
-- 各セッションに一意の暗号化キーがあること
-- マスターキーなしでは鍵を導出できないこと
-- セッションデータは異なるセッション間で復号できないこと
+これにより次が保証されます:
+- 各セッションは一意の暗号化キーを持ちます
+- マスターキーがなければ鍵は導出できません
+- 異なるセッション間でセッションデータは復号できません
 
-## 自動失効
+## 自動期限切れ
 
 項目が TTL を超えた場合、取得時に自動的にスキップされます:
 
@@ -173,7 +173,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API リファレンス
+## API 参照
 
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - メインクラス
-- [`Session`][agents.memory.session.Session] - ベースセッションプロトコル
+- [`Session`][agents.memory.session.Session] - 基本セッションプロトコル

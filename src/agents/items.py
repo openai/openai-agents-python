@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union
+import weakref
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
 
 import pydantic
 from openai.types.responses import (
@@ -72,6 +73,9 @@ TResponseStreamEvent = ResponseStreamEvent
 
 T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
+# Distinguish a missing dict entry from an explicit None value.
+_MISSING_ATTR_SENTINEL = object()
+
 
 @dataclass
 class RunItemBase(Generic[T], abc.ABC):
@@ -83,6 +87,49 @@ class RunItemBase(Generic[T], abc.ABC):
     `openai.types.responses.ResponseOutputItem` or an input item
     (i.e. `openai.types.responses.ResponseInputItemParam`).
     """
+
+    _agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        # Store a weak reference so we can release the strong reference later if desired.
+        self._agent_ref = weakref.ref(self.agent)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "agent":
+            return self._get_agent_via_weakref("agent", "_agent_ref")
+        return super().__getattribute__(name)
+
+    def release_agent(self) -> None:
+        """Release the strong reference to the agent while keeping a weak reference."""
+        if "agent" not in self.__dict__:
+            return
+        agent = self.__dict__["agent"]
+        if agent is None:
+            return
+        self._agent_ref = weakref.ref(agent) if agent is not None else None
+        # Set to None instead of deleting so dataclass repr/asdict keep working.
+        self.__dict__["agent"] = None
+
+    def _get_agent_via_weakref(self, attr_name: str, ref_name: str) -> Any:
+        # Preserve the dataclass field so repr/asdict still read it, but lazily resolve the weakref
+        # when the stored value is None (meaning release_agent already dropped the strong ref).
+        # If the attribute was never overridden we fall back to the default descriptor chain.
+        data = object.__getattribute__(self, "__dict__")
+        value = data.get(attr_name, _MISSING_ATTR_SENTINEL)
+        if value is _MISSING_ATTR_SENTINEL:
+            return object.__getattribute__(self, attr_name)
+        if value is not None:
+            return value
+        ref = object.__getattribute__(self, ref_name)
+        if ref is not None:
+            agent = ref()
+            if agent is not None:
+                return agent
+        return None
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
@@ -131,6 +178,48 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
 
     type: Literal["handoff_output_item"] = "handoff_output_item"
 
+    _source_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+    _target_agent_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        init=False,
+        repr=False,
+        default=None,
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Maintain weak references so downstream code can release the strong references when safe.
+        self._source_agent_ref = weakref.ref(self.source_agent)
+        self._target_agent_ref = weakref.ref(self.target_agent)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "source_agent":
+            # Provide lazy weakref access like the base `agent` field so HandoffOutputItem
+            # callers keep seeing the original agent until GC occurs.
+            return self._get_agent_via_weakref("source_agent", "_source_agent_ref")
+        if name == "target_agent":
+            # Same as above but for the target of the handoff.
+            return self._get_agent_via_weakref("target_agent", "_target_agent_ref")
+        return super().__getattribute__(name)
+
+    def release_agent(self) -> None:
+        super().release_agent()
+        if "source_agent" in self.__dict__:
+            source_agent = self.__dict__["source_agent"]
+            if source_agent is not None:
+                self._source_agent_ref = weakref.ref(source_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["source_agent"] = None
+        if "target_agent" in self.__dict__:
+            target_agent = self.__dict__["target_agent"]
+            if target_agent is not None:
+                self._target_agent_ref = weakref.ref(target_agent)
+            # Preserve dataclass fields for repr/asdict while dropping strong refs.
+            self.__dict__["target_agent"] = None
+
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
@@ -141,12 +230,13 @@ ToolCallItemTypes: TypeAlias = Union[
     ResponseCodeInterpreterToolCall,
     ImageGenerationCall,
     LocalShellCall,
+    dict[str, Any],
 ]
 """A type that represents a tool call item."""
 
 
 @dataclass
-class ToolCallItem(RunItemBase[ToolCallItemTypes]):
+class ToolCallItem(RunItemBase[Any]):
     """Represents a tool call e.g. a function call or computer action call."""
 
     raw_item: ToolCallItemTypes
@@ -155,13 +245,19 @@ class ToolCallItem(RunItemBase[ToolCallItemTypes]):
     type: Literal["tool_call_item"] = "tool_call_item"
 
 
+ToolCallOutputTypes: TypeAlias = Union[
+    FunctionCallOutput,
+    ComputerCallOutput,
+    LocalShellCallOutput,
+    dict[str, Any],
+]
+
+
 @dataclass
-class ToolCallOutputItem(
-    RunItemBase[Union[FunctionCallOutput, ComputerCallOutput, LocalShellCallOutput]]
-):
+class ToolCallOutputItem(RunItemBase[Any]):
     """Represents the output of a tool call."""
 
-    raw_item: FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
+    raw_item: ToolCallOutputTypes
     """The raw item from the model."""
 
     output: Any
@@ -170,6 +266,25 @@ class ToolCallOutputItem(
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    def to_input_item(self) -> TResponseInputItem:
+        """Converts the tool output into an input item for the next model turn.
+
+        Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
+        book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
+        payload we send back to the model while keeping the original raw item intact.
+        """
+
+        if isinstance(self.raw_item, dict):
+            payload = dict(self.raw_item)
+            payload_type = payload.get("type")
+            if payload_type == "shell_call_output":
+                payload.pop("status", None)
+                payload.pop("shell_output", None)
+                payload.pop("provider_data", None)
+            return cast(TResponseInputItem, payload)
+
+        return super().to_input_item()
 
 
 @dataclass

@@ -42,6 +42,7 @@ from openai.types.responses.response_reasoning_text_done_event import (
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from ..items import TResponseStreamEvent
+from .chatcmpl_helpers import ChatCmplHelpers
 from .fake_id import FAKE_RESPONSES_ID
 
 
@@ -97,12 +98,15 @@ class ChatCmplStreamHandler:
                 )
 
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM
-            usage = chunk.usage if hasattr(chunk, "usage") else None
+            # Only update when chunk has usage data (not always in the last chunk)
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                usage = chunk.usage
 
             if not chunk.choices or not chunk.choices[0].delta:
                 continue
 
             delta = chunk.choices[0].delta
+            choice_logprobs = chunk.choices[0].logprobs
 
             # Handle thinking blocks from Anthropic (for preserving signatures)
             if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
@@ -264,6 +268,15 @@ class ChatCmplStreamHandler:
                         type="response.content_part.added",
                         sequence_number=sequence_number.get_and_increment(),
                     )
+                delta_logprobs = (
+                    ChatCmplHelpers.convert_logprobs_for_text_delta(
+                        choice_logprobs.content if choice_logprobs else None
+                    )
+                    or []
+                )
+                output_logprobs = ChatCmplHelpers.convert_logprobs_for_output_text(
+                    choice_logprobs.content if choice_logprobs else None
+                )
                 # Emit the delta for this segment of content
                 yield ResponseTextDeltaEvent(
                     content_index=state.text_content_index_and_output[0],
@@ -273,10 +286,15 @@ class ChatCmplStreamHandler:
                     is not None,  # fixed 0 -> 0 or 1
                     type="response.output_text.delta",
                     sequence_number=sequence_number.get_and_increment(),
-                    logprobs=[],
+                    logprobs=delta_logprobs,
                 )
                 # Accumulate the text into the response part
                 state.text_content_index_and_output[1].text += delta.content
+                if output_logprobs:
+                    existing_logprobs = state.text_content_index_and_output[1].logprobs or []
+                    state.text_content_index_and_output[1].logprobs = (
+                        existing_logprobs + output_logprobs
+                    )
 
             # Handle refusals (model declines to answer)
             # This is always set by the OpenAI API, but not by others e.g. LiteLLM

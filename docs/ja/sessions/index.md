@@ -4,9 +4,9 @@ search:
 ---
 # セッション
 
-Agents SDK は、エージェントの複数回の実行にわたって会話履歴を自動的に維持するための組み込みセッションメモリを提供し、ターン間で `.to_input_list()` を手動で扱う必要をなくします。
+Agents SDK は、複数のエージェント実行にまたがる会話履歴を自動で保持する組み込みのセッションメモリを提供し、ターン間で手動で `.to_input_list()` を扱う必要をなくします。
 
-セッションは特定のセッションに対して会話履歴を保存し、明示的な手動メモリ管理なしにエージェントがコンテキストを維持できるようにします。これは、チャットアプリケーションや、エージェントに過去のやり取りを覚えさせたいマルチターン会話の構築に特に有用です。
+セッションは特定のセッションの会話履歴を保存し、明示的な手動メモリ管理を行わなくてもエージェントがコンテキストを維持できるようにします。これは、チャットアプリケーションや、エージェントにこれまでのやり取りを覚えていてほしいマルチターンの会話を構築する際に特に有用です。
 
 ## クイックスタート
 
@@ -51,11 +51,11 @@ print(result.final_output)  # "Approximately 39 million"
 
 セッションメモリが有効な場合:
 
-1. **各実行の前**: ランナー (runner) はセッションの会話履歴を自動的に取得し、入力アイテムの先頭に追加します。
-2. **各実行の後**: 実行中に生成された新しいアイテム (ユーザー入力、アシスタントの応答、ツール呼び出しなど) はすべて自動的にセッションに保存されます。
-3. **コンテキストの保存**: 同じセッションでの以降の実行は、完全な会話履歴を含むため、エージェントはコンテキストを維持できます。
+1. **各実行の前**: ランナーはセッションの会話履歴を自動で取得し、入力アイテムの先頭に追加します。
+2. **各実行の後**: 実行中に生成されたすべての新規アイテム（ユーザー入力、アシスタントの応答、ツール呼び出しなど）は自動的にセッションへ保存されます。
+3. **コンテキストの保持**: 同じセッションでの後続の実行には完全な会話履歴が含まれ、エージェントはコンテキストを維持できます。
 
-これにより、`.to_input_list()` を手動で呼び出し、実行間の会話状態を管理する必要がなくなります。
+これにより、手動で `.to_input_list()` を呼び出し、実行間で会話状態を管理する必要がなくなります。
 
 ## メモリ操作
 
@@ -88,7 +88,7 @@ await session.clear_session()
 
 ### 修正のための pop_item の使用
 
-`pop_item` メソッドは、会話の最後のアイテムを取り消したり変更したりしたい場合に特に便利です:
+`pop_item` メソッドは、会話内の最後のアイテムを取り消したり変更したいときに特に便利です:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -117,13 +117,13 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## セッションの種類
+## セッションタイプ
 
-SDK は用途に応じた複数のセッション実装を提供します:
+SDK は、ユースケースに応じたいくつかのセッション実装を提供します:
 
 ### OpenAI Conversations API セッション
 
-`OpenAIConversationsSession` を通じて [OpenAI の Conversations API](https://platform.openai.com/docs/api-reference/conversations) を使用します。
+`OpenAIConversationsSession` を使用して [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations) を利用します。
 
 ```python
 from agents import Agent, Runner, OpenAIConversationsSession
@@ -159,7 +159,7 @@ print(result.final_output)  # "California"
 
 ### SQLite セッション
 
-デフォルトの軽量な SQLite ベースのセッション実装です:
+デフォルトの軽量な SQLite を用いたセッション実装:
 
 ```python
 from agents import SQLiteSession
@@ -180,7 +180,7 @@ result = await Runner.run(
 
 ### SQLAlchemy セッション
 
-SQLAlchemy がサポートする任意のデータベースを使用できる本番対応のセッションです:
+任意の SQLAlchemy 対応データベースを使用できる本番運用向けセッション:
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
@@ -198,13 +198,13 @@ engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
 session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 ```
 
-詳細なドキュメントは [SQLAlchemy セッション](sqlalchemy_session.md) を参照してください。
+詳細なドキュメントは [SQLAlchemy Sessions](sqlalchemy_session.md) を参照してください。
 
 
 
-### 高度な SQLite セッション
+### 高機能 SQLite セッション
 
-会話の分岐、利用分析、構造化クエリを備えた強化版 SQLite セッションです:
+会話の分岐、利用状況分析、構造化クエリを備えた強化版 SQLite セッション:
 
 ```python
 from agents.extensions.memory import AdvancedSQLiteSession
@@ -224,11 +224,11 @@ await session.store_run_usage(result)  # Track token usage
 await session.create_branch_from_turn(2)  # Branch from turn 2
 ```
 
-詳細なドキュメントは [高度な SQLite セッション](advanced_sqlite_session.md) を参照してください。
+詳細なドキュメントは [Advanced SQLite Sessions](advanced_sqlite_session.md) を参照してください。
 
 ### 暗号化セッション
 
-任意のセッション実装に対する透過的な暗号化ラッパーです:
+任意のセッション実装に対する透過的な暗号化ラッパー:
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -251,7 +251,7 @@ session = EncryptedSession(
 result = await Runner.run(agent, "Hello", session=session)
 ```
 
-詳細なドキュメントは [暗号化セッション](encrypted_session.md) を参照してください。
+詳細なドキュメントは [Encrypted Sessions](encrypted_session.md) を参照してください。
 
 ### その他のセッションタイプ
 
@@ -261,22 +261,21 @@ result = await Runner.run(agent, "Hello", session=session)
 
 ### セッション ID の命名
 
-会話を整理しやすい意味のあるセッション ID を使用します:
+会話を整理するのに役立つ意味のあるセッション ID を使用します:
 
-- ユーザー単位: `"user_12345"`
-- スレッド単位: `"thread_abc123"`
-- コンテキスト単位: `"support_ticket_456"`
+- User ベース: `"user_12345"`
+- スレッドベース: `"thread_abc123"`
+- コンテキストベース: `"support_ticket_456"`
 
-### メモリの永続化
+### メモリ永続化
 
-- 一時的な会話にはインメモリ SQLite (`SQLiteSession("session_id")`) を使用します
-- 永続的な会話にはファイルベースの SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) を使用します
-- 既存の SQLAlchemy がサポートするデータベースを用いる本番システムには SQLAlchemy ベースのセッション (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) を使用します
-- クラウドネイティブな本番デプロイで、組み込みテレメトリー、トレーシング、データ分離に対応し、かつ 
-30+ のデータベースバックエンドをサポートする場合は Dapr ステートストアセッション (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) を使用します
-- 履歴を OpenAI Conversations API に保存したい場合は OpenAI がホストするストレージ (`OpenAIConversationsSession()`) を使用します
-- 透過的な暗号化と TTL ベースの有効期限で任意のセッションをラップするには暗号化セッション (`EncryptedSession(session_id, underlying_session, encryption_key)`) を使用します
-- より高度なユースケースに向けて、他の本番システム (Redis、Django など) 向けのカスタムセッションバックエンドの実装も検討してください
+- 一時的な会話にはインメモリ SQLite（`SQLiteSession("session_id")`）を使用します
+- 永続的な会話にはファイルベース SQLite（`SQLiteSession("session_id", "path/to/db.sqlite")`）を使用します
+- 既存の SQLAlchemy 対応データベースを備えた本番システムには SQLAlchemy 駆動のセッション（`SQLAlchemySession("session_id", engine=engine, create_tables=True)`）を使用します
+- クラウドネイティブな本番デプロイには Dapr ステートストアセッション（`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`）を使用します。組み込みのテレメトリー、トレーシング、データ分離を備え、30+ のデータベースバックエンドをサポートします
+- 履歴を OpenAI Conversations API に保存したい場合は OpenAI ホスト型ストレージ（`OpenAIConversationsSession()`）を使用します
+- あらゆるセッションに透過的な暗号化と TTL ベースの有効期限を付与するには暗号化セッション（`EncryptedSession(session_id, underlying_session, encryption_key)`）を使用します
+- さらに高度なユースケース向けに、他の本番システム（Redis、Django など）用のカスタムセッションバックエンドの実装も検討してください
 
 ### 複数セッション
 
@@ -324,7 +323,7 @@ result2 = await Runner.run(
 
 ## 完全な例
 
-以下は、セッションメモリの動作を示す完全な例です:
+セッションメモリが実際にどのように動作するかを示す完全な例です:
 
 ```python
 import asyncio
@@ -388,7 +387,7 @@ if __name__ == "__main__":
 
 ## カスタムセッション実装
 
-[`Session`][agents.memory.session.Session] プロトコルに準拠するクラスを作成することで、独自のセッションメモリを実装できます:
+[`Session`][agents.memory.session.Session] プロトコルに従うクラスを作成することで、独自のセッションメモリを実装できます:
 
 ```python
 from agents.memory.session import SessionABC
@@ -431,6 +430,16 @@ result = await Runner.run(
 )
 ```
 
+## コミュニティ製セッション実装
+
+コミュニティによって追加のセッション実装が開発されています:
+
+| パッケージ | 説明 |
+|---------|-------------|
+| [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | 任意の Django 対応データベース（PostgreSQL、MySQL、SQLite など）向けの Django ORM ベースのセッション |
+
+セッション実装を作成された場合は、ここに追加するためのドキュメント PR をぜひお寄せください。
+
 ## API リファレンス
 
 詳細な API ドキュメントは次を参照してください:
@@ -438,7 +447,7 @@ result = await Runner.run(
 - [`Session`][agents.memory.session.Session] - プロトコルインターフェース
 - [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API 実装
 - [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - 基本的な SQLite 実装
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy ベースの実装
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 駆動の実装
 - [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr ステートストア実装
 - [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 分岐と分析を備えた強化版 SQLite
-- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 任意のセッション向け暗号化ラッパー
+- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 任意のセッション向けの暗号化ラッパー

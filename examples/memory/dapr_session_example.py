@@ -417,8 +417,8 @@ async def demonstrate_multi_store():
             r_items = await redis_session.get_items()
             p_items = await pg_session.get_items()
 
-            r_example = r_items[-1]["content"] if r_items else "empty"
-            p_example = p_items[-1]["content"] if p_items else "empty"
+            r_example = r_items[-1]["content"] if r_items else "empty"  # type: ignore[typeddict-item]
+            p_example = p_items[-1]["content"] if p_items else "empty"  # type: ignore[typeddict-item]
 
             print(f"{redis_store}: {len(r_items)} items; example: {r_example}")
             print(f"{pg_store}: {len(p_items)} items; example: {p_example}")

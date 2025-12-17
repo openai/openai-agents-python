@@ -182,7 +182,7 @@ async def _create_test_session(
     session = DaprSession(
         session_id=session_id,
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
 
     # Clean up any existing data
@@ -260,12 +260,12 @@ async def test_session_isolation(fake_dapr_client: FakeDaprClient):
     session1 = DaprSession(
         session_id="session_1",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
     session2 = DaprSession(
         session_id="session_2",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
 
     try:
@@ -386,7 +386,7 @@ async def test_pop_from_empty_session(fake_dapr_client: FakeDaprClient):
     session = DaprSession(
         session_id="empty_session",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
     try:
         await session.clear_session()
@@ -540,7 +540,7 @@ async def test_dapr_connectivity(fake_dapr_client: FakeDaprClient):
     session = DaprSession(
         session_id="connectivity_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
     try:
         # Test ping
@@ -555,7 +555,7 @@ async def test_ttl_functionality(fake_dapr_client: FakeDaprClient):
     session = DaprSession(
         session_id="ttl_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
         ttl=3600,  # 1 hour TTL
     )
 
@@ -586,7 +586,7 @@ async def test_consistency_levels(fake_dapr_client: FakeDaprClient):
     session_eventual = DaprSession(
         session_id="eventual_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
         consistency=DAPR_CONSISTENCY_EVENTUAL,
     )
 
@@ -594,7 +594,7 @@ async def test_consistency_levels(fake_dapr_client: FakeDaprClient):
     session_strong = DaprSession(
         session_id="strong_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
         consistency=DAPR_CONSISTENCY_STRONG,
     )
 
@@ -621,7 +621,7 @@ async def test_external_client_not_closed(fake_dapr_client: FakeDaprClient):
     session = DaprSession(
         session_id="external_client_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
 
     try:
@@ -650,7 +650,7 @@ async def test_internal_client_ownership(fake_dapr_client: FakeDaprClient):
     session = DaprSession(
         session_id="internal_client_test",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
     session._owns_client = True  # Simulate ownership
 
@@ -732,7 +732,7 @@ async def test_close_method_coverage(fake_dapr_client: FakeDaprClient):
     session1 = DaprSession(
         session_id="close_test_1",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
 
     # Verify _owns_client is False for external client
@@ -749,7 +749,7 @@ async def test_close_method_coverage(fake_dapr_client: FakeDaprClient):
     session2 = DaprSession(
         session_id="close_test_2",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client2,
+        dapr_client=fake_dapr_client2,  # type: ignore[arg-type]
     )
     session2._owns_client = True  # Simulate ownership
 
@@ -788,8 +788,8 @@ async def test_already_deserialized_messages(fake_dapr_client: FakeDaprClient):
     # Should handle both string and dict messages
     items = await session.get_items()
     assert len(items) == 2
-    assert items[0]["content"] == "First message"
-    assert items[1]["content"] == "Second message"
+    assert items[0]["content"] == "First message"  # type: ignore[typeddict-item]
+    assert items[1]["content"] == "Second message"  # type: ignore[typeddict-item]
 
     await session.close()
 
@@ -800,7 +800,7 @@ async def test_context_manager(fake_dapr_client: FakeDaprClient):
     async with DaprSession(
         "test_cm_session",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     ) as session:
         # Verify we got the session object back
         assert session.session_id == "test_cm_session"
@@ -809,7 +809,7 @@ async def test_context_manager(fake_dapr_client: FakeDaprClient):
         await session.add_items([{"role": "user", "content": "Test message"}])
         items = await session.get_items()
         assert len(items) == 1
-        assert items[0]["content"] == "Test message"
+        assert items[0]["content"] == "Test message"  # type: ignore[typeddict-item]
 
     # After exiting context manager, close should have been called
     # Verify we can still check the state (fake client doesn't truly disconnect)
@@ -819,7 +819,7 @@ async def test_context_manager(fake_dapr_client: FakeDaprClient):
     owned_session = DaprSession(
         "test_cm_owned",
         state_store_name="statestore",
-        dapr_client=fake_dapr_client,
+        dapr_client=fake_dapr_client,  # type: ignore[arg-type]
     )
     # Manually set ownership to simulate from_address behavior
     owned_session._owns_client = True

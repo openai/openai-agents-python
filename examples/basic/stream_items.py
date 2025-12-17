@@ -31,7 +31,7 @@ async def main():
             continue
         elif event.type == "run_item_stream_event":
             if event.item.type == "tool_call_item":
-                print("-- Tool was called")
+                print(f"-- Tool was called: {getattr(event.item.raw_item, 'name', 'Unknown Tool')}")
             elif event.item.type == "tool_call_output_item":
                 print(f"-- Tool output: {event.item.output}")
             elif event.item.type == "message_output_item":
@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     # === Run starting ===
     # Agent updated: Joker
-    # -- Tool was called
+    # -- Tool was called: how_many_jokes
     # -- Tool output: 4
     # -- Message output:
     #  Sure, here are four jokes for you:

@@ -6,12 +6,16 @@ from typing import Any
 import httpx
 import pytest
 from openai import AsyncOpenAI, omit
-from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_tool_call import (  # type: ignore[attr-defined]
     ChatCompletionMessageFunctionToolCall,
     Function,
+)
+from openai.types.chat.chat_completion_token_logprob import (
+    ChatCompletionTokenLogprob,
+    TopLogprob,
 )
 from openai.types.completion_usage import (
     CompletionUsage,
@@ -96,6 +100,65 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens_details.cached_tokens == 3
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_attaches_logprobs(monkeypatch) -> None:
+    msg = ChatCompletionMessage(role="assistant", content="Hi!")
+    choice = Choice(
+        index=0,
+        finish_reason="stop",
+        message=msg,
+        logprobs=ChoiceLogprobs(
+            content=[
+                ChatCompletionTokenLogprob(
+                    token="Hi",
+                    logprob=-0.5,
+                    bytes=[1],
+                    top_logprobs=[TopLogprob(token="Hi", logprob=-0.5, bytes=[1])],
+                ),
+                ChatCompletionTokenLogprob(
+                    token="!",
+                    logprob=-0.1,
+                    bytes=[2],
+                    top_logprobs=[TopLogprob(token="!", logprob=-0.1, bytes=[2])],
+                ),
+            ]
+        ),
+    )
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], ResponseOutputMessage)
+    text_part = resp.output[0].content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.logprobs is not None
+    assert [lp.token for lp in text_part.logprobs] == ["Hi", "!"]
 
 
 @pytest.mark.allow_call_model_methods
