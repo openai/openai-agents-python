@@ -132,12 +132,15 @@ class AdvancedSQLiteSession(SQLiteSession):
         """Get items from current or specified branch.
 
         Args:
-            limit: Maximum number of items to return. If None, returns all items.
+            limit: Maximum number of items to return. If None, uses session_settings.limit.
             branch_id: Branch to get items from. If None, uses current branch.
 
         Returns:
             List of conversation items from the specified branch.
         """
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
+        
         if branch_id is None:
             branch_id = self._current_branch_id
 
@@ -148,7 +151,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
                 with self._lock if self._is_memory_db else threading.Lock():
                     with closing(conn.cursor()) as cursor:
-                        if limit is None:
+                        if session_limit is None:
                             cursor.execute(
                                 """
                                 SELECT m.message_data
@@ -169,11 +172,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 ORDER BY s.sequence_number DESC
                                 LIMIT ?
                             """,
-                                (self.session_id, branch_id, limit),
+                                (self.session_id, branch_id, session_limit),
                             )
 
                         rows = cursor.fetchall()
-                        if limit is not None:
+                        if session_limit is not None:
                             rows = list(reversed(rows))
 
                     items = []
@@ -194,7 +197,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
-                    if limit is None:
+                    if session_limit is None:
                         cursor.execute(
                             """
                             SELECT m.message_data
@@ -215,11 +218,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                             ORDER BY s.sequence_number DESC
                             LIMIT ?
                         """,
-                            (self.session_id, branch_id, limit),
+                            (self.session_id, branch_id, session_limit),
                         )
 
                     rows = cursor.fetchall()
-                    if limit is not None:
+                    if session_limit is not None:
                         rows = list(reversed(rows))
 
                 items = []
