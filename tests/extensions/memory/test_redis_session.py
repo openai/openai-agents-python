@@ -794,3 +794,214 @@ async def test_close_method_coverage():
 
     # This should trigger the close path for owned clients
     await session2.close()
+
+
+# ============================================================================
+# SessionSettings Tests
+# ============================================================================
+
+
+async def test_session_settings_default():
+    """Test that session_settings defaults to empty SessionSettings."""
+    from agents.memory import SessionSettings
+
+    session = await _create_test_session()
+
+    try:
+        # Should have default SessionSettings
+        assert isinstance(session.session_settings, SessionSettings)
+        assert session.session_settings.limit is None
+    finally:
+        await session.close()
+
+
+async def test_session_settings_constructor():
+    """Test passing session_settings via constructor."""
+    from agents.memory import SessionSettings
+
+    if USE_FAKE_REDIS:
+        session = RedisSession(
+            session_id="settings_test",
+            redis_client=fake_redis,
+            key_prefix="test:",
+            session_settings=SessionSettings(limit=5)
+        )
+    else:
+        session = RedisSession.from_url(
+            "settings_test",
+            url=REDIS_URL,
+            session_settings=SessionSettings(limit=5)
+        )
+
+    try:
+        assert session.session_settings.limit == 5
+    finally:
+        await session.close()
+
+
+async def test_session_settings_from_url():
+    """Test passing session_settings via from_url."""
+    if USE_FAKE_REDIS:
+        pytest.skip("from_url test requires real Redis server")
+
+    from agents.memory import SessionSettings
+
+    session = RedisSession.from_url(
+        "from_url_settings_test",
+        url=REDIS_URL,
+        session_settings=SessionSettings(limit=10)
+    )
+
+    try:
+        if not await session.ping():
+            pytest.skip("Redis server not available")
+        assert session.session_settings.limit == 10
+    finally:
+        await session.close()
+
+
+async def test_get_items_uses_session_settings_limit():
+    """Test that get_items uses session_settings.limit as default."""
+    from agents.memory import SessionSettings
+
+    if USE_FAKE_REDIS:
+        session = RedisSession(
+            session_id="uses_settings_limit_test",
+            redis_client=fake_redis,
+            key_prefix="test:",
+            session_settings=SessionSettings(limit=3)
+        )
+    else:
+        session = RedisSession.from_url(
+            "uses_settings_limit_test",
+            url=REDIS_URL,
+            session_settings=SessionSettings(limit=3)
+        )
+
+    try:
+        await session.clear_session()
+
+        # Add 5 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"}
+            for i in range(5)
+        ]
+        await session.add_items(items)
+
+        # get_items() with no limit should use session_settings.limit=3
+        retrieved = await session.get_items()
+        assert len(retrieved) == 3
+        # Should get the last 3 items
+        assert retrieved[0].get("content") == "Message 2"
+        assert retrieved[1].get("content") == "Message 3"
+        assert retrieved[2].get("content") == "Message 4"
+    finally:
+        await session.close()
+
+
+async def test_get_items_explicit_limit_overrides_session_settings():
+    """Test that explicit limit parameter overrides session_settings."""
+    from agents.memory import SessionSettings
+
+    if USE_FAKE_REDIS:
+        session = RedisSession(
+            session_id="explicit_override_test",
+            redis_client=fake_redis,
+            key_prefix="test:",
+            session_settings=SessionSettings(limit=5)
+        )
+    else:
+        session = RedisSession.from_url(
+            "explicit_override_test",
+            url=REDIS_URL,
+            session_settings=SessionSettings(limit=5)
+        )
+
+    try:
+        await session.clear_session()
+
+        # Add 10 items
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Message {i}"}
+            for i in range(10)
+        ]
+        await session.add_items(items)
+
+        # Explicit limit=2 should override session_settings.limit=5
+        retrieved = await session.get_items(limit=2)
+        assert len(retrieved) == 2
+        assert retrieved[0].get("content") == "Message 8"
+        assert retrieved[1].get("content") == "Message 9"
+    finally:
+        await session.close()
+
+
+async def test_session_settings_resolve():
+    """Test SessionSettings.resolve() method."""
+    from agents.memory import SessionSettings
+
+    base = SessionSettings(limit=100)
+    override = SessionSettings(limit=50)
+
+    final = base.resolve(override)
+
+    assert final.limit == 50  # Override wins
+    assert base.limit == 100  # Original unchanged
+
+    # Resolving with None returns self
+    final_none = base.resolve(None)
+    assert final_none.limit == 100
+
+
+async def test_runner_with_session_settings_override():
+    """Test that RunConfig can override session's default settings."""
+    from agents import Agent, RunConfig, Runner
+    from agents.memory import SessionSettings
+    from tests.fake_model import FakeModel
+    from tests.test_responses import get_text_message
+
+    if USE_FAKE_REDIS:
+        session = RedisSession(
+            session_id="runner_override_test",
+            redis_client=fake_redis,
+            key_prefix="test:",
+            session_settings=SessionSettings(limit=100)
+        )
+    else:
+        session = RedisSession.from_url(
+            "runner_override_test",
+            url=REDIS_URL,
+            session_settings=SessionSettings(limit=100)
+        )
+
+    try:
+        await session.clear_session()
+
+        # Add some history
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"Turn {i}"}
+            for i in range(10)
+        ]
+        await session.add_items(items)
+
+        model = FakeModel()
+        agent = Agent(name="test", model=model)
+        model.set_next_output([get_text_message("Got it")])
+
+        result = await Runner.run(
+            agent,
+            "New question",
+            session=session,
+            run_config=RunConfig(
+                session_settings=SessionSettings(limit=2)  # Override to 2
+            )
+        )
+
+        # Verify the agent received only the last 2 history items + new question
+        last_input = model.last_turn_args["input"]
+        # Filter out the new "New question" input
+        history_items = [item for item in last_input if item.get("content") != "New question"]
+        # Should have 2 history items (last two from the 10 we added)
+        assert len(history_items) == 2
+    finally:
+        await session.close()

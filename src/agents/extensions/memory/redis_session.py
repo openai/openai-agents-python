@@ -36,6 +36,7 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
+from ...memory.session_settings import SessionSettings
 
 
 class RedisSession(SessionABC):
@@ -48,6 +49,7 @@ class RedisSession(SessionABC):
         redis_client: Redis,
         key_prefix: str = "agents:session",
         ttl: int | None = None,
+        session_settings: SessionSettings | None = None,
     ):
         """Initializes a new RedisSession.
 
@@ -58,8 +60,11 @@ class RedisSession(SessionABC):
                 Defaults to "agents:session".
             ttl (int | None, optional): Time-to-live in seconds for session data.
                 If None, data persists indefinitely. Defaults to None.
+            session_settings (SessionSettings | None): Session configuration settings including
+                default limit for retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
+        self.session_settings = session_settings or SessionSettings()
         self._redis = redis_client
         self._key_prefix = key_prefix
         self._ttl = ttl
@@ -78,6 +83,7 @@ class RedisSession(SessionABC):
         *,
         url: str,
         redis_kwargs: dict[str, Any] | None = None,
+        session_settings: SessionSettings | None = None,
         **kwargs: Any,
     ) -> RedisSession:
         """Create a session from a Redis URL string.
@@ -87,6 +93,8 @@ class RedisSession(SessionABC):
             url (str): Redis URL, e.g. "redis://localhost:6379/0" or "rediss://host:6380".
             redis_kwargs (dict[str, Any] | None): Additional keyword arguments forwarded to
                 redis.asyncio.from_url.
+            session_settings (SessionSettings | None): Session configuration settings including
+                default limit for retrieving items. If None, uses default SessionSettings().
             **kwargs: Additional keyword arguments forwarded to the main constructor
                 (e.g., key_prefix, ttl, etc.).
 
@@ -96,7 +104,7 @@ class RedisSession(SessionABC):
         redis_kwargs = redis_kwargs or {}
 
         redis_client = redis.from_url(url, **redis_kwargs)
-        session = cls(session_id, redis_client=redis_client, **kwargs)
+        session = cls(session_id, redis_client=redis_client, session_settings=session_settings, **kwargs)
         session._owns_client = True  # We created the client, so we own it
         return session
 
@@ -129,22 +137,25 @@ class RedisSession(SessionABC):
         """Retrieve the conversation history for this session.
 
         Args:
-            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
 
         Returns:
             List of input items representing the conversation history
         """
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
+        
         async with self._lock:
-            if limit is None:
+            if session_limit is None:
                 # Get all messages in chronological order
                 raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
             else:
-                if limit <= 0:
+                if session_limit <= 0:
                     return []
                 # Get the latest N messages (Redis list is ordered chronologically)
                 # Use negative indices to get from the end - Redis uses -N to -1 for last N items
-                raw_messages = await self._redis.lrange(self._messages_key, -limit, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                raw_messages = await self._redis.lrange(self._messages_key, -session_limit, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
 
             items: list[TResponseInputItem] = []
             for raw_msg in raw_messages:
