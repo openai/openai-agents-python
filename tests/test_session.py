@@ -590,10 +590,7 @@ async def test_session_settings_constructor():
     """Test passing session_settings via constructor."""
     from agents.memory import SessionSettings
 
-    session = SQLiteSession(
-        "constructor_settings_test",
-        session_settings=SessionSettings(limit=5)
-    )
+    session = SQLiteSession("constructor_settings_test", session_settings=SessionSettings(limit=5))
 
     assert session.session_settings.limit == 5
 
@@ -608,15 +605,12 @@ async def test_get_items_uses_session_settings_limit():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_settings_limit.db"
         session = SQLiteSession(
-            "uses_settings_limit_test",
-            db_path,
-            session_settings=SessionSettings(limit=3)
+            "uses_settings_limit_test", db_path, session_settings=SessionSettings(limit=3)
         )
 
         # Add 5 items
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Message {i}"}
-            for i in range(5)
+            {"role": "user", "content": f"Message {i}"} for i in range(5)
         ]
         await session.add_items(items)
 
@@ -639,15 +633,12 @@ async def test_get_items_explicit_limit_overrides_session_settings():
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_override.db"
         session = SQLiteSession(
-            "explicit_override_test",
-            db_path,
-            session_settings=SessionSettings(limit=5)
+            "explicit_override_test", db_path, session_settings=SessionSettings(limit=5)
         )
 
         # Add 10 items
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Message {i}"}
-            for i in range(10)
+            {"role": "user", "content": f"Message {i}"} for i in range(10)
         ]
         await session.add_items(items)
 
@@ -685,18 +676,15 @@ async def test_runner_with_session_settings_override():
 
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_runner_override.db"
-        
+
         # Session with default limit=100
         session = SQLiteSession(
-            "runner_override_test",
-            db_path,
-            session_settings=SessionSettings(limit=100)
+            "runner_override_test", db_path, session_settings=SessionSettings(limit=100)
         )
 
         # Add some history
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Turn {i}"}
-            for i in range(10)
+            {"role": "user", "content": f"Turn {i}"} for i in range(10)
         ]
         await session.add_items(items)
 
@@ -704,13 +692,13 @@ async def test_runner_with_session_settings_override():
         agent = Agent(name="test", model=model)
         model.set_next_output([get_text_message("Got it")])
 
-        result = await Runner.run(
+        await Runner.run(
             agent,
             "New question",
             session=session,
             run_config=RunConfig(
                 session_settings=SessionSettings(limit=2)  # Override to 2
-            )
+            ),
         )
 
         # Verify the agent received only the last 2 history items + new question

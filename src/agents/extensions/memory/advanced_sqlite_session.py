@@ -147,7 +147,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         """
         # Use session settings limit if no explicit limit provided
         session_limit = limit if limit is not None else self.session_settings.limit
-        
+
         if branch_id is None:
             branch_id = self._current_branch_id
 

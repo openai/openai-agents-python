@@ -13,7 +13,6 @@ class SimpleListSession(Session):
         self.session_settings = SessionSettings()
         self._items: list[TResponseInputItem] = []
 
-
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         if limit is None:
             return list(self._items)

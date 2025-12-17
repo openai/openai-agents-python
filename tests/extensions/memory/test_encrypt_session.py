@@ -344,11 +344,7 @@ async def test_session_settings_delegated_to_underlying(encryption_key: str):
 
     temp_dir = tempfile.mkdtemp()
     db_path = Path(temp_dir) / "test_settings.db"
-    underlying = SQLiteSession(
-        "test_session",
-        db_path,
-        session_settings=SessionSettings(limit=5)
-    )
+    underlying = SQLiteSession("test_session", db_path, session_settings=SessionSettings(limit=5))
 
     session = EncryptedSession(
         session_id="test_session",
@@ -368,11 +364,7 @@ async def test_session_settings_get_items_uses_underlying_limit(encryption_key: 
 
     temp_dir = tempfile.mkdtemp()
     db_path = Path(temp_dir) / "test_settings_limit.db"
-    underlying = SQLiteSession(
-        "test_session",
-        db_path,
-        session_settings=SessionSettings(limit=3)
-    )
+    underlying = SQLiteSession("test_session", db_path, session_settings=SessionSettings(limit=3))
 
     session = EncryptedSession(
         session_id="test_session",
@@ -382,8 +374,7 @@ async def test_session_settings_get_items_uses_underlying_limit(encryption_key: 
 
     # Add 5 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(5)
+        {"role": "user", "content": f"Message {i}"} for i in range(5)
     ]
     await session.add_items(items)
 
@@ -404,11 +395,7 @@ async def test_session_settings_explicit_limit_overrides_settings(encryption_key
 
     temp_dir = tempfile.mkdtemp()
     db_path = Path(temp_dir) / "test_override.db"
-    underlying = SQLiteSession(
-        "test_session",
-        db_path,
-        session_settings=SessionSettings(limit=5)
-    )
+    underlying = SQLiteSession("test_session", db_path, session_settings=SessionSettings(limit=5))
 
     session = EncryptedSession(
         session_id="test_session",
@@ -418,8 +405,7 @@ async def test_session_settings_explicit_limit_overrides_settings(encryption_key
 
     # Add 10 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(10)
+        {"role": "user", "content": f"Message {i}"} for i in range(10)
     ]
     await session.add_items(items)
 
@@ -458,11 +444,7 @@ async def test_runner_with_session_settings_override(encryption_key: str):
 
     temp_dir = tempfile.mkdtemp()
     db_path = Path(temp_dir) / "test_runner_override.db"
-    underlying = SQLiteSession(
-        "test_session",
-        db_path,
-        session_settings=SessionSettings(limit=100)
-    )
+    underlying = SQLiteSession("test_session", db_path, session_settings=SessionSettings(limit=100))
 
     session = EncryptedSession(
         session_id="test_session",
@@ -471,23 +453,20 @@ async def test_runner_with_session_settings_override(encryption_key: str):
     )
 
     # Add some history
-    items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Turn {i}"}
-        for i in range(10)
-    ]
+    items: list[TResponseInputItem] = [{"role": "user", "content": f"Turn {i}"} for i in range(10)]
     await session.add_items(items)
 
     model = FakeModel()
     agent = Agent(name="test", model=model)
     model.set_next_output([get_text_message("Got it")])
 
-    result = await Runner.run(
+    await Runner.run(
         agent,
         "New question",
         session=session,
         run_config=RunConfig(
             session_settings=SessionSettings(limit=2)  # Override to 2
-        )
+        ),
     )
 
     # Verify the agent received only the last 2 history items + new question

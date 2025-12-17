@@ -468,9 +468,7 @@ class TestOpenAIConversationsSessionSettings:
         from agents.memory import SessionSettings
 
         session = OpenAIConversationsSession(
-            openai_client=mock_openai_client,
-            session_settings=SessionSettings(limit=5)
+            openai_client=mock_openai_client, session_settings=SessionSettings(limit=5)
         )
 
         assert session.session_settings.limit == 5
-

@@ -1013,7 +1013,7 @@ async def test_session_settings_constructor():
     session = AdvancedSQLiteSession(
         session_id="constructor_settings_test",
         create_tables=True,
-        session_settings=SessionSettings(limit=5)
+        session_settings=SessionSettings(limit=5),
     )
 
     assert session.session_settings.limit == 5
@@ -1028,13 +1028,12 @@ async def test_get_items_uses_session_settings_limit():
     session = AdvancedSQLiteSession(
         session_id="uses_settings_limit_test",
         create_tables=True,
-        session_settings=SessionSettings(limit=3)
+        session_settings=SessionSettings(limit=3),
     )
 
     # Add 5 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(5)
+        {"role": "user", "content": f"Message {i}"} for i in range(5)
     ]
     await session.add_items(items)
 
@@ -1056,13 +1055,12 @@ async def test_get_items_explicit_limit_overrides_session_settings():
     session = AdvancedSQLiteSession(
         session_id="explicit_override_test",
         create_tables=True,
-        session_settings=SessionSettings(limit=5)
+        session_settings=SessionSettings(limit=5),
     )
 
     # Add 10 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(10)
+        {"role": "user", "content": f"Message {i}"} for i in range(10)
     ]
     await session.add_items(items)
 
@@ -1101,27 +1099,24 @@ async def test_runner_with_session_settings_override(agent: Agent):
     session = AdvancedSQLiteSession(
         session_id="runner_override_test",
         create_tables=True,
-        session_settings=SessionSettings(limit=100)
+        session_settings=SessionSettings(limit=100),
     )
 
     # Add some history
-    items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Turn {i}"}
-        for i in range(10)
-    ]
+    items: list[TResponseInputItem] = [{"role": "user", "content": f"Turn {i}"} for i in range(10)]
     await session.add_items(items)
 
     # Use RunConfig to override limit to 2
     assert isinstance(agent.model, FakeModel)
     agent.model.set_next_output([get_text_message("Got it")])
 
-    result = await Runner.run(
+    await Runner.run(
         agent,
         "New question",
         session=session,
         run_config=RunConfig(
             session_settings=SessionSettings(limit=2)  # Override to 2
-        )
+        ),
     )
 
     # Verify the agent received only the last 2 history items + new question

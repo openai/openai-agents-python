@@ -450,9 +450,9 @@ async def test_engine_property_is_read_only():
 async def test_session_settings_default():
     """Test that session_settings defaults to empty SessionSettings."""
     from agents.memory import SessionSettings
-    
+
     session = SQLAlchemySession.from_url("default_settings_test", url=DB_URL, create_tables=True)
-    
+
     # Should have default SessionSettings
     assert isinstance(session.session_settings, SessionSettings)
     assert session.session_settings.limit is None
@@ -461,35 +461,34 @@ async def test_session_settings_default():
 async def test_session_settings_from_url():
     """Test passing session_settings via from_url."""
     from agents.memory import SessionSettings
-    
+
     session = SQLAlchemySession.from_url(
         "from_url_settings_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=5)
+        session_settings=SessionSettings(limit=5),
     )
-    
+
     assert session.session_settings.limit == 5
 
 
 async def test_get_items_uses_session_settings_limit():
     """Test that get_items uses session_settings.limit as default."""
     from agents.memory import SessionSettings
-    
+
     session = SQLAlchemySession.from_url(
         "uses_settings_limit_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=3)
+        session_settings=SessionSettings(limit=3),
     )
-    
+
     # Add 5 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(5)
+        {"role": "user", "content": f"Message {i}"} for i in range(5)
     ]
     await session.add_items(items)
-    
+
     # get_items() with no limit should use session_settings.limit=3
     retrieved = await session.get_items()
     assert len(retrieved) == 3
@@ -502,21 +501,20 @@ async def test_get_items_uses_session_settings_limit():
 async def test_get_items_explicit_limit_overrides_session_settings():
     """Test that explicit limit parameter overrides session_settings."""
     from agents.memory import SessionSettings
-    
+
     session = SQLAlchemySession.from_url(
         "explicit_override_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=5)
+        session_settings=SessionSettings(limit=5),
     )
-    
+
     # Add 10 items
     items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Message {i}"}
-        for i in range(10)
+        {"role": "user", "content": f"Message {i}"} for i in range(10)
     ]
     await session.add_items(items)
-    
+
     # Explicit limit=2 should override session_settings.limit=5
     retrieved = await session.get_items(limit=2)
     assert len(retrieved) == 2
@@ -527,15 +525,15 @@ async def test_get_items_explicit_limit_overrides_session_settings():
 async def test_session_settings_resolve():
     """Test SessionSettings.resolve() method."""
     from agents.memory import SessionSettings
-    
+
     base = SessionSettings(limit=100)
     override = SessionSettings(limit=50)
-    
+
     final = base.resolve(override)
-    
+
     assert final.limit == 50  # Override wins
     assert base.limit == 100  # Original unchanged
-    
+
     # Resolving with None returns self
     final_none = base.resolve(None)
     assert final_none.limit == 100
@@ -545,35 +543,32 @@ async def test_runner_with_session_settings_override(agent: Agent):
     """Test that RunConfig can override session's default settings."""
     from agents import RunConfig
     from agents.memory import SessionSettings
-    
+
     # Session with default limit=100
     session = SQLAlchemySession.from_url(
         "runner_override_test",
         url=DB_URL,
         create_tables=True,
-        session_settings=SessionSettings(limit=100)
+        session_settings=SessionSettings(limit=100),
     )
-    
+
     # Add some history
-    items: list[TResponseInputItem] = [
-        {"role": "user", "content": f"Turn {i}"}
-        for i in range(10)
-    ]
+    items: list[TResponseInputItem] = [{"role": "user", "content": f"Turn {i}"} for i in range(10)]
     await session.add_items(items)
-    
+
     # Use RunConfig to override limit to 2
     assert isinstance(agent.model, FakeModel)
     agent.model.set_next_output([get_text_message("Got it")])
-    
-    result = await Runner.run(
+
+    await Runner.run(
         agent,
         "New question",
         session=session,
         run_config=RunConfig(
             session_settings=SessionSettings(limit=2)  # Override to 2
-        )
+        ),
     )
-    
+
     # Verify the agent received only the last 2 history items + new question
     last_input = agent.model.last_turn_args["input"]
     # Filter out the new "New question" input

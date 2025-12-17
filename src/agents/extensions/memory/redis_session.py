@@ -104,7 +104,12 @@ class RedisSession(SessionABC):
         redis_kwargs = redis_kwargs or {}
 
         redis_client = redis.from_url(url, **redis_kwargs)
-        session = cls(session_id, redis_client=redis_client, session_settings=session_settings, **kwargs)
+        session = cls(
+            session_id,
+            redis_client=redis_client,
+            session_settings=session_settings,
+            **kwargs,
+        )
         session._owns_client = True  # We created the client, so we own it
         return session
 
@@ -145,7 +150,7 @@ class RedisSession(SessionABC):
         """
         # Use session settings limit if no explicit limit provided
         session_limit = limit if limit is not None else self.session_settings.limit
-        
+
         async with self._lock:
             if session_limit is None:
                 # Get all messages in chronological order

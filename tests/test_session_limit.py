@@ -39,7 +39,7 @@ async def test_session_limit_parameter(runner_method):
         all_items = await session.get_items()
         assert len(all_items) == 6
 
-        # Now test session_limit parameter via RunConfig - should only get last 2 history items + new input
+        # Test session_limit via RunConfig - should only get last 2 history items + new input
         model.set_next_output([get_text_message("Reply 4")])
         await run_agent_async(
             runner_method,

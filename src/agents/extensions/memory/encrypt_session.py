@@ -146,7 +146,6 @@ class EncryptedSession(SessionABC):
         """Set session settings on the underlying session."""
         self.underlying_session.session_settings = value
 
-
     def _wrap(self, item: TResponseInputItem) -> EncryptedEnvelope:
         if isinstance(item, dict):
             payload = item

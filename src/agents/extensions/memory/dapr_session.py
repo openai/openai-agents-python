@@ -127,7 +127,11 @@ class DaprSession(SessionABC):
         """
         dapr_client = DaprClient(address=dapr_address)
         session = cls(
-            session_id, state_store_name=state_store_name, dapr_client=dapr_client, session_settings=session_settings, **kwargs
+            session_id,
+            state_store_name=state_store_name,
+            dapr_client=dapr_client,
+            session_settings=session_settings,
+            **kwargs,
         )
         session._owns_client = True  # We created the client, so we own it
         return session
@@ -238,7 +242,7 @@ class DaprSession(SessionABC):
         """
         # Use session settings limit if no explicit limit provided
         session_limit = limit if limit is not None else self.session_settings.limit
-        
+
         async with self._lock:
             # Get messages from state store with consistency level
             response = await self._dapr_client.get_state(

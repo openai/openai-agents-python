@@ -824,13 +824,11 @@ async def test_session_settings_constructor():
             session_id="settings_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=5)
+            session_settings=SessionSettings(limit=5),
         )
     else:
         session = RedisSession.from_url(
-            "settings_test",
-            url=REDIS_URL,
-            session_settings=SessionSettings(limit=5)
+            "settings_test", url=REDIS_URL, session_settings=SessionSettings(limit=5)
         )
 
     try:
@@ -847,9 +845,7 @@ async def test_session_settings_from_url():
     from agents.memory import SessionSettings
 
     session = RedisSession.from_url(
-        "from_url_settings_test",
-        url=REDIS_URL,
-        session_settings=SessionSettings(limit=10)
+        "from_url_settings_test", url=REDIS_URL, session_settings=SessionSettings(limit=10)
     )
 
     try:
@@ -869,13 +865,11 @@ async def test_get_items_uses_session_settings_limit():
             session_id="uses_settings_limit_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=3)
+            session_settings=SessionSettings(limit=3),
         )
     else:
         session = RedisSession.from_url(
-            "uses_settings_limit_test",
-            url=REDIS_URL,
-            session_settings=SessionSettings(limit=3)
+            "uses_settings_limit_test", url=REDIS_URL, session_settings=SessionSettings(limit=3)
         )
 
     try:
@@ -883,8 +877,7 @@ async def test_get_items_uses_session_settings_limit():
 
         # Add 5 items
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Message {i}"}
-            for i in range(5)
+            {"role": "user", "content": f"Message {i}"} for i in range(5)
         ]
         await session.add_items(items)
 
@@ -908,13 +901,11 @@ async def test_get_items_explicit_limit_overrides_session_settings():
             session_id="explicit_override_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=5)
+            session_settings=SessionSettings(limit=5),
         )
     else:
         session = RedisSession.from_url(
-            "explicit_override_test",
-            url=REDIS_URL,
-            session_settings=SessionSettings(limit=5)
+            "explicit_override_test", url=REDIS_URL, session_settings=SessionSettings(limit=5)
         )
 
     try:
@@ -922,8 +913,7 @@ async def test_get_items_explicit_limit_overrides_session_settings():
 
         # Add 10 items
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Message {i}"}
-            for i in range(10)
+            {"role": "user", "content": f"Message {i}"} for i in range(10)
         ]
         await session.add_items(items)
 
@@ -965,13 +955,11 @@ async def test_runner_with_session_settings_override():
             session_id="runner_override_test",
             redis_client=fake_redis,
             key_prefix="test:",
-            session_settings=SessionSettings(limit=100)
+            session_settings=SessionSettings(limit=100),
         )
     else:
         session = RedisSession.from_url(
-            "runner_override_test",
-            url=REDIS_URL,
-            session_settings=SessionSettings(limit=100)
+            "runner_override_test", url=REDIS_URL, session_settings=SessionSettings(limit=100)
         )
 
     try:
@@ -979,8 +967,7 @@ async def test_runner_with_session_settings_override():
 
         # Add some history
         items: list[TResponseInputItem] = [
-            {"role": "user", "content": f"Turn {i}"}
-            for i in range(10)
+            {"role": "user", "content": f"Turn {i}"} for i in range(10)
         ]
         await session.add_items(items)
 
@@ -988,13 +975,13 @@ async def test_runner_with_session_settings_override():
         agent = Agent(name="test", model=model)
         model.set_next_output([get_text_message("Got it")])
 
-        result = await Runner.run(
+        await Runner.run(
             agent,
             "New question",
             session=session,
             run_config=RunConfig(
                 session_settings=SessionSettings(limit=2)  # Override to 2
-            )
+            ),
         )
 
         # Verify the agent received only the last 2 history items + new question

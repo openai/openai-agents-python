@@ -1973,7 +1973,7 @@ class AgentRunner:
         session_settings = session.session_settings
         if run_config.session_settings is not None:
             session_settings = session_settings.resolve(run_config.session_settings)
-        
+
         history = await session.get_items(
             limit=session_settings.limit,
         )

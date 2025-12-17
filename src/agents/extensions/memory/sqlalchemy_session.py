@@ -80,7 +80,6 @@ class SQLAlchemySession(SessionABC):
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
             session_settings (SessionSettings | None, optional): Session configuration settings
-                
         """
         self.session_id = session_id
         self.session_settings = session_settings or SessionSettings()
@@ -198,10 +197,10 @@ class SQLAlchemySession(SessionABC):
             List of input items representing the conversation history
         """
         await self._ensure_tables()
-        
+
         # Use session settings limit if no explicit limit provided
         session_limit = limit if limit is not None else self.session_settings.limit
-        
+
         async with self._session_factory() as sess:
             if session_limit is None:
                 stmt = (

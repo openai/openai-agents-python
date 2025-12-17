@@ -22,7 +22,6 @@ from agents import (
     SessionSettings,
     TResponseInputItem,
 )
-
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
 
@@ -315,7 +314,6 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
         async def clear_session(self) -> None:
             return None
-
 
     dummy_session = DummySession()
 
