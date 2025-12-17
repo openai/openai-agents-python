@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
+from ...memory.session_settings import SessionSettings
 
 
 class SQLAlchemySession(SessionABC):
@@ -64,6 +65,7 @@ class SQLAlchemySession(SessionABC):
         create_tables: bool = False,
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        session_settings: SessionSettings | None = None,
     ):
         """Initializes a new SQLAlchemySession.
 
@@ -77,8 +79,11 @@ class SQLAlchemySession(SessionABC):
                 development and testing when migrations aren't used.
             sessions_table (str, optional): Override the default table name for sessions if needed.
             messages_table (str, optional): Override the default table name for messages if needed.
+            session_settings (SessionSettings | None, optional): Session configuration settings
+                
         """
         self.session_id = session_id
+        self.session_settings = session_settings or SessionSettings()
         self._engine = engine
         self._lock = asyncio.Lock()
 
@@ -142,6 +147,7 @@ class SQLAlchemySession(SessionABC):
         *,
         url: str,
         engine_kwargs: dict[str, Any] | None = None,
+        session_settings: SessionSettings | None = None,
         **kwargs: Any,
     ) -> SQLAlchemySession:
         """Create a session from a database URL string.
@@ -151,6 +157,8 @@ class SQLAlchemySession(SessionABC):
             url (str): Any SQLAlchemy async URL, e.g. "postgresql+asyncpg://user:pass@host/db".
             engine_kwargs (dict[str, Any] | None): Additional keyword arguments forwarded to
                 sqlalchemy.ext.asyncio.create_async_engine.
+            session_settings (SessionSettings | None): Session configuration settings including
+                default limit for retrieving items. If None, uses default SessionSettings().
             **kwargs: Additional keyword arguments forwarded to the main constructor
                 (e.g., create_tables, custom table names, etc.).
 
@@ -159,7 +167,7 @@ class SQLAlchemySession(SessionABC):
         """
         engine_kwargs = engine_kwargs or {}
         engine = create_async_engine(url, **engine_kwargs)
-        return cls(session_id, engine=engine, **kwargs)
+        return cls(session_id, engine=engine, session_settings=session_settings, **kwargs)
 
     async def _serialize_item(self, item: TResponseInputItem) -> str:
         """Serialize an item to JSON string. Can be overridden by subclasses."""
@@ -183,15 +191,19 @@ class SQLAlchemySession(SessionABC):
         """Retrieve the conversation history for this session.
 
         Args:
-            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
 
         Returns:
             List of input items representing the conversation history
         """
         await self._ensure_tables()
+        
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
+        
         async with self._session_factory() as sess:
-            if limit is None:
+            if session_limit is None:
                 stmt = (
                     select(self._messages.c.message_data)
                     .where(self._messages.c.session_id == self.session_id)
@@ -210,13 +222,13 @@ class SQLAlchemySession(SessionABC):
                         self._messages.c.created_at.desc(),
                         self._messages.c.id.desc(),
                     )
-                    .limit(limit)
+                    .limit(session_limit)
                 )
 
             result = await sess.execute(stmt)
             rows: list[str] = [row[0] for row in result.all()]
 
-            if limit is not None:
+            if session_limit is not None:
                 rows.reverse()
 
             items: list[TResponseInputItem] = []
