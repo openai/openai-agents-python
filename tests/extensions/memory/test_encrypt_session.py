@@ -331,3 +331,170 @@ async def test_encrypted_session_delegation():
     assert items[0].get("content") == "Test delegation"
 
     underlying_session.close()
+
+
+# ============================================================================
+# SessionSettings Tests
+# ============================================================================
+
+
+async def test_session_settings_delegated_to_underlying(encryption_key: str):
+    """Test that session_settings is correctly delegated to underlying session."""
+    from agents.memory import SessionSettings
+
+    temp_dir = tempfile.mkdtemp()
+    db_path = Path(temp_dir) / "test_settings.db"
+    underlying = SQLiteSession(
+        "test_session",
+        db_path,
+        session_settings=SessionSettings(limit=5)
+    )
+
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying,
+        encryption_key=encryption_key,
+    )
+
+    # session_settings should be accessible through EncryptedSession
+    assert session.session_settings.limit == 5
+
+    underlying.close()
+
+
+async def test_session_settings_get_items_uses_underlying_limit(encryption_key: str):
+    """Test that get_items uses underlying session's session_settings.limit."""
+    from agents.memory import SessionSettings
+
+    temp_dir = tempfile.mkdtemp()
+    db_path = Path(temp_dir) / "test_settings_limit.db"
+    underlying = SQLiteSession(
+        "test_session",
+        db_path,
+        session_settings=SessionSettings(limit=3)
+    )
+
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying,
+        encryption_key=encryption_key,
+    )
+
+    # Add 5 items
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": f"Message {i}"}
+        for i in range(5)
+    ]
+    await session.add_items(items)
+
+    # get_items() with no limit should use underlying session_settings.limit=3
+    retrieved = await session.get_items()
+    assert len(retrieved) == 3
+    # Should get the last 3 items
+    assert retrieved[0].get("content") == "Message 2"
+    assert retrieved[1].get("content") == "Message 3"
+    assert retrieved[2].get("content") == "Message 4"
+
+    underlying.close()
+
+
+async def test_session_settings_explicit_limit_overrides_settings(encryption_key: str):
+    """Test that explicit limit parameter overrides session_settings."""
+    from agents.memory import SessionSettings
+
+    temp_dir = tempfile.mkdtemp()
+    db_path = Path(temp_dir) / "test_override.db"
+    underlying = SQLiteSession(
+        "test_session",
+        db_path,
+        session_settings=SessionSettings(limit=5)
+    )
+
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying,
+        encryption_key=encryption_key,
+    )
+
+    # Add 10 items
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": f"Message {i}"}
+        for i in range(10)
+    ]
+    await session.add_items(items)
+
+    # Explicit limit=2 should override session_settings.limit=5
+    retrieved = await session.get_items(limit=2)
+    assert len(retrieved) == 2
+    assert retrieved[0].get("content") == "Message 8"
+    assert retrieved[1].get("content") == "Message 9"
+
+    underlying.close()
+
+
+async def test_session_settings_resolve():
+    """Test SessionSettings.resolve() method."""
+    from agents.memory import SessionSettings
+
+    base = SessionSettings(limit=100)
+    override = SessionSettings(limit=50)
+
+    final = base.resolve(override)
+
+    assert final.limit == 50  # Override wins
+    assert base.limit == 100  # Original unchanged
+
+    # Resolving with None returns self
+    final_none = base.resolve(None)
+    assert final_none.limit == 100
+
+
+async def test_runner_with_session_settings_override(encryption_key: str):
+    """Test that RunConfig can override session's default settings."""
+    from agents import Agent, RunConfig, Runner
+    from agents.memory import SessionSettings
+    from tests.fake_model import FakeModel
+    from tests.test_responses import get_text_message
+
+    temp_dir = tempfile.mkdtemp()
+    db_path = Path(temp_dir) / "test_runner_override.db"
+    underlying = SQLiteSession(
+        "test_session",
+        db_path,
+        session_settings=SessionSettings(limit=100)
+    )
+
+    session = EncryptedSession(
+        session_id="test_session",
+        underlying_session=underlying,
+        encryption_key=encryption_key,
+    )
+
+    # Add some history
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": f"Turn {i}"}
+        for i in range(10)
+    ]
+    await session.add_items(items)
+
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    model.set_next_output([get_text_message("Got it")])
+
+    result = await Runner.run(
+        agent,
+        "New question",
+        session=session,
+        run_config=RunConfig(
+            session_settings=SessionSettings(limit=2)  # Override to 2
+        )
+    )
+
+    # Verify the agent received only the last 2 history items + new question
+    last_input = model.last_turn_args["input"]
+    # Filter out the new "New question" input
+    history_items = [item for item in last_input if item.get("content") != "New question"]
+    # Should have 2 history items (last two from the 10 we added)
+    assert len(history_items) == 2
+
+    underlying.close()
