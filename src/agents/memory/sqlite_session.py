@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..items import TResponseInputItem
 from .session import SessionABC
+from .session_settings import SessionSettings
 
 
 class SQLiteSession(SessionABC):
@@ -24,6 +25,7 @@ class SQLiteSession(SessionABC):
         db_path: str | Path = ":memory:",
         sessions_table: str = "agent_sessions",
         messages_table: str = "agent_messages",
+        session_settings: SessionSettings | None = None,
     ):
         """Initialize the SQLite session.
 
@@ -33,8 +35,11 @@ class SQLiteSession(SessionABC):
             sessions_table: Name of the table to store session metadata. Defaults to
                 'agent_sessions'
             messages_table: Name of the table to store message data. Defaults to 'agent_messages'
+            session_settings: Session configuration settings including default limit for
+                retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
+        self.session_settings = session_settings or SessionSettings()
         self.db_path = db_path
         self.sessions_table = sessions_table
         self.messages_table = messages_table
@@ -111,17 +116,19 @@ class SQLiteSession(SessionABC):
         """Retrieve the conversation history for this session.
 
         Args:
-            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
 
         Returns:
             List of input items representing the conversation history
         """
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
 
         def _get_items_sync():
             conn = self._get_connection()
             with self._lock if self._is_memory_db else threading.Lock():
-                if limit is None:
+                if session_limit is None:
                     # Fetch all items in chronological order
                     cursor = conn.execute(
                         f"""
@@ -140,13 +147,13 @@ class SQLiteSession(SessionABC):
                         ORDER BY created_at DESC
                         LIMIT ?
                         """,
-                        (self.session_id, limit),
+                        (self.session_id, session_limit),
                     )
 
                 rows = cursor.fetchall()
 
                 # Reverse to get chronological order when using DESC
-                if limit is not None:
+                if session_limit is not None:
                     rows = list(reversed(rows))
 
                 items = []
