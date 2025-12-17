@@ -19,8 +19,10 @@ from agents import (
     RunHooks,
     Runner,
     Session,
+    SessionSettings,
     TResponseInputItem,
 )
+
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
 
@@ -300,6 +302,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
     class DummySession(Session):
         session_id = "sess_123"
+        session_settings = SessionSettings()
 
         async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
             return []
@@ -312,6 +315,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
         async def clear_session(self) -> None:
             return None
+
 
     dummy_session = DummySession()
 

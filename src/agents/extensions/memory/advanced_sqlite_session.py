@@ -13,6 +13,7 @@ from agents.usage import Usage
 
 from ...items import TResponseInputItem
 from ...memory import SQLiteSession
+from ...memory.session_settings import SessionSettings
 
 
 class AdvancedSQLiteSession(SQLiteSession):
