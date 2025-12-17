@@ -4,10 +4,12 @@ import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from . import _openai_shared
+from .default_models import get_default_model
 from .interface import Model, ModelProvider
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel
 
+# This is kept for backward compatiblity but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = "gpt-4o"
 
 
@@ -79,13 +81,17 @@ class OpenAIProvider(ModelProvider):
         return self._client
 
     def get_model(self, model_name: str | None) -> Model:
-        if model_name is None:
-            model_name = DEFAULT_MODEL
+        model_is_explicit = model_name is not None
+        resolved_model_name = model_name if model_name is not None else get_default_model()
 
         client = self._get_client()
 
         return (
-            OpenAIResponsesModel(model=model_name, openai_client=client)
+            OpenAIResponsesModel(
+                model=resolved_model_name,
+                openai_client=client,
+                model_is_explicit=model_is_explicit,
+            )
             if self._use_responses
-            else OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+            else OpenAIChatCompletionsModel(model=resolved_model_name, openai_client=client)
         )

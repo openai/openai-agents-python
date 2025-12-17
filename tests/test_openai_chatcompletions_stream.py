@@ -7,6 +7,11 @@ from openai.types.chat.chat_completion_chunk import (
     ChoiceDelta,
     ChoiceDeltaToolCall,
     ChoiceDeltaToolCallFunction,
+    ChoiceLogprobs,
+)
+from openai.types.chat.chat_completion_token_logprob import (
+    ChatCompletionTokenLogprob,
+    TopLogprob,
 )
 from openai.types.completion_usage import (
     CompletionTokensDetails,
@@ -15,6 +20,7 @@ from openai.types.completion_usage import (
 )
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -90,6 +96,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -125,6 +132,113 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     assert completed_resp.usage.total_tokens == 12
     assert completed_resp.usage.input_tokens_details.cached_tokens == 2
     assert completed_resp.usage.output_tokens_details.reasoning_tokens == 3
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_includes_logprobs(monkeypatch) -> None:
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content="Hi"),
+                logprobs=ChoiceLogprobs(
+                    content=[
+                        ChatCompletionTokenLogprob(
+                            token="Hi",
+                            logprob=-0.5,
+                            bytes=[1],
+                            top_logprobs=[TopLogprob(token="Hi", logprob=-0.5, bytes=[1])],
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[
+            Choice(
+                index=0,
+                delta=ChoiceDelta(content=" there"),
+                logprobs=ChoiceLogprobs(
+                    content=[
+                        ChatCompletionTokenLogprob(
+                            token=" there",
+                            logprob=-0.25,
+                            bytes=[2],
+                            top_logprobs=[TopLogprob(token=" there", logprob=-0.25, bytes=[2])],
+                        )
+                    ]
+                ),
+            )
+        ],
+        usage=CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        ),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    text_delta_events = [
+        event for event in output_events if event.type == "response.output_text.delta"
+    ]
+    assert len(text_delta_events) == 2
+    assert [lp.token for lp in text_delta_events[0].logprobs] == ["Hi"]
+    assert [lp.token for lp in text_delta_events[1].logprobs] == [" there"]
+
+    completed_event = next(event for event in output_events if event.type == "response.completed")
+    assert isinstance(completed_event, ResponseCompletedEvent)
+    completed_resp = completed_event.response
+    assert isinstance(completed_resp.output[0], ResponseOutputMessage)
+    text_part = completed_resp.output[0].content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.text == "Hi there"
+    assert text_part.logprobs is not None
+    assert [lp.token for lp in text_part.logprobs] == ["Hi", " there"]
 
 
 @pytest.mark.allow_call_model_methods
@@ -183,6 +297,7 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -214,17 +329,18 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     the model is streaming a function/tool call instead of plain text.
     The function call will be split across two chunks.
     """
-    # Simulate a single tool call whose ID stays constant and function name/args built over chunks.
+    # Simulate a single tool call with complete function name in first chunk
+    # and arguments split across chunks (reflecting real OpenAI API behavior)
     tool_call_delta1 = ChoiceDeltaToolCall(
         index=0,
         id="tool-id",
-        function=ChoiceDeltaToolCallFunction(name="my_", arguments="arg1"),
+        function=ChoiceDeltaToolCallFunction(name="my_func", arguments="arg1"),
         type="function",
     )
     tool_call_delta2 = ChoiceDeltaToolCall(
         index=0,
         id="tool-id",
-        function=ChoiceDeltaToolCallFunction(name="func", arguments="arg2"),
+        function=ChoiceDeltaToolCallFunction(name=None, arguments="arg2"),
         type="function",
     )
     chunk1 = ChatCompletionChunk(
@@ -272,6 +388,7 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -284,18 +401,155 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     # The added item should be a ResponseFunctionToolCall.
     added_fn = output_events[1].item
     assert isinstance(added_fn, ResponseFunctionToolCall)
-    assert added_fn.name == "my_func"  # Name should be concatenation of both chunks.
-    assert added_fn.arguments == "arg1arg2"
+    assert added_fn.name == "my_func"  # Name should be complete from first chunk
+    assert added_fn.arguments == ""  # Arguments start empty
     assert output_events[2].type == "response.function_call_arguments.delta"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
-    assert added_fn.name == "my_func"  # Name should be concatenation of both chunks.
-    assert added_fn.arguments == "arg1arg2"
-    assert output_events[2].type == "response.function_call_arguments.delta"
-    assert output_events[2].delta == "arg1arg2"
-    assert output_events[3].type == "response.output_item.done"
-    assert output_events[4].type == "response.completed"
+    assert output_events[2].delta == "arg1"  # First argument chunk
+    assert output_events[3].type == "response.function_call_arguments.delta"
+    assert output_events[3].delta == "arg2"  # Second argument chunk
+    assert output_events[4].type == "response.output_item.done"
+    assert output_events[5].type == "response.completed"
+    # Final function call should have complete arguments
+    final_fn = output_events[4].item
+    assert isinstance(final_fn, ResponseFunctionToolCall)
+    assert final_fn.name == "my_func"
+    assert final_fn.arguments == "arg1arg2"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_yields_real_time_function_call_arguments(monkeypatch) -> None:
+    """
+    Validate that `stream_response` emits function call arguments in real-time as they
+    are received, not just at the end. This test simulates the real OpenAI API behavior
+    where function name comes first, then arguments are streamed incrementally.
+    """
+    # Simulate realistic OpenAI API chunks: name first, then arguments incrementally
+    tool_call_delta1 = ChoiceDeltaToolCall(
+        index=0,
+        id="tool-call-123",
+        function=ChoiceDeltaToolCallFunction(name="write_file", arguments=""),
+        type="function",
+    )
+    tool_call_delta2 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='{"filename": "'),
+        type="function",
+    )
+    tool_call_delta3 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='test.py", "content": "'),
+        type="function",
+    )
+    tool_call_delta4 = ChoiceDeltaToolCall(
+        index=0,
+        function=ChoiceDeltaToolCallFunction(arguments='print(hello)"}'),
+        type="function",
+    )
+
+    chunk1 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta1]))],
+    )
+    chunk2 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta2]))],
+    )
+    chunk3 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta3]))],
+    )
+    chunk4 = ChatCompletionChunk(
+        id="chunk-id",
+        created=1,
+        model="fake",
+        object="chat.completion.chunk",
+        choices=[Choice(index=0, delta=ChoiceDelta(tool_calls=[tool_call_delta4]))],
+        usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+    )
+
+    async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for c in (chunk1, chunk2, chunk3, chunk4):
+            yield c
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, fake_stream()
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    # Extract events by type
+    created_events = [e for e in output_events if e.type == "response.created"]
+    output_item_added_events = [e for e in output_events if e.type == "response.output_item.added"]
+    function_args_delta_events = [
+        e for e in output_events if e.type == "response.function_call_arguments.delta"
+    ]
+    output_item_done_events = [e for e in output_events if e.type == "response.output_item.done"]
+    completed_events = [e for e in output_events if e.type == "response.completed"]
+
+    # Verify event structure
+    assert len(created_events) == 1
+    assert len(output_item_added_events) == 1
+    assert len(function_args_delta_events) == 3  # Three incremental argument chunks
+    assert len(output_item_done_events) == 1
+    assert len(completed_events) == 1
+
+    # Verify the function call started as soon as we had name and ID
+    added_event = output_item_added_events[0]
+    assert isinstance(added_event.item, ResponseFunctionToolCall)
+    assert added_event.item.name == "write_file"
+    assert added_event.item.call_id == "tool-call-123"
+    assert added_event.item.arguments == ""  # Should be empty at start
+
+    # Verify real-time argument streaming
+    expected_deltas = ['{"filename": "', 'test.py", "content": "', 'print(hello)"}']
+    for i, delta_event in enumerate(function_args_delta_events):
+        assert delta_event.delta == expected_deltas[i]
+        assert delta_event.item_id == "__fake_id__"  # FAKE_RESPONSES_ID
+        assert delta_event.output_index == 0
+
+    # Verify completion event has full arguments
+    done_event = output_item_done_events[0]
+    assert isinstance(done_event.item, ResponseFunctionToolCall)
+    assert done_event.item.name == "write_file"
+    assert done_event.item.arguments == '{"filename": "test.py", "content": "print(hello)"}'
+
+    # Verify final response
+    completed_event = completed_events[0]
+    function_call_output = completed_event.response.output[0]
+    assert isinstance(function_call_output, ResponseFunctionToolCall)
+    assert function_call_output.name == "write_file"
+    assert function_call_output.arguments == '{"filename": "test.py", "content": "print(hello)"}'

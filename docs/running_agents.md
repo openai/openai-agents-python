@@ -16,7 +16,7 @@ async def main():
     print(result.final_output)
     # Code within the code,
     # Functions calling themselves,
-    # Infinite loop's dance.
+    # Infinite loop's dance
 ```
 
 Read more in the [results guide](results.md).
@@ -40,7 +40,7 @@ The runner then runs a loop:
 
 ## Streaming
 
-Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produces. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
+Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
 
 ## Run config
 
@@ -51,10 +51,14 @@ The `run_config` parameter lets you configure some global settings for the agent
 -   [`model_settings`][agents.run.RunConfig.model_settings]: Overrides agent-specific settings. For example, you can set a global `temperature` or `top_p`.
 -   [`input_guardrails`][agents.run.RunConfig.input_guardrails], [`output_guardrails`][agents.run.RunConfig.output_guardrails]: A list of input or output guardrails to include on all runs.
 -   [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]: A global input filter to apply to all handoffs, if the handoff doesn't already have one. The input filter allows you to edit the inputs that are sent to the new agent. See the documentation in [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] for more details.
+-   [`nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]: When `True` (the default) the runner collapses the prior transcript into a single assistant message before invoking the next agent. The helper places the content inside a `<CONVERSATION HISTORY>` block that keeps appending new turns as subsequent handoffs occur. Set this to `False` or provide a custom handoff filter if you prefer to pass through the raw transcript. All [`Runner` methods](agents.run.Runner) automatically create a `RunConfig` when you do not pass one, so the quickstarts and examples pick up this default automatically, and any explicit [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] callbacks continue to override it. Individual handoffs can override this setting via [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history].
+-   [`handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper]: Optional callable that receives the normalized transcript (history + handoff items) whenever `nest_handoff_history` is `True`. It must return the exact list of input items to forward to the next agent, allowing you to replace the built-in summary without writing a full handoff filter.
 -   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: Allows you to disable [tracing](tracing.md) for the entire run.
 -   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: Configures whether traces will include potentially sensitive data, such as LLM and tool call inputs/outputs.
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
+
+By default, the SDK now nests prior turns inside a single assistant summary message whenever an agent hands off to another agent. This reduces repeated assistant messages and keeps the full transcript inside a single block that new agents can scan quickly. If you'd like to return to the legacy behavior, pass `RunConfig(nest_handoff_history=False)` or supply a `handoff_input_filter` (or `handoff_history_mapper`) that forwards the conversation exactly as you need. You can also opt out (or in) for a specific handoff by setting `handoff(..., nest_handoff_history=False)` or `True`. To change the wrapper text used in the generated summary without writing a custom mapper, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] to restore the defaults).
 
 ## Conversations/chat threads
 
@@ -73,6 +77,7 @@ You can manually manage conversation history using the [`RunResultBase.to_input_
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
+    thread_id = "thread_123"  # Example thread ID
     with trace(workflow_name="Conversation", group_id=thread_id):
         # First turn
         result = await Runner.run(agent, "What city is the Golden Gate Bridge in?")
@@ -88,7 +93,7 @@ async def main():
 
 ### Automatic conversation management with Sessions
 
-For a simpler approach, you can use [Sessions](sessions.md) to automatically handle conversation history without manually calling `.to_input_list()`:
+For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -99,6 +104,7 @@ async def main():
     # Create session instance
     session = SQLiteSession("conversation_123")
 
+    thread_id = "thread_123"  # Example thread ID
     with trace(workflow_name="Conversation", group_id=thread_id):
         # First turn
         result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
@@ -117,14 +123,77 @@ Sessions automatically:
 -   Stores new messages after each run
 -   Maintains separate conversations for different session IDs
 
-See the [Sessions documentation](sessions.md) for more details.
+See the [Sessions documentation](sessions/index.md) for more details.
+
+
+### Server-managed conversations
+
+You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
+
+OpenAI provides two ways to track state across turns:
+
+#### 1. Using `conversation_id`
+
+You first create a conversation using the OpenAI Conversations API and then reuse its ID for every subsequent call:
+
+```python
+from agents import Agent, Runner
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+async def main():
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    # Create a server-managed conversation
+    conversation = await client.conversations.create()
+    conv_id = conversation.id
+
+    while True:
+        user_input = input("You: ")
+        result = await Runner.run(agent, user_input, conversation_id=conv_id)
+        print(f"Assistant: {result.final_output}")
+```
+
+#### 2. Using `previous_response_id`
+
+Another option is **response chaining**, where each turn links explicitly to the response ID from the previous turn.
+
+```python
+from agents import Agent, Runner
+
+async def main():
+    agent = Agent(name="Assistant", instructions="Reply very concisely.")
+
+    previous_response_id = None
+
+    while True:
+        user_input = input("You: ")
+
+        # Setting auto_previous_response_id=True enables response chaining automatically
+        # for the first turn, even when there's no actual previous response ID yet.
+        result = await Runner.run(
+            agent,
+            user_input,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=True,
+        )
+        previous_response_id = result.last_response_id
+        print(f"Assistant: {result.final_output}")
+```
+
+## Long running agents & human-in-the-loop
+
+You can use the Agents SDK [Temporal](https://temporal.io/) integration to run durable, long-running workflows, including human-in-the-loop tasks. View a demo of Temporal and the Agents SDK working in action to complete long-running tasks [in this video](https://www.youtube.com/watch?v=fFBZqzT4DD8), and [view docs here](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents).
 
 ## Exceptions
 
 The SDK raises exceptions in certain cases. The full list is in [`agents.exceptions`][]. As an overview:
 
--   [`AgentsException`][agents.exceptions.AgentsException] is the base class for all exceptions raised in the SDK.
--   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] is raised when the run exceeds the `max_turns` passed to the run methods.
--   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError] is raised when the model produces invalid outputs, e.g. malformed JSON or using non-existent tools.
--   [`UserError`][agents.exceptions.UserError] is raised when you (the person writing code using the SDK) make an error using the SDK.
--   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered], [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] is raised when a [guardrail](guardrails.md) is tripped.
+-   [`AgentsException`][agents.exceptions.AgentsException]: This is the base class for all exceptions raised within the SDK. It serves as a generic type from which all other specific exceptions are derived.
+-   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]: This exception is raised when the agent's run exceeds the `max_turns` limit passed to the `Runner.run`, `Runner.run_sync`, or `Runner.run_streamed` methods. It indicates that the agent could not complete its task within the specified number of interaction turns.
+-   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]: This exception occurs when the underlying model (LLM) produces unexpected or invalid outputs. This can include:
+    -   Malformed JSON: When the model provides a malformed JSON structure for tool calls or in its direct output, especially if a specific `output_type` is defined.
+    -   Unexpected tool-related failures: When the model fails to use tools in an expected manner
+-   [`UserError`][agents.exceptions.UserError]: This exception is raised when you (the person writing code using the SDK) make an error while using the SDK. This typically results from incorrect code implementation, invalid configuration, or misuse of the SDK's API.
+-   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered], [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]: This exception is raised when the conditions of an input guardrail or output guardrail are met, respectively. Input guardrails check incoming messages before processing, while output guardrails check the agent's final response before delivery.

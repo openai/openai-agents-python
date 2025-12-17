@@ -129,6 +129,7 @@ async def test_stream_response_yields_events_for_reasoning_content(monkeypatch) 
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)
@@ -216,6 +217,7 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
 
@@ -230,6 +232,60 @@ async def test_get_response_with_reasoning_content(monkeypatch) -> None:
     assert isinstance(resp.output[1], ResponseOutputMessage)
     assert isinstance(resp.output[1].content[0], ResponseOutputText)
     assert resp.output[1].content[0].text == "The answer is 42"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_preserves_usage_from_earlier_chunk(monkeypatch) -> None:
+    """
+    Test that when an earlier chunk has usage data and later chunks don't,
+    the usage from the earlier chunk is preserved in the final response.
+    This handles cases where some providers (e.g., LiteLLM) may not include
+    usage in every chunk.
+    """
+    # Create test chunks where first chunk has usage, last chunk doesn't
+    chunks = [
+        create_chunk(create_content_delta("Hello"), include_usage=True),  # Has usage
+        create_chunk(create_content_delta("")),  # No usage (usage=None)
+    ]
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        resp = Response(
+            id="resp-id",
+            created_at=0,
+            model="fake-model",
+            object="response",
+            output=[],
+            tool_choice="none",
+            tools=[],
+            parallel_tool_calls=False,
+        )
+        return resp, create_fake_stream(chunks)
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    output_events = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        output_events.append(event)
+
+    # Verify the final response preserves usage from the first chunk
+    response_event = output_events[-1]
+    assert response_event.type == "response.completed"
+    assert response_event.response.usage is not None
+    assert response_event.response.usage.input_tokens == 2
+    assert response_event.response.usage.output_tokens == 4
+    assert response_event.response.usage.total_tokens == 6
 
 
 @pytest.mark.allow_call_model_methods
@@ -270,6 +326,7 @@ async def test_stream_response_with_empty_reasoning_content(monkeypatch) -> None
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     ):
         output_events.append(event)

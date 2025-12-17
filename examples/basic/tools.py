@@ -1,18 +1,20 @@
 import asyncio
+from typing import Annotated
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents import Agent, Runner, function_tool
 
 
 class Weather(BaseModel):
-    city: str
-    temperature_range: str
-    conditions: str
+    city: str = Field(description="The city name")
+    temperature_range: str = Field(description="The temperature range in Celsius")
+    conditions: str = Field(description="The weather conditions")
 
 
 @function_tool
-def get_weather(city: str) -> Weather:
+def get_weather(city: Annotated[str, "The city to get the weather for"]) -> Weather:
+    """Get the current weather information for a specified city."""
     print("[debug] get_weather called")
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
 

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import copy
+import contextlib
 import inspect
+import os
+import warnings
 from dataclasses import dataclass, field
-from typing import Any, Generic, cast
+from typing import Any, Callable, Generic, cast, get_args, get_origin
 
-from openai.types.responses import ResponseCompletedEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseOutputItemDoneEvent,
+)
 from openai.types.responses.response_prompt_param import (
     ResponsePromptParam,
 )
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from typing_extensions import NotRequired, TypedDict, Unpack
 
 from ._run_impl import (
@@ -40,22 +46,38 @@ from .guardrail import (
     OutputGuardrail,
     OutputGuardrailResult,
 )
-from .handoffs import Handoff, HandoffInputFilter, handoff
-from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
-from .lifecycle import RunHooks
+from .handoffs import Handoff, HandoffHistoryMapper, HandoffInputFilter, handoff
+from .items import (
+    HandoffCallItem,
+    ItemHelpers,
+    ModelResponse,
+    ReasoningItem,
+    RunItem,
+    ToolCallItem,
+    ToolCallItemTypes,
+    TResponseInputItem,
+)
+from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
-from .memory import Session
+from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
 from .run_context import RunContextWrapper, TContext
-from .stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
+from .stream_events import (
+    AgentUpdatedStreamEvent,
+    RawResponsesStreamEvent,
+    RunItemStreamEvent,
+    StreamEvent,
+)
 from .tool import Tool
+from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
+from .util._types import MaybeAwaitable
 
 DEFAULT_MAX_TURNS = 10
 
@@ -81,6 +103,83 @@ def get_default_agent_runner() -> AgentRunner:
     return DEFAULT_AGENT_RUNNER
 
 
+def _default_trace_include_sensitive_data() -> bool:
+    """Returns the default value for trace_include_sensitive_data based on environment variable."""
+    val = os.getenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "true")
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+@dataclass
+class ModelInputData:
+    """Container for the data that will be sent to the model."""
+
+    input: list[TResponseInputItem]
+    instructions: str | None
+
+
+@dataclass
+class CallModelData(Generic[TContext]):
+    """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
+
+    model_data: ModelInputData
+    agent: Agent[TContext]
+    context: TContext | None
+
+
+@dataclass
+class _ServerConversationTracker:
+    """Tracks server-side conversation state for either conversation_id or
+    previous_response_id modes.
+
+    Note: When auto_previous_response_id=True is used, response chaining is enabled
+    automatically for the first turn, even when there's no actual previous response ID yet.
+    """
+
+    conversation_id: str | None = None
+    previous_response_id: str | None = None
+    auto_previous_response_id: bool = False
+    sent_items: set[int] = field(default_factory=set)
+    server_items: set[int] = field(default_factory=set)
+
+    def track_server_items(self, model_response: ModelResponse) -> None:
+        for output_item in model_response.output:
+            self.server_items.add(id(output_item))
+
+        # Update previous_response_id when using previous_response_id mode or auto mode
+        if (
+            self.conversation_id is None
+            and (self.previous_response_id is not None or self.auto_previous_response_id)
+            and model_response.response_id is not None
+        ):
+            self.previous_response_id = model_response.response_id
+
+    def prepare_input(
+        self,
+        original_input: str | list[TResponseInputItem],
+        generated_items: list[RunItem],
+    ) -> list[TResponseInputItem]:
+        input_items: list[TResponseInputItem] = []
+
+        # On first call (when there are no generated items yet), include the original input
+        if not generated_items:
+            input_items.extend(ItemHelpers.input_to_new_input_list(original_input))
+
+        # Process generated_items, skip items already sent or from server
+        for item in generated_items:
+            raw_item_id = id(item.raw_item)
+
+            if raw_item_id in self.sent_items or raw_item_id in self.server_items:
+                continue
+            input_items.append(item.to_input_item())
+            self.sent_items.add(raw_item_id)
+
+        return input_items
+
+
+# Type alias for the optional input filter callback
+CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+
+
 @dataclass
 class RunConfig:
     """Configures settings for the entire agent run."""
@@ -104,6 +203,19 @@ class RunConfig:
     agent. See the documentation in `Handoff.input_filter` for more details.
     """
 
+    nest_handoff_history: bool = True
+    """Wrap prior run history in a single assistant message before handing off when no custom
+    input filter is set. Set to False to preserve the raw transcript behavior from previous
+    releases.
+    """
+
+    handoff_history_mapper: HandoffHistoryMapper | None = None
+    """Optional function that receives the normalized transcript (history + handoff items) and
+    returns the input history that should be passed to the next agent. When left as `None`, the
+    runner collapses the transcript into a single assistant message. This function only runs when
+    `nest_handoff_history` is True.
+    """
+
     input_guardrails: list[InputGuardrail[Any]] | None = None
     """A list of input guardrails to run on the initial run input."""
 
@@ -114,7 +226,9 @@ class RunConfig:
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
     """
 
-    trace_include_sensitive_data: bool = True
+    trace_include_sensitive_data: bool = field(
+        default_factory=_default_trace_include_sensitive_data
+    )
     """Whether we include potentially sensitive data (for example: inputs/outputs of tool calls or
     LLM generations) in traces. If False, we'll still create spans for these events, but the
     sensitive data will not be included.
@@ -139,6 +253,23 @@ class RunConfig:
     An optional dictionary of additional metadata to include with the trace.
     """
 
+    session_input_callback: SessionInputCallback | None = None
+    """Defines how to handle session history when new input is provided.
+    - `None` (default): The new input is appended to the session history.
+    - `SessionInputCallback`: A custom function that receives the history and new input, and
+      returns the desired combined list of items.
+    """
+
+    call_model_input_filter: CallModelInputFilter | None = None
+    """
+    Optional callback that is invoked immediately before calling the model. It receives the current
+    agent, context and the model input (instructions and input items), and must return a possibly
+    modified `ModelInputData` to use for the model call.
+
+    This allows you to edit the input sent to the model e.g. to stay within a token limit.
+    For example, you can use this to add a system prompt to the input.
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -158,6 +289,12 @@ class RunOptions(TypedDict, Generic[TContext]):
     previous_response_id: NotRequired[str | None]
     """The ID of the previous response, if any."""
 
+    auto_previous_response_id: NotRequired[bool]
+    """Enable automatic response chaining for the first turn."""
+
+    conversation_id: NotRequired[str | None]
+    """The ID of the stored conversation, if any."""
+
     session: NotRequired[Session | None]
     """The session for the run."""
 
@@ -174,34 +311,58 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
+        conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResult:
-        """Run a workflow starting at the given agent. The agent will run in a loop until a final
-        output is generated. The loop runs like so:
-        1. The agent is invoked with the given input.
-        2. If there is a final output (i.e. the agent produces something of type
-            `agent.output_type`, the loop terminates.
-        3. If there's a handoff, we run the loop again, with the new agent.
-        4. Else, we run tool calls (if any), and re-run the loop.
+        """
+        Run a workflow starting at the given agent.
+
+        The agent will run in a loop until a final output is generated. The loop runs like so:
+
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
+
         In two cases, the agent may raise an exception:
-        1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
-        2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered exception is raised.
-        Note that only the first agent's input guardrails are run.
+
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
+
+        Note:
+            Only the first agent's input guardrails are run.
+
         Args:
             starting_agent: The starting agent to run.
-            input: The initial input to the agent. You can pass a single string for a user message,
-                or a list of input items.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
             context: The context to run the agent with.
-            max_turns: The maximum number of turns to run the agent for. A turn is defined as one
-                AI invocation (including any tool calls that might occur).
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            previous_response_id: The ID of the previous response, if using OpenAI models via the
-                Responses API, this allows you to skip passing in input from the previous turn.
+            previous_response_id: The ID of the previous response. If using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The conversation ID
+                (https://platform.openai.com/docs/guides/conversation-state?api-mode=responses).
+                If provided, the conversation will be used to read and write items.
+                Every agent will have access to the conversation history so far,
+                and its output items will be written to the conversation.
+                We recommend only using this if you are exclusively using OpenAI models;
+                other model providers don't write to the Conversation object,
+                so you'll end up having partial conversations stored.
+            session: A session for automatic conversation history management.
+
         Returns:
-            A run result containing all the inputs, guardrail results and the output of the last
-            agent. Agents may perform handoffs, so we don't know the specific type of the output.
+            A run result containing all the inputs, guardrail results and the output of
+            the last agent. Agents may perform handoffs, so we don't know the specific
+            type of the output.
         """
+
         runner = DEFAULT_AGENT_RUNNER
         return await runner.run(
             starting_agent,
@@ -211,6 +372,8 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+            conversation_id=conversation_id,
             session=session,
         )
 
@@ -225,37 +388,56 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
+        conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResult:
-        """Run a workflow synchronously, starting at the given agent. Note that this just wraps the
-        `run` method, so it will not work if there's already an event loop (e.g. inside an async
-        function, or in a Jupyter notebook or async context like FastAPI). For those cases, use
-        the `run` method instead.
-        The agent will run in a loop until a final output is generated. The loop runs like so:
-        1. The agent is invoked with the given input.
-        2. If there is a final output (i.e. the agent produces something of type
-            `agent.output_type`, the loop terminates.
-        3. If there's a handoff, we run the loop again, with the new agent.
-        4. Else, we run tool calls (if any), and re-run the loop.
+        """
+        Run a workflow synchronously, starting at the given agent.
+
+        Note:
+            This just wraps the `run` method, so it will not work if there's already an
+            event loop (e.g. inside an async function, or in a Jupyter notebook or async
+            context like FastAPI). For those cases, use the `run` method instead.
+
+        The agent will run in a loop until a final output is generated. The loop runs:
+
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
+
         In two cases, the agent may raise an exception:
-        1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
-        2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered exception is raised.
-        Note that only the first agent's input guardrails are run.
+
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
+
+        Note:
+            Only the first agent's input guardrails are run.
+
         Args:
             starting_agent: The starting agent to run.
-            input: The initial input to the agent. You can pass a single string for a user message,
-                or a list of input items.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
             context: The context to run the agent with.
-            max_turns: The maximum number of turns to run the agent for. A turn is defined as one
-                AI invocation (including any tool calls that might occur).
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            previous_response_id: The ID of the previous response, if using OpenAI models via the
-                Responses API, this allows you to skip passing in input from the previous turn.
+            previous_response_id: The ID of the previous response, if using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The ID of the stored conversation, if any.
+            session: A session for automatic conversation history management.
+
         Returns:
-            A run result containing all the inputs, guardrail results and the output of the last
-            agent. Agents may perform handoffs, so we don't know the specific type of the output.
+            A run result containing all the inputs, guardrail results and the output of
+            the last agent. Agents may perform handoffs, so we don't know the specific
+            type of the output.
         """
+
         runner = DEFAULT_AGENT_RUNNER
         return runner.run_sync(
             starting_agent,
@@ -265,7 +447,9 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
             session=session,
+            auto_previous_response_id=auto_previous_response_id,
         )
 
     @classmethod
@@ -278,34 +462,53 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
         previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
+        conversation_id: str | None = None,
         session: Session | None = None,
     ) -> RunResultStreaming:
-        """Run a workflow starting at the given agent in streaming mode. The returned result object
-        contains a method you can use to stream semantic events as they are generated.
+        """
+        Run a workflow starting at the given agent in streaming mode.
+
+        The returned result object contains a method you can use to stream semantic
+        events as they are generated.
+
         The agent will run in a loop until a final output is generated. The loop runs like so:
-        1. The agent is invoked with the given input.
-        2. If there is a final output (i.e. the agent produces something of type
-            `agent.output_type`, the loop terminates.
-        3. If there's a handoff, we run the loop again, with the new agent.
-        4. Else, we run tool calls (if any), and re-run the loop.
+
+          1. The agent is invoked with the given input.
+          2. If there is a final output (i.e. the agent produces something of type
+             `agent.output_type`), the loop terminates.
+          3. If there's a handoff, we run the loop again, with the new agent.
+          4. Else, we run tool calls (if any), and re-run the loop.
+
         In two cases, the agent may raise an exception:
-        1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
-        2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered exception is raised.
-        Note that only the first agent's input guardrails are run.
+
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
+             exception is raised.
+
+        Note:
+            Only the first agent's input guardrails are run.
+
         Args:
             starting_agent: The starting agent to run.
-            input: The initial input to the agent. You can pass a single string for a user message,
-                or a list of input items.
+            input: The initial input to the agent. You can pass a single string for a
+                user message, or a list of input items.
             context: The context to run the agent with.
-            max_turns: The maximum number of turns to run the agent for. A turn is defined as one
-                AI invocation (including any tool calls that might occur).
+            max_turns: The maximum number of turns to run the agent for. A turn is
+                defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
-            previous_response_id: The ID of the previous response, if using OpenAI models via the
-                Responses API, this allows you to skip passing in input from the previous turn.
+            previous_response_id: The ID of the previous response, if using OpenAI
+                models via the Responses API, this allows you to skip passing in input
+                from the previous turn.
+            conversation_id: The ID of the stored conversation, if any.
+            session: A session for automatic conversation history management.
+
         Returns:
-            A result object that contains data about the run, as well as a method to stream events.
+            A result object that contains data about the run, as well as a method to
+            stream events.
         """
+
         runner = DEFAULT_AGENT_RUNNER
         return runner.run_streamed(
             starting_agent,
@@ -315,6 +518,8 @@ class Runner:
             hooks=hooks,
             run_config=run_config,
             previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+            conversation_id=conversation_id,
             session=session,
         )
 
@@ -333,17 +538,35 @@ class AgentRunner:
     ) -> RunResult:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = kwargs.get("hooks")
+        hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
-        if hooks is None:
-            hooks = RunHooks[Any]()
+
         if run_config is None:
             run_config = RunConfig()
 
-        # Prepare input with session if enabled
-        prepared_input = await self._prepare_input_with_session(input, session)
+        # Check whether to enable OpenAI server-managed conversation
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
+            server_conversation_tracker = _ServerConversationTracker(
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+        else:
+            server_conversation_tracker = None
+
+        # Keep original user input separate from session-prepared input
+        original_user_input = input
+        prepared_input = await self._prepare_input_with_session(
+            input, session, run_config.session_input_callback
+        )
 
         tool_use_tracker = AgentToolUseTracker()
 
@@ -355,7 +578,7 @@ class AgentRunner:
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
-            original_input: str | list[TResponseInputItem] = copy.deepcopy(prepared_input)
+            original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
             generated_items: list[RunItem] = []
             model_responses: list[ModelResponse] = []
 
@@ -364,10 +587,15 @@ class AgentRunner:
             )
 
             input_guardrail_results: list[InputGuardrailResult] = []
+            tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+            tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
 
             current_span: Span[AgentSpanData] | None = None
             current_agent = starting_agent
             should_run_agent_start_hooks = True
+
+            # save only the new user input to the session, not the combined history
+            await self._save_result_to_session(session, original_user_input, [])
 
             try:
                 while True:
@@ -409,12 +637,32 @@ class AgentRunner:
                     )
 
                     if current_turn == 1:
+                        # Separate guardrails based on execution mode.
+                        all_input_guardrails = starting_agent.input_guardrails + (
+                            run_config.input_guardrails or []
+                        )
+                        sequential_guardrails = [
+                            g for g in all_input_guardrails if not g.run_in_parallel
+                        ]
+                        parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+
+                        # Run blocking guardrails first, before agent starts.
+                        # (will raise exception if tripwire triggered).
+                        sequential_results = []
+                        if sequential_guardrails:
+                            sequential_results = await self._run_input_guardrails(
+                                starting_agent,
+                                sequential_guardrails,
+                                _copy_str_or_list(prepared_input),
+                                context_wrapper,
+                            )
+
+                        # Run parallel guardrails + agent together.
                         input_guardrail_results, turn_result = await asyncio.gather(
                             self._run_input_guardrails(
                                 starting_agent,
-                                starting_agent.input_guardrails
-                                + (run_config.input_guardrails or []),
-                                copy.deepcopy(prepared_input),
+                                parallel_guardrails,
+                                _copy_str_or_list(prepared_input),
                                 context_wrapper,
                             ),
                             self._run_single_turn(
@@ -427,9 +675,12 @@ class AgentRunner:
                                 run_config=run_config,
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
-                                previous_response_id=previous_response_id,
+                                server_conversation_tracker=server_conversation_tracker,
                             ),
                         )
+
+                        # Combine sequential and parallel results.
+                        input_guardrail_results = sequential_results + input_guardrail_results
                     else:
                         turn_result = await self._run_single_turn(
                             agent=current_agent,
@@ -441,7 +692,7 @@ class AgentRunner:
                             run_config=run_config,
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
-                            previous_response_id=previous_response_id,
+                            server_conversation_tracker=server_conversation_tracker,
                         )
                     should_run_agent_start_hooks = False
 
@@ -449,39 +700,76 @@ class AgentRunner:
                     original_input = turn_result.original_input
                     generated_items = turn_result.generated_items
 
-                    if isinstance(turn_result.next_step, NextStepFinalOutput):
-                        output_guardrail_results = await self._run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            turn_result.next_step.output,
-                            context_wrapper,
-                        )
-                        result = RunResult(
-                            input=original_input,
-                            new_items=generated_items,
-                            raw_responses=model_responses,
-                            final_output=turn_result.next_step.output,
-                            _last_agent=current_agent,
-                            input_guardrail_results=input_guardrail_results,
-                            output_guardrail_results=output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                        )
+                    if server_conversation_tracker is not None:
+                        server_conversation_tracker.track_server_items(turn_result.model_response)
 
-                        # Save the conversation to session if enabled
-                        await self._save_result_to_session(session, input, result)
+                    # Collect tool guardrail results from this turn
+                    tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
+                    tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
-                        return result
-                    elif isinstance(turn_result.next_step, NextStepHandoff):
-                        current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
-                        current_span.finish(reset_current=True)
-                        current_span = None
-                        should_run_agent_start_hooks = True
-                    elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
-                    else:
-                        raise AgentsException(
-                            f"Unknown next step type: {type(turn_result.next_step)}"
-                        )
+                    try:
+                        if isinstance(turn_result.next_step, NextStepFinalOutput):
+                            output_guardrail_results = await self._run_output_guardrails(
+                                current_agent.output_guardrails
+                                + (run_config.output_guardrails or []),
+                                current_agent,
+                                turn_result.next_step.output,
+                                context_wrapper,
+                            )
+                            result = RunResult(
+                                input=original_input,
+                                new_items=generated_items,
+                                raw_responses=model_responses,
+                                final_output=turn_result.next_step.output,
+                                _last_agent=current_agent,
+                                input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                                context_wrapper=context_wrapper,
+                            )
+                            if not any(
+                                guardrail_result.output.tripwire_triggered
+                                for guardrail_result in input_guardrail_results
+                            ):
+                                await self._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+
+                            return result
+                        elif isinstance(turn_result.next_step, NextStepHandoff):
+                            # Save the conversation to session if enabled (before handoff)
+                            if session is not None:
+                                if not any(
+                                    guardrail_result.output.tripwire_triggered
+                                    for guardrail_result in input_guardrail_results
+                                ):
+                                    await self._save_result_to_session(
+                                        session, [], turn_result.new_step_items
+                                    )
+                            current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            current_span.finish(reset_current=True)
+                            current_span = None
+                            should_run_agent_start_hooks = True
+                        elif isinstance(turn_result.next_step, NextStepRunAgain):
+                            if not any(
+                                guardrail_result.output.tripwire_triggered
+                                for guardrail_result in input_guardrail_results
+                            ):
+                                await self._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+                        else:
+                            raise AgentsException(
+                                f"Unknown next step type: {type(turn_result.next_step)}"
+                            )
+                    finally:
+                        # RunImpl.execute_tools_and_side_effects returns a SingleStepResult that
+                        # stores direct references to the `pre_step_items` and `new_step_items`
+                        # lists it manages internally. Clear them here so the next turn does not
+                        # hold on to items from previous turns and to avoid leaking agent refs.
+                        turn_result.pre_step_items.clear()
+                        turn_result.new_step_items.clear()
             except AgentsException as exc:
                 exc.run_data = RunErrorDetails(
                     input=original_input,
@@ -508,9 +796,44 @@ class AgentRunner:
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        return asyncio.get_event_loop().run_until_complete(
+        # Python 3.14 stopped implicitly wiring up a default event loop
+        # when synchronous code touches asyncio APIs for the first time.
+        # Several of our synchronous entry points (for example the Redis/SQLAlchemy session helpers)
+        # construct asyncio primitives like asyncio.Lock during __init__,
+        # which binds them to whatever loop happens to be the thread's default at that moment.
+        # To keep those locks usable we must ensure that run_sync reuses that same default loop
+        # instead of hopping over to a brand-new asyncio.run() loop.
+        try:
+            already_running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            already_running_loop = None
+
+        if already_running_loop is not None:
+            # This method is only expected to run when no loop is already active.
+            # (Each thread has its own default loop; concurrent sync runs should happen on
+            # different threads. In a single thread use the async API to interleave work.)
+            raise RuntimeError(
+                "AgentRunner.run_sync() cannot be called when an event loop is already running."
+            )
+
+        policy = asyncio.get_event_loop_policy()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                default_loop = policy.get_event_loop()
+            except RuntimeError:
+                default_loop = policy.new_event_loop()
+                policy.set_event_loop(default_loop)
+
+        # We intentionally leave the default loop open even if we had to create one above. Session
+        # instances and other helpers stash loop-bound primitives between calls and expect to find
+        # the same default loop every time run_sync is invoked on this thread.
+        # Schedule the async run on the default loop so that we can manage cancellation explicitly.
+        task = default_loop.create_task(
             self.run(
                 starting_agent,
                 input,
@@ -520,8 +843,28 @@ class AgentRunner:
                 hooks=hooks,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                conversation_id=conversation_id,
             )
         )
+
+        try:
+            # Drive the coroutine to completion, harvesting the final RunResult.
+            return default_loop.run_until_complete(task)
+        except BaseException:
+            # If the sync caller aborts (KeyboardInterrupt, etc.), make sure the scheduled task
+            # does not linger on the shared loop by cancelling it and waiting for completion.
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    default_loop.run_until_complete(task)
+            raise
+        finally:
+            if not default_loop.is_closed():
+                # The loop stays open for subsequent runs, but we still need to flush any pending
+                # async generators so their cleanup code executes promptly.
+                with contextlib.suppress(RuntimeError):
+                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
     def run_streamed(
         self,
@@ -531,13 +874,13 @@ class AgentRunner:
     ) -> RunResultStreaming:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
-        hooks = kwargs.get("hooks")
+        hooks = cast(RunHooks[TContext], self._validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
         previous_response_id = kwargs.get("previous_response_id")
+        auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
+        conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        if hooks is None:
-            hooks = RunHooks[Any]()
         if run_config is None:
             run_config = RunConfig()
 
@@ -562,7 +905,7 @@ class AgentRunner:
         )
 
         streamed_result = RunResultStreaming(
-            input=copy.deepcopy(input),
+            input=_copy_str_or_list(input),
             new_items=[],
             current_agent=starting_agent,
             raw_responses=[],
@@ -572,6 +915,8 @@ class AgentRunner:
             max_turns=max_turns,
             input_guardrail_results=[],
             output_guardrail_results=[],
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
@@ -588,10 +933,70 @@ class AgentRunner:
                 context_wrapper=context_wrapper,
                 run_config=run_config,
                 previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+                conversation_id=conversation_id,
                 session=session,
             )
         )
         return streamed_result
+
+    @staticmethod
+    def _validate_run_hooks(
+        hooks: RunHooksBase[Any, Agent[Any]] | AgentHooksBase[Any, Agent[Any]] | Any | None,
+    ) -> RunHooks[Any]:
+        if hooks is None:
+            return RunHooks[Any]()
+        input_hook_type = type(hooks).__name__
+        if isinstance(hooks, AgentHooksBase):
+            raise TypeError(
+                "Run hooks must be instances of RunHooks. "
+                f"Received agent-scoped hooks ({input_hook_type}). "
+                "Attach AgentHooks to an Agent via Agent(..., hooks=...)."
+            )
+        if not isinstance(hooks, RunHooksBase):
+            raise TypeError(f"Run hooks must be instances of RunHooks. Received {input_hook_type}.")
+        return hooks
+
+    @classmethod
+    async def _maybe_filter_model_input(
+        cls,
+        *,
+        agent: Agent[TContext],
+        run_config: RunConfig,
+        context_wrapper: RunContextWrapper[TContext],
+        input_items: list[TResponseInputItem],
+        system_instructions: str | None,
+    ) -> ModelInputData:
+        """Apply optional call_model_input_filter to modify model input.
+
+        Returns a `ModelInputData` that will be sent to the model.
+        """
+        effective_instructions = system_instructions
+        effective_input: list[TResponseInputItem] = input_items
+
+        if run_config.call_model_input_filter is None:
+            return ModelInputData(input=effective_input, instructions=effective_instructions)
+
+        try:
+            model_input = ModelInputData(
+                input=effective_input.copy(),
+                instructions=effective_instructions,
+            )
+            filter_payload: CallModelData[TContext] = CallModelData(
+                model_data=model_input,
+                agent=agent,
+                context=context_wrapper.context,
+            )
+            maybe_updated = run_config.call_model_input_filter(filter_payload)
+            updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
+            if not isinstance(updated, ModelInputData):
+                raise UserError("call_model_input_filter must return a ModelInputData instance")
+            return updated
+        except Exception as e:
+            _error_tracing.attach_error_to_current_span(
+                SpanError(message="Error in call_model_input_filter", data={"error": str(e)})
+            )
+            raise
 
     @classmethod
     async def _run_input_guardrails_with_queue(
@@ -617,6 +1022,11 @@ class AgentRunner:
             for done in asyncio.as_completed(guardrail_tasks):
                 result = await done
                 if result.output.tripwire_triggered:
+                    # Cancel all remaining guardrail tasks if a tripwire is triggered.
+                    for t in guardrail_tasks:
+                        t.cancel()
+                    # Wait for cancellations to propagate by awaiting the cancelled tasks.
+                    await asyncio.gather(*guardrail_tasks, return_exceptions=True)
                     _error_tracing.attach_error_to_span(
                         parent_span,
                         SpanError(
@@ -627,6 +1037,9 @@ class AgentRunner:
                             },
                         ),
                     )
+                    queue.put_nowait(result)
+                    guardrail_results.append(result)
+                    break
                 queue.put_nowait(result)
                 guardrail_results.append(result)
         except Exception:
@@ -634,7 +1047,9 @@ class AgentRunner:
                 t.cancel()
             raise
 
-        streamed_result.input_guardrail_results = guardrail_results
+        streamed_result.input_guardrail_results = (
+            streamed_result.input_guardrail_results + guardrail_results
+        )
 
     @classmethod
     async def _start_streaming(
@@ -647,6 +1062,8 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         previous_response_id: str | None,
+        auto_previous_response_id: bool,
+        conversation_id: str | None,
         session: Session | None,
     ):
         if streamed_result.trace:
@@ -658,16 +1075,40 @@ class AgentRunner:
         should_run_agent_start_hooks = True
         tool_use_tracker = AgentToolUseTracker()
 
+        # Check whether to enable OpenAI server-managed conversation
+        if (
+            conversation_id is not None
+            or previous_response_id is not None
+            or auto_previous_response_id
+        ):
+            server_conversation_tracker = _ServerConversationTracker(
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+        else:
+            server_conversation_tracker = None
+
         streamed_result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=current_agent))
 
         try:
             # Prepare input with session if enabled
-            prepared_input = await AgentRunner._prepare_input_with_session(starting_input, session)
+            prepared_input = await AgentRunner._prepare_input_with_session(
+                starting_input, session, run_config.session_input_callback
+            )
 
             # Update the streamed result with the prepared input
             streamed_result.input = prepared_input
 
+            await AgentRunner._save_result_to_session(session, starting_input, [])
+
             while True:
+                # Check for soft cancel before starting new turn
+                if streamed_result._cancel_mode == "after_turn":
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
+
                 if streamed_result.is_complete:
                     break
 
@@ -708,12 +1149,37 @@ class AgentRunner:
                     break
 
                 if current_turn == 1:
-                    # Run the input guardrails in the background and put the results on the queue
+                    # Separate guardrails based on execution mode.
+                    all_input_guardrails = starting_agent.input_guardrails + (
+                        run_config.input_guardrails or []
+                    )
+                    sequential_guardrails = [
+                        g for g in all_input_guardrails if not g.run_in_parallel
+                    ]
+                    parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+
+                    # Run sequential guardrails first.
+                    if sequential_guardrails:
+                        await cls._run_input_guardrails_with_queue(
+                            starting_agent,
+                            sequential_guardrails,
+                            ItemHelpers.input_to_new_input_list(prepared_input),
+                            context_wrapper,
+                            streamed_result,
+                            current_span,
+                        )
+                        # Check if any blocking guardrail triggered and raise before starting agent.
+                        for result in streamed_result.input_guardrail_results:
+                            if result.output.tripwire_triggered:
+                                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                                raise InputGuardrailTripwireTriggered(result)
+
+                    # Run parallel guardrails in background.
                     streamed_result._input_guardrails_task = asyncio.create_task(
                         cls._run_input_guardrails_with_queue(
                             starting_agent,
-                            starting_agent.input_guardrails + (run_config.input_guardrails or []),
-                            copy.deepcopy(ItemHelpers.input_to_new_input_list(prepared_input)),
+                            parallel_guardrails,
+                            ItemHelpers.input_to_new_input_list(prepared_input),
                             context_wrapper,
                             streamed_result,
                             current_span,
@@ -729,7 +1195,7 @@ class AgentRunner:
                         should_run_agent_start_hooks,
                         tool_use_tracker,
                         all_tools,
-                        previous_response_id,
+                        server_conversation_tracker,
                     )
                     should_run_agent_start_hooks = False
 
@@ -739,7 +1205,23 @@ class AgentRunner:
                     streamed_result.input = turn_result.original_input
                     streamed_result.new_items = turn_result.generated_items
 
+                    if server_conversation_tracker is not None:
+                        server_conversation_tracker.track_server_items(turn_result.model_response)
+
                     if isinstance(turn_result.next_step, NextStepHandoff):
+                        # Save the conversation to session if enabled (before handoff)
+                        # Streaming needs to save for graceful cancellation support
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+
                         current_agent = turn_result.next_step.new_agent
                         current_span.finish(reset_current=True)
                         current_span = None
@@ -747,6 +1229,12 @@ class AgentRunner:
                         streamed_result._event_queue.put_nowait(
                             AgentUpdatedStreamEvent(new_agent=current_agent)
                         )
+
+                        # Check for soft cancel after handoff
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                     elif isinstance(turn_result.next_step, NextStepFinalOutput):
                         streamed_result._output_guardrails_task = asyncio.create_task(
                             cls._run_output_guardrails(
@@ -769,24 +1257,35 @@ class AgentRunner:
                         streamed_result.is_complete = True
 
                         # Save the conversation to session if enabled
-                        # Create a temporary RunResult for session saving
-                        temp_result = RunResult(
-                            input=streamed_result.input,
-                            new_items=streamed_result.new_items,
-                            raw_responses=streamed_result.raw_responses,
-                            final_output=streamed_result.final_output,
-                            _last_agent=current_agent,
-                            input_guardrail_results=streamed_result.input_guardrail_results,
-                            output_guardrail_results=streamed_result.output_guardrail_results,
-                            context_wrapper=context_wrapper,
-                        )
-                        await AgentRunner._save_result_to_session(
-                            session, starting_input, temp_result
-                        )
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     elif isinstance(turn_result.next_step, NextStepRunAgain):
-                        pass
+                        if session is not None:
+                            should_skip_session_save = (
+                                await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                                    streamed_result
+                                )
+                            )
+                            if should_skip_session_save is False:
+                                await AgentRunner._save_result_to_session(
+                                    session, [], turn_result.new_step_items
+                                )
+
+                        # Check for soft cancel after turn completion
+                        if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
+                            streamed_result.is_complete = True
+                            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            break
                 except AgentsException as exc:
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -815,10 +1314,27 @@ class AgentRunner:
 
             streamed_result.is_complete = True
         finally:
+            if streamed_result._input_guardrails_task:
+                try:
+                    await AgentRunner._input_guardrail_tripwire_triggered_for_stream(
+                        streamed_result
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
+                    )
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
                 streamed_result.trace.finish(reset_current=True)
+
+            # Ensure QueueCompleteSentinel is always put in the queue when the stream ends,
+            # even if an exception occurs before the inner try/except block (e.g., in
+            # _save_result_to_session at the beginning). Without this, stream_events()
+            # would hang forever waiting for more items.
+            if not streamed_result.is_complete:
+                streamed_result.is_complete = True
+                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
 
     @classmethod
     async def _run_single_turn_streamed(
@@ -831,8 +1347,11 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         all_tools: list[Tool],
-        previous_response_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
+        emitted_tool_call_ids: set[str] = set()
+        emitted_reasoning_item_ids: set[str] = set()
+
         if should_run_agent_start_hooks:
             await asyncio.gather(
                 hooks.on_agent_start(context_wrapper, agent),
@@ -860,13 +1379,49 @@ class AgentRunner:
 
         final_response: ModelResponse | None = None
 
-        input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-        input.extend([item.to_input_item() for item in streamed_result.new_items])
+        if server_conversation_tracker is not None:
+            input = server_conversation_tracker.prepare_input(
+                streamed_result.input, streamed_result.new_items
+            )
+        else:
+            input = ItemHelpers.input_to_new_input_list(streamed_result.input)
+            input.extend([item.to_input_item() for item in streamed_result.new_items])
+
+        # THIS IS THE RESOLVED CONFLICT BLOCK
+        filtered = await cls._maybe_filter_model_input(
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+            input_items=input,
+            system_instructions=system_prompt,
+        )
+
+        # Call hook just before the model is invoked, with the correct system_prompt.
+        await asyncio.gather(
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+            (
+                agent.hooks.on_llm_start(
+                    context_wrapper, agent, filtered.instructions, filtered.input
+                )
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        )
 
         # 1. Stream the output events
         async for event in model.stream_response(
-            system_prompt,
-            input,
+            filtered.instructions,
+            filtered.input,
             model_settings,
             all_tools,
             output_schema,
@@ -875,8 +1430,12 @@ class AgentRunner:
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
             previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
             prompt=prompt_config,
         ):
+            # Emit the raw event ASAP
+            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+
             if isinstance(event, ResponseCompletedEvent):
                 usage = (
                     Usage(
@@ -897,7 +1456,46 @@ class AgentRunner:
                 )
                 context_wrapper.usage.add(usage)
 
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            if isinstance(event, ResponseOutputItemDoneEvent):
+                output_item = event.item
+
+                if isinstance(output_item, _TOOL_CALL_TYPES):
+                    call_id: str | None = getattr(
+                        output_item, "call_id", getattr(output_item, "id", None)
+                    )
+
+                    if call_id and call_id not in emitted_tool_call_ids:
+                        emitted_tool_call_ids.add(call_id)
+
+                        tool_item = ToolCallItem(
+                            raw_item=cast(ToolCallItemTypes, output_item),
+                            agent=agent,
+                        )
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=tool_item, name="tool_called")
+                        )
+
+                elif isinstance(output_item, ResponseReasoningItem):
+                    reasoning_id: str | None = getattr(output_item, "id", None)
+
+                    if reasoning_id and reasoning_id not in emitted_reasoning_item_ids:
+                        emitted_reasoning_item_ids.add(reasoning_id)
+
+                        reasoning_item = ReasoningItem(raw_item=output_item, agent=agent)
+                        streamed_result._event_queue.put_nowait(
+                            RunItemStreamEvent(item=reasoning_item, name="reasoning_item_created")
+                        )
+
+        # Call hook just after the model response is finalized.
+        if final_response is not None:
+            await asyncio.gather(
+                (
+                    agent.hooks.on_llm_end(context_wrapper, agent, final_response)
+                    if agent.hooks
+                    else _coro.noop_coroutine()
+                ),
+                hooks.on_llm_end(context_wrapper, agent, final_response),
+            )
 
         # 2. At this point, the streaming is complete for this turn of the agent loop.
         if not final_response:
@@ -916,9 +1514,50 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_use_tracker=tool_use_tracker,
+            event_queue=streamed_result._event_queue,
         )
 
-        RunImpl.stream_step_result_to_queue(single_step_result, streamed_result._event_queue)
+        import dataclasses as _dc
+
+        # Filter out items that have already been sent to avoid duplicates
+        items_to_filter = single_step_result.new_step_items
+
+        if emitted_tool_call_ids:
+            # Filter out tool call items that were already emitted during streaming
+            items_to_filter = [
+                item
+                for item in items_to_filter
+                if not (
+                    isinstance(item, ToolCallItem)
+                    and (
+                        call_id := getattr(
+                            item.raw_item, "call_id", getattr(item.raw_item, "id", None)
+                        )
+                    )
+                    and call_id in emitted_tool_call_ids
+                )
+            ]
+
+        if emitted_reasoning_item_ids:
+            # Filter out reasoning items that were already emitted during streaming
+            items_to_filter = [
+                item
+                for item in items_to_filter
+                if not (
+                    isinstance(item, ReasoningItem)
+                    and (reasoning_id := getattr(item.raw_item, "id", None))
+                    and reasoning_id in emitted_reasoning_item_ids
+                )
+            ]
+
+        # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
+        items_to_filter = [
+            item for item in items_to_filter if not isinstance(item, HandoffCallItem)
+        ]
+
+        # Create filtered result and send to queue
+        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
+        RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
     @classmethod
@@ -934,7 +1573,7 @@ class AgentRunner:
         run_config: RunConfig,
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
-        previous_response_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -954,8 +1593,11 @@ class AgentRunner:
 
         output_schema = cls._get_output_schema(agent)
         handoffs = await cls._get_handoffs(agent, context_wrapper)
-        input = ItemHelpers.input_to_new_input_list(original_input)
-        input.extend([generated_item.to_input_item() for generated_item in generated_items])
+        if server_conversation_tracker is not None:
+            input = server_conversation_tracker.prepare_input(original_input, generated_items)
+        else:
+            input = ItemHelpers.input_to_new_input_list(original_input)
+            input.extend([generated_item.to_input_item() for generated_item in generated_items])
 
         new_response = await cls._get_new_response(
             agent,
@@ -964,10 +1606,11 @@ class AgentRunner:
             output_schema,
             all_tools,
             handoffs,
+            hooks,
             context_wrapper,
             run_config,
             tool_use_tracker,
-            previous_response_id,
+            server_conversation_tracker,
             prompt_config,
         )
 
@@ -1000,6 +1643,7 @@ class AgentRunner:
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
+        event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] | None = None,
     ) -> SingleStepResult:
         processed_response = RunImpl.process_model_response(
             agent=agent,
@@ -1010,6 +1654,14 @@ class AgentRunner:
         )
 
         tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+
+        # Send handoff items immediately for streaming, but avoid duplicates
+        if event_queue is not None and processed_response.new_items:
+            handoff_items = [
+                item for item in processed_response.new_items if isinstance(item, HandoffCallItem)
+            ]
+            if handoff_items:
+                RunImpl.stream_step_items_to_queue(cast(list[RunItem], handoff_items), event_queue)
 
         return await RunImpl.execute_tools_and_side_effects(
             agent=agent,
@@ -1022,6 +1674,56 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
         )
+
+    @classmethod
+    async def _get_single_step_result_from_streamed_response(
+        cls,
+        *,
+        agent: Agent[TContext],
+        all_tools: list[Tool],
+        streamed_result: RunResultStreaming,
+        new_response: ModelResponse,
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        tool_use_tracker: AgentToolUseTracker,
+    ) -> SingleStepResult:
+        original_input = streamed_result.input
+        pre_step_items = streamed_result.new_items
+        event_queue = streamed_result._event_queue
+
+        processed_response = RunImpl.process_model_response(
+            agent=agent,
+            all_tools=all_tools,
+            response=new_response,
+            output_schema=output_schema,
+            handoffs=handoffs,
+        )
+        new_items_processed_response = processed_response.new_items
+        tool_use_tracker.add_tool_use(agent, processed_response.tools_used)
+        RunImpl.stream_step_items_to_queue(new_items_processed_response, event_queue)
+
+        single_step_result = await RunImpl.execute_tools_and_side_effects(
+            agent=agent,
+            original_input=original_input,
+            pre_step_items=pre_step_items,
+            new_response=new_response,
+            processed_response=processed_response,
+            output_schema=output_schema,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+        )
+        new_step_items = [
+            item
+            for item in single_step_result.new_step_items
+            if item not in new_items_processed_response
+        ]
+        RunImpl.stream_step_items_to_queue(new_step_items, event_queue)
+
+        return single_step_result
 
     @classmethod
     async def _run_input_guardrails(
@@ -1049,6 +1751,8 @@ class AgentRunner:
                 # Cancel all guardrail tasks if a tripwire is triggered.
                 for t in guardrail_tasks:
                     t.cancel()
+                # Wait for cancellations to propagate by awaiting the cancelled tasks.
+                await asyncio.gather(*guardrail_tasks, return_exceptions=True)
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
                         message="Guardrail tripwire triggered",
@@ -1108,19 +1812,54 @@ class AgentRunner:
         output_schema: AgentOutputSchemaBase | None,
         all_tools: list[Tool],
         handoffs: list[Handoff],
+        hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         run_config: RunConfig,
         tool_use_tracker: AgentToolUseTracker,
-        previous_response_id: str | None,
+        server_conversation_tracker: _ServerConversationTracker | None,
         prompt_config: ResponsePromptParam | None,
     ) -> ModelResponse:
+        # Allow user to modify model input right before the call, if configured
+        filtered = await cls._maybe_filter_model_input(
+            agent=agent,
+            run_config=run_config,
+            context_wrapper=context_wrapper,
+            input_items=input,
+            system_instructions=system_prompt,
+        )
+
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
 
+        # If we have run hooks, or if the agent has hooks, we need to call them before the LLM call
+        await asyncio.gather(
+            hooks.on_llm_start(context_wrapper, agent, filtered.instructions, filtered.input),
+            (
+                agent.hooks.on_llm_start(
+                    context_wrapper,
+                    agent,
+                    filtered.instructions,  # Use filtered instructions
+                    filtered.input,  # Use filtered input
+                )
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        previous_response_id = (
+            server_conversation_tracker.previous_response_id
+            if server_conversation_tracker
+            and server_conversation_tracker.previous_response_id is not None
+            else None
+        )
+        conversation_id = (
+            server_conversation_tracker.conversation_id if server_conversation_tracker else None
+        )
+
         new_response = await model.get_response(
-            system_instructions=system_prompt,
-            input=input,
+            system_instructions=filtered.instructions,
+            input=filtered.input,
             model_settings=model_settings,
             tools=all_tools,
             output_schema=output_schema,
@@ -1129,10 +1868,21 @@ class AgentRunner:
                 run_config.tracing_disabled, run_config.trace_include_sensitive_data
             ),
             previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
             prompt=prompt_config,
         )
 
         context_wrapper.usage.add(new_response.usage)
+
+        # If we have run hooks, or if the agent has hooks, we need to call them after the LLM call
+        await asyncio.gather(
+            (
+                agent.hooks.on_llm_end(context_wrapper, agent, new_response)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+            hooks.on_llm_end(context_wrapper, agent, new_response),
+        )
 
         return new_response
 
@@ -1191,19 +1941,20 @@ class AgentRunner:
         cls,
         input: str | list[TResponseInputItem],
         session: Session | None,
+        session_input_callback: SessionInputCallback | None,
     ) -> str | list[TResponseInputItem]:
         """Prepare input by combining it with session history if enabled."""
         if session is None:
             return input
 
-        # Validate that we don't have both a session and a list input, as this creates
-        # ambiguity about whether the list should append to or replace existing session history
-        if isinstance(input, list):
+        # If the user doesn't specify an input callback and pass a list as input
+        if isinstance(input, list) and not session_input_callback:
             raise UserError(
-                "Cannot provide both a session and a list of input items. "
-                "When using session memory, provide only a string input to append to the "
-                "conversation, or use session=None and provide a list to manually manage "
-                "conversation history."
+                "When using session memory, list inputs require a "
+                "`RunConfig.session_input_callback` to define how they should be merged "
+                "with the conversation history. If you don't want to use a callback, "
+                "provide your input as a string instead, or disable session memory "
+                "(session=None) and pass a list to manage the history manually."
             )
 
         # Get previous conversation history
@@ -1212,19 +1963,31 @@ class AgentRunner:
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
-        # Combine history with new input
-        combined_input = history + new_input_list
-
-        return combined_input
+        if session_input_callback is None:
+            return history + new_input_list
+        elif callable(session_input_callback):
+            res = session_input_callback(history, new_input_list)
+            if inspect.isawaitable(res):
+                return await res
+            return res
+        else:
+            raise UserError(
+                f"Invalid `session_input_callback` value: {session_input_callback}. "
+                "Choose between `None` or a custom callable function."
+            )
 
     @classmethod
     async def _save_result_to_session(
         cls,
         session: Session | None,
         original_input: str | list[TResponseInputItem],
-        result: RunResult,
+        new_items: list[RunItem],
     ) -> None:
-        """Save the conversation turn to session."""
+        """
+        Save the conversation turn to session.
+        It does not account for any filtering or modification performed by
+        `RunConfig.session_input_callback`.
+        """
         if session is None:
             return
 
@@ -1232,11 +1995,48 @@ class AgentRunner:
         input_list = ItemHelpers.input_to_new_input_list(original_input)
 
         # Convert new items to input format
-        new_items_as_input = [item.to_input_item() for item in result.new_items]
+        new_items_as_input = [item.to_input_item() for item in new_items]
 
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
         await session.add_items(items_to_save)
 
+    @staticmethod
+    async def _input_guardrail_tripwire_triggered_for_stream(
+        streamed_result: RunResultStreaming,
+    ) -> bool:
+        """Return True if any input guardrail triggered during a streamed run."""
+
+        task = streamed_result._input_guardrails_task
+        if task is None:
+            return False
+
+        if not task.done():
+            await task
+
+        return any(
+            guardrail_result.output.tripwire_triggered
+            for guardrail_result in streamed_result.input_guardrail_results
+        )
+
 
 DEFAULT_AGENT_RUNNER = AgentRunner()
+
+
+def _get_tool_call_types() -> tuple[type, ...]:
+    normalized_types: list[type] = []
+    for type_hint in get_args(ToolCallItemTypes):
+        origin = get_origin(type_hint)
+        candidate = origin or type_hint
+        if isinstance(candidate, type):
+            normalized_types.append(candidate)
+    return tuple(normalized_types)
+
+
+_TOOL_CALL_TYPES: tuple[type, ...] = _get_tool_call_types()
+
+
+def _copy_str_or_list(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
+    if isinstance(input, str):
+        return input
+    return input.copy()

@@ -28,6 +28,10 @@ class CustomAgentHooks(AgentHooks):
             f"### ({self.display_name}) {self.event_counter}: Agent {source.name} handed off to {agent.name}"
         )
 
+    # Note: The on_tool_start and on_tool_end hooks apply only to local tools.
+    # They do not include hosted tools that run on the OpenAI server side,
+    # such as WebSearchTool, FileSearchTool, CodeInterpreterTool, HostedMCPTool,
+    # or other built-in hosted tools.
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
         self.event_counter += 1
         print(
@@ -49,7 +53,7 @@ class CustomAgentHooks(AgentHooks):
 @function_tool
 def random_number(max: int) -> int:
     """
-    Generate a random number up to the provided maximum.
+    Generate a random number from 0 to max (inclusive).
     """
     return random.randint(0, max)
 
@@ -84,10 +88,15 @@ start_agent = Agent(
 
 async def main() -> None:
     user_input = input("Enter a max number: ")
-    await Runner.run(
-        start_agent,
-        input=f"Generate a random number between 0 and {user_input}.",
-    )
+    try:
+        max_number = int(user_input)
+        await Runner.run(
+            start_agent,
+            input=f"Generate a random number between 0 and {max_number}.",
+        )
+    except ValueError:
+        print("Please enter a valid integer.")
+        return
 
     print("Done!")
 

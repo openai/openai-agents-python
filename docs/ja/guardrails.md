@@ -4,44 +4,54 @@ search:
 ---
 # ガードレール
 
-ガードレールは エージェント と _並行して_ 実行され、ユーザー入力のチェックとバリデーションを行えます。例えば、とても賢い（つまり遅く/高価な）モデルを使用してカスタマーリクエストを処理するエージェントがあるとします。悪意のある ユーザー がモデルに数学の宿題を手伝わせようとするのは避けたいでしょう。そこで、速く/安価なモデルで動くガードレールを実行できます。ガードレールが悪意のある利用を検知すると、直ちにエラーを送出して高価なモデルの実行を停止し、時間とコストを節約できます。
+ガードレールは、ユーザー入力とエージェント出力の検査・検証を可能にします。たとえば、顧客からのリクエスト対応にとても賢い（そのため遅く/高価な）モデルを使うエージェントがあるとします。悪意のあるユーザーが、そのモデルに数学の宿題を手伝わせようとするのは避けたいはずです。そこで、速く/安価なモデルでガードレールを実行できます。ガードレールが悪意ある利用を検知した場合、直ちにエラーを発生させて高価なモデルの実行を防ぎ、時間とコストを節約できます（ **ブロッキング型ガードレールを使用する場合**。並列ガードレールでは、ガードレールの完了前に高価なモデルがすでに実行を開始している可能性があります。詳細は下記「実行モード」を参照してください）。
 
-ガードレールには 2 種類あります:
+ガードレールには 2 つの種類があります:
 
-1. 入力ガードレール は初期 ユーザー 入力に対して実行されます  
-2. 出力ガードレール は最終的なエージェント出力に対して実行されます  
+1. 入力ガードレールは最初のユーザー入力で実行されます
+2. 出力ガードレールは最終的なエージェント出力で実行されます
 
 ## 入力ガードレール
 
-入力ガードレールは 3 ステップで実行されます:
+入力ガードレールは 3 つの手順で実行されます:
 
-1. まず、ガードレールはエージェントに渡されたものと同じ入力を受け取ります。  
-2. 次に、ガードレール関数が実行され [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を生成し、それが [`InputGuardrailResult`][agents.guardrail.InputGuardrailResult] にラップされます。  
-3. 最後に [.tripwire_triggered][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] が true かどうかを確認します。true の場合、[`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered] 例外が送出されるので、適切に ユーザー に応答したり例外を処理できます。  
+1. まず、ガードレールはエージェントに渡されたものと同じ入力を受け取ります。
+2. 次に、ガードレール関数を実行して [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を生成し、それを [`InputGuardrailResult`][agents.guardrail.InputGuardrailResult] にラップします。
+3. 最後に、[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] が true かどうかを確認します。true の場合は [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered] 例外を送出し、ユーザーへの適切な応答や例外処理ができるようにします。
 
 !!! Note
 
-    入力ガードレールは ユーザー 入力に対して実行されることを意図しているため、ガードレールは *最初* のエージェントでのみ実行されます。「なぜ `guardrails` プロパティがエージェントにあり、`Runner.run` に渡さないのか」と疑問に思うかもしれません。これは、ガードレールが実際の エージェント と密接に関連していることが多いからです。異なるエージェントには異なるガードレールを実行するため、コードを同じ場所に置くことで可読性が向上します。
+    入力ガードレールはユーザー入力に対して実行されることを意図しているため、エージェントのガードレールは、そのエージェントが最初のエージェントである場合にのみ実行されます。なぜ `guardrails` プロパティがエージェント側にあり、`Runner.run` に渡さないのか疑問に思うかもしれません。これは、ガードレールが実際のエージェントに密接に関係する傾向があるためです。エージェントごとに異なるガードレールを実行することになるため、コードを同じ場所に置くと読みやすくなります。
+
+### 実行モード
+
+入力ガードレールは 2 つの実行モードをサポートします:
+
+- **並列実行**（既定、`run_in_parallel=True`）: ガードレールはエージェントの実行と同時に並行して実行されます。両者が同時に開始されるため、待ち時間に最も優れています。ただし、ガードレールが失敗した場合でも、エージェントはキャンセルされる前にすでにトークンを消費し、ツールを実行している可能性があります。
+
+- **ブロッキング実行**（`run_in_parallel=False`）: ガードレールはエージェントが開始する *前に* 実行され、完了します。ガードレールのトリップワイヤーが発動した場合、エージェントは一切実行されず、トークン消費やツール実行を防げます。これはコスト最適化や、ツール呼び出しによる副作用を避けたい場合に最適です。
 
 ## 出力ガードレール
 
-出力ガードレールは 3 ステップで実行されます:
+出力ガードレールは 3 つの手順で実行されます:
 
-1. まず、ガードレールはエージェントが生成した出力を受け取ります。  
-2. 次に、ガードレール関数が実行され [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を生成し、それが [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult] にラップされます。  
-3. 最後に [.tripwire_triggered][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] が true かどうかを確認します。true の場合、[`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] 例外が送出されるので、適切に ユーザー に応答したり例外を処理できます。  
+1. まず、ガードレールはエージェントが生成した出力を受け取ります。
+2. 次に、ガードレール関数を実行して [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を生成し、それを [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult] にラップします。
+3. 最後に、[`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] が true かどうかを確認します。true の場合は [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] 例外を送出し、ユーザーへの適切な応答や例外処理ができるようにします。
 
 !!! Note
 
-    出力ガードレールは最終的なエージェント出力に対して実行されることを意図しているため、ガードレールは *最後* のエージェントでのみ実行されます。入力ガードレールの場合と同様、ガードレールが実際の エージェント と密接に関連していることが多いため、コードを同じ場所に置くことで可読性が向上します。
+    出力ガードレールは最終的なエージェント出力に対して実行されることを意図しているため、エージェントのガードレールは、そのエージェントが最後のエージェントである場合にのみ実行されます。入力ガードレールと同様に、ガードレールは実際のエージェントに密接に関係する傾向があるため、コードを同じ場所に置くと読みやすくなります。
+
+    出力ガードレールは常にエージェントの完了後に実行されるため、`run_in_parallel` パラメーターはサポートしません。
 
 ## トリップワイヤー
 
-入力または出力がガードレールを通過できなかった場合、ガードレールはトリップワイヤーでそれを示すことができます。トリップワイヤーがトリガーされたガードレールを検知した時点で、直ちに `{Input,Output}GuardrailTripwireTriggered` 例外を送出し、エージェントの実行を停止します。
+入力または出力がガードレールに不合格となった場合、ガードレールはトリップワイヤーでそれを通知できます。トリップワイヤーが発動したガードレールを検出すると、直ちに `{Input,Output}GuardrailTripwireTriggered` 例外を送出し、エージェントの実行を停止します。
 
 ## ガードレールの実装
 
-入力を受け取り、[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を返す関数を提供する必要があります。この例では、内部で エージェント を実行してこれを行います。
+入力を受け取り、[`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput] を返す関数を用意する必要があります。この例では、内部でエージェントを実行してこれを行います。
 
 ```python
 from pydantic import BaseModel
@@ -94,10 +104,10 @@ async def main():
         print("Math homework guardrail tripped")
 ```
 
-1. このエージェントをガードレール関数内で使用します。  
-2. これはエージェントの入力/コンテキストを受け取り、結果を返すガードレール関数です。  
-3. ガードレール結果に追加情報を含めることができます。  
-4. これはワークフローを定義する実際のエージェントです。  
+1. このエージェントをガードレール関数内で使用します。
+2. これはエージェントの入力/コンテキストを受け取り、結果を返すガードレール関数です。
+3. ガードレール結果に追加情報を含めることができます。
+4. これはワークフローを定義する実際のエージェントです。
 
 出力ガードレールも同様です。
 
@@ -152,7 +162,7 @@ async def main():
         print("Math output guardrail tripped")
 ```
 
-1. これは実際のエージェントの出力型です。  
-2. これはガードレールの出力型です。  
-3. これはエージェントの出力を受け取り、結果を返すガードレール関数です。  
-4. これはワークフローを定義する実際のエージェントです。  
+1. これは実際のエージェントの出力型です。
+2. これはガードレールの出力型です。
+3. これはエージェントの出力を受け取り、結果を返すガードレール関数です。
+4. これはワークフローを定義する実際のエージェントです。

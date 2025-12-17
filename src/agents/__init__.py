@@ -5,9 +5,18 @@ from typing import Literal
 from openai import AsyncOpenAI
 
 from . import _config
-from .agent import Agent, ToolsToFinalOutputFunction, ToolsToFinalOutputResult
+from .agent import (
+    Agent,
+    AgentBase,
+    AgentToolStreamEvent,
+    StopAtTools,
+    ToolsToFinalOutputFunction,
+    ToolsToFinalOutputResult,
+)
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
+from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -15,6 +24,8 @@ from .exceptions import (
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
+    ToolInputGuardrailTripwireTriggered,
+    ToolOutputGuardrailTripwireTriggered,
     UserError,
 )
 from .guardrail import (
@@ -26,7 +37,17 @@ from .guardrail import (
     input_guardrail,
     output_guardrail,
 )
-from .handoffs import Handoff, HandoffInputData, HandoffInputFilter, handoff
+from .handoffs import (
+    Handoff,
+    HandoffInputData,
+    HandoffInputFilter,
+    default_handoff_history_mapper,
+    get_conversation_history_wrappers,
+    handoff,
+    nest_handoff_history,
+    reset_conversation_history_wrappers,
+    set_conversation_history_wrappers,
+)
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -40,9 +61,15 @@ from .items import (
     TResponseInputItem,
 )
 from .lifecycle import AgentHooks, RunHooks
-from .memory import Session, SQLiteSession
+from .memory import (
+    OpenAIConversationsSession,
+    Session,
+    SessionABC,
+    SQLiteSession,
+)
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
+from .models.multi_provider import MultiProvider
 from .models.openai_chatcompletions import OpenAIChatCompletionsModel
 from .models.openai_provider import OpenAIProvider
 from .models.openai_responses import OpenAIResponsesModel
@@ -58,6 +85,7 @@ from .stream_events import (
     StreamEvent,
 )
 from .tool import (
+    ApplyPatchTool,
     CodeInterpreterTool,
     ComputerTool,
     FileSearchTool,
@@ -71,10 +99,35 @@ from .tool import (
     MCPToolApprovalFunction,
     MCPToolApprovalFunctionResult,
     MCPToolApprovalRequest,
+    ShellActionRequest,
+    ShellCallData,
+    ShellCallOutcome,
+    ShellCommandOutput,
+    ShellCommandRequest,
+    ShellExecutor,
+    ShellResult,
+    ShellTool,
     Tool,
+    ToolOutputFileContent,
+    ToolOutputFileContentDict,
+    ToolOutputImage,
+    ToolOutputImageDict,
+    ToolOutputText,
+    ToolOutputTextDict,
     WebSearchTool,
     default_tool_error_function,
     function_tool,
+)
+from .tool_guardrails import (
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolInputGuardrailData,
+    ToolInputGuardrailResult,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailData,
+    ToolOutputGuardrailResult,
+    tool_input_guardrail,
+    tool_output_guardrail,
 )
 from .tracing import (
     AgentSpanData,
@@ -118,7 +171,7 @@ from .version import __version__
 
 
 def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
-    """Set the default OpenAI API key to use for LLM requests (and optionally tracing(). This is
+    """Set the default OpenAI API key to use for LLM requests (and optionally tracing()). This is
     only necessary if the OPENAI_API_KEY environment variable is not already set.
 
     If provided, this key will be used instead of the OPENAI_API_KEY environment variable.
@@ -161,15 +214,25 @@ def enable_verbose_stdout_logging():
 
 __all__ = [
     "Agent",
+    "AgentBase",
+    "AgentToolStreamEvent",
+    "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
+    "default_handoff_history_mapper",
+    "get_conversation_history_wrappers",
+    "nest_handoff_history",
+    "reset_conversation_history_wrappers",
+    "set_conversation_history_wrappers",
     "Runner",
+    "apply_diff",
     "run_demo_loop",
     "Model",
     "ModelProvider",
     "ModelTracing",
     "ModelSettings",
     "OpenAIChatCompletionsModel",
+    "MultiProvider",
     "OpenAIProvider",
     "OpenAIResponsesModel",
     "AgentOutputSchema",
@@ -181,6 +244,8 @@ __all__ = [
     "AgentsException",
     "InputGuardrailTripwireTriggered",
     "OutputGuardrailTripwireTriggered",
+    "ToolInputGuardrailTripwireTriggered",
+    "ToolOutputGuardrailTripwireTriggered",
     "DynamicPromptFunction",
     "GenerateDynamicPromptData",
     "Prompt",
@@ -194,6 +259,15 @@ __all__ = [
     "GuardrailFunctionOutput",
     "input_guardrail",
     "output_guardrail",
+    "ToolInputGuardrail",
+    "ToolOutputGuardrail",
+    "ToolGuardrailFunctionOutput",
+    "ToolInputGuardrailData",
+    "ToolInputGuardrailResult",
+    "ToolOutputGuardrailData",
+    "ToolOutputGuardrailResult",
+    "tool_input_guardrail",
+    "tool_output_guardrail",
     "handoff",
     "Handoff",
     "HandoffInputData",
@@ -211,7 +285,9 @@ __all__ = [
     "RunHooks",
     "AgentHooks",
     "Session",
+    "SessionABC",
     "SQLiteSession",
+    "OpenAIConversationsSession",
     "RunContextWrapper",
     "TContext",
     "RunErrorDetails",
@@ -231,12 +307,30 @@ __all__ = [
     "LocalShellCommandRequest",
     "LocalShellExecutor",
     "LocalShellTool",
+    "ShellActionRequest",
+    "ShellCallData",
+    "ShellCallOutcome",
+    "ShellCommandOutput",
+    "ShellCommandRequest",
+    "ShellExecutor",
+    "ShellResult",
+    "ShellTool",
+    "ApplyPatchEditor",
+    "ApplyPatchOperation",
+    "ApplyPatchResult",
+    "ApplyPatchTool",
     "Tool",
     "WebSearchTool",
     "HostedMCPTool",
     "MCPToolApprovalFunction",
     "MCPToolApprovalRequest",
     "MCPToolApprovalFunctionResult",
+    "ToolOutputText",
+    "ToolOutputTextDict",
+    "ToolOutputImage",
+    "ToolOutputImageDict",
+    "ToolOutputFileContent",
+    "ToolOutputFileContentDict",
     "function_tool",
     "Usage",
     "add_trace_processor",

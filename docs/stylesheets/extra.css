@@ -184,6 +184,17 @@
     border-radius: 8px;
 }
 
+/* Prevent grid layout from collapsing code lines on narrow viewports. */
+.md-typeset .md-code__content {
+    display: block;
+    white-space: pre;
+    min-width: 0;
+}
+
+.md-typeset pre > code {
+    white-space: pre;
+}
+
 .md-clipboard.md-icon {
     color: #9e9e9e;
 }

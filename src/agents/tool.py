@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
 
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
@@ -13,24 +13,29 @@ from openai.types.responses.response_computer_tool_call import (
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 from openai.types.responses.tool_param import CodeInterpreter, ImageGeneration, Mcp
+from openai.types.responses.web_search_tool import Filters as WebSearchToolFilters
 from openai.types.responses.web_search_tool_param import UserLocation
-from pydantic import ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError, model_validator
 from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 
 from . import _debug
 from .computer import AsyncComputer, Computer
+from .editor import ApplyPatchEditor
 from .exceptions import ModelBehaviorError
 from .function_schema import DocstringStyle, function_schema
-from .items import RunItem
 from .logger import logger
 from .run_context import RunContextWrapper
+from .strict_schema import ensure_strict_json_schema
 from .tool_context import ToolContext
+from .tool_guardrails import ToolInputGuardrail, ToolOutputGuardrail
 from .tracing import SpanError
 from .util import _error_tracing
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    from .agent import Agent, AgentBase
+    from .items import RunItem
+
 
 ToolParams = ParamSpec("ToolParams")
 
@@ -43,6 +48,86 @@ ToolFunction = Union[
     ToolFunctionWithContext[ToolParams],
     ToolFunctionWithToolContext[ToolParams],
 ]
+
+
+class ToolOutputText(BaseModel):
+    """Represents a tool output that should be sent to the model as text."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ToolOutputTextDict(TypedDict, total=False):
+    """TypedDict variant for text tool outputs."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ToolOutputImage(BaseModel):
+    """Represents a tool output that should be sent to the model as an image.
+
+    You can provide either an `image_url` (URL or data URL) or a `file_id` for previously uploaded
+    content. The optional `detail` can control vision detail.
+    """
+
+    type: Literal["image"] = "image"
+    image_url: str | None = None
+    file_id: str | None = None
+    detail: Literal["low", "high", "auto"] | None = None
+
+    @model_validator(mode="after")
+    def check_at_least_one_required_field(self) -> ToolOutputImage:
+        """Validate that at least one of image_url or file_id is provided."""
+        if self.image_url is None and self.file_id is None:
+            raise ValueError("At least one of image_url or file_id must be provided")
+        return self
+
+
+class ToolOutputImageDict(TypedDict, total=False):
+    """TypedDict variant for image tool outputs."""
+
+    type: Literal["image"]
+    image_url: NotRequired[str]
+    file_id: NotRequired[str]
+    detail: NotRequired[Literal["low", "high", "auto"]]
+
+
+class ToolOutputFileContent(BaseModel):
+    """Represents a tool output that should be sent to the model as a file.
+
+    Provide one of `file_data` (base64), `file_url`, or `file_id`. You may also
+    provide an optional `filename` when using `file_data` to hint file name.
+    """
+
+    type: Literal["file"] = "file"
+    file_data: str | None = None
+    file_url: str | None = None
+    file_id: str | None = None
+    filename: str | None = None
+
+    @model_validator(mode="after")
+    def check_at_least_one_required_field(self) -> ToolOutputFileContent:
+        """Validate that at least one of file_data, file_url, or file_id is provided."""
+        if self.file_data is None and self.file_url is None and self.file_id is None:
+            raise ValueError("At least one of file_data, file_url, or file_id must be provided")
+        return self
+
+
+class ToolOutputFileContentDict(TypedDict, total=False):
+    """TypedDict variant for file content tool outputs."""
+
+    type: Literal["file"]
+    file_data: NotRequired[str]
+    file_url: NotRequired[str]
+    file_id: NotRequired[str]
+    filename: NotRequired[str]
+
+
+ValidToolOutputPydanticModels = Union[ToolOutputText, ToolOutputImage, ToolOutputFileContent]
+ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
+    ValidToolOutputPydanticModels
+)
 
 
 @dataclass
@@ -78,7 +163,9 @@ class FunctionTool:
     1. The tool run context.
     2. The arguments from the LLM, as a JSON string.
 
-    You must return a string representation of the tool output, or something we can call `str()` on.
+    You must return a one of the structured tool output types (e.g. ToolOutputText, ToolOutputImage,
+    ToolOutputFileContent) or a string representation of the tool output, or a list of them,
+    or something we can call `str()` on.
     In case of errors, you can either raise an Exception (which will cause the run to fail) or
     return a string error message (which will be sent back to the LLM).
     """
@@ -87,10 +174,21 @@ class FunctionTool:
     """Whether the JSON schema is in strict mode. We **strongly** recommend setting this to True,
     as it increases the likelihood of correct JSON input."""
 
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True
     """Whether the tool is enabled. Either a bool or a Callable that takes the run context and agent
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
+
+    # Tool-specific guardrails
+    tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
+    """Optional list of input guardrails to run before invoking this tool."""
+
+    tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
+    """Optional list of output guardrails to run after invoking this tool."""
+
+    def __post_init__(self):
+        if self.strict_json_schema:
+            self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
 
 @dataclass
@@ -128,12 +226,15 @@ class WebSearchTool:
     user_location: UserLocation | None = None
     """Optional location for the search. Lets you customize results to be relevant to a location."""
 
+    filters: WebSearchToolFilters | None = None
+    """A filter to apply based on file attributes."""
+
     search_context_size: Literal["low", "medium", "high"] = "medium"
     """The amount of context to use for the search."""
 
     @property
     def name(self):
-        return "web_search_preview"
+        return "web_search"
 
 
 @dataclass
@@ -200,7 +301,7 @@ MCPToolApprovalFunction = Callable[
 @dataclass
 class HostedMCPTool:
     """A tool that allows the LLM to use a remote MCP server. The LLM will automatically list and
-    call tools, without requiring a a round trip back to your code.
+    call tools, without requiring a round trip back to your code.
     If you want to run MCP servers locally via stdio, in a VPC or other non-publicly-accessible
     environment, or you just prefer to run tool calls locally, then you can instead use the servers
     in `agents.mcp` and pass `Agent(mcp_servers=[...])` to the agent."""
@@ -259,7 +360,11 @@ LocalShellExecutor = Callable[[LocalShellCommandRequest], MaybeAwaitable[str]]
 
 @dataclass
 class LocalShellTool:
-    """A tool that allows the LLM to execute commands on a shell."""
+    """A tool that allows the LLM to execute commands on a shell.
+
+    For more details, see:
+    https://platform.openai.com/docs/guides/tools-local-shell
+    """
 
     executor: LocalShellExecutor
     """A function that executes a command on a shell."""
@@ -269,12 +374,109 @@ class LocalShellTool:
         return "local_shell"
 
 
+@dataclass
+class ShellCallOutcome:
+    """Describes the terminal condition of a shell command."""
+
+    type: Literal["exit", "timeout"]
+    exit_code: int | None = None
+
+
+def _default_shell_outcome() -> ShellCallOutcome:
+    return ShellCallOutcome(type="exit")
+
+
+@dataclass
+class ShellCommandOutput:
+    """Structured output for a single shell command execution."""
+
+    stdout: str = ""
+    stderr: str = ""
+    outcome: ShellCallOutcome = field(default_factory=_default_shell_outcome)
+    command: str | None = None
+    provider_data: dict[str, Any] | None = None
+
+    @property
+    def exit_code(self) -> int | None:
+        return self.outcome.exit_code
+
+    @property
+    def status(self) -> Literal["completed", "timeout"]:
+        return "timeout" if self.outcome.type == "timeout" else "completed"
+
+
+@dataclass
+class ShellResult:
+    """Result returned by a shell executor."""
+
+    output: list[ShellCommandOutput]
+    max_output_length: int | None = None
+    provider_data: dict[str, Any] | None = None
+
+
+@dataclass
+class ShellActionRequest:
+    """Action payload for a next-generation shell call."""
+
+    commands: list[str]
+    timeout_ms: int | None = None
+    max_output_length: int | None = None
+
+
+@dataclass
+class ShellCallData:
+    """Normalized shell call data provided to shell executors."""
+
+    call_id: str
+    action: ShellActionRequest
+    status: Literal["in_progress", "completed"] | None = None
+    raw: Any | None = None
+
+
+@dataclass
+class ShellCommandRequest:
+    """A request to execute a modern shell call."""
+
+    ctx_wrapper: RunContextWrapper[Any]
+    data: ShellCallData
+
+
+ShellExecutor = Callable[[ShellCommandRequest], MaybeAwaitable[Union[str, ShellResult]]]
+"""Executes a shell command sequence and returns either text or structured output."""
+
+
+@dataclass
+class ShellTool:
+    """Next-generation shell tool. LocalShellTool will be deprecated in favor of this."""
+
+    executor: ShellExecutor
+    name: str = "shell"
+
+    @property
+    def type(self) -> str:
+        return "shell"
+
+
+@dataclass
+class ApplyPatchTool:
+    """Hosted apply_patch tool. Lets the model request file mutations via unified diffs."""
+
+    editor: ApplyPatchEditor
+    name: str = "apply_patch"
+
+    @property
+    def type(self) -> str:
+        return "apply_patch"
+
+
 Tool = Union[
     FunctionTool,
     FileSearchTool,
     WebSearchTool,
     ComputerTool,
     HostedMCPTool,
+    ShellTool,
+    ApplyPatchTool,
     LocalShellTool,
     ImageGenerationTool,
     CodeInterpreterTool,
@@ -300,7 +502,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -315,7 +517,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = None,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -330,7 +532,7 @@ def function_tool(
     use_docstring_info: bool = True,
     failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     strict_mode: bool = True,
-    is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -443,6 +645,13 @@ def function_tool(
                         },
                     )
                 )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool {schema.name} failed")
+                else:
+                    logger.error(
+                        f"Tool {schema.name} failed: {input} {e}",
+                        exc_info=e,
+                    )
                 return result
 
         return FunctionTool(
