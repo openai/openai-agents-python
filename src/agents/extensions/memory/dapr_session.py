@@ -40,6 +40,7 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...logger import logger
 from ...memory.session import SessionABC
+from ...memory.session_settings import SessionSettings
 
 # Type alias for consistency levels
 ConsistencyLevel = Literal["eventual", "strong"]
@@ -64,6 +65,7 @@ class DaprSession(SessionABC):
         dapr_client: DaprClient,
         ttl: int | None = None,
         consistency: ConsistencyLevel = DAPR_CONSISTENCY_EVENTUAL,
+        session_settings: SessionSettings | None = None,
     ):
         """Initializes a new DaprSession.
 
@@ -77,8 +79,11 @@ class DaprSession(SessionABC):
             consistency (ConsistencyLevel, optional): Consistency level for state operations.
                 Use DAPR_CONSISTENCY_EVENTUAL or DAPR_CONSISTENCY_STRONG constants.
                 Defaults to DAPR_CONSISTENCY_EVENTUAL.
+            session_settings (SessionSettings | None): Session configuration settings including
+                default limit for retrieving items. If None, uses default SessionSettings().
         """
         self.session_id = session_id
+        self.session_settings = session_settings or SessionSettings()
         self._dapr_client = dapr_client
         self._state_store_name = state_store_name
         self._ttl = ttl
@@ -97,6 +102,7 @@ class DaprSession(SessionABC):
         *,
         state_store_name: str,
         dapr_address: str = "localhost:50001",
+        session_settings: SessionSettings | None = None,
         **kwargs: Any,
     ) -> DaprSession:
         """Create a session from a Dapr sidecar address.
@@ -105,6 +111,8 @@ class DaprSession(SessionABC):
             session_id (str): Conversation ID.
             state_store_name (str): Name of the Dapr state store component.
             dapr_address (str): Dapr sidecar gRPC address. Defaults to "localhost:50001".
+            session_settings (SessionSettings | None): Session configuration settings including
+                default limit for retrieving items. If None, uses default SessionSettings().
             **kwargs: Additional keyword arguments forwarded to the main constructor
                 (e.g., ttl, consistency).
 
@@ -119,7 +127,7 @@ class DaprSession(SessionABC):
         """
         dapr_client = DaprClient(address=dapr_address)
         session = cls(
-            session_id, state_store_name=state_store_name, dapr_client=dapr_client, **kwargs
+            session_id, state_store_name=state_store_name, dapr_client=dapr_client, session_settings=session_settings, **kwargs
         )
         session._owns_client = True  # We created the client, so we own it
         return session
@@ -222,12 +230,15 @@ class DaprSession(SessionABC):
         """Retrieve the conversation history for this session.
 
         Args:
-            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
 
         Returns:
             List of input items representing the conversation history
         """
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
+        
         async with self._lock:
             # Get messages from state store with consistency level
             response = await self._dapr_client.get_state(
@@ -239,10 +250,10 @@ class DaprSession(SessionABC):
             messages = self._decode_messages(response.data)
             if not messages:
                 return []
-            if limit is not None:
-                if limit <= 0:
+            if session_limit is not None:
+                if session_limit <= 0:
                     return []
-                messages = messages[-limit:]
+                messages = messages[-session_limit:]
             items: list[TResponseInputItem] = []
             for msg in messages:
                 try:
