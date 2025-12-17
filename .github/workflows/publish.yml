@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -31,4 +31,4 @@ jobs:
       - name: Build package
         run: uv build
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@v1
