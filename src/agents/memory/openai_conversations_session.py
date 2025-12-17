@@ -6,6 +6,7 @@ from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
 from .session import SessionABC
+from .session_settings import SessionSettings
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -25,8 +26,10 @@ class OpenAIConversationsSession(SessionABC):
         *,
         conversation_id: str | None = None,
         openai_client: AsyncOpenAI | None = None,
+        session_settings: SessionSettings | None = None,
     ):
         self._session_id: str | None = conversation_id
+        self.session_settings = session_settings or SessionSettings()
         _openai_client = openai_client
         if _openai_client is None:
             _openai_client = get_default_openai_client() or AsyncOpenAI()
@@ -43,8 +46,10 @@ class OpenAIConversationsSession(SessionABC):
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
+        # Use session settings limit if no explicit limit provided
+        session_limit = limit if limit is not None else self.session_settings.limit
         all_items = []
-        if limit is None:
+        if session_limit is None:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
                 order="asc",
@@ -54,12 +59,12 @@ class OpenAIConversationsSession(SessionABC):
         else:
             async for item in self._openai_client.conversations.items.list(
                 conversation_id=session_id,
-                limit=limit,
+                limit=session_limit,
                 order="desc",
             ):
                 # calling model_dump() to make this serializable
                 all_items.append(item.model_dump(exclude_unset=True))
-                if limit is not None and len(all_items) >= limit:
+                if session_limit is not None and len(all_items) >= session_limit:
                     break
             all_items.reverse()
 

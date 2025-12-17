@@ -443,3 +443,34 @@ class TestOpenAIConversationsSessionConcurrentAccess:
 
         # Conversation should only be created once
         mock_openai_client.conversations.create.assert_called_once()
+
+
+# ============================================================================
+# SessionSettings Tests
+# ============================================================================
+
+
+class TestOpenAIConversationsSessionSettings:
+    """Test SessionSettings integration with OpenAIConversationsSession."""
+
+    def test_session_settings_default(self, mock_openai_client):
+        """Test that session_settings defaults to empty SessionSettings."""
+        from agents.memory import SessionSettings
+
+        session = OpenAIConversationsSession(openai_client=mock_openai_client)
+
+        # Should have default SessionSettings
+        assert isinstance(session.session_settings, SessionSettings)
+        assert session.session_settings.limit is None
+
+    def test_session_settings_constructor(self, mock_openai_client):
+        """Test passing session_settings via constructor."""
+        from agents.memory import SessionSettings
+
+        session = OpenAIConversationsSession(
+            openai_client=mock_openai_client,
+            session_settings=SessionSettings(limit=5)
+        )
+
+        assert session.session_settings.limit == 5
+
