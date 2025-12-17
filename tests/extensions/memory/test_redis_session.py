@@ -77,7 +77,7 @@ async def _create_test_session(session_id: str | None = None) -> RedisSession:
         # Use in-memory fake Redis for testing
         session = RedisSession(session_id=session_id, redis_client=fake_redis, key_prefix="test:")
     else:
-        session = RedisSession.from_url(session_id, url=REDIS_URL)
+        session = RedisSession.from_url(session_id, url=REDIS_URL, key_prefix="test:")
 
         # Ensure we can connect
         if not await session.ping():
