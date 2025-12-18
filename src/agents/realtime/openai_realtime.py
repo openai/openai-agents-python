@@ -12,6 +12,7 @@ from typing import Annotated, Any, Callable, Literal, Union, cast
 import pydantic
 import websockets
 from openai.types.realtime import realtime_audio_config as _rt_audio_config
+from openai.types.realtime.audio_transcription import AudioTranscription
 from openai.types.realtime.conversation_item import (
     ConversationItem,
     ConversationItem as OpenAIConversationItem,
@@ -87,6 +88,7 @@ from agents.prompts import Prompt
 from agents.realtime._default_tracker import ModelAudioTracker
 from agents.realtime.audio_formats import to_realtime_audio_format
 from agents.tool import FunctionTool, Tool
+from agents.util._pydantic import coerce_model_with_literal_fallback
 from agents.util._types import MaybeAwaitable
 
 from ..exceptions import UserError
@@ -883,7 +885,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 "modalities", DEFAULT_MODEL_SETTINGS.get("modalities")
             ),
             audio=OpenAIRealtimeAudioConfig(
-                input=OpenAIRealtimeAudioInput(**audio_input_args),  # type: ignore[arg-type]
+                input=OpenAIRealtimeAudioInput(
+                    **_AudioTranscriptionHelper.prepare_audio_input_args(audio_input_args)
+                ),
                 output=OpenAIRealtimeAudioOutput(**audio_output_args),  # type: ignore[arg-type]
             ),
             tools=cast(
@@ -956,6 +960,38 @@ class OpenAIRealtimeSIPModel(OpenAIRealtimeWebSocketModel):
 
         sip_options = options.copy()
         await super().connect(sip_options)
+
+
+class _AudioTranscriptionHelper:
+    """Helpers for handling transcription configs with forward compatibility."""
+
+    @staticmethod
+    def prepare_audio_input_args(audio_input_args: dict[str, Any]) -> dict[str, Any]:
+        """Prepare audio input args, allowing newer transcription model names."""
+        prepared_args = dict(audio_input_args)
+        transcription_config = prepared_args.get("transcription")
+        if transcription_config is None:
+            return prepared_args
+
+        prepared_args["transcription"] = _AudioTranscriptionHelper._coerce_audio_transcription(
+            transcription_config
+        )
+        return prepared_args
+
+    @staticmethod
+    def _coerce_audio_transcription(transcription_config: Any) -> Any:
+        """Convert transcription config into an AudioTranscription, tolerating new model names."""
+        if isinstance(transcription_config, AudioTranscription):
+            return transcription_config
+
+        if not isinstance(transcription_config, Mapping):
+            return transcription_config
+
+        return coerce_model_with_literal_fallback(
+            AudioTranscription,
+            transcription_config,
+            literal_error_locs=[("model",), ("transcription", "model")],
+        )
 
 
 class _ConversionHelper:

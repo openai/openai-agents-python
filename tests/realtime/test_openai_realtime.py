@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
+import pydantic
 import pytest
 import websockets
+from openai.types.realtime.audio_transcription import AudioTranscription
 
 from agents import Agent
 from agents.exceptions import UserError
@@ -21,7 +23,10 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
+from agents.realtime.openai_realtime import (
+    OpenAIRealtimeWebSocketModel,
+    _AudioTranscriptionHelper,
+)
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -646,6 +651,15 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio is not None and cfg.audio.output is not None
         assert cfg.audio.output.voice == "verse"
 
+    def test_session_config_allows_new_transcription_models(self, model):
+        cfg = model._get_session_config(
+            {"input_audio_transcription": {"model": "gpt-4o-mini-transcribe-2025-12-15"}}
+        )
+        assert cfg.audio is not None
+        assert cfg.audio.input is not None
+        assert cfg.audio.input.transcription is not None
+        assert cfg.audio.input.transcription.model == "gpt-4o-mini-transcribe-2025-12-15"
+
     def test_session_config_defaults_audio_formats_when_not_call(self, model):
         settings: dict[str, Any] = {}
         cfg = model._get_session_config(settings)
@@ -656,6 +670,28 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is not None
         assert cfg.audio.output.format.type == "audio/pcm"
+
+    def test_audio_transcription_helper_accepts_new_models(self):
+        args = {"transcription": {"model": "gpt-4o-mini-transcribe-2025-12-15"}}
+        prepared = _AudioTranscriptionHelper.prepare_audio_input_args(args)
+        assert prepared is not args
+        transcription = prepared["transcription"]
+        assert isinstance(transcription, AudioTranscription)
+        assert transcription.model is not None
+        assert str(transcription.model) == "gpt-4o-mini-transcribe-2025-12-15"
+
+    def test_audio_transcription_helper_returns_copy_without_transcription(self):
+        args = {"format": "pcm16"}
+        prepared = _AudioTranscriptionHelper.prepare_audio_input_args(args)
+        assert prepared is not args
+        assert prepared == args
+
+    def test_audio_transcription_helper_raises_on_non_literal_error(self):
+        # Non-literal validation errors should still surface to the caller.
+        with pytest.raises(pydantic.ValidationError):
+            _AudioTranscriptionHelper._coerce_audio_transcription(
+                {"model": "gpt-4o-mini-transcribe", "language": 123}  # invalid language type
+            )
 
     def test_session_config_preserves_sip_audio_formats(self, model):
         model._call_id = "call-123"
