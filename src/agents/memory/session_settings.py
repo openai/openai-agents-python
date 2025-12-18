@@ -1,5 +1,7 @@
 """Session configuration settings."""
 
+from __future__ import annotations
+
 import dataclasses
 from dataclasses import fields, replace
 from typing import Any
@@ -19,7 +21,7 @@ class SessionSettings:
     limit: int | None = None
     """Maximum number of items to retrieve. If None, retrieves all items."""
 
-    def resolve(self, override: "SessionSettings | None") -> "SessionSettings":
+    def resolve(self, override: SessionSettings | None) -> SessionSettings:
         """Produce a new SessionSettings by overlaying any non-None values from the
         override on top of this instance."""
         if override is None:
