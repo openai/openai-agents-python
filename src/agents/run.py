@@ -57,7 +57,7 @@ from .items import (
     ToolCallItemTypes,
     TResponseInputItem,
 )
-from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
+from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase, _call_hook_with_data
 from .logger import logger
 from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
@@ -1367,10 +1367,24 @@ class AgentRunner:
         emitted_reasoning_item_ids: set[str] = set()
 
         if should_run_agent_start_hooks:
+            if server_conversation_tracker is not None:
+                turn_input = server_conversation_tracker.prepare_input(
+                    streamed_result.input, streamed_result.new_items
+                )
+            else:
+                turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
+                turn_input.extend([item.to_input_item() for item in streamed_result.new_items])
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                _call_hook_with_data(
+                    hooks.on_agent_start, context_wrapper, agent, data={"turn_input": turn_input}
+                ),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    _call_hook_with_data(
+                        agent.hooks.on_start,
+                        context_wrapper,
+                        agent,
+                        data={"turn_input": turn_input},
+                    )
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),
@@ -1591,10 +1605,26 @@ class AgentRunner:
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
+            if server_conversation_tracker is not None:
+                turn_input = server_conversation_tracker.prepare_input(
+                    original_input, generated_items
+                )
+            else:
+                turn_input = ItemHelpers.input_to_new_input_list(original_input)
+                turn_input.extend(
+                    [generated_item.to_input_item() for generated_item in generated_items]
+                )
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                _call_hook_with_data(
+                    hooks.on_agent_start, context_wrapper, agent, data={"turn_input": turn_input}
+                ),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    _call_hook_with_data(
+                        agent.hooks.on_start,
+                        context_wrapper,
+                        agent,
+                        data={"turn_input": turn_input},
+                    )
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),

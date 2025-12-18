@@ -71,7 +71,7 @@ from .items import (
     ToolCallOutputItem,
     TResponseInputItem,
 )
-from .lifecycle import RunHooks
+from .lifecycle import RunHooks, _call_hook_with_data
 from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import ModelTracing
@@ -909,9 +909,21 @@ class RunImpl:
             The result from the tool execution.
         """
         await asyncio.gather(
-            hooks.on_tool_start(tool_context, agent, func_tool),
+            _call_hook_with_data(
+                hooks.on_tool_start,
+                tool_context,
+                agent,
+                func_tool,
+                data={"arguments": tool_call.arguments},
+            ),
             (
-                agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_start,
+                    tool_context,
+                    agent,
+                    func_tool,
+                    data={"arguments": tool_call.arguments},
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -979,10 +991,22 @@ class RunImpl:
 
                         # 4) Tool end hooks (with final result, which may have been overridden)
                         await asyncio.gather(
-                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                            _call_hook_with_data(
+                                hooks.on_tool_end,
+                                tool_context,
+                                agent,
+                                func_tool,
+                                final_result,
+                                data={"arguments": tool_call.arguments},
+                            ),
                             (
-                                agent.hooks.on_tool_end(
-                                    tool_context, agent, func_tool, final_result
+                                _call_hook_with_data(
+                                    agent.hooks.on_tool_end,
+                                    tool_context,
+                                    agent,
+                                    func_tool,
+                                    final_result,
+                                    data={"arguments": tool_call.arguments},
                                 )
                                 if agent.hooks
                                 else _coro.noop_coroutine()
@@ -1553,10 +1577,20 @@ class ComputerAction:
             else cls._get_screenshot_sync(computer, action.tool_call)
         )
 
+        tool_args = getattr(action.tool_call, "arguments", None)
+        tool_data = {"arguments": tool_args} if tool_args else None
         _, _, output = await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, action.computer_tool),
+            _call_hook_with_data(
+                hooks.on_tool_start, context_wrapper, agent, action.computer_tool, data=tool_data
+            ),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, action.computer_tool)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_start,
+                    context_wrapper,
+                    agent,
+                    action.computer_tool,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1564,9 +1598,23 @@ class ComputerAction:
         )
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+            _call_hook_with_data(
+                hooks.on_tool_end,
+                context_wrapper,
+                agent,
+                action.computer_tool,
+                output,
+                data=tool_data,
+            ),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_end,
+                    context_wrapper,
+                    agent,
+                    action.computer_tool,
+                    output,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1656,10 +1704,20 @@ class LocalShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
+        tool_args = getattr(call.tool_call, "arguments", None)
+        tool_data = {"arguments": tool_args} if tool_args else None
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool),
+            _call_hook_with_data(
+                hooks.on_tool_start, context_wrapper, agent, call.local_shell_tool, data=tool_data
+            ),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.local_shell_tool)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_start,
+                    context_wrapper,
+                    agent,
+                    call.local_shell_tool,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1676,9 +1734,23 @@ class LocalShellAction:
             result = output
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+            _call_hook_with_data(
+                hooks.on_tool_end,
+                context_wrapper,
+                agent,
+                call.local_shell_tool,
+                result,
+                data=tool_data,
+            ),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_end,
+                    context_wrapper,
+                    agent,
+                    call.local_shell_tool,
+                    result,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1707,10 +1779,20 @@ class ShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
+        tool_args = getattr(call.tool_call, "arguments", None)
+        tool_data = {"arguments": tool_args} if tool_args else None
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
+            _call_hook_with_data(
+                hooks.on_tool_start, context_wrapper, agent, call.shell_tool, data=tool_data
+            ),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_start,
+                    context_wrapper,
+                    agent,
+                    call.shell_tool,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1744,9 +1826,23 @@ class ShellAction:
             logger.error("Shell executor failed: %s", exc, exc_info=True)
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+            _call_hook_with_data(
+                hooks.on_tool_end,
+                context_wrapper,
+                agent,
+                call.shell_tool,
+                output_text,
+                data=tool_data,
+            ),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_end,
+                    context_wrapper,
+                    agent,
+                    call.shell_tool,
+                    output_text,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1831,10 +1927,20 @@ class ApplyPatchAction:
         config: RunConfig,
     ) -> RunItem:
         apply_patch_tool = call.apply_patch_tool
+        tool_args = getattr(call.tool_call, "arguments", None)
+        tool_data = {"arguments": tool_args} if tool_args else None
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
+            _call_hook_with_data(
+                hooks.on_tool_start, context_wrapper, agent, apply_patch_tool, data=tool_data
+            ),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_start,
+                    context_wrapper,
+                    agent,
+                    apply_patch_tool,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
@@ -1871,9 +1977,23 @@ class ApplyPatchAction:
             logger.error("Apply patch editor failed: %s", exc, exc_info=True)
 
         await asyncio.gather(
-            hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+            _call_hook_with_data(
+                hooks.on_tool_end,
+                context_wrapper,
+                agent,
+                apply_patch_tool,
+                output_text,
+                data=tool_data,
+            ),
             (
-                agent.hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
+                _call_hook_with_data(
+                    agent.hooks.on_tool_end,
+                    context_wrapper,
+                    agent,
+                    apply_patch_tool,
+                    output_text,
+                    data=tool_data,
+                )
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),

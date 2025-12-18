@@ -1,4 +1,5 @@
-from typing import Any, Generic, Optional
+import inspect
+from typing import Any, Callable, Generic, Optional
 
 from typing_extensions import TypeVar
 
@@ -34,7 +35,12 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called immediately after the LLM call returns for this agent."""
         pass
 
-    async def on_agent_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
+    async def on_agent_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         """Called before the agent is invoked. Called each time the current agent changes."""
         pass
 
@@ -61,6 +67,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Called immediately before a local tool is invoked."""
         pass
@@ -71,6 +78,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Called immediately after a local tool is invoked."""
         pass
@@ -83,7 +91,12 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     Subclass and override the methods you need.
     """
 
-    async def on_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
+    async def on_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: TAgent,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
         agent."""
         pass
@@ -112,6 +125,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Called immediately before a local tool is invoked."""
         pass
@@ -122,6 +136,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Called immediately after a local tool is invoked."""
         pass
@@ -151,3 +166,12 @@ RunHooks = RunHooksBase[TContext, Agent]
 
 AgentHooks = AgentHooksBase[TContext, Agent]
 """Agent hooks for `Agent`s."""
+
+
+async def _call_hook_with_data(
+    hook_method: Callable[..., Any], *args: Any, data: dict[str, Any] | None = None, **kwargs: Any
+) -> Any:
+    sig = inspect.signature(hook_method)
+    if "data" in sig.parameters:
+        return await hook_method(*args, data=data, **kwargs)
+    return await hook_method(*args, **kwargs)
