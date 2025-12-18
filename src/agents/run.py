@@ -2381,8 +2381,6 @@ class AgentRunner:
                         # Get the last model response
                         last_model_response = run_state._model_responses[-1]
 
-                        from ._run_impl import RunImpl
-
                         turn_result = await RunImpl.resolve_interrupted_turn(
                             agent=current_agent,
                             original_input=run_state._original_input,
