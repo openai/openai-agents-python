@@ -58,7 +58,7 @@ SDK 会自动在 `request_usage_entries` 中跟踪每个 API 请求的用量，�
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
 
-for request in enumerate(result.context_wrapper.usage.request_usage_entries):
+for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
 

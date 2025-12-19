@@ -58,7 +58,7 @@ SDK 는 `request_usage_entries` 에서 각 API 요청의 사용량을 자동으�
 ```python
 result = await Runner.run(agent, "What's the weather in Tokyo?")
 
-for request in enumerate(result.context_wrapper.usage.request_usage_entries):
+for i, request in enumerate(result.context_wrapper.usage.request_usage_entries):
     print(f"Request {i + 1}: {request.input_tokens} in, {request.output_tokens} out")
 ```
 
