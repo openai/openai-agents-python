@@ -4,18 +4,18 @@ search:
 ---
 # 暗号化セッション
 
-`EncryptedSession` は、任意のセッション実装に対して透過的な暗号化を提供し、自動期限切れにより古い項目を保護します。
+`EncryptedSession` は、あらゆるセッション実装に透過的な暗号化を提供し、会話データを保護するとともに古い項目の自動有効期限切れを行います。
 
-## 機能
+## 特長
 
 - **透過的な暗号化**: 任意のセッションを Fernet 暗号化でラップします
-- **セッションごとのキー**: HKDF キー導出によりセッションごとに一意の暗号鍵を使用します
-- **自動期限切れ**: TTL の有効期限切れ時には古い項目を静かにスキップします
-- **差し替え可能**: 既存の任意のセッション実装で動作します
+- **セッションごとの鍵**: HKDF キー導出によりセッションごとに一意の暗号鍵を使用します
+- **自動有効期限**: TTL が切れた古い項目は自動的に読み飛ばされます
+- **ドロップイン置き換え**: 既存のあらゆるセッション実装で動作します
 
 ## インストール
 
-暗号化セッションには `encrypt` エクストラが必要です:
+暗号化セッションを使用するには `encrypt` エクストラが必要です:
 
 ```bash
 pip install openai-agents[encrypt]
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 ### 暗号化キー
 
-暗号化キーは Fernet キーでも、任意の文字列でも構いません:
+暗号化キーは Fernet キー、または任意の文字列を使用できます:
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -81,7 +81,7 @@ session = EncryptedSession(
 
 ### TTL (Time To Live)
 
-暗号化された項目の有効期間を設定します:
+暗号化された項目を有効に保つ期間を設定します:
 
 ```python
 # Items expire after 1 hour
@@ -143,27 +143,27 @@ session = EncryptedSession(
     `EncryptedSession` を `AdvancedSQLiteSession` のような高度なセッション実装と併用する場合、次の点に注意してください:
 
     - メッセージ内容が暗号化されるため、`find_turns_by_content()` のようなメソッドは有効に機能しません
-    - コンテンツベースの検索は暗号化データ上で行われるため、有効性が制限されます
+    - コンテンツベースの検索は暗号化データに対して行われるため、有効性が制限されます
 
 
 
-## キー導出
+## 鍵導出
 
-EncryptedSession は HKDF (HMAC-based Key Derivation Function) を使用して、セッションごとに一意の暗号化キーを導出します:
+EncryptedSession は HKDF (HMAC-based Key Derivation Function) を使用して、セッションごとに一意の暗号鍵を導出します:
 
-- **マスターキー**: 供給された暗号化キー
+- **マスターキー**: あなたが提供する暗号化キー
 - **セッションソルト**: セッション ID
 - **Info 文字列**: `"agents.session-store.hkdf.v1"`
 - **出力**: 32 バイトの Fernet キー
 
-これにより次が保証されます:
+これにより、次のことが保証されます:
 - 各セッションは一意の暗号化キーを持ちます
 - マスターキーがなければ鍵は導出できません
-- 異なるセッション間でセッションデータは復号できません
+- 異なるセッション間でデータを復号できません
 
-## 自動期限切れ
+## 自動有効期限
 
-項目が TTL を超えた場合、取得時に自動的にスキップされます:
+項目が TTL を超えた場合、取得時に自動的に読み飛ばされます:
 
 ```python
 # Items older than TTL are silently ignored
@@ -173,7 +173,7 @@ items = await session.get_items()  # Only returns non-expired items
 result = await Runner.run(agent, "Continue conversation", session=session)
 ```
 
-## API 参照
+## API リファレンス
 
 - [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - メインクラス
-- [`Session`][agents.memory.session.Session] - 基本セッションプロトコル
+- [`Session`][agents.memory.session.Session] - ベースのセッションプロトコル

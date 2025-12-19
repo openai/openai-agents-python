@@ -4,18 +4,18 @@ search:
 ---
 # 암호화된 세션
 
-`EncryptedSession`은 어떤 세션 구현에도 투명한 암호화를 제공하며, 오래된 항목을 자동으로 만료 처리하여 대화 데이터를 보호합니다.
+`EncryptedSession`은 어떤 세션 구현에도 투명한 암호화를 제공하여, 대화 데이터를 보호하고 오래된 항목을 자동으로 만료합니다.
 
 ## 기능
 
-- **투명한 암호화**: 모든 세션을 Fernet 암호화로 래핑
-- **세션별 키**: 세션마다 고유한 암호화를 위해 HKDF 키 유도 사용
-- **자동 만료**: TTL 만료 시 오래된 항목을 조용히 건너뜀
-- **대체 가능한 구성**: 기존 세션 구현과 함께 작동
+- **투명한 암호화**: 모든 세션을 Fernet 암호화로 감쌉니다
+- **세션별 키**: HKDF 키 파생을 사용해 세션마다 고유한 암호화를 적용합니다
+- **자동 만료**: TTL 만료 시 오래된 항목을 조용히 건너뜁니다
+- **대체 가능**: 기존 세션 구현과 그대로 함께 작동합니다
 
 ## 설치
 
-암호화 세션을 사용하려면 `encrypt` extra가 필요합니다:
+암호화된 세션을 사용하려면 `encrypt` extra가 필요합니다:
 
 ```bash
 pip install openai-agents[encrypt]
@@ -53,11 +53,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 구성
+## 설정
 
 ### 암호화 키
 
-암호화 키는 Fernet 키이거나 임의의 문자열일 수 있습니다:
+암호화 키는 Fernet 키이거나 아무 문자열일 수 있습니다:
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -81,7 +81,7 @@ session = EncryptedSession(
 
 ### TTL (Time To Live)
 
-암호화된 항목의 유효 기간을 설정합니다:
+암호화된 항목이 유효한 기간을 설정합니다:
 
 ```python
 # Items expire after 1 hour
@@ -101,7 +101,7 @@ session = EncryptedSession(
 )
 ```
 
-## 다양한 세션 타입에서의 사용
+## 다양한 세션 타입과의 사용
 
 ### SQLite 세션과 함께 사용
 
@@ -140,26 +140,26 @@ session = EncryptedSession(
 
 !!! warning "고급 세션 기능"
 
-    `EncryptedSession`을 `AdvancedSQLiteSession`과 같은 고급 세션 구현과 함께 사용할 때는 다음을 유의하세요:
+    `EncryptedSession`을 `AdvancedSQLiteSession` 같은 고급 세션 구현과 함께 사용할 때는 다음을 유의하세요:
 
     - 메시지 내용이 암호화되므로 `find_turns_by_content()` 같은 메서드는 효과적으로 동작하지 않습니다
-    - 내용 기반 검색은 암호화된 데이터에서 수행되므로 효율이 제한됩니다
+    - 내용 기반 검색은 암호화된 데이터에서 수행되어 효율이 제한됩니다
 
 
 
-## 키 유도
+## 키 파생
 
-EncryptedSession은 HKDF (HMAC 기반 키 유도 함수)를 사용하여 세션마다 고유한 암호화 키를 유도합니다:
+EncryptedSession은 HKDF(HMAC 기반 키 파생 함수)를 사용해 세션마다 고유한 암호화 키를 파생합니다:
 
-- **마스터 키**: 사용자가 제공한 암호화 키
+- **마스터 키**: 제공한 암호화 키
 - **세션 솔트**: 세션 ID
 - **정보 문자열**: `"agents.session-store.hkdf.v1"`
 - **출력**: 32바이트 Fernet 키
 
 이는 다음을 보장합니다:
 - 각 세션은 고유한 암호화 키를 가짐
-- 마스터 키 없이는 키를 유도할 수 없음
-- 서로 다른 세션 간에는 세션 데이터를 복호화할 수 없음
+- 마스터 키 없이는 키를 파생할 수 없음
+- 서로 다른 세션 간에 세션 데이터를 복호화할 수 없음
 
 ## 자동 만료
 
