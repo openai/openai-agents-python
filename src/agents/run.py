@@ -71,7 +71,7 @@ from .stream_events import (
     RunItemStreamEvent,
     StreamEvent,
 )
-from .tool import Tool
+from .tool import Tool, dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -600,6 +600,9 @@ class AgentRunner:
             try:
                 while True:
                     all_tools = await AgentRunner._get_all_tools(current_agent, context_wrapper)
+                    await RunImpl.initialize_computer_tools(
+                        tools=all_tools, context_wrapper=context_wrapper
+                    )
 
                     # Start an agent span if we don't have one. This span is ended if the current
                     # agent changes, or if the agent loop ends.
@@ -782,6 +785,10 @@ class AgentRunner:
                 )
                 raise
             finally:
+                try:
+                    await dispose_resolved_computers(run_context=context_wrapper)
+                except Exception as error:
+                    logger.warning("Failed to dispose computers after run: %s", error)
                 if current_span:
                     current_span.finish(reset_current=True)
 
@@ -1113,6 +1120,9 @@ class AgentRunner:
                     break
 
                 all_tools = await cls._get_all_tools(current_agent, context_wrapper)
+                await RunImpl.initialize_computer_tools(
+                    tools=all_tools, context_wrapper=context_wrapper
+                )
 
                 # Start an agent span if we don't have one. This span is ended if the current
                 # agent changes, or if the agent loop ends.
@@ -1323,6 +1333,10 @@ class AgentRunner:
                     logger.debug(
                         f"Error in streamed_result finalize for agent {current_agent.name} - {e}"
                     )
+            try:
+                await dispose_resolved_computers(run_context=context_wrapper)
+            except Exception as error:
+                logger.warning("Failed to dispose computers after streamed run: %s", error)
             if current_span:
                 current_span.finish(reset_current=True)
             if streamed_result.trace:
