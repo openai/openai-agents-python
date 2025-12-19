@@ -95,6 +95,7 @@ from .tool import (
     ShellResult,
     ShellTool,
     Tool,
+    resolve_computer,
 )
 from .tool_context import ToolContext
 from .tool_guardrails import (
@@ -159,7 +160,7 @@ class ToolRunFunction:
 @dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
-    computer_tool: ComputerTool
+    computer_tool: ComputerTool[Any]
 
 
 @dataclass
@@ -460,6 +461,22 @@ class RunImpl:
             return dataclasses.replace(model_settings, tool_choice=None)
 
         return model_settings
+
+    @classmethod
+    async def initialize_computer_tools(
+        cls,
+        *,
+        tools: list[Tool],
+        context_wrapper: RunContextWrapper[TContext],
+    ) -> None:
+        """Resolve computer tools ahead of model invocation so each run gets its own instance."""
+        computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
+        if not computer_tools:
+            return
+
+        await asyncio.gather(
+            *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
+        )
 
     @classmethod
     def process_model_response(
@@ -1529,10 +1546,11 @@ class ComputerAction:
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
+        computer = await resolve_computer(tool=action.computer_tool, run_context=context_wrapper)
         output_func = (
-            cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
-            if isinstance(action.computer_tool.computer, AsyncComputer)
-            else cls._get_screenshot_sync(action.computer_tool.computer, action.tool_call)
+            cls._get_screenshot_async(computer, action.tool_call)
+            if isinstance(computer, AsyncComputer)
+            else cls._get_screenshot_sync(computer, action.tool_call)
         )
 
         _, _, output = await asyncio.gather(

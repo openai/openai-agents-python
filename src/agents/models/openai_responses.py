@@ -21,6 +21,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
+from ..computer import AsyncComputer, Computer
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
@@ -491,11 +492,18 @@ class Converter:
 
             includes = "file_search_call.results" if tool.include_search_results else None
         elif isinstance(tool, ComputerTool):
+            computer = tool.computer
+            if not isinstance(computer, (Computer, AsyncComputer)):
+                raise UserError(
+                    "Computer tool is not initialized for serialization. Call "
+                    "resolve_computer({ tool, run_context }) with a run context first "
+                    "when building payloads manually."
+                )
             converted_tool = {
                 "type": "computer_use_preview",
-                "environment": tool.computer.environment,
-                "display_width": tool.computer.dimensions[0],
-                "display_height": tool.computer.dimensions[1],
+                "environment": computer.environment,
+                "display_width": computer.dimensions[0],
+                "display_height": computer.dimensions[1],
             }
             includes = None
         elif isinstance(tool, HostedMCPTool):

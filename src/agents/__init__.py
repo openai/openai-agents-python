@@ -87,6 +87,7 @@ from .stream_events import (
 from .tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
+    ComputerProvider,
     ComputerTool,
     FileSearchTool,
     FunctionTool,
@@ -116,7 +117,9 @@ from .tool import (
     ToolOutputTextDict,
     WebSearchTool,
     default_tool_error_function,
+    dispose_resolved_computers,
     function_tool,
+    resolve_computer,
 )
 from .tool_guardrails import (
     ToolGuardrailFunctionOutput,
@@ -301,6 +304,7 @@ __all__ = [
     "FunctionTool",
     "FunctionToolResult",
     "ComputerTool",
+    "ComputerProvider",
     "FileSearchTool",
     "CodeInterpreterTool",
     "ImageGenerationTool",
@@ -332,6 +336,8 @@ __all__ = [
     "ToolOutputFileContent",
     "ToolOutputFileContentDict",
     "function_tool",
+    "resolve_computer",
+    "dispose_resolved_computers",
     "Usage",
     "add_trace_processor",
     "agent_span",
