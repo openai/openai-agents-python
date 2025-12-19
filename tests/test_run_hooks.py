@@ -15,6 +15,7 @@ from tests.test_agent_llm_hooks import AgentHooksForTests
 from .fake_model import FakeModel
 from .test_responses import (
     get_function_tool,
+    get_function_tool_call,
     get_text_message,
 )
 
@@ -244,3 +245,73 @@ async def test_streamed_run_hooks_llm_error(monkeypatch):
     assert hooks.events["on_llm_start"] == 1
     assert hooks.events["on_llm_end"] == 0
     assert hooks.events["on_agent_end"] == 0
+
+
+class RunHooksWithData(RunHooks):
+    """Hooks that accept the optional data parameter to verify new functionality."""
+
+    def __init__(self):
+        self.captured_turn_inputs: list[list[TResponseInputItem]] = []
+        self.captured_tool_arguments: list[str] = []
+
+    async def on_agent_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if data and "turn_input" in data:
+            self.captured_turn_inputs.append(data["turn_input"])
+
+    async def on_tool_start(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if data and "arguments" in data:
+            self.captured_tool_arguments.append(data["arguments"])
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[TContext],
+        agent: Agent[TContext],
+        tool: Tool,
+        result: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if data and "arguments" in data:
+            # Verify arguments are also available in on_tool_end
+            assert data["arguments"] in self.captured_tool_arguments
+
+
+@pytest.mark.asyncio
+async def test_hooks_receive_turn_input_and_arguments():
+    """Verify that hooks with data parameter receive turn_input and arguments."""
+    hooks = RunHooksWithData()
+    model = FakeModel()
+    agent = Agent(name="A", model=model, tools=[get_function_tool("f", "res")], handoffs=[])
+
+    # First turn: tool call
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("f", '{"test": "arg"}')],
+            [get_text_message("done")],
+        ]
+    )
+
+    await Runner.run(agent, input="test input", hooks=hooks)
+
+    # Verify turn_input was captured
+    assert len(hooks.captured_turn_inputs) == 1
+    turn_input = hooks.captured_turn_inputs[0]
+    assert len(turn_input) == 1
+    assert turn_input[0]["role"] == "user"
+    # For string input, content is the string itself
+    assert turn_input[0]["content"] == "test input"
+
+
+    # Verify tool arguments were captured
+    assert len(hooks.captured_tool_arguments) == 1
+    assert hooks.captured_tool_arguments[0] == '{"test": "arg"}'
