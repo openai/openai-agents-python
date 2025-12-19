@@ -258,7 +258,7 @@ class RunHooksWithData(RunHooks):
         self,
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         if data and "turn_input" in data:
             self.captured_turn_inputs.append(data["turn_input"])
@@ -268,7 +268,7 @@ class RunHooksWithData(RunHooks):
         context: RunContextWrapper[TContext],
         agent: Agent[TContext],
         tool: Tool,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         if data and "arguments" in data:
             self.captured_tool_arguments.append(data["arguments"])
@@ -279,7 +279,7 @@ class RunHooksWithData(RunHooks):
         agent: Agent[TContext],
         tool: Tool,
         result: str,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         if data and "arguments" in data:
             # Verify arguments are also available in on_tool_end
@@ -310,7 +310,6 @@ async def test_hooks_receive_turn_input_and_arguments():
     assert turn_input[0]["role"] == "user"
     # For string input, content is the string itself
     assert turn_input[0]["content"] == "test input"
-
 
     # Verify tool arguments were captured
     assert len(hooks.captured_tool_arguments) == 1

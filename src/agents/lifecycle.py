@@ -39,7 +39,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called before the agent is invoked. Called each time the current agent changes."""
         pass
@@ -67,7 +67,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called immediately before a local tool is invoked."""
         pass
@@ -78,7 +78,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called immediately after a local tool is invoked."""
         pass
@@ -95,7 +95,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         self,
         context: RunContextWrapper[TContext],
         agent: TAgent,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
         agent."""
@@ -125,7 +125,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         context: RunContextWrapper[TContext],
         agent: TAgent,
         tool: Tool,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called immediately before a local tool is invoked."""
         pass
@@ -136,7 +136,7 @@ class AgentHooksBase(Generic[TContext, TAgent]):
         agent: TAgent,
         tool: Tool,
         result: str,
-        data: dict[str, Any] | None = None,
+        data: Optional[dict[str, Any]] = None,
     ) -> None:
         """Called immediately after a local tool is invoked."""
         pass
@@ -169,7 +169,10 @@ AgentHooks = AgentHooksBase[TContext, Agent]
 
 
 async def _call_hook_with_data(
-    hook_method: Callable[..., Any], *args: Any, data: dict[str, Any] | None = None, **kwargs: Any
+    hook_method: Callable[..., Any],
+    *args: Any,
+    data: Optional[dict[str, Any]] = None,
+    **kwargs: Any,
 ) -> Any:
     sig = inspect.signature(hook_method)
     if "data" in sig.parameters:
