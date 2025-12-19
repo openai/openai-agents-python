@@ -1,28 +1,38 @@
 ---
 name: Bug report
-about: Report a bug
+about: Create a report to help us improve
 title: ''
-labels: bug
+labels: ''
 assignees: ''
 
 ---
 
-### Please read this first
-
-- **Have you read the docs?**[Agents SDK docs](https://openai.github.io/openai-agents-python/)
-- **Have you searched for related issues?** Others may have faced similar issues.
-
-### Describe the bug
+**Describe the bug**
 A clear and concise description of what the bug is.
 
-### Debug information
-- Agents SDK version: (e.g. `v0.0.3`)
-- Python version (e.g. Python 3.10)
+**To Reproduce**
+Steps to reproduce the behavior:
+1. Go to '...'
+2. Click on '....'
+3. Scroll down to '....'
+4. See error
 
-### Repro steps
-
-Ideally provide a minimal python script that can be run to reproduce the bug.
-
-
-### Expected behavior
+**Expected behavior**
 A clear and concise description of what you expected to happen.
+
+**Screenshots**
+If applicable, add screenshots to help explain your problem.
+
+**Desktop (please complete the following information):**
+ - OS: [e.g. iOS]
+ - Browser [e.g. chrome, safari]
+ - Version [e.g. 22]
+
+**Smartphone (please complete the following information):**
+ - Device: [e.g. iPhone6]
+ - OS: [e.g. iOS8.1]
+ - Browser [e.g. stock browser, safari]
+ - Version [e.g. 22]
+
+**Additional context**
+Add any other context about the problem here.
