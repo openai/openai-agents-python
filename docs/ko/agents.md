@@ -4,15 +4,15 @@ search:
 ---
 # 에이전트
 
-에이전트는 앱의 핵심 빌딩 블록입니다. 에이전트는 instructions 와 tools 로 구성된 대규모 언어 모델(LLM)입니다.
+에이전트는 앱의 핵심 빌딩 블록입니다. 에이전트는 instructions와 tools로 구성된 대규모 언어 모델(LLM)입니다.
 
 ## 기본 구성
 
-에이전트에서 가장 흔히 구성하는 속성은 다음과 같습니다:
+에이전트에서 가장 일반적으로 구성하는 속성은 다음과 같습니다:
 
 - `name`: 에이전트를 식별하는 필수 문자열
-- `instructions`: developer message 또는 시스템 프롬프트(system prompt)라고도 함
-- `model`: 사용할 LLM 및 temperature, top_p 등 모델 튜닝 매개변수를 설정하는 선택적 `model_settings`
+- `instructions`: 개발자 메시지 또는 시스템 프롬프트라고도 함
+- `model`: 사용할 LLM과 temperature, top_p 등 모델 튜닝 매개변수를 설정하는 선택적 `model_settings`
 - `tools`: 에이전트가 작업을 수행하기 위해 사용할 수 있는 도구
 
 ```python
@@ -33,7 +33,7 @@ agent = Agent(
 
 ## 컨텍스트
 
-에이전트는 `context` 타입에 대해 제네릭합니다. 컨텍스트는 의존성 주입 도구로, `Runner.run()` 에 전달하기 위해 생성하는 객체이며 모든 에이전트, 도구, 핸드오프 등에 전달되어 에이전트 실행을 위한 의존성과 상태를 담는 가방 역할을 합니다. 컨텍스트로는 어떤 Python 객체든 제공할 수 있습니다.
+에이전트는 `context` 타입에 대해 제네릭합니다. 컨텍스트는 의존성 주입 도구입니다. `Runner.run()`에 전달하는 객체로, 모든 에이전트, 도구, 핸드오프 등에 전달되며 에이전트 실행을 위한 의존성과 상태를 모아두는 역할을 합니다. 컨텍스트로는 어떤 Python 객체든 제공할 수 있습니다.
 
 ```python
 @dataclass
@@ -52,7 +52,7 @@ agent = Agent[UserContext](
 
 ## 출력 유형
 
-기본적으로 에이전트는 일반 텍스트(즉, `str`) 출력을 생성합니다. 특정 유형의 출력을 원한다면 `output_type` 매개변수를 사용할 수 있습니다. 흔히 [Pydantic](https://docs.pydantic.dev/) 객체를 사용하지만, Pydantic [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/) 로 래핑할 수 있는 모든 타입(데이터클래스, 리스트, TypedDict 등)을 지원합니다.
+기본적으로 에이전트는 일반 텍스트(즉, `str`) 출력을 생성합니다. 특정 유형의 출력을 생성하도록 하려면 `output_type` 매개변수를 사용할 수 있습니다. 일반적인 선택은 [Pydantic](https://docs.pydantic.dev/) 객체를 사용하는 것이지만, Pydantic [TypeAdapter](https://docs.pydantic.dev/latest/api/type_adapter/)로 래핑할 수 있는 모든 타입(데이터클래스, 리스트, TypedDict 등)을 지원합니다.
 
 ```python
 from pydantic import BaseModel
@@ -73,20 +73,20 @@ agent = Agent(
 
 !!! note
 
-    `output_type` 을 전달하면, 모델은 일반 텍스트 응답 대신 [structured outputs](https://platform.openai.com/docs/guides/structured-outputs) 를 사용하도록 지시받습니다.
+    `output_type`을 전달하면, 모델은 일반 텍스트 응답 대신 [structured outputs](https://platform.openai.com/docs/guides/structured-outputs)를 사용하게 됩니다.
 
-## 멀티 에이전트 시스템 설계 패턴
+## 멀티 에이전트 시스템 디자인 패턴
 
-멀티 에이전트 시스템을 설계하는 방법은 다양하지만, 일반적으로 두 가지 널리 적용 가능한 패턴이 있습니다:
+멀티 에이전트 시스템을 설계하는 방법은 다양하지만, 일반적으로 두 가지 광범위하게 적용 가능한 패턴이 있습니다:
 
-1. 매니저(도구로서의 에이전트): 중앙 매니저/오케스트레이터가 특화된 서브 에이전트를 도구처럼 호출하며 대화를 계속 통제함
-2. 핸드오프: 동등한 에이전트 간에 제어권을 특화된 에이전트로 넘겨 해당 에이전트가 대화를 이어받음. 탈중앙화됨
+1. 매니저(에이전트를 도구로): 중앙 매니저/오케스트레이터가 특화된 서브 에이전트를 도구처럼 호출하며 대화를 제어함
+2. 핸드오프: 동등한 에이전트 간에 제어권을 특화된 에이전트로 넘겨 해당 에이전트가 대화를 이어받는 분산형 방식
 
-자세한 내용은 [에이전트 구축 실무 가이드](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf) 를 참고하세요.
+자세한 내용은 [에이전트 구축을 위한 실용 가이드](https://cdn.openai.com/business-guides-and-resources/a-practical-guide-to-building-agents.pdf)를 참고하세요.
 
-### 매니저(도구로서의 에이전트)
+### 매니저(에이전트를 도구로)
 
-`customer_facing_agent` 가 모든 사용자 상호작용을 처리하고 도구로 노출된 특화 서브 에이전트를 호출합니다. 자세한 내용은 [tools](tools.md#agents-as-tools) 문서를 참고하세요.
+`customer_facing_agent`가 모든 사용자 상호작용을 처리하고, 도구로 노출된 특화된 서브 에이전트를 호출합니다. 자세한 내용은 [도구](tools.md#agents-as-tools) 문서를 참고하세요.
 
 ```python
 from agents import Agent
@@ -115,7 +115,7 @@ customer_facing_agent = Agent(
 
 ### 핸드오프
 
-핸드오프는 에이전트가 위임할 수 있는 서브 에이전트입니다. 핸드오프가 일어나면, 위임된 에이전트가 대화 기록을 받아 대화를 이어받습니다. 이 패턴은 단일 작업에 뛰어난 모듈형 특화 에이전트를 가능하게 합니다. 자세한 내용은 [handoffs](handoffs.md) 문서를 참고하세요.
+핸드오프는 에이전트가 위임할 수 있는 서브 에이전트입니다. 핸드오프가 발생하면, 위임된 에이전트가 대화 이력을 전달받고 대화를 이어받습니다. 이 패턴은 단일 작업에 특화된 모듈형 에이전트를 가능하게 합니다. 자세한 내용은 [핸드오프](handoffs.md) 문서를 참고하세요.
 
 ```python
 from agents import Agent
@@ -136,7 +136,7 @@ triage_agent = Agent(
 
 ## 동적 instructions
 
-대부분의 경우 에이전트를 생성할 때 instructions 를 제공할 수 있습니다. 하지만 함수로 동적 instructions 를 제공할 수도 있습니다. 이 함수는 에이전트와 컨텍스트를 입력으로 받아 프롬프트를 반환해야 합니다. 동기 및 `async` 함수 모두 허용됩니다.
+대부분의 경우 에이전트를 생성할 때 instructions를 제공할 수 있습니다. 그러나 함수로 동적 instructions를 제공할 수도 있습니다. 이 함수는 에이전트와 컨텍스트를 입력으로 받아 프롬프트를 반환해야 합니다. 동기 및 `async` 함수 모두 허용됩니다.
 
 ```python
 def dynamic_instructions(
@@ -153,15 +153,15 @@ agent = Agent[UserContext](
 
 ## 수명 주기 이벤트(후크)
 
-때로는 에이전트의 수명 주기를 관찰하고 싶을 수 있습니다. 예를 들어 이벤트를 로깅하거나 특정 이벤트가 발생할 때 데이터를 미리 가져오고자 할 수 있습니다. `hooks` 속성을 사용해 에이전트 수명 주기에 후크를 걸 수 있습니다. [`AgentHooks`][agents.lifecycle.AgentHooks] 클래스를 서브클래싱하고 관심 있는 메서드를 오버라이드하세요.
+때로는 에이전트의 수명 주기를 관찰하고 싶을 수 있습니다. 예를 들어, 이벤트를 로깅하거나 특정 이벤트 발생 시 데이터를 미리 가져올 수 있습니다. `hooks` 속성으로 에이전트 수명 주기에 후크를 추가할 수 있습니다. [`AgentHooks`][agents.lifecycle.AgentHooks] 클래스를 서브클래싱하고 관심 있는 메서드를 오버라이드하세요.
 
 ## 가드레일
 
-가드레일을 사용하면 에이전트가 실행되는 동안 사용자 입력에 대해, 그리고 에이전트 출력이 생성된 후 출력에 대해 병렬로 검사/검증을 수행할 수 있습니다. 예를 들어 사용자 입력과 에이전트 출력을 관련성 기준으로 필터링할 수 있습니다. 자세한 내용은 [guardrails](guardrails.md) 문서를 참고하세요.
+가드레일은 에이전트가 실행되는 동안 사용자 입력을 병렬로 검사/검증하고, 에이전트 출력이 생성된 후에도 검사/검증할 수 있도록 합니다. 예를 들어, 사용자 입력과 에이전트 출력을 관련성 기준으로 필터링할 수 있습니다. 자세한 내용은 [가드레일](guardrails.md) 문서를 참고하세요.
 
 ## 에이전트 복제/복사
 
-에이전트에서 `clone()` 메서드를 사용하면 에이전트를 복제하고, 원한다면 어떤 속성이든 변경할 수 있습니다.
+에이전트의 `clone()` 메서드를 사용하면 에이전트를 복제하고, 선택적으로 원하는 속성을 변경할 수 있습니다.
 
 ```python
 pirate_agent = Agent(
@@ -178,12 +178,12 @@ robot_agent = pirate_agent.clone(
 
 ## 도구 사용 강제
 
-도구 목록을 제공한다고 해서 LLM 이 항상 도구를 사용하는 것은 아닙니다. [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice] 를 설정해 도구 사용을 강제할 수 있습니다. 유효한 값은 다음과 같습니다:
+도구 목록을 제공한다고 해서 LLM이 항상 도구를 사용하는 것은 아닙니다. [`ModelSettings.tool_choice`][agents.model_settings.ModelSettings.tool_choice]를 설정하여 도구 사용을 강제할 수 있습니다. 유효한 값은 다음과 같습니다:
 
-1. `auto`: LLM 이 도구 사용 여부를 스스로 결정
-2. `required`: LLM 이 도구를 반드시 사용하도록 요구(단, 어떤 도구를 사용할지는 지능적으로 결정)
-3. `none`: LLM 이 도구를 사용하지 않도록 요구
-4. 특정 문자열(예: `my_tool`)을 설정하여 LLM 이 해당 특정 도구를 반드시 사용하도록 요구
+1. `auto`: LLM이 도구 사용 여부를 결정함
+2. `required`: LLM이 반드시 도구를 사용해야 함(단, 어떤 도구를 사용할지는 지능적으로 결정)
+3. `none`: LLM이 도구를 사용하지 않도록 요구함
+4. 특정 문자열 예: `my_tool`을 설정하여 해당 도구의 사용을 강제함
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -205,8 +205,8 @@ agent = Agent(
 
 `Agent` 구성의 `tool_use_behavior` 매개변수는 도구 출력 처리 방식을 제어합니다:
 
-- `"run_llm_again"`: 기본값. 도구를 실행한 뒤, LLM 이 결과를 처리해 최종 응답을 생성
-- `"stop_on_first_tool"`: 첫 번째 도구 호출의 출력을 추가 LLM 처리 없이 최종 응답으로 사용
+- `"run_llm_again"`: 기본값입니다. 도구가 실행되고, LLM이 결과를 처리하여 최종 응답을 생성합니다.
+- `"stop_on_first_tool"`: 첫 번째 도구 호출의 출력을 추가 LLM 처리 없이 최종 응답으로 사용합니다.
 
 ```python
 from agents import Agent, Runner, function_tool, ModelSettings
@@ -224,7 +224,7 @@ agent = Agent(
 )
 ```
 
-- `StopAtTools(stop_at_tool_names=[...])`: 지정된 도구 중 하나가 호출되면 중지하고 해당 도구 출력을 최종 응답으로 사용
+- `StopAtTools(stop_at_tool_names=[...])`: 지정된 도구 중 하나가 호출되면 중단하고, 해당 도구의 출력을 최종 응답으로 사용합니다.
 
 ```python
 from agents import Agent, Runner, function_tool
@@ -248,7 +248,7 @@ agent = Agent(
 )
 ```
 
-- `ToolsToFinalOutputFunction`: 도구 결과를 처리하여 중지할지 LLM 을 계속 사용할지 결정하는 사용자 정의 함수
+- `ToolsToFinalOutputFunction`: 도구 결과를 처리하고 중단할지 LLM을 계속 사용할지 결정하는 사용자 정의 함수입니다.
 
 ```python
 from agents import Agent, Runner, function_tool, FunctionToolResult, RunContextWrapper
@@ -286,4 +286,4 @@ agent = Agent(
 
 !!! note
 
-    무한 루프를 방지하기 위해, 프레임워크는 도구 호출 이후 `tool_choice` 를 자동으로 "auto" 로 재설정합니다. 이 동작은 [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice] 로 구성할 수 있습니다. 무한 루프는 도구 결과가 LLM 으로 전달되고, `tool_choice` 때문에 LLM 이 다시 도구 호출을 생성하는 일이 반복되면서 발생합니다.
+    무한 루프를 방지하기 위해, 프레임워크는 도구 호출 후 자동으로 `tool_choice`를 "auto"로 재설정합니다. 이 동작은 [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]로 구성할 수 있습니다. 무한 루프는 도구 결과가 LLM에 전달되고, `tool_choice` 때문에 LLM이 다시 도구 호출을 생성하는 일이 반복되며 발생합니다.

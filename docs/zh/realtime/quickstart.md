@@ -4,12 +4,12 @@ search:
 ---
 # 快速开始
 
-使用 OpenAI 的 Realtime API，实时智能体可以与用户进行语音对话。本指南将带你创建第一个实时语音智能体。
+Realtime 智能体通过 OpenAI 的 Realtime API 为你的 AI 智能体提供语音对话能力。本指南将带你创建第一个实时语音智能体。
 
-!!! warning "测试版功能"
-Realtime 智能体目前为测试版。随着我们改进实现，可能会出现不兼容的变更。
+!!! warning "Beta 功能"
+Realtime 智能体当前处于 Beta。随着实现改进，可能会有不兼容的变更。
 
-## 先决条件
+## 前提条件
 
 - Python 3.9 或更高版本
 - OpenAI API key
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. 设置运行器
+### 3. 设置 runner
 
 ```python
 runner = RealtimeRunner(
@@ -60,7 +60,7 @@ runner = RealtimeRunner(
 )
 ```
 
-### 4. 启动会话
+### 4. 启动一个会话
 
 ```python
 # Start the session
@@ -202,30 +202,30 @@ if __name__ == "__main__":
 - `output_audio_format`: 输出音频格式
 - `input_audio_transcription`: 转录配置
 
-### 轮次检测
+### 发言轮次检测
 
 - `type`: 检测方法（`server_vad`、`semantic_vad`）
 - `threshold`: 语音活动阈值（0.0-1.0）
-- `silence_duration_ms`: 判断轮次结束的静音时长
-- `prefix_padding_ms`: 语音前的音频填充
+- `silence_duration_ms`: 用于检测轮次结束的静默时长
+- `prefix_padding_ms`: 语音开始前的音频填充
 
 ## 后续步骤
 
-- [进一步了解实时智能体](guide.md)
-- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可运行的 code examples
+- [进一步了解 Realtime 智能体](guide.md)
+- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹查看可用的示例
 - 为你的智能体添加工具
 - 在智能体之间实现任务转移
-- 设置安全防护措施以保证安全
+- 设置安全防护措施以提高安全性
 
-## 认证
+## 身份验证
 
-请确保在环境中设置了你的 OpenAI API key：
+确保已在环境中设置你的 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传入：
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
