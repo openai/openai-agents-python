@@ -145,3 +145,55 @@ def test_prepare_input_returns_json_serializable_dicts_not_pydantic_models() -> 
     assert prepared_item.get("id") == "msg-1"
     assert prepared_item.get("type") == "message"
     assert prepared_item.get("role") == "assistant"
+
+
+def test_prepare_input_tracks_sent_items_to_prevent_duplicates() -> None:
+    """Test that prepare_input tracks sent items to prevent duplicates on subsequent calls.
+
+    Issue: prepare_input appends items to input_items but never records them in sent_items,
+    causing duplicates on subsequent calls. This test verifies that items are tracked in
+    sent_items after being appended.
+
+    Note: mark_input_as_sent() adds items to sent_items, but prepare_input() should also
+    add items to sent_items when they're appended, so that subsequent calls to prepare_input
+    don't re-send the same items.
+    """
+    tracker = _ServerConversationTracker(conversation_id="conv5", previous_response_id=None)
+    agent = Agent(name="TestAgent")
+
+    # Create a generated item with a dict raw_item that is NOT in server_items
+    # and NOT in server_item_ids (so it won't be filtered out)
+    raw_item_dict = {"type": "message", "content": "first message"}
+    message_item = MessageOutputItem(
+        agent=agent,
+        raw_item=cast(Any, raw_item_dict),
+    )
+
+    original_input: list[TResponseInputItem] = []
+    generated_items: list[RunItem] = [message_item]
+
+    # First call to prepare_input
+    prepared1 = tracker.prepare_input(
+        original_input=original_input,
+        generated_items=generated_items,
+        model_responses=None,
+    )
+
+    # Verify the item was returned
+    assert len(prepared1) == 1
+    assert prepared1[0].get("content") == "first message"
+
+    # Second call with the same items - should NOT return duplicates if items were tracked
+    # But currently they're not tracked in prepare_input, so it WILL return duplicates
+    # (this is the bug)
+    prepared2 = tracker.prepare_input(
+        original_input=original_input,
+        generated_items=generated_items,
+        model_responses=None,
+    )
+
+    # Currently fails: items are re-sent because they weren't tracked in sent_items by prepare_input
+    assert len(prepared2) == 0, (
+        "Items should not be re-sent on subsequent calls if they were tracked in sent_items. "
+        "Currently prepare_input doesn't add items to sent_items, causing duplicates."
+    )
