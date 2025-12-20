@@ -5,7 +5,13 @@ import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from agents import Agent
-from agents.items import MessageOutputItem, ModelResponse, RunItem, TResponseInputItem
+from agents.items import (
+    MessageOutputItem,
+    ModelResponse,
+    RunItem,
+    ToolCallOutputItem,
+    TResponseInputItem,
+)
 from agents.run import _ServerConversationTracker
 from agents.usage import Usage
 
@@ -197,3 +203,75 @@ def test_prepare_input_tracks_sent_items_to_prevent_duplicates() -> None:
         "Items should not be re-sent on subsequent calls if they were tracked in sent_items. "
         "Currently prepare_input doesn't add items to sent_items, causing duplicates."
     )
+
+
+def test_prepare_input_normalizes_tool_outputs_stripping_protocol_only_fields() -> None:
+    """Test that prepare_input normalizes tool outputs by stripping protocol-only fields.
+
+    Issue: prepare_input uses raw_item directly when it's a dict, bypassing the normalization
+    that to_input_item() would do. ToolCallOutputItem.to_input_item() strips protocol-only fields
+    like 'status', 'shell_output', 'provider_data' that the Responses API rejects. This test
+    verifies that these fields are stripped when tool outputs are prepared for sending.
+
+    Protocol-only fields that should be stripped:
+    - 'status' (for function_call_output and shell_call_output)
+    - 'shell_output' (for shell_call_output)
+    - 'provider_data' (for shell_call_output)
+    - 'name' (for function_call_result when converting to function_call_output)
+    """
+    tracker = _ServerConversationTracker(conversation_id="conv6", previous_response_id=None)
+    agent = Agent(name="TestAgent")
+
+    # Create a ToolCallOutputItem with a dict raw_item containing protocol-only fields
+    # that should be stripped by to_input_item()
+    tool_output_raw = {
+        "type": "shell_call_output",
+        "call_id": "call-123",
+        "output": "command output",
+        "status": "completed",  # Protocol-only field - should be stripped
+        "shell_output": "raw shell output",  # Protocol-only field - should be stripped
+        "provider_data": {"some": "data"},  # Protocol-only field - should be stripped
+    }
+    tool_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item=tool_output_raw,
+        output="command output",
+    )
+
+    original_input: list[TResponseInputItem] = []
+    generated_items: list[RunItem] = [tool_output_item]
+
+    prepared = tracker.prepare_input(
+        original_input=original_input,
+        generated_items=generated_items,
+        model_responses=None,
+    )
+
+    # Verify the result contains normalized tool output without protocol-only fields
+    assert len(prepared) == 1
+    prepared_item = prepared[0]
+
+    # Should be a dict
+    assert isinstance(prepared_item, dict), f"Expected dict, got {type(prepared_item)}"
+
+    # Verify protocol-only fields are stripped
+    assert "status" not in prepared_item, (
+        "Protocol-only field 'status' should be stripped from shell_call_output. "
+        "Currently prepare_input uses raw_item directly when it's a dict, bypassing "
+        "the normalization that to_input_item() would do."
+    )
+    assert "shell_output" not in prepared_item, (
+        "Protocol-only field 'shell_output' should be stripped from shell_call_output. "
+        "Currently prepare_input uses raw_item directly when it's a dict, bypassing "
+        "the normalization that to_input_item() would do."
+    )
+    assert "provider_data" not in prepared_item, (
+        "Protocol-only field 'provider_data' should be stripped from shell_call_output. "
+        "Currently prepare_input uses raw_item directly when it's a dict, bypassing "
+        "the normalization that to_input_item() would do."
+    )
+
+    # Verify required fields are still present
+    assert prepared_item.get("type") == "shell_call_output"
+    assert prepared_item.get("call_id") == "call-123"
+    assert prepared_item.get("output") == "command output"
