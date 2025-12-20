@@ -494,6 +494,8 @@ class _ServerConversationTracker:
             else:
                 input_item = run_item.to_input_item()
             input_items.append(input_item)
+            # Track sent items to prevent duplicates on subsequent calls
+            self.sent_items.add(raw_item_id)
 
         return input_items
 
