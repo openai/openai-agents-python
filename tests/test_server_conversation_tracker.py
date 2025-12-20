@@ -12,7 +12,7 @@ from agents.items import (
     ToolCallOutputItem,
     TResponseInputItem,
 )
-from agents.run import _ServerConversationTracker
+from agents.run import AgentRunner, _ServerConversationTracker
 from agents.usage import Usage
 
 
@@ -275,3 +275,88 @@ def test_prepare_input_normalizes_tool_outputs_stripping_protocol_only_fields() 
     assert prepared_item.get("type") == "shell_call_output"
     assert prepared_item.get("call_id") == "call-123"
     assert prepared_item.get("output") == "command output"
+
+
+def test_prepare_input_filters_items_by_fingerprint_after_resume() -> None:
+    """Test that prepare_input filters items by fingerprint, not just object ID.
+
+    Issue: prepare_input checks sent_items and server_items by object ID, but doesn't
+    check sent_item_fingerprints. When items are rehydrated after resume, they have
+    new object IDs, so they won't be filtered by sent_items or server_items, but they
+    should be filtered by sent_item_fingerprints because their content (fingerprint)
+    matches items that were already sent.
+
+    This test verifies that items with matching fingerprints are filtered out even
+    if they have different object IDs.
+    """
+    tracker = _ServerConversationTracker(conversation_id="conv7", previous_response_id=None)
+    agent = Agent(name="TestAgent")
+
+    # Create an item that will be primed into the tracker
+    # Use a tool output item for simplicity
+    original_item_dict: TResponseInputItem = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "result",
+        },
+    )
+
+    # Prime the tracker with this item (simulates resuming from state)
+    # This will add the item's fingerprint to sent_item_fingerprints
+    model_response = object.__new__(ModelResponse)
+    model_response.output = []
+    model_response.usage = Usage()
+    model_response.response_id = "resp-1"
+
+    tracker.prime_from_state(
+        original_input=[original_item_dict],
+        generated_items=[],
+        model_responses=[model_response],
+        session_items=None,
+    )
+
+    # Verify the fingerprint was added
+    # The fingerprint is created from normalized items, so we need to normalize first
+    normalized = AgentRunner._normalize_input_items([original_item_dict])
+    expected_fingerprint = json.dumps(normalized[0], sort_keys=True)
+    assert expected_fingerprint in tracker.sent_item_fingerprints
+
+    # Now create a NEW RunItem with the SAME content but DIFFERENT object ID
+    # (simulates rehydrated item after resume)
+    # When to_input_item() is called, it should produce a dict with the same fingerprint
+    rehydrated_tool_output_dict = {
+        "type": "function_call_output",
+        "call_id": "call-1",
+        "output": "result",
+    }
+    tool_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item=rehydrated_tool_output_dict,
+        output="result",
+    )
+
+    # Verify the rehydrated item, when converted to input item, has the same fingerprint
+    rehydrated_input_item = tool_output_item.to_input_item()
+    rehydrated_normalized = AgentRunner._normalize_input_items([rehydrated_input_item])
+    rehydrated_fingerprint = json.dumps(rehydrated_normalized[0], sort_keys=True)
+    assert rehydrated_fingerprint == expected_fingerprint, "Fingerprints should match"
+
+    # Call prepare_input with the rehydrated item
+    # The item should be filtered out because its fingerprint matches
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=[tool_output_item],
+        model_responses=None,
+    )
+
+    # The item should be filtered out because its fingerprint matches an item that
+    # was already sent. prepare_input should check sent_item_fingerprints in addition
+    # to sent_items and server_items (which only check by object ID).
+    assert len(prepared) == 0, (
+        "Items with matching fingerprints should be filtered out even if they have "
+        "different object IDs. prepare_input must check sent_item_fingerprints to "
+        "prevent rehydrated items after resume from being re-sent when their content "
+        "(fingerprint) matches items that were already sent."
+    )
