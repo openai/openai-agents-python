@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import inspect
 import json
 import weakref
@@ -244,8 +243,10 @@ class FunctionTool:
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
 
+        # Dress the FunctionTool object with the name and docstring of the wrapped function
         if self._func:
-            functools.update_wrapper(self, self._func)
+            self.__name__ = self._func.__name__
+            self.__doc__ = self._func.__doc__
 
     def __call__(self, *args, **kwargs):
         if not self._func:

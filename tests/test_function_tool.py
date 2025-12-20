@@ -188,6 +188,12 @@ async def test_complex_args_function():
         )
 
 
+def test_func_tool_name_doc_inheritance():
+    tool = function_tool(simple_function)
+    assert tool.__name__ == simple_function.__name__
+    assert tool.__doc__ == simple_function.__doc__
+
+
 def test_absent_func_tool():
     tool = function_tool(simple_function)
     kwargs = asdict(tool)

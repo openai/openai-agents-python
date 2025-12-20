@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 
 
 @function_tool
-async def _test_tool(query: str) -> str:
+async def test_tool(query: str) -> str:
     """A test tool for testing tool call tracking."""
     return f"Tool result for: {query}"
 
@@ -28,7 +28,7 @@ async def _test_tool(query: str) -> str:
 @pytest.fixture
 def agent() -> Agent:
     """Fixture for a basic agent with a fake model."""
-    return Agent(name="test", model=FakeModel(), tools=[_test_tool])
+    return Agent(name="test", model=FakeModel(), tools=[test_tool])
 
 
 @pytest.fixture
@@ -961,7 +961,7 @@ async def test_tool_execution_integration(agent: Agent):
         [
             {  # type: ignore
                 "type": "function_call",
-                "name": "_test_tool",
+                "name": "test_tool",
                 "arguments": '{"query": "test query"}',
                 "call_id": "call_123",
             }
