@@ -1,6 +1,11 @@
+import json
 from typing import Any, cast
 
-from agents.items import ModelResponse, TResponseInputItem
+import pytest
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+from agents import Agent
+from agents.items import MessageOutputItem, ModelResponse, RunItem, TResponseInputItem
 from agents.run import _ServerConversationTracker
 from agents.usage import Usage
 
@@ -90,3 +95,53 @@ def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> 
     tracker.track_server_items(model_response)
 
     assert tracker.remaining_initial_input == [pending_kept]
+
+
+def test_prepare_input_returns_json_serializable_dicts_not_pydantic_models() -> None:
+    """Test that prepare_input converts Pydantic models to dicts via to_input_item().
+
+    Issue: prepare_input was appending raw_item directly, which could be a Pydantic
+    model (like ResponseOutputMessage), causing non-serializable items to be sent
+    to the API. This test verifies that to_input_item() is called to convert models
+    to dicts before appending.
+    """
+    tracker = _ServerConversationTracker(conversation_id="conv4", previous_response_id=None)
+
+    # Create a RunItem with a Pydantic model as raw_item
+    agent = Agent(name="TestAgent")
+    pydantic_message = ResponseOutputMessage(
+        id="msg-1",
+        type="message",
+        role="assistant",
+        content=[ResponseOutputText(text="Hello", type="output_text", annotations=[], logprobs=[])],
+        status="completed",
+    )
+    message_item = MessageOutputItem(agent=agent, raw_item=pydantic_message)
+
+    original_input: list[TResponseInputItem] = []
+    generated_items: list[RunItem] = [message_item]
+
+    prepared = tracker.prepare_input(
+        original_input=original_input,
+        generated_items=generated_items,
+        model_responses=None,
+    )
+
+    # Verify the result contains dicts, not Pydantic models
+    assert len(prepared) == 1
+    prepared_item = prepared[0]
+
+    # Should be a dict, not a Pydantic model
+    assert isinstance(prepared_item, dict), f"Expected dict, got {type(prepared_item)}"
+    assert not isinstance(prepared_item, ResponseOutputMessage), "Should not be a Pydantic model"
+
+    # Should be JSON-serializable
+    try:
+        json.dumps(prepared_item)
+    except (TypeError, ValueError) as e:
+        pytest.fail(f"Item is not JSON-serializable: {e}")
+
+    # Verify the dict contains expected fields from the Pydantic model
+    assert prepared_item.get("id") == "msg-1"
+    assert prepared_item.get("type") == "message"
+    assert prepared_item.get("role") == "assistant"
