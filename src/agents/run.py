@@ -487,7 +487,13 @@ class _ServerConversationTracker:
             if raw_item_id in self.sent_items or raw_item_id in self.server_items:
                 continue
 
-            input_items.append(cast(TResponseInputItem, raw_item))
+            # Convert RunItem to input item format (handles Pydantic models -> dicts)
+            # If raw_item is already a dict, use it directly; otherwise call to_input_item()
+            if isinstance(raw_item, dict):
+                input_item = cast(TResponseInputItem, raw_item)
+            else:
+                input_item = run_item.to_input_item()
+            input_items.append(input_item)
 
         return input_items
 
