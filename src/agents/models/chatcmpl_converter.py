@@ -17,7 +17,6 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolChoiceOptionParam,
-    ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_content_part_param import File, FileFile
@@ -42,6 +41,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_reasoning_item import Content, Summary
+from typing_extensions import Required, TypedDict
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
@@ -52,6 +52,18 @@ from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
 ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
+
+
+class ExtendedChatCompletionToolMessageParam(TypedDict, total=False):
+    """Extended tool message that supports media content (images, audio, files).
+
+    Some chatcmpl providers support media in tool outputs beyond what OpenAI's
+    ChatCompletionToolMessageParam allows (which only accepts text content).
+    """
+
+    role: Required[Literal["tool"]]
+    tool_call_id: Required[str]
+    content: Required[str | list[ChatCompletionContentPartParam]]
 
 
 class Converter:
@@ -541,13 +553,13 @@ class Converter:
                 output_content = cast(
                     Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
                 )
-                msg: ChatCompletionToolMessageParam = {
+                msg: ExtendedChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
                     "content": cls.extract_all_content(output_content),
                 }
 
-                result.append(msg)
+                result.append(cast(ChatCompletionMessageParam, msg))
 
             # 6) item reference => handle or raise
             elif item_ref := cls.maybe_item_reference(item):
