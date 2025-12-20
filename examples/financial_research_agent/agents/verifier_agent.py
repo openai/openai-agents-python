@@ -22,6 +22,6 @@ class VerificationResult(BaseModel):
 verifier_agent = Agent(
     name="VerificationAgent",
     instructions=VERIFIER_PROMPT,
-    model="gpt-4o",
+    model="gpt-5.2",
     output_type=VerificationResult,
 )

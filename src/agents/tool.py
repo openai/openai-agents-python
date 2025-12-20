@@ -3,9 +3,21 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import weakref
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal, Union, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Literal,
+    Protocol,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 
 from openai.types.responses.file_search_tool_param import Filters, RankingOptions
 from openai.types.responses.response_computer_tool_call import (
@@ -22,7 +34,7 @@ from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 from . import _debug
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor
-from .exceptions import ModelBehaviorError
+from .exceptions import ModelBehaviorError, UserError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
 from .run_context import RunContextWrapper
@@ -129,6 +141,43 @@ ValidToolOutputPydanticModels = Union[ToolOutputText, ToolOutputImage, ToolOutpu
 ValidToolOutputPydanticModelsTypeAdapter: TypeAdapter[ValidToolOutputPydanticModels] = TypeAdapter(
     ValidToolOutputPydanticModels
 )
+
+ComputerLike = Union[Computer, AsyncComputer]
+ComputerT = TypeVar("ComputerT", bound=ComputerLike)
+ComputerT_co = TypeVar("ComputerT_co", bound=ComputerLike, covariant=True)
+ComputerT_contra = TypeVar("ComputerT_contra", bound=ComputerLike, contravariant=True)
+
+
+class ComputerCreate(Protocol[ComputerT_co]):
+    """Initializes a computer for the current run context."""
+
+    def __call__(self, *, run_context: RunContextWrapper[Any]) -> MaybeAwaitable[ComputerT_co]: ...
+
+
+class ComputerDispose(Protocol[ComputerT_contra]):
+    """Cleans up a computer initialized for a run context."""
+
+    def __call__(
+        self,
+        *,
+        run_context: RunContextWrapper[Any],
+        computer: ComputerT_contra,
+    ) -> MaybeAwaitable[None]: ...
+
+
+@dataclass
+class ComputerProvider(Generic[ComputerT]):
+    """Configures create/dispose hooks for per-run computer lifecycle management."""
+
+    create: ComputerCreate[ComputerT]
+    dispose: ComputerDispose[ComputerT] | None = None
+
+
+ComputerConfig = Union[
+    ComputerT,
+    ComputerCreate[ComputerT],
+    ComputerProvider[ComputerT],
+]
 
 
 @dataclass
@@ -253,21 +302,156 @@ class WebSearchTool:
         return "web_search"
 
 
-@dataclass
-class ComputerTool:
+@dataclass(eq=False)
+class ComputerTool(Generic[ComputerT]):
     """A hosted tool that lets the LLM control a computer."""
 
-    computer: Computer | AsyncComputer
-    """The computer implementation, which describes the environment and dimensions of the computer,
-    as well as implements the computer actions like click, screenshot, etc.
-    """
+    computer: ComputerConfig[ComputerT]
+    """The computer implementation, or a factory that produces a computer per run."""
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
     """Optional callback to acknowledge computer tool safety checks."""
 
+    def __post_init__(self) -> None:
+        _store_computer_initializer(self)
+
     @property
     def name(self):
         return "computer_use_preview"
+
+
+@dataclass
+class _ResolvedComputer:
+    computer: ComputerLike
+    dispose: ComputerDispose[ComputerLike] | None = None
+
+
+_computer_cache: weakref.WeakKeyDictionary[
+    ComputerTool[Any],
+    weakref.WeakKeyDictionary[RunContextWrapper[Any], _ResolvedComputer],
+] = weakref.WeakKeyDictionary()
+_computer_initializer_map: weakref.WeakKeyDictionary[ComputerTool[Any], ComputerConfig[Any]] = (
+    weakref.WeakKeyDictionary()
+)
+_computers_by_run_context: weakref.WeakKeyDictionary[
+    RunContextWrapper[Any], dict[ComputerTool[Any], _ResolvedComputer]
+] = weakref.WeakKeyDictionary()
+
+
+def _is_computer_provider(candidate: object) -> bool:
+    return isinstance(candidate, ComputerProvider) or (
+        hasattr(candidate, "create") and callable(candidate.create)
+    )
+
+
+def _store_computer_initializer(tool: ComputerTool[Any]) -> None:
+    config = tool.computer
+    if callable(config) or _is_computer_provider(config):
+        _computer_initializer_map[tool] = config
+
+
+def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig[Any] | None:
+    if tool in _computer_initializer_map:
+        return _computer_initializer_map[tool]
+
+    if callable(tool.computer) or _is_computer_provider(tool.computer):
+        return tool.computer
+
+    return None
+
+
+def _track_resolved_computer(
+    *,
+    tool: ComputerTool[Any],
+    run_context: RunContextWrapper[Any],
+    resolved: _ResolvedComputer,
+) -> None:
+    resolved_by_run = _computers_by_run_context.get(run_context)
+    if resolved_by_run is None:
+        resolved_by_run = {}
+        _computers_by_run_context[run_context] = resolved_by_run
+    resolved_by_run[tool] = resolved
+
+
+async def resolve_computer(
+    *, tool: ComputerTool[Any], run_context: RunContextWrapper[Any]
+) -> ComputerLike:
+    """Resolve a computer for a given run context, initializing it if needed."""
+    per_context = _computer_cache.get(tool)
+    if per_context is None:
+        per_context = weakref.WeakKeyDictionary()
+        _computer_cache[tool] = per_context
+
+    cached = per_context.get(run_context)
+    if cached is not None:
+        _track_resolved_computer(tool=tool, run_context=run_context, resolved=cached)
+        return cached.computer
+
+    initializer_config = _get_computer_initializer(tool)
+    lifecycle: ComputerProvider[Any] | None = (
+        cast(ComputerProvider[Any], initializer_config)
+        if _is_computer_provider(initializer_config)
+        else None
+    )
+    initializer: ComputerCreate[Any] | None = None
+    disposer: ComputerDispose[Any] | None = lifecycle.dispose if lifecycle else None
+
+    if lifecycle is not None:
+        initializer = lifecycle.create
+    elif callable(initializer_config):
+        initializer = initializer_config
+    elif _is_computer_provider(tool.computer):
+        lifecycle_provider = cast(ComputerProvider[Any], tool.computer)
+        initializer = lifecycle_provider.create
+        disposer = lifecycle_provider.dispose
+
+    if initializer:
+        computer_candidate = initializer(run_context=run_context)
+        computer = (
+            await computer_candidate
+            if inspect.isawaitable(computer_candidate)
+            else computer_candidate
+        )
+    else:
+        computer = cast(ComputerLike, tool.computer)
+
+    if not isinstance(computer, (Computer, AsyncComputer)):
+        raise UserError("The computer tool did not provide a computer instance.")
+
+    resolved = _ResolvedComputer(computer=computer, dispose=disposer)
+    per_context[run_context] = resolved
+    _track_resolved_computer(tool=tool, run_context=run_context, resolved=resolved)
+    tool.computer = computer
+    return computer
+
+
+async def dispose_resolved_computers(*, run_context: RunContextWrapper[Any]) -> None:
+    """Dispose any computer instances created for the provided run context."""
+    resolved_by_tool = _computers_by_run_context.pop(run_context, None)
+    if not resolved_by_tool:
+        return
+
+    disposers: list[tuple[ComputerDispose[ComputerLike], ComputerLike]] = []
+
+    for tool, _resolved in resolved_by_tool.items():
+        per_context = _computer_cache.get(tool)
+        if per_context is not None:
+            per_context.pop(run_context, None)
+
+        initializer = _get_computer_initializer(tool)
+        if initializer is not None:
+            tool.computer = initializer
+
+        if _resolved.dispose is not None:
+            disposers.append((_resolved.dispose, _resolved.computer))
+
+    for dispose, computer in disposers:
+        try:
+            result = dispose(run_context=run_context, computer=computer)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning("Failed to dispose computer for run context: %s", exc)
 
 
 @dataclass
@@ -489,7 +673,7 @@ Tool = Union[
     FunctionTool,
     FileSearchTool,
     WebSearchTool,
-    ComputerTool,
+    ComputerTool[Any],
     HostedMCPTool,
     ShellTool,
     ApplyPatchTool,

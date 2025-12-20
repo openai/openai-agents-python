@@ -2,11 +2,11 @@
 search:
   exclude: true
 ---
-# 快速入门
+# 快速开始
 
 ## 先决条件
 
-请确保你已按照 Agents SDK 的基础[快速入门](../quickstart.md)进行操作，并设置好虚拟环境。然后，从 SDK 安装可选的语音相关依赖：
+请确保你已按照 Agents SDK 的基础[快速入门说明](../quickstart.md)完成设置，并创建了虚拟环境。然后，从 SDK 安装可选的语音依赖：
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,10 +14,10 @@ pip install 'openai-agents[voice]'
 
 ## 概念
 
-这里的核心概念是一个[`VoicePipeline`][agents.voice.pipeline.VoicePipeline]，它是一个包含 3 个步骤的流程：
+需要了解的核心概念是一个[`VoicePipeline`][agents.voice.pipeline.VoicePipeline]，它包含 3 个步骤：
 
 1. 运行语音转文本模型，将音频转为文本。
-2. 运行你的代码（通常是一个智能体工作流）以生成结果。
+2. 运行你的代码（通常是一个智能化工作流）以生成结果。
 3. 运行文本转语音模型，将结果文本转换回音频。
 
 ```mermaid
@@ -48,7 +48,7 @@ graph LR
 
 ## 智能体
 
-首先，来设置一些智能体。如果你使用过该 SDK 构建过智能体，这会很熟悉。我们将有几个智能体、一次任务转移，以及一个工具。
+首先，让我们设置一些智能体。如果你之前使用此 SDK 构建过智能体，这应该很熟悉。我们将创建几个智能体、一个任务转移，以及一个工具。
 
 ```python
 import asyncio
@@ -76,7 +76,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-4.1",
+    model="gpt-5.2",
 )
 
 agent = Agent(
@@ -84,7 +84,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
     ),
-    model="gpt-4.1",
+    model="gpt-5.2",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )
@@ -92,7 +92,7 @@ agent = Agent(
 
 ## 语音流水线
 
-我们将设置一个简单的语音流水线，使用[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]作为工作流。
+我们将使用[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]作为工作流，来设置一个简单的语音流水线。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -160,7 +160,7 @@ spanish_agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. Speak in Spanish.",
     ),
-    model="gpt-4.1",
+    model="gpt-5.2",
 )
 
 agent = Agent(
@@ -168,7 +168,7 @@ agent = Agent(
     instructions=prompt_with_handoff_instructions(
         "You're speaking to a human, so be polite and concise. If the user speaks in Spanish, handoff to the spanish agent.",
     ),
-    model="gpt-4.1",
+    model="gpt-5.2",
     handoffs=[spanish_agent],
     tools=[get_weather],
 )
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-如果你运行这个示例，智能体会和你对话！查看[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)中的示例，体验一个你可以亲自与智能体对话的演示。
+如果你运行此示例，智能体会和你对话！查看[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)中的示例，观看演示并亲自与智能体对话。

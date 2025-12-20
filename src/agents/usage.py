@@ -92,9 +92,18 @@ class Usage:
         # (cached_tokens, reasoning_tokens), and the OpenAI SDK's generated
         # code can bypass Pydantic validation (e.g., via model_construct),
         # allowing None values. We normalize these to 0 to prevent TypeErrors.
-        if self.input_tokens_details.cached_tokens is None:
+        input_details_none = self.input_tokens_details is None
+        input_cached_none = (
+            not input_details_none and self.input_tokens_details.cached_tokens is None
+        )
+        if input_details_none or input_cached_none:
             self.input_tokens_details = InputTokensDetails(cached_tokens=0)
-        if self.output_tokens_details.reasoning_tokens is None:
+
+        output_details_none = self.output_tokens_details is None
+        output_reasoning_none = (
+            not output_details_none and self.output_tokens_details.reasoning_tokens is None
+        )
+        if output_details_none or output_reasoning_none:
             self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
 
     def add(self, other: Usage) -> None:
@@ -109,25 +118,46 @@ class Usage:
         self.input_tokens += other.input_tokens if other.input_tokens else 0
         self.output_tokens += other.output_tokens if other.output_tokens else 0
         self.total_tokens += other.total_tokens if other.total_tokens else 0
-        self.input_tokens_details = InputTokensDetails(
-            cached_tokens=self.input_tokens_details.cached_tokens
-            + other.input_tokens_details.cached_tokens
+
+        # Null guards for nested token details (other may bypass validation via model_construct)
+        other_cached = (
+            other.input_tokens_details.cached_tokens
+            if other.input_tokens_details and other.input_tokens_details.cached_tokens
+            else 0
+        )
+        other_reasoning = (
+            other.output_tokens_details.reasoning_tokens
+            if other.output_tokens_details and other.output_tokens_details.reasoning_tokens
+            else 0
+        )
+        self_cached = (
+            self.input_tokens_details.cached_tokens
+            if self.input_tokens_details and self.input_tokens_details.cached_tokens
+            else 0
+        )
+        self_reasoning = (
+            self.output_tokens_details.reasoning_tokens
+            if self.output_tokens_details and self.output_tokens_details.reasoning_tokens
+            else 0
         )
 
+        self.input_tokens_details = InputTokensDetails(cached_tokens=self_cached + other_cached)
+
         self.output_tokens_details = OutputTokensDetails(
-            reasoning_tokens=self.output_tokens_details.reasoning_tokens
-            + other.output_tokens_details.reasoning_tokens
+            reasoning_tokens=self_reasoning + other_reasoning
         )
 
         # Automatically preserve request_usage_entries.
         # If the other Usage represents a single request with tokens, record it.
         if other.requests == 1 and other.total_tokens > 0:
+            input_details = other.input_tokens_details or InputTokensDetails(cached_tokens=0)
+            output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)
             request_usage = RequestUsage(
                 input_tokens=other.input_tokens,
                 output_tokens=other.output_tokens,
                 total_tokens=other.total_tokens,
-                input_tokens_details=other.input_tokens_details,
-                output_tokens_details=other.output_tokens_details,
+                input_tokens_details=input_details,
+                output_tokens_details=output_details,
             )
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:
