@@ -488,8 +488,12 @@ class _ServerConversationTracker:
                 continue
 
             # Convert RunItem to input item format (handles Pydantic models -> dicts)
-            # If raw_item is already a dict, use it directly; otherwise call to_input_item()
-            if isinstance(raw_item, dict):
+            # Always call to_input_item() for RunItem instances to ensure normalization
+            # (e.g., ToolCallOutputItem strips protocol-only fields like 'status', 'shell_output')
+            # For non-RunItem instances (like DummyRunItem in tests), use raw_item directly
+            if hasattr(run_item, "to_input_item"):
+                input_item = run_item.to_input_item()
+            elif isinstance(raw_item, dict):
                 input_item = cast(TResponseInputItem, raw_item)
             else:
                 input_item = run_item.to_input_item()
