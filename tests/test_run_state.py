@@ -22,6 +22,8 @@ from agents import Agent, Runner, handoff
 from agents._run_impl import (
     NextStepInterruption,
     ProcessedResponse,
+    RunImpl,
+    SingleStepResult,
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
     ToolRunFunction,
@@ -1554,6 +1556,117 @@ class TestRunStateResumption:
         assert state._current_step is not None
         assert isinstance(state._current_step, NextStepInterruption)
         assert len(state._current_step.interruptions) == len(result.interruptions)
+
+    @pytest.mark.asyncio
+    async def test_interrupted_run_state_contains_model_response(self, monkeypatch):
+        """Test that interrupted runs preserve model response and processed response in state.
+
+        Issue: When NextStepInterruption occurs during resume, RunResult is built without
+        _last_processed_response, making resumption fail. This test verifies that to_state()
+        creates a RunState with _model_responses and _last_processed_response so the run
+        can be resumed.
+
+        The test uses monkeypatch to force resolve_interrupted_turn to return NextStepInterruption,
+        simulating the scenario where there are still pending approvals after executing
+        approved tools.
+        """
+        model = FakeModel()
+
+        async def tool_func() -> str:
+            return "tool_result"
+
+        async def needs_approval(_ctx, _params, _call_id) -> bool:
+            return True
+
+        tool = function_tool(tool_func, name_override="test_tool", needs_approval=needs_approval)
+        agent = Agent(name="TestAgent", model=model, tools=[tool])
+
+        # First run - create an interruption
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("test_tool", json.dumps({}))],
+                [get_text_message("done")],
+            ]
+        )
+        result1 = await Runner.run(agent, "test input")
+
+        # Should have interruptions
+        assert len(result1.interruptions) > 0
+
+        # Verify first result has _last_processed_response (normal flow sets it)
+        assert result1._last_processed_response is not None
+
+        # Convert to state and approve to trigger resume
+        state1 = result1.to_state()
+        if state1.get_interruptions():
+            state1.approve(state1.get_interruptions()[0])
+
+        # Monkeypatch resolve_interrupted_turn to return NextStepInterruption
+        # This simulates the scenario where there are still pending approvals
+        # after executing approved tools
+        original_resolve = RunImpl.resolve_interrupted_turn
+
+        async def mock_resolve_interrupted_turn(*args, **kwargs):
+            # Call the original function
+            result = await original_resolve(*args, **kwargs)
+            # Force it to return NextStepInterruption to test the bug
+            # Create a new interruption item
+            approval_item = ToolApprovalItem(
+                agent=agent,
+                raw_item={
+                    "type": "function_call",
+                    "name": "test_tool",
+                    "call_id": "call-remaining",
+                    "arguments": "{}",
+                },
+            )
+            # Return NextStepInterruption instead of NextStepRunAgain
+            return SingleStepResult(
+                original_input=result.original_input,
+                model_response=result.model_response,
+                pre_step_items=result.pre_step_items,
+                new_step_items=result.new_step_items,
+                next_step=NextStepInterruption(interruptions=[approval_item]),
+                tool_input_guardrail_results=result.tool_input_guardrail_results,
+                tool_output_guardrail_results=result.tool_output_guardrail_results,
+                processed_response=result.processed_response,
+            )
+
+        monkeypatch.setattr(RunImpl, "resolve_interrupted_turn", mock_resolve_interrupted_turn)
+
+        # Resume - this should hit the resume interruption path
+        result2 = await Runner.run(agent, state1)
+
+        # Should have interruptions (from the mock)
+        assert len(result2.interruptions) > 0
+
+        # RunResult created during resume interruption should have _last_processed_response set
+        # from turn_result.processed_response. Without it, to_state() will create a RunState
+        # without _last_processed_response, causing resumption to fail with
+        # 'No model response found in previous state'.
+        assert result2._last_processed_response is not None, (
+            "RunResult created during resume interruption should have _last_processed_response set "
+            "from turn_result.processed_response. Without it, to_state() will create a RunState "
+            "without _last_processed_response, causing resumption to fail with "
+            "'No model response found in previous state'."
+        )
+
+        state2 = result2.to_state()
+
+        # State should have model responses
+        assert state2._model_responses is not None
+        assert len(state2._model_responses) > 0, (
+            "RunState should contain model responses when created from interrupted RunResult "
+            "during resume. Without model responses, resumption will fail with "
+            "'No model response found in previous state'."
+        )
+
+        # State should have last processed response
+        assert state2._last_processed_response is not None, (
+            "RunState should contain _last_processed_response when created from interrupted "
+            "RunResult during resume. Without _last_processed_response, resumption will fail "
+            "with 'No model response found in previous state'."
+        )
 
 
 class TestRunStateSerializationEdgeCases:
