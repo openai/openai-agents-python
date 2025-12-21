@@ -1283,6 +1283,7 @@ class AgentRunner:
                                     ),
                                     context_wrapper=context_wrapper,
                                     interruptions=turn_result.next_step.interruptions,
+                                    _last_processed_response=turn_result.processed_response,
                                     _tool_use_tracker_snapshot=self._serialize_tool_use_tracker(
                                         tool_use_tracker
                                     ),

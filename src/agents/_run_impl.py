@@ -917,6 +917,7 @@ class RunImpl:
             next_step=NextStepRunAgain(),
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
+            processed_response=processed_response,
         )
 
     @classmethod
