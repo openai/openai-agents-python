@@ -30,13 +30,15 @@ from agents import (
 from agents._run_impl import (
     NextStepInterruption,
 )
-from agents.items import MessageOutputItem, ModelResponse, ToolCallOutputItem
+from agents.items import MessageOutputItem, ModelResponse, RunItem, ToolCallOutputItem
+from agents.run import AgentRunner
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState as RunStateClass
 from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
+from .utils.simple_session import SimpleListSession
 
 
 class RecordingEditor:
@@ -1025,3 +1027,80 @@ async def test_preserve_tool_output_types_during_serialization():
             f"The bug converts all tool outputs to function_call_result during serialization, "
             f"causing them to be incorrectly deserialized as FunctionCallOutput."
         )
+
+
+@pytest.mark.asyncio
+async def test_resume_with_all_items_already_persisted_does_not_duplicate():
+    """Test that resuming a turn with all items already persisted does not save duplicates.
+
+    Issue: When already_persisted >= len(new_items), _save_result_to_session sets
+    new_run_items = list(new_items) instead of empty list, causing duplicates.
+
+    This test verifies that when _save_result_to_session is called with new_items where
+    already_persisted >= len(new_items), no duplicates are saved to the session.
+    """
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model)
+
+    session = SimpleListSession()
+
+    # Create some items that will be passed to _save_result_to_session
+    items = []
+    for i in range(3):
+        message_item = MessageOutputItem(
+            agent=agent,
+            raw_item=ResponseOutputMessage(
+                id=f"msg_{i}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text=f"Message {i}", annotations=[], logprobs=[]
+                    )
+                ],
+            ),
+        )
+        items.append(message_item)
+
+    # Save items to session first (simulating they were already persisted)
+    await AgentRunner._save_result_to_session(
+        session, "test input", cast(list[RunItem], items), None
+    )
+
+    # Get the initial session items count
+    initial_items = await session.get_items()
+    initial_count = len(initial_items)
+
+    # Create a RunState with _current_turn_persisted_item_count >= len(items)
+    # This simulates the scenario where all items were already persisted
+    context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context,
+        original_input="test input",
+        starting_agent=agent,
+        max_turns=10,
+    )
+    state._current_turn_persisted_item_count = len(items)
+
+    # Call _save_result_to_session with the same items and already_persisted >= len(items)
+    # This should not save duplicates
+    await AgentRunner._save_result_to_session(
+        session, "test input", cast(list[RunItem], items), state
+    )
+
+    # Get the final session items count
+    final_items = await session.get_items()
+    final_count = len(final_items)
+
+    # The session should not have duplicates
+    # When already_persisted >= len(new_items), no items should be saved
+    # The bug causes all items to be saved again by setting new_run_items = list(new_items)
+    assert final_count == initial_count, (
+        f"Expected session to have {initial_count} items (no duplicates), "
+        f"but got {final_count}. "
+        f"The bug causes duplicates when already_persisted >= len(new_items) by setting "
+        f"new_run_items = list(new_items) instead of an empty list."
+    )
