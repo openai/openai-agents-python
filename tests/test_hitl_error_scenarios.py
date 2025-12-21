@@ -1272,3 +1272,123 @@ async def test_resuming_with_unapproved_tool_raises_interruption():
     )
     assert len(result2.interruptions) == 1
     assert isinstance(result2.interruptions[0], ToolApprovalItem)
+
+
+@pytest.mark.asyncio
+async def test_resuming_after_approval_only_executes_unapproved_tools():
+    """Test that resuming after approval only executes tools that weren't already run.
+
+    When a turn has multiple tools where some require approval and some don't,
+    the tools that don't require approval execute immediately. When resuming
+    after approving the tools that require approval, only the approved tools
+    should execute. Tools that were already executed should not be executed again.
+
+    The resolve_interrupted_turn method should check original_pre_step_items for
+    tool outputs and skip tools that were already executed to avoid duplicate
+    side effects.
+
+    This test verifies that already-executed tools are not re-executed when
+    resuming after approval.
+    """
+    model = FakeModel()
+
+    # Track execution counts for each tool
+    tool_a_execution_count = 0
+    tool_b_execution_count = 0
+
+    # Tool A: doesn't require approval, executes immediately
+    async def tool_a_func() -> str:
+        nonlocal tool_a_execution_count
+        tool_a_execution_count += 1
+        return "tool_a_result"
+
+    tool_a = function_tool(tool_a_func, name_override="tool_a", needs_approval=False)
+
+    # Tool B: requires approval
+    async def tool_b_func() -> str:
+        nonlocal tool_b_execution_count
+        tool_b_execution_count += 1
+        return "tool_b_result"
+
+    async def needs_approval(_ctx: Any, _params: Any, _call_id: str) -> bool:
+        # Only tool_b needs approval
+        return _call_id == "call_b_1"
+
+    tool_b = function_tool(tool_b_func, name_override="tool_b", needs_approval=needs_approval)
+
+    agent = Agent(name="TestAgent", model=model, tools=[tool_a, tool_b])
+
+    # Single turn: both tools are called
+    # Tool A executes immediately (no approval needed)
+    # Tool B needs approval, causing an interruption
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call("tool_a", "{}", call_id="call_a_1"),
+                get_function_tool_call("tool_b", "{}", call_id="call_b_1"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result1 = await Runner.run(agent, "Use both tools")
+    assert result1.interruptions, "should have an interruption for tool_b approval"
+    assert len(result1.interruptions) == 1
+    assert isinstance(result1.interruptions[0], ToolApprovalItem)
+
+    # Tool A should have executed once (before the interruption)
+    assert tool_a_execution_count == 1, (
+        f"Expected tool_a to execute once before interruption, "
+        f"but got {tool_a_execution_count} executions."
+    )
+
+    # Tool B should not have executed yet (needs approval)
+    assert tool_b_execution_count == 0, (
+        f"Expected tool_b to not execute before approval, "
+        f"but got {tool_b_execution_count} executions."
+    )
+
+    # Approve tool_b and resume
+    state = result1.to_state()
+    state.approve(result1.interruptions[0])
+
+    # Manually remove the ToolApprovalItem from generated_items to simulate
+    # a scenario where function_call_ids can't be collected (e.g., deserialization issue).
+    # This forces the fallback case where ALL function tools are executed.
+    # In this fallback case, tool_a (which was already executed) should not be
+    # executed again. The resolve_interrupted_turn method should check
+    # original_pre_step_items for tool outputs and skip tools that were already executed.
+    state._generated_items = [
+        item for item in state._generated_items if not isinstance(item, ToolApprovalItem)
+    ]
+
+    # Set up next model response (final output)
+    model.set_next_output([get_text_message("done")])
+
+    # Resume from state after approval
+    # The processed_response contains both tool_a and tool_b from the original turn.
+    # When resolve_interrupted_turn executes tools, it tries to filter function tools
+    # by approved call_ids. However, if function_call_ids can't be collected
+    # (e.g., ToolApprovalItem was removed from generated_items), the fallback case
+    # executes ALL function tools from processed_response.functions without checking
+    # if they were already executed. Tool A was already executed, so it should not
+    # be executed again.
+    await Runner.run(agent, state)
+
+    # Tool A should still have executed only once (not re-executed on resume)
+    # The resolve_interrupted_turn method should check original_pre_step_items for
+    # tool outputs and skip tools that were already executed to avoid duplicate
+    # side effects.
+    assert tool_a_execution_count == 1, (
+        f"Expected tool_a to execute only once total (not re-executed on resume), "
+        f"but got {tool_a_execution_count} executions. "
+        f"Already-executed tools should not be re-executed when resuming after approval. "
+        f"resolve_interrupted_turn should check original_pre_step_items for tool outputs "
+        f"and skip tools that were already executed."
+    )
+
+    # Tool B should have executed once (after approval)
+    assert tool_b_execution_count == 1, (
+        f"Expected tool_b to execute once after approval, "
+        f"but got {tool_b_execution_count} executions."
+    )
