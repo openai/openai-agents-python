@@ -1006,9 +1006,21 @@ class RunState(Generic[TContext, TAgent]):
                 agent_name = item_data["agent"]["name"]
                 agent = agent_map.get(agent_name)
                 if agent:
+                    # Preserve providerData before normalization for MCP approvals
+                    # providerData is needed to identify MCP approval requests when resuming
+                    original_raw_item = item_data["rawItem"]
+                    provider_data = original_raw_item.get("providerData") or original_raw_item.get(
+                        "provider_data"
+                    )
+
                     # Normalize field names from JSON format (camelCase)
                     # to Python format (snake_case)
-                    normalized_raw_item = _normalize_field_names(item_data["rawItem"])
+                    normalized_raw_item = _normalize_field_names(original_raw_item)
+
+                    # Restore providerData for hosted_tool_call items (MCP approvals)
+                    # This is needed for resolve_interrupted_turn to identify MCP approval requests
+                    if provider_data and normalized_raw_item.get("type") == "hosted_tool_call":
+                        normalized_raw_item["providerData"] = provider_data
 
                     # Extract tool_name if present (for backwards compatibility)
                     tool_name = item_data.get("toolName")
@@ -1220,9 +1232,21 @@ class RunState(Generic[TContext, TAgent]):
                 agent_name = item_data["agent"]["name"]
                 agent = agent_map.get(agent_name)
                 if agent:
+                    # Preserve providerData before normalization for MCP approvals
+                    # providerData is needed to identify MCP approval requests when resuming
+                    original_raw_item = item_data["rawItem"]
+                    provider_data = original_raw_item.get("providerData") or original_raw_item.get(
+                        "provider_data"
+                    )
+
                     # Normalize field names from JSON format (camelCase)
                     # to Python format (snake_case)
-                    normalized_raw_item = _normalize_field_names(item_data["rawItem"])
+                    normalized_raw_item = _normalize_field_names(original_raw_item)
+
+                    # Restore providerData for hosted_tool_call items (MCP approvals)
+                    # This is needed for resolve_interrupted_turn to identify MCP approval requests
+                    if provider_data and normalized_raw_item.get("type") == "hosted_tool_call":
+                        normalized_raw_item["providerData"] = provider_data
 
                     # Extract tool_name if present (for backwards compatibility)
                     tool_name = item_data.get("toolName")
