@@ -155,6 +155,7 @@ class _ServerConversationTracker:
     server_item_ids: set[str] = field(default_factory=set)
     server_tool_call_ids: set[str] = field(default_factory=set)
     sent_item_fingerprints: set[str] = field(default_factory=set)
+    original_input_fingerprints: set[str] = field(default_factory=set)
     sent_initial_input: bool = False
     remaining_initial_input: list[TResponseInputItem] | None = None
 
@@ -195,11 +196,13 @@ class _ServerConversationTracker:
                 self.server_item_ids.add(item_id)
             # Also mark by fingerprint to filter out items even if they're new Python
             # objects. Use normalized items so fingerprints match what prepare_input
-            # will receive.
+            # will receive. Store in both sent_item_fingerprints (for track_server_items
+            # filtering) and original_input_fingerprints (for prepare_input filtering).
             if isinstance(item, dict):
                 try:
                     fp = json.dumps(item, sort_keys=True)
                     self.sent_item_fingerprints.add(fp)
+                    self.original_input_fingerprints.add(fp)
                 except Exception:
                     pass
 
@@ -266,14 +269,10 @@ class _ServerConversationTracker:
             # Only mark as sent if already in server_items
             if raw_item_id in self.server_items:
                 self.sent_items.add(raw_item_id)
-            # Always mark by fingerprint to filter out items even if they're new Python objects
-            # This ensures items already in the conversation are filtered correctly
-            if isinstance(raw_item, dict):
-                try:
-                    fp = json.dumps(raw_item, sort_keys=True)
-                    self.sent_item_fingerprints.add(fp)
-                except Exception:
-                    pass
+            # Don't add fingerprints for generated_items - they're tracked by object ID
+            # (sent_items, server_items) and server IDs (server_item_ids). Fingerprints
+            # are only needed for original_input items that may be rehydrated with new
+            # object IDs after resume.
             # Also mark by server ID if available
             item_id = (
                 raw_item.get("id") if isinstance(raw_item, dict) else getattr(raw_item, "id", None)
@@ -315,10 +314,14 @@ class _ServerConversationTracker:
             )
             has_output_payload = isinstance(output_item, dict) and "output" in output_item
             has_output_payload = has_output_payload or hasattr(output_item, "output")
-            if isinstance(call_id, str) and has_output_payload:
+            is_tool_output = isinstance(call_id, str) and has_output_payload
+            if is_tool_output and call_id is not None:
                 self.server_tool_call_ids.add(call_id)
             # Also mark by fingerprint to filter out items even if they're new Python objects
             # This ensures items echoed by the server are filtered correctly in prepare_input
+            # and in remaining_initial_input. For tool outputs, we still need fingerprints
+            # to filter remaining_initial_input, but they're also tracked by call_id for
+            # prepare_input filtering.
             if isinstance(output_item, dict):
                 try:
                     fp = json.dumps(output_item, sort_keys=True)
@@ -476,11 +479,8 @@ class _ServerConversationTracker:
             )
             has_output_payload = isinstance(raw_item, dict) and "output" in raw_item
             has_output_payload = has_output_payload or hasattr(raw_item, "output")
-            if (
-                isinstance(call_id, str)
-                and has_output_payload
-                and call_id in self.server_tool_call_ids
-            ):
+            is_tool_output = isinstance(call_id, str) and has_output_payload
+            if is_tool_output and call_id in self.server_tool_call_ids:
                 continue
 
             raw_item_id = id(raw_item)
@@ -497,6 +497,41 @@ class _ServerConversationTracker:
                 input_item = cast(TResponseInputItem, raw_item)
             else:
                 input_item = run_item.to_input_item()
+
+            # Check fingerprint to filter out rehydrated items after resume
+            # (items with matching fingerprints but different object IDs)
+            # Fingerprints are created in different ways in prime_from_state:
+            # - For original_input: normalized, then filtered, then JSON dumped
+            # - For generated_items: raw dict JSON dumped directly (no normalization)
+            # - For session_items: raw dict JSON dumped directly (no normalization)
+            # We only check normalized fingerprints to match original_input items that
+            # were actually sent. Items from generated_items and session_items are tracked
+            # by object ID (sent_items, server_items) and server IDs (server_item_ids),
+            # so they don't need fingerprint checking.
+            # Check fingerprints for all items. Tool outputs from generated_items won't match
+            # fingerprints from original_input, so they'll be sent. Tool outputs that were
+            # in original_input (rehydrated after resume) will match and be filtered.
+            # Tool outputs are also tracked by call_id, but fingerprint checking handles
+            # rehydrated items with new object IDs.
+            if isinstance(input_item, dict):
+                try:
+                    # Check normalized fingerprint (matches original_input items)
+                    # Only check original_input_fingerprints (from prime_from_state),
+                    # not sent_item_fingerprints which includes server-echoed items
+                    # that shouldn't filter new items from generated_items
+                    if self.original_input_fingerprints:
+                        normalized = AgentRunner._normalize_input_items([input_item])
+                        filtered = AgentRunner._filter_incomplete_function_calls(normalized)
+                        if filtered:
+                            normalized_item = filtered[0]
+                            if isinstance(normalized_item, dict):
+                                fp = json.dumps(normalized_item, sort_keys=True)
+                                if fp in self.original_input_fingerprints:
+                                    continue
+                except Exception:
+                    # If fingerprint check fails, continue processing the item
+                    pass
+
             input_items.append(input_item)
             # Track sent items to prevent duplicates on subsequent calls
             self.sent_items.add(raw_item_id)
