@@ -661,6 +661,23 @@ class RunImpl:
             # Note: Rewind logic for persisted item count is handled in the run loop
             # when resuming from state
 
+        # Collect call_ids from tool outputs in original_pre_step_items to identify
+        # which tools were already executed. This prevents re-executing tools that
+        # have already been executed.
+        executed_call_ids: set[str] = set()
+        for item in original_pre_step_items:
+            if isinstance(item, ToolCallOutputItem):
+                output_raw_item: Any = item.raw_item
+                output_call_id: str | None = None
+                if isinstance(output_raw_item, dict):
+                    output_call_id = output_raw_item.get("call_id") or output_raw_item.get("callId")
+                elif hasattr(output_raw_item, "call_id"):
+                    output_call_id = getattr(output_raw_item, "call_id", None)
+                elif hasattr(output_raw_item, "id"):
+                    output_call_id = getattr(output_raw_item, "id", None)
+                if output_call_id and isinstance(output_call_id, str):
+                    executed_call_ids.add(output_call_id)
+
         # Run function tools that require approval after they get their approval results
         # Filter processed_response.functions by call_ids from approved interruptions
         function_tool_runs = [
@@ -672,6 +689,11 @@ class RunImpl:
         # executing all function tool runs from the processed response so approved tools still run.
         if not function_tool_runs:
             function_tool_runs = list(processed_response.functions)
+
+        # Filter out function tools that were already executed
+        function_tool_runs = [
+            run for run in function_tool_runs if run.tool_call.call_id not in executed_call_ids
+        ]
 
         # If deserialized state failed to carry function tool runs (e.g., missing functions array),
         # reconstruct them from the pending approvals to mirror JS behavior.
@@ -724,37 +746,65 @@ class RunImpl:
             config=run_config,
         )
 
+        # Filter out computer actions that were already executed
+        computer_actions = [
+            action
+            for action in processed_response.computer_actions
+            if _extract_call_id_from_tool_call(action.tool_call) not in executed_call_ids
+        ]
+
         # Execute computer actions (no built-in HITL approval surface for computer tools today)
         computer_results = await cls.execute_computer_actions(
             agent=agent,
-            actions=processed_response.computer_actions,
+            actions=computer_actions,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
+
+        # Filter out shell calls that were already executed
+        shell_calls = [
+            call
+            for call in processed_response.shell_calls
+            if _extract_call_id_from_tool_call(call.tool_call) not in executed_call_ids
+        ]
 
         # Execute shell calls that were approved
         shell_results = await cls.execute_shell_calls(
             agent=agent,
-            calls=processed_response.shell_calls,
+            calls=shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
+
+        # Filter out local shell calls that were already executed
+        local_shell_calls = [
+            call
+            for call in processed_response.local_shell_calls
+            if _extract_call_id_from_tool_call(call.tool_call) not in executed_call_ids
+        ]
 
         # Execute local shell calls that were approved
         local_shell_results = await cls.execute_local_shell_calls(
             agent=agent,
-            calls=processed_response.local_shell_calls,
+            calls=local_shell_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
         )
 
+        # Filter out apply_patch calls that were already executed
+        apply_patch_calls = [
+            call
+            for call in processed_response.apply_patch_calls
+            if _extract_call_id_from_tool_call(call.tool_call) not in executed_call_ids
+        ]
+
         # Execute apply_patch calls that were approved
         apply_patch_results = await cls.execute_apply_patch_calls(
             agent=agent,
-            calls=processed_response.apply_patch_calls,
+            calls=apply_patch_calls,
             hooks=hooks,
             context_wrapper=context_wrapper,
             config=run_config,
@@ -2734,6 +2784,25 @@ def _resolve_exit_code(raw_exit_code: Any, outcome_status: str | None) -> int:
     if normalized_status == "failure":
         return 1
     return 0
+
+
+def _extract_call_id_from_tool_call(tool_call: Any) -> str | None:
+    """Extract call_id from a tool call.
+
+    Tool calls can have call_id in different formats:
+    - Function tools: call_id or callId
+    - Hosted tools (shell, apply_patch): id or call_id
+    """
+    if isinstance(tool_call, dict):
+        result = tool_call.get("call_id") or tool_call.get("callId") or tool_call.get("id")
+        return str(result) if result is not None else None
+    elif hasattr(tool_call, "call_id"):
+        result = getattr(tool_call, "call_id", None)
+        return str(result) if result is not None else None
+    elif hasattr(tool_call, "id"):
+        result = getattr(tool_call, "id", None)
+        return str(result) if result is not None else None
+    return None
 
 
 def _normalize_exit_code(value: Any) -> int | None:
