@@ -1210,3 +1210,65 @@ async def test_approvals_checked_before_executing_other_tools():
         f"Approvals should be checked before executing other tools to prevent "
         f"side effects from occurring before approval."
     )
+
+
+@pytest.mark.asyncio
+async def test_resuming_with_unapproved_tool_raises_interruption():
+    """Test that resuming with an unapproved tool raises an interruption.
+
+    When a tool requires approval and the run is resumed without approving it,
+    the tool execution should return a ToolApprovalItem and an interruption should
+    be raised. The resolve_interrupted_turn method should check tool results for
+    ToolApprovalItem and return NextStepInterruption if found.
+
+    This test verifies that when resuming with an unapproved tool, an interruption
+    is raised rather than silently continuing.
+    """
+    model = FakeModel()
+
+    async def function_tool_func() -> str:
+        return "function_result"
+
+    async def needs_approval(_ctx, _params, _call_id) -> bool:
+        return True
+
+    function_tool_with_approval = function_tool(
+        function_tool_func, name_override="function_tool", needs_approval=needs_approval
+    )
+
+    agent = Agent(name="TestAgent", model=model, tools=[function_tool_with_approval])
+
+    # First turn: tool call requiring approval
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("function_tool", "{}", call_id="call_func_1")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result1 = await Runner.run(agent, "Use function_tool")
+    assert result1.interruptions, "should have an interruption for function tool approval"
+    assert len(result1.interruptions) == 1
+    assert isinstance(result1.interruptions[0], ToolApprovalItem)
+
+    # Create state but DO NOT approve the tool
+    state = result1.to_state()
+
+    # Set up next model response (final output)
+    model.set_next_output([get_text_message("done")])
+
+    # Resume from state without approving - should raise interruption
+    # because the tool still needs approval
+    result2 = await Runner.run(agent, state)
+
+    # Should have interruptions since the tool was not approved
+    # The resolve_interrupted_turn method should check tool results for
+    # ToolApprovalItem and return NextStepInterruption if found.
+    assert result2.interruptions, (
+        f"Expected interruption when resuming with unapproved tool, "
+        f"but got {len(result2.interruptions)} interruptions. "
+        f"When a tool requires approval and is not approved, resolve_interrupted_turn "
+        f"should check tool results for ToolApprovalItem and return NextStepInterruption."
+    )
+    assert len(result2.interruptions) == 1
+    assert isinstance(result2.interruptions[0], ToolApprovalItem)
