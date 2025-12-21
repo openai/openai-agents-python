@@ -21,6 +21,8 @@ from agents import (
     Agent,
     ApplyPatchTool,
     LocalShellTool,
+    RunConfig,
+    RunHooks,
     Runner,
     RunState,
     ShellTool,
@@ -29,6 +31,10 @@ from agents import (
 )
 from agents._run_impl import (
     NextStepInterruption,
+    ProcessedResponse,
+    RunImpl,
+    ToolRunFunction,
+    ToolRunShellCall,
 )
 from agents.items import MessageOutputItem, ModelResponse, RunItem, ToolCallOutputItem
 from agents.run import AgentRunner
@@ -37,7 +43,7 @@ from agents.run_state import RunState as RunStateClass
 from agents.usage import Usage
 
 from .fake_model import FakeModel
-from .test_responses import get_text_message
+from .test_responses import get_function_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
 
@@ -1103,4 +1109,104 @@ async def test_resume_with_all_items_already_persisted_does_not_duplicate():
         f"but got {final_count}. "
         f"The bug causes duplicates when already_persisted >= len(new_items) by setting "
         f"new_run_items = list(new_items) instead of an empty list."
+    )
+
+
+@pytest.mark.asyncio
+async def test_approvals_checked_before_executing_other_tools():
+    """Test that approvals are checked before executing other tools.
+
+    When a function tool requires approval and a shell tool doesn't, the shell tool
+    should not execute before the function tool approval is checked. This ensures
+    that side effects from tools that don't require approval don't occur before
+    tools that require approval are properly handled.
+
+    This test verifies that when a function tool requires approval, other tools
+    (like shell tools) do not execute before the approval check.
+    """
+    model = FakeModel()
+    shell_executed = False
+
+    # Create a function tool that requires approval
+    async def function_tool_func() -> str:
+        return "function_result"
+
+    async def needs_approval(_ctx, _params, _call_id) -> bool:
+        return True
+
+    function_tool_with_approval = function_tool(
+        function_tool_func, name_override="function_tool", needs_approval=needs_approval
+    )
+
+    # Create a shell tool that doesn't require approval
+    # Track execution to verify it doesn't run before approval check
+    async def shell_executor(request: Any) -> str:
+        nonlocal shell_executed
+        shell_executed = True
+        return "shell_output"
+
+    shell_tool = ShellTool(executor=shell_executor)
+
+    agent = Agent(name="TestAgent", model=model, tools=[function_tool_with_approval, shell_tool])
+
+    # Create tool calls for both tools
+    function_tool_call = get_function_tool_call("function_tool", "{}", call_id="call_func_1")
+    assert isinstance(function_tool_call, ResponseFunctionToolCall)
+    shell_tool_call = cast(
+        Any,
+        {
+            "type": "shell_call",
+            "id": "shell_1",
+            "call_id": "call_shell_1",
+            "status": "in_progress",
+            "action": {"type": "exec", "commands": ["echo test"], "timeout_ms": 1000},
+        },
+    )
+
+    # Create ProcessedResponse with both tools
+    function_run = ToolRunFunction(
+        function_tool=function_tool_with_approval, tool_call=function_tool_call
+    )
+    shell_run = ToolRunShellCall(tool_call=shell_tool_call, shell_tool=shell_tool)
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[function_run],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[shell_run],
+        apply_patch_calls=[],
+        mcp_approval_requests=[],
+        tools_used=[],
+        interruptions=[],
+    )
+
+    # Execute tools - should check approvals before executing shell tool
+    result = await RunImpl.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=None,  # type: ignore[arg-type]
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=RunContextWrapper(context={}),
+        run_config=RunConfig(),
+    )
+
+    # Should have interruptions since function tool needs approval
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert len(result.next_step.interruptions) == 1
+    assert isinstance(result.next_step.interruptions[0], ToolApprovalItem)
+
+    # The shell tool should NOT have been executed because the function tool
+    # requires approval and approvals should be checked before executing other tools.
+    # This ensures that side effects from tools that don't require approval don't
+    # occur before tools that require approval are properly handled.
+    assert not shell_executed, (
+        f"Expected shell tool to NOT execute when function tool requires approval, "
+        f"but shell_executed is {shell_executed}. "
+        f"Approvals should be checked before executing other tools to prevent "
+        f"side effects from occurring before approval."
     )
