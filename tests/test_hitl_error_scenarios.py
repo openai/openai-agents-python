@@ -1392,3 +1392,88 @@ async def test_resuming_after_approval_only_executes_unapproved_tools():
         f"Expected tool_b to execute once after approval, "
         f"but got {tool_b_execution_count} executions."
     )
+
+
+@pytest.mark.asyncio
+async def test_mcp_approval_providerdata_preserved_on_deserialization():
+    """Test that providerData is preserved when deserializing MCP approval interruptions.
+
+    When a run is interrupted with an MCP approval request and the state is serialized
+    to JSON and then deserialized, the providerData field should be preserved in the
+    raw_item. This is needed for resolve_interrupted_turn to identify MCP approval
+    requests by checking providerData.type == "mcp_approval_request".
+
+    The _normalize_field_names function should preserve providerData for MCP approvals
+    so they can be properly identified when resuming from a deserialized state.
+    """
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, tools=[])
+
+    # Create a ToolApprovalItem with an MCP approval request
+    # This simulates an interruption with an MCP tool that requires approval
+    mcp_raw_item = {
+        "type": "hosted_tool_call",
+        "name": "test_mcp_tool",
+        "id": "mcp_call_1",
+        "call_id": "call_mcp_1",
+        "providerData": {
+            "type": "mcp_approval_request",
+            "id": "req-1",
+            "server_label": "test_server",
+            "approval_url": "https://example.com/approve",
+        },
+    }
+    mcp_approval_item = ToolApprovalItem(
+        agent=agent, raw_item=mcp_raw_item, tool_name="test_mcp_tool"
+    )
+
+    # Create a state with this interruption
+    context: RunContextWrapper = RunContextWrapper(context={})
+    state = RunState(
+        context=context,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=10,
+    )
+    state._current_step = NextStepInterruption(interruptions=[mcp_approval_item])
+
+    # Serialize state to JSON
+    state_json = state.to_json()
+
+    # Deserialize from JSON
+    deserialized_state = await RunStateClass.from_json(agent, state_json)
+
+    # Verify that the interruption was correctly deserialized
+    assert deserialized_state._current_step is not None
+    assert isinstance(deserialized_state._current_step, NextStepInterruption)
+    assert len(deserialized_state._current_step.interruptions) == 1
+
+    deserialized_item = deserialized_state._current_step.interruptions[0]
+    assert isinstance(deserialized_item, ToolApprovalItem)
+
+    # Verify that providerData is preserved in the raw_item
+    # This is critical for resolve_interrupted_turn to identify MCP approvals
+    raw_item = deserialized_item.raw_item
+    assert isinstance(raw_item, dict), (
+        f"Expected raw_item to be a dict after deserialization, "
+        f"but got {type(raw_item)}. providerData should be preserved "
+        f"so MCP approvals can be identified when resuming."
+    )
+
+    # Check that providerData exists and has the correct type
+    provider_data = raw_item.get("providerData") or raw_item.get("provider_data")
+    assert provider_data is not None, (
+        f"Expected providerData to be preserved in raw_item after deserialization, "
+        f"but it was missing. providerData is needed to identify MCP approval requests "
+        f"when resuming from a deserialized state. Raw item keys: {list(raw_item.keys())}"
+    )
+
+    assert isinstance(provider_data, dict), (
+        f"Expected providerData to be a dict, but got {type(provider_data)}."
+    )
+
+    assert provider_data.get("type") == "mcp_approval_request", (
+        f"Expected providerData.type to be 'mcp_approval_request', "
+        f"but got {provider_data.get('type')}. This is needed for "
+        f"resolve_interrupted_turn to identify MCP approval requests."
+    )
