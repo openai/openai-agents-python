@@ -347,68 +347,28 @@ class RunImpl:
                 existing_call_keys.add((call_id, name, args))
             new_step_items.append(item)
 
-        # First, run function tools, computer actions, shell calls, apply_patch calls,
-        # and legacy local shell calls.
+        # First, execute tools that might require approval (function tools, shell calls,
+        # apply_patch calls) sequentially to check if any need approval. We do this before
+        # executing tools that don't require approval (computer actions, local shell calls)
+        # to ensure that side effects from tools that don't require approval don't occur
+        # before tools that require approval are properly handled.
+        # Execute function tools first
         (
-            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
-            computer_results,
-            shell_results,
-            apply_patch_results,
-            local_shell_results,
-        ) = await asyncio.gather(
-            cls.execute_function_tool_calls(
-                agent=agent,
-                tool_runs=processed_response.functions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            cls.execute_computer_actions(
-                agent=agent,
-                actions=processed_response.computer_actions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            cls.execute_shell_calls(
-                agent=agent,
-                calls=processed_response.shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            cls.execute_apply_patch_calls(
-                agent=agent,
-                calls=processed_response.apply_patch_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
-            cls.execute_local_shell_calls(
-                agent=agent,
-                calls=processed_response.local_shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-            ),
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+        ) = await cls.execute_function_tool_calls(
+            agent=agent,
+            tool_runs=processed_response.functions,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
         )
-        # Add all tool results to new_step_items first, including approval items.
-        # This ensures ToolCallItem items from processed_response.new_items are preserved
-        # in the conversation history when resuming after an interruption.
-        # Add all function results (including approval items) to new_step_items
+        # Add function results (including approval items) to new_step_items
         for result in function_results:
             new_step_items.append(result.run_item)
 
-        # Add all other tool results
-        new_step_items.extend(computer_results)
-        for shell_result in shell_results:
-            new_step_items.append(shell_result)
-        for apply_patch_result in apply_patch_results:
-            new_step_items.append(apply_patch_result)
-        new_step_items.extend(local_shell_results)
-
-        # Check for interruptions after adding all items.
-        # Check runItem first, then check nested interruptions only for function_output.
+        # Check for interruptions from function tools
         interruptions: list[RunItem] = []
         for result in function_results:
             if isinstance(result.run_item, ToolApprovalItem):
@@ -422,18 +382,12 @@ class RunImpl:
                     nested_interruptions = result.agent_run_result.interruptions
                     if nested_interruptions:
                         interruptions.extend(nested_interruptions)
-        for shell_result in shell_results:
-            if isinstance(shell_result, ToolApprovalItem):
-                interruptions.append(shell_result)
-        for apply_patch_result in apply_patch_results:
-            if isinstance(apply_patch_result, ToolApprovalItem):
-                interruptions.append(apply_patch_result)
 
-        # If there are interruptions, return immediately without executing remaining tools
+        # If function tools need approval, return early without executing other tools
         if interruptions:
             # new_step_items already contains:
             # 1. processed_response.new_items (added earlier) - includes ToolCallItem items
-            # 2. All tool results including approval items (added above)
+            # 2. Function tool results (added above)
             # This ensures ToolCallItem items are preserved in conversation history when resuming
             return SingleStepResult(
                 original_input=original_input,
@@ -445,6 +399,89 @@ class RunImpl:
                 tool_output_guardrail_results=tool_output_guardrail_results,
                 processed_response=processed_response,
             )
+
+        # No interruptions from function tools - execute shell calls
+        shell_results = await cls.execute_shell_calls(
+            agent=agent,
+            calls=processed_response.shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        # Add shell results
+        for shell_result in shell_results:
+            new_step_items.append(shell_result)
+
+        # Check for interruptions from shell tools
+        for shell_result in shell_results:
+            if isinstance(shell_result, ToolApprovalItem):
+                interruptions.append(shell_result)
+
+        # If shell tools need approval, return early without executing other tools
+        if interruptions:
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepInterruption(interruptions=interruptions),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
+
+        # No interruptions from shell tools - execute apply_patch calls
+        apply_patch_results = await cls.execute_apply_patch_calls(
+            agent=agent,
+            calls=processed_response.apply_patch_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        # Add apply_patch results
+        for apply_patch_result in apply_patch_results:
+            new_step_items.append(apply_patch_result)
+
+        # Check for interruptions from apply_patch tools
+        for apply_patch_result in apply_patch_results:
+            if isinstance(apply_patch_result, ToolApprovalItem):
+                interruptions.append(apply_patch_result)
+
+        # If apply_patch tools need approval, return early without executing other tools
+        if interruptions:
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepInterruption(interruptions=interruptions),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
+
+        # No interruptions - safe to execute tools that don't require approval
+        # (computer actions, local shell calls) since all tools that might require
+        # approval have been checked and don't need approval.
+        computer_results = await cls.execute_computer_actions(
+            agent=agent,
+            actions=processed_response.computer_actions,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        local_shell_results = await cls.execute_local_shell_calls(
+            agent=agent,
+            calls=processed_response.local_shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        # Add results from tools that don't require approval
+        new_step_items.extend(computer_results)
+        new_step_items.extend(local_shell_results)
+
         # Next, run the MCP approval requests
         if processed_response.mcp_approval_requests:
             approval_results = await cls.execute_mcp_approval_requests(
