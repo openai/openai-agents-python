@@ -774,20 +774,47 @@ class RunImpl:
             new_items.append(item)
             new_items_ids.add(item_id)
 
+        # Check tool results for ToolApprovalItem before adding them to new_items.
+        # If any tools still need approval (weren't approved), we should return
+        # NextStepInterruption rather than silently continuing.
+        interruptions: list[RunItem] = []
+
         for function_result in function_results:
-            append_if_new(function_result.run_item)
+            if isinstance(function_result.run_item, ToolApprovalItem):
+                interruptions.append(function_result.run_item)
+            else:
+                append_if_new(function_result.run_item)
 
         for computer_result in computer_results:
             append_if_new(computer_result)
 
         for shell_result in shell_results:
-            append_if_new(shell_result)
+            if isinstance(shell_result, ToolApprovalItem):
+                interruptions.append(shell_result)
+            else:
+                append_if_new(shell_result)
 
         for local_shell_result in local_shell_results:
             append_if_new(local_shell_result)
 
         for apply_patch_result in apply_patch_results:
-            append_if_new(apply_patch_result)
+            if isinstance(apply_patch_result, ToolApprovalItem):
+                interruptions.append(apply_patch_result)
+            else:
+                append_if_new(apply_patch_result)
+
+        # If any tools still need approval, return NextStepInterruption
+        if interruptions:
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=original_pre_step_items,
+                new_step_items=new_items,
+                next_step=NextStepInterruption(interruptions=interruptions),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
 
         # Run MCP tools that require approval after they get their approval results
         # Find MCP approval requests that have corresponding ToolApprovalItems in interruptions
