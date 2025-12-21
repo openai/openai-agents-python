@@ -1407,11 +1407,12 @@ class AgentRunner:
                         )
                         raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
 
-                    if (
-                        run_state is not None
-                        and not resuming_turn
-                        and not isinstance(run_state._current_step, NextStepRunAgain)
-                    ):
+                    # Reset the counter at the start of each new turn in a fresh run.
+                    # We don't reset when resuming (resuming_turn=True) to preserve the
+                    # persisted count from the saved state. However, we do reset when
+                    # _current_step is NextStepRunAgain in a fresh run to ensure the
+                    # counter starts at 0 for each turn.
+                    if run_state is not None and not resuming_turn:
                         run_state._current_turn_persisted_item_count = 0
 
                     logger.debug("Running agent %s (turn %s)", current_agent.name, current_turn)
@@ -4252,11 +4253,11 @@ class AgentRunner:
 
         # If we're resuming a turn and only passing a subset of items (e.g.,
         # post-approval outputs), the persisted counter from the earlier partial
-        # save can exceed the new items being saved. In that case, reset the
-        # baseline so the new items are still written.
+        # save can exceed the new items being saved. In that case, all new_items
+        # have already been persisted, so don't save them again.
         # Only persist items that haven't been saved yet for this turn
         if already_persisted >= len(new_items):
-            new_run_items = list(new_items)
+            new_run_items = []
         else:
             new_run_items = new_items[already_persisted:]
         # If the counter skipped past tool outputs (e.g., resuming after approval),
@@ -4277,12 +4278,32 @@ class AgentRunner:
         # because input items were saved earlier. If new_items is not empty,
         # we're in streaming mode and must not save input here. Only save input
         # items in blocking mode when new_items is empty.
+        # If resuming and all new_items were already persisted, skip saving original_input
+        # as well (it was already saved in the initial turn). This prevents duplicates
+        # when resuming with all items already persisted. The counter may not reset between
+        # turns in blocking mode (when _current_step is NextStepRunAgain), but in a fresh
+        # run, the counter should be 0 at the start of the first turn. So if already_persisted
+        # >= len(new_items) with already_persisted > 0 and new_items not empty, it indicates
+        # a resume scenario where items from a previous partial save exceed the current new_items.
         input_list = []
         if original_input:
-            input_list = [
-                cls._ensure_api_input_item(item)
-                for item in ItemHelpers.input_to_new_input_list(original_input)
-            ]
+            # Skip saving original_input if all new_items were already persisted during a resume.
+            # This prevents duplicates when resuming with all items already persisted.
+            # We check already_persisted >= len(new_items) to handle the Issue #6 case where
+            # already_persisted == len(new_items). We also ensure new_items is not empty to
+            # allow initial input saves where new_items=[].
+            should_skip_input = (
+                run_state is not None
+                and already_persisted > 0
+                and already_persisted >= len(new_items)
+                and new_run_items == []
+                and len(new_items) > 0
+            )
+            if not should_skip_input:
+                input_list = [
+                    cls._ensure_api_input_item(item)
+                    for item in ItemHelpers.input_to_new_input_list(original_input)
+                ]
 
         # Filter out tool_approval_item items before converting to input format
         items_to_convert = [item for item in new_run_items if item.type != "tool_approval_item"]
@@ -4292,10 +4313,6 @@ class AgentRunner:
         new_items_as_input: list[TResponseInputItem] = [
             cls._ensure_api_input_item(item.to_input_item()) for item in items_to_convert
         ]
-
-        # In streaming mode: only output items are saved (input_list is [] because
-        # original_input is [] in streaming).
-        # In blocking mode: both input and output items are saved.
         items_to_save = input_list + new_items_as_input
         items_to_save = cls._deduplicate_items_by_id(items_to_save)
 
