@@ -4,30 +4,30 @@ search:
 ---
 # 上下文管理
 
-“上下文”一词涵义广泛。你可能关心的上下文主要有两类：
+“上下文”一词含义广泛。你可能关心的上下文主要有两类：
 
-1. 代码可本地访问的上下文：这是工具函数运行时、`on_handoff` 等回调、生命周期钩子等场景可能需要的数据和依赖。
-2. LLM 可访问的上下文：这是 LLM 在生成回复时能够看到的数据。
+1. 代码本地可用的上下文：这是在工具函数运行时、`on_handoff` 等回调、生命周期钩子中可能需要的数据和依赖。
+2. LLM 可用的上下文：这是 LLM 在生成回复时可见的数据。
 
 ## 本地上下文
 
-这由 [`RunContextWrapper`][agents.run_context.RunContextWrapper] 类及其内部的 [`context`][agents.run_context.RunContextWrapper.context] 属性表示。其工作方式如下：
+这通过 [`RunContextWrapper`][agents.run_context.RunContextWrapper] 类以及其中的 [`context`][agents.run_context.RunContextWrapper.context] 属性来表示。工作方式如下：
 
-1. 你创建任意 Python 对象。常见模式是使用 dataclass 或 Pydantic 对象。
-2. 将该对象传给各类运行方法（例如 `Runner.run(..., **context=whatever**)`）。
-3. 你的所有工具调用、生命周期钩子等都会接收一个包装对象 `RunContextWrapper[T]`，其中 `T` 表示你的上下文对象类型，可通过 `wrapper.context` 访问。
+1. 创建任意你想要的 Python 对象。常见做法是使用 dataclass 或 Pydantic 对象。
+2. 将该对象传给各种运行方法（例如 `Runner.run(..., **context=whatever**)`）。
+3. 你所有的工具调用、生命周期钩子等都会接收到一个包装对象 `RunContextWrapper[T]`，其中 `T` 表示你的上下文对象类型，你可以通过 `wrapper.context` 访问。
 
-需要特别注意的**最重要**一点：一次智能体运行中，所有智能体、工具函数、生命周期等必须使用相同的上下文_类型_。
+需要注意的最重要的一点：对于一次给定的智能体运行，所有智能体、工具函数、生命周期等都必须使用相同类型的上下文。
 
-你可以将上下文用于如下场景：
+你可以将上下文用于以下场景：
 
-- 上一次运行的情境化数据（例如用户名/uid 或其他关于用户的信息）
-- 依赖（例如日志记录器、数据获取器等）
-- 帮助函数
+-  该次运行的情境化数据（例如用户名/uid 或关于用户的其他信息）
+-  依赖项（例如日志记录器对象、数据获取器等）
+-  帮助函数
 
 !!! danger "注意"
 
-    上下文对象**不会**发送给 LLM。它仅是一个本地对象，你可以读取、写入并在其上调用方法。
+    该上下文对象并不会发送给 LLM。它纯粹是一个本地对象，你可以读取、写入并在其上调用方法。
 
 ```python
 import asyncio
@@ -66,17 +66,17 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-1. 这是上下文对象。此处我们使用了 dataclass，但你可以使用任意类型。
-2. 这是一个工具。你可以看到它接收 `RunContextWrapper[UserInfo]`。工具实现会从上下文中读取数据。
-3. 我们用泛型 `UserInfo` 标注智能体，以便类型检查器能捕捉错误（例如，如果我们试图传入一个使用不同上下文类型的工具）。
-4. 将上下文传给 `run` 函数。
+1. 这是上下文对象。我们这里使用了 dataclass，但你可以使用任何类型。
+2. 这是一个工具。你可以看到它接收 `RunContextWrapper[UserInfo]`。工具实现会从上下文中读取。
+3. 我们在智能体上标注了泛型 `UserInfo`，以便类型检查器能捕获错误（例如，如果我们尝试传入一个接收不同上下文类型的工具）。
+4. 将上下文传递给 `run` 函数。
 5. 智能体正确调用工具并获取年龄。
 
 ---
 
-### 进阶：`ToolContext`
+### 高级：`ToolContext`
 
-在某些情况下，你可能希望访问正在执行的工具的额外元数据——例如其名称、调用 ID 或原始参数字符串。  
+在某些情况下，你可能希望访问关于正在执行的工具的额外元数据——例如其名称、调用 ID 或原始参数字符串。  
 为此，你可以使用扩展自 `RunContextWrapper` 的 [`ToolContext`][agents.tool_context.ToolContext] 类。
 
 ```python
@@ -106,22 +106,22 @@ agent = Agent(
 ```
 
 `ToolContext` 提供与 `RunContextWrapper` 相同的 `.context` 属性，  
-并额外包含当前工具调用特有的字段：
+并额外包含针对当前工具调用的字段：
 
-- `tool_name` – 被调用工具的名称  
+- `tool_name` – 正在调用的工具名称  
 - `tool_call_id` – 此次工具调用的唯一标识符  
-- `tool_arguments` – 传递给工具的原始参数字符串  
+- `tool_arguments` – 传给工具的原始参数字符串  
 
 当你在执行期间需要工具级元数据时，请使用 `ToolContext`。  
-对于在智能体与工具之间共享的一般上下文，`RunContextWrapper` 已经足够。
+对于智能体与工具之间的一般上下文共享，`RunContextWrapper` 已经足够。
 
 ---
 
 ## 智能体/LLM 上下文
 
-当调用 LLM 时，它能看到的**唯一**数据来自对话历史。这意味着如果你想让 LLM 获取新的数据，必须以能将其放入对话历史的方式提供。常见做法包括：
+当调用 LLM 时，它能看到的唯一数据来自对话历史。这意味着如果你希望让一些新数据对 LLM 可见，你必须以一种方式将其纳入该历史中。常见方式包括：
 
-1. 将其添加到智能体的 `instructions`。这也被称为“system prompt（系统提示词）”或“developer message”。System prompts 可以是静态字符串，也可以是接收上下文并输出字符串的动态函数。这对始终有用的信息很常见（例如用户名或当前日期）。
-2. 在调用 `Runner.run` 函数时将其添加到 `input`。这与 `instructions` 的策略类似，但允许你将消息置于更低的[指挥链](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command)中。
-3. 通过工具调用公开它。这对_按需_上下文很有用——LLM 会在需要某些数据时决定调用工具来获取。
-4. 使用检索或网络检索。这些是能够从文件或数据库（检索）或从网络（网络检索）中获取相关数据的特殊工具。这有助于用相关的上下文数据对回复进行“锚定”。
+1. 将其添加到智能体的 `instructions`。这也被称为“系统提示词”或“开发者消息”。系统提示词可以是静态字符串，也可以是接收上下文并输出字符串的动态函数。这对于始终有用的信息很常见（例如用户名或当前日期）。
+2. 在调用 `Runner.run` 函数时将其添加到 `input`。这与 `instructions` 策略类似，但允许你放置更处于[指挥链](https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command)更低位置的消息。
+3. 通过 工具调用 暴露。这对按需上下文很有用——LLM 决定何时需要某些数据，并可调用工具以获取该数据。
+4. 使用 文件检索 或 网络检索。这些是能够从文件或数据库（文件检索）或从网络（网络检索）中获取相关数据的特殊工具。这对于将回复“锚定”在相关上下文数据上很有用。

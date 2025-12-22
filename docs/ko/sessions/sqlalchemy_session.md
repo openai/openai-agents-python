@@ -4,7 +4,7 @@ search:
 ---
 # SQLAlchemy 세션
 
-`SQLAlchemySession`은 SQLAlchemy를 사용해 프로덕션 수준의 세션 구현을 제공합니다. 이를 통해 SQLAlchemy가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 세션 저장소로 사용할 수 있습니다.
+`SQLAlchemySession`은 SQLAlchemy를 사용해 프로덕션 수준의 세션 구현을 제공하며, 세션 저장소로 SQLAlchemy가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 사용할 수 있습니다.
 
 ## 설치
 
@@ -74,7 +74,7 @@ if __name__ == "__main__":
 ```
 
 
-## API 레퍼런스
+## API 참조
 
-- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 기본 클래스
+- [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 메인 클래스
 - [`Session`][agents.memory.session.Session] - 기본 세션 프로토콜
