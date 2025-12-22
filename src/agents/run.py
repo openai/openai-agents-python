@@ -63,6 +63,7 @@ from .memory import Session, SessionInputCallback
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
+from .rate_limit import RateLimitConfig, RateLimiter
 from .result import RunResult, RunResultStreaming
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .stream_events import (
@@ -268,6 +269,19 @@ class RunConfig:
 
     This allows you to edit the input sent to the model e.g. to stay within a token limit.
     For example, you can use this to add a system prompt to the input.
+    """
+
+    rate_limit: RateLimitConfig | None = None
+    """
+    Optional rate limiting configuration for LLM requests. Use this when working with
+    providers that have strict rate limits (e.g., free tiers with 3 requests/minute).
+
+    Example:
+        ```python
+        run_config = RunConfig(
+            rate_limit=RateLimitConfig(requests_per_minute=3)
+        )
+        ```
     """
 
 
@@ -570,6 +584,11 @@ class AgentRunner:
 
         tool_use_tracker = AgentToolUseTracker()
 
+        # Create rate limiter if configured
+        rate_limiter: RateLimiter | None = None
+        if run_config.rate_limit is not None:
+            rate_limiter = RateLimiter(run_config.rate_limit)
+
         with TraceCtxManager(
             workflow_name=run_config.workflow_name,
             trace_id=run_config.trace_id,
@@ -679,6 +698,7 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 server_conversation_tracker=server_conversation_tracker,
+                                rate_limiter=rate_limiter,
                             ),
                         )
 
@@ -696,6 +716,7 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             server_conversation_tracker=server_conversation_tracker,
+                            rate_limiter=rate_limiter,
                         )
                     should_run_agent_start_hooks = False
 
@@ -1593,6 +1614,7 @@ class AgentRunner:
         should_run_agent_start_hooks: bool,
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
@@ -1636,6 +1658,7 @@ class AgentRunner:
             tool_use_tracker,
             server_conversation_tracker,
             prompt_config,
+            rate_limiter=rate_limiter,
         )
 
         return await cls._get_single_step_result_from_response(
@@ -1842,6 +1865,7 @@ class AgentRunner:
         tool_use_tracker: AgentToolUseTracker,
         server_conversation_tracker: _ServerConversationTracker | None,
         prompt_config: ResponsePromptParam | None,
+        rate_limiter: RateLimiter | None = None,
     ) -> ModelResponse:
         # Allow user to modify model input right before the call, if configured
         filtered = await cls._maybe_filter_model_input(
@@ -1881,20 +1905,28 @@ class AgentRunner:
             server_conversation_tracker.conversation_id if server_conversation_tracker else None
         )
 
-        new_response = await model.get_response(
-            system_instructions=filtered.instructions,
-            input=filtered.input,
-            model_settings=model_settings,
-            tools=all_tools,
-            output_schema=output_schema,
-            handoffs=handoffs,
-            tracing=get_model_tracing_impl(
-                run_config.tracing_disabled, run_config.trace_include_sensitive_data
-            ),
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt_config,
-        )
+        # Define the model call as a coroutine function for rate limiting
+        async def _call_model() -> ModelResponse:
+            return await model.get_response(
+                system_instructions=filtered.instructions,
+                input=filtered.input,
+                model_settings=model_settings,
+                tools=all_tools,
+                output_schema=output_schema,
+                handoffs=handoffs,
+                tracing=get_model_tracing_impl(
+                    run_config.tracing_disabled, run_config.trace_include_sensitive_data
+                ),
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt_config,
+            )
+
+        # Apply rate limiting if configured
+        if rate_limiter is not None and rate_limiter.is_enabled:
+            new_response = await rate_limiter.execute_with_retry(_call_model)
+        else:
+            new_response = await _call_model()
 
         context_wrapper.usage.add(new_response.usage)
 
