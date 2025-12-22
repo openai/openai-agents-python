@@ -17,6 +17,7 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolChoiceOptionParam,
+    ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_content_part_param import File, FileFile
@@ -41,7 +42,6 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_param import FunctionCallOutput, ItemReference, Message
 from openai.types.responses.response_reasoning_item import Content, Summary
-from typing_extensions import Required, TypedDict
 
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import AgentsException, UserError
@@ -52,18 +52,6 @@ from ..tool import FunctionTool, Tool
 from .fake_id import FAKE_RESPONSES_ID
 
 ResponseInputContentWithAudioParam = Union[ResponseInputContentParam, ResponseInputAudioParam]
-
-
-class ExtendedChatCompletionToolMessageParam(TypedDict, total=False):
-    """Extended tool message that supports media content (images, audio, files).
-
-    Some chatcmpl providers support media in tool outputs beyond what OpenAI's
-    ChatCompletionToolMessageParam allows (which only accepts text content).
-    """
-
-    role: Required[Literal["tool"]]
-    tool_call_id: Required[str]
-    content: Required[str | list[ChatCompletionContentPartParam]]
 
 
 class Converter:
@@ -352,6 +340,7 @@ class Converter:
         cls,
         items: str | Iterable[TResponseInputItem],
         preserve_thinking_blocks: bool = False,
+        preserve_tool_output_all_content: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -362,6 +351,12 @@ class Converter:
                 for reasoning models like Claude 4 Sonnet/Opus which support interleaved
                 thinking. When True, thinking blocks are reconstructed and included in
                 assistant messages with tool calls.
+            preserve_tool_output_all_content: Whether to preserve non-text content (like images)
+                in tool outputs. When False (default), only text content is extracted.
+                OpenAI Chat Completions API doesn't support non-text content in tool results.
+                When True, all content types including images are preserved. This is useful
+                for model providers (e.g. Anthropic via LiteLLM) that support processing
+                non-text content in tool results.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -553,13 +548,16 @@ class Converter:
                 output_content = cast(
                     Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
                 )
-                msg: ExtendedChatCompletionToolMessageParam = {
+                if preserve_tool_output_all_content:
+                    tool_result_content = cls.extract_all_content(output_content)
+                else:
+                    tool_result_content = cls.extract_text_content(output_content)  # type: ignore[assignment]
+                msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
-                    "content": cls.extract_all_content(output_content),
+                    "content": tool_result_content,  # type: ignore[typeddict-item]
                 }
-
-                result.append(cast(ChatCompletionMessageParam, msg))
+                result.append(msg)
 
             # 6) item reference => handle or raise
             elif item_ref := cls.maybe_item_reference(item):

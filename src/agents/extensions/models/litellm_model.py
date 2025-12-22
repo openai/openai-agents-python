@@ -280,7 +280,9 @@ class LitellmModel(Model):
         )
 
         converted_messages = Converter.items_to_messages(
-            input, preserve_thinking_blocks=preserve_thinking_blocks
+            input,
+            preserve_thinking_blocks=preserve_thinking_blocks,
+            preserve_tool_output_all_content=True,
         )
 
         # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
