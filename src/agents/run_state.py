@@ -733,7 +733,15 @@ class RunState(Generic[TContext, TAgent]):
 
         # Add additional fields based on item type
         if hasattr(item, "output"):
-            result["output"] = str(item.output)
+            # Preserve structured outputs (dict/list) by storing them as-is.
+            # JSON serialization will handle dicts, lists, strings, numbers, etc. correctly.
+            # Only stringify non-JSON-serializable types (custom objects).
+            output = item.output
+            if isinstance(output, (dict, list, str, int, float, bool, type(None))):
+                result["output"] = output
+            else:
+                # For custom objects or other non-JSON-serializable types, stringify them
+                result["output"] = str(output)
         if hasattr(item, "source_agent"):
             result["sourceAgent"] = {"name": item.source_agent.name}
         if hasattr(item, "target_agent"):
@@ -1749,11 +1757,16 @@ def _deserialize_items(
                         FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
                     ] = TypeAdapter(FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput)
                     raw_item_output = union_adapter.validate_python(normalized_raw_item)
+                # Deserialize output field - JSON parsing preserves types (dict/list/str/etc.)
+                # If output is missing, default to empty string for backwards compatibility
+                output_value = item_data.get("output")
+                if output_value is None:
+                    output_value = ""
                 result.append(
                     ToolCallOutputItem(
                         agent=agent,
                         raw_item=raw_item_output,
-                        output=item_data.get("output", ""),
+                        output=output_value,
                     )
                 )
 
