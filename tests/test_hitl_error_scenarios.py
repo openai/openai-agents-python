@@ -43,7 +43,6 @@ from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
-from .utils.simple_session import SimpleListSession
 
 
 class RecordingEditor:

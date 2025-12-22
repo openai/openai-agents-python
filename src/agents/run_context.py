@@ -8,7 +8,7 @@ from typing_extensions import TypeVar
 from .usage import Usage
 
 if TYPE_CHECKING:
-    from .items import TResponseInputItem, ToolApprovalItem
+    from .items import ToolApprovalItem, TResponseInputItem
 
 TContext = TypeVar("TContext", default=Any)
 
@@ -206,5 +206,5 @@ class RunContextWrapper(Generic[TContext]):
 class AgentHookContext(RunContextWrapper[TContext]):
     """Context passed to agent hooks (on_start, on_end)."""
 
-    turn_input: "list[TResponseInputItem]" = field(default_factory=list)
+    turn_input: list[TResponseInputItem] = field(default_factory=list)
     """The input items for the current turn."""
