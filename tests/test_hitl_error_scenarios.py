@@ -9,7 +9,12 @@ import json
 from typing import Any, cast
 
 import pytest
-from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 from openai.types.responses.response_input_param import (
     ComputerCallOutput,
     LocalShellCallOutput,
@@ -36,13 +41,15 @@ from agents._run_impl import (
     ToolRunFunction,
     ToolRunShellCall,
 )
-from agents.items import MessageOutputItem, ModelResponse, ToolCallOutputItem
+from agents.items import MessageOutputItem, ModelResponse, RunItem, ToolCallOutputItem
+from agents.run import AgentRunner
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState as RunStateClass
 from agents.usage import Usage
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
+from .utils.simple_session import SimpleListSession
 
 
 class RecordingEditor:
@@ -1397,4 +1404,104 @@ async def test_mcp_approval_providerdata_preserved_on_deserialization():
         f"Expected providerData.type to be 'mcp_approval_request', "
         f"but got {provider_data.get('type')}. This is needed for "
         f"resolve_interrupted_turn to identify MCP approval requests."
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_with_all_items_already_persisted_does_not_duplicate():
+    """Test that resuming with all items already persisted does not create duplicates.
+
+    When resuming a turn where all items have already been persisted to the session,
+    calling _save_result_to_session again with the same items should not create
+    duplicate entries in the session.
+    """
+    # Setup: Create session and agent
+    session = SimpleListSession()
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model)
+
+    # Create 3 message output items with unique IDs
+    message_items = []
+    for i in range(3):
+        message_item = MessageOutputItem(
+            agent=agent,
+            raw_item=ResponseOutputMessage(
+                id=f"msg_{i}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text=f"Message {i}", annotations=[], logprobs=[]
+                    )
+                ],
+            ),
+        )
+        message_items.append(message_item)
+
+    # First save: Save all 3 items to session (simulating normal persistence)
+    # This sets the baseline - all 3 items are now in the session
+    await AgentRunner._save_result_to_session(
+        session=session,
+        original_input=[],
+        new_items=cast(list[RunItem], message_items),
+        run_state=None,  # No run_state means already_persisted = 0
+    )
+
+    # Verify all 3 items were saved
+    session_items = await session.get_items()
+    assistant_items = [
+        item for item in session_items if isinstance(item, dict) and item.get("role") == "assistant"
+    ]
+    assert len(assistant_items) == 3, (
+        f"Expected 3 assistant items after first save, but got {len(assistant_items)}"
+    )
+
+    # Create a RunState with _current_turn_persisted_item_count = 3
+    # This simulates resuming after all items were already persisted
+    context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    run_state = RunState(
+        context=context,
+        original_input="test input",
+        starting_agent=agent,
+        max_turns=10,
+    )
+    run_state._current_turn_persisted_item_count = 3  # All 3 items already persisted
+    # Set _last_processed_response to indicate we're resuming from an interruption
+    # This indicates a resumption scenario where items may have already been persisted
+    run_state._last_processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    # Second save: Call _save_result_to_session again with the same 3 items
+    # Since all items are already persisted (counter = 3, len(new_items) = 3),
+    # this should skip saving to prevent duplicates
+    await AgentRunner._save_result_to_session(
+        session=session,
+        original_input=[],
+        new_items=cast(list[RunItem], message_items),  # Same 3 items
+        run_state=run_state,  # Counter = 3, len(new_items) = 3
+    )
+
+    # Assert: Session should still have exactly 3 assistant message items (no duplicates)
+    final_session_items = await session.get_items()
+    final_assistant_items = [
+        item
+        for item in final_session_items
+        if isinstance(item, dict) and item.get("role") == "assistant"
+    ]
+
+    assert len(final_assistant_items) == 3, (
+        f"Expected exactly 3 assistant items after second save (no duplicates), "
+        f"but got {len(final_assistant_items)}. "
+        f"When all items are already persisted, they should not be saved again."
     )
