@@ -17,7 +17,7 @@ class Session(Protocol):
     """
 
     session_id: str
-    session_settings: SessionSettings
+    session_settings: SessionSettings | None = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
@@ -63,7 +63,7 @@ class SessionABC(ABC):
     """
 
     session_id: str
-    session_settings: SessionSettings
+    session_settings: SessionSettings | None = None
 
     @abstractmethod
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:

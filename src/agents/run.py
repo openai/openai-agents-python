@@ -1970,13 +1970,16 @@ class AgentRunner:
 
         # Get previous conversation history
         # Resolve session settings: session defaults + run config overrides
-        session_settings = session.session_settings
+        session_settings = session.session_settings or SessionSettings()
         if run_config.session_settings is not None:
             session_settings = session_settings.resolve(run_config.session_settings)
 
-        history = await session.get_items(
-            limit=session_settings.limit,
-        )
+        if session_settings.limit is not None:
+            history = await session.get_items(
+                limit=session_settings.limit,
+            )
+        else:
+            history = await session.get_items()
 
         # Convert input to list format
         new_input_list = ItemHelpers.input_to_new_input_list(input)
