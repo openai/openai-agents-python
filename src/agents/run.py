@@ -4255,9 +4255,25 @@ class AgentRunner:
         # save can exceed the new items being saved. In that case, reset the
         # baseline so the new items are still written.
         # Only persist items that haven't been saved yet for this turn
-        if already_persisted >= len(new_items):
+        if already_persisted == len(new_items) and len(new_items) > 0:
+            # All items already persisted, skip to prevent duplicates.
+            # Only skip if we have a run_state AND we're in a resumption scenario
+            # (indicated by _last_processed_response being set), which means we're
+            # resuming from an interruption and the same items are being passed again.
+            # This prevents skipping in normal multi-turn scenarios where the counter
+            # might match by coincidence.
+            if run_state is not None and run_state._last_processed_response is not None:
+                new_run_items = []
+            else:
+                # Not a resumption scenario or no run_state - save all items
+                # (either subset scenario or normal case where counter matches by coincidence)
+                new_run_items = list(new_items)
+        elif already_persisted > len(new_items):
+            # Subset scenario: resuming with post-approval outputs where counter
+            # from earlier partial save exceeds new items count. Save the new items.
             new_run_items = list(new_items)
         else:
+            # Normal case: only some items persisted, save the remaining ones
             new_run_items = new_items[already_persisted:]
         # If the counter skipped past tool outputs (e.g., resuming after approval),
         # make sure those outputs are still persisted.
