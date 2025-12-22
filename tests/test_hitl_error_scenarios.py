@@ -1505,3 +1505,105 @@ async def test_resume_with_all_items_already_persisted_does_not_duplicate():
         f"but got {len(final_assistant_items)}. "
         f"When all items are already persisted, they should not be saved again."
     )
+
+
+@pytest.mark.asyncio
+async def test_preserve_structured_tool_outputs_when_serializing_run_state():
+    """Test that structured tool outputs (dict/list) are preserved during run state serialization.
+
+    When a tool returns structured output (e.g., a dict or list), that output should be preserved
+    with its original type when serializing and deserializing a RunState. This ensures that:
+    1. HITL flows that use serialized state maintain typed tool outputs after resumption
+    2. Resumed runs can access the original structured output, not just a string representation
+    3. Session persistence correctly stores and retrieves structured tool results
+
+    The output field should round-trip through JSON serialization/deserialization while maintaining
+    its original Python type (dict, list, etc.) rather than being converted to a string.
+    """
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, tools=[])
+
+    # Create a RunState with a tool output that has a structured output (dict)
+    context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context,
+        original_input="test",
+        starting_agent=agent,
+        max_turns=10,
+    )
+
+    # Create a function_call_output item with a structured output (dict)
+    structured_output = {"result": "success", "code": 200, "data": {"key": "value"}}
+    function_output: dict[str, Any] = {
+        "type": "function_call_output",
+        "call_id": "call_func_1",
+        "output": structured_output,
+    }
+    tool_output_item = ToolCallOutputItem(
+        agent=agent,
+        raw_item=function_output,
+        output=structured_output,  # Structured output (dict)
+    )
+    state._generated_items = [tool_output_item]
+
+    # Serialize state to JSON
+    state_json = state.to_json()
+
+    # Deserialize from JSON
+    deserialized_state = await RunStateClass.from_json(agent, state_json)
+
+    # Verify that the structured output type is preserved after deserialization
+    assert len(deserialized_state._generated_items) == 1, (
+        "Tool output item should be deserialized correctly."
+    )
+    deserialized_item = deserialized_state._generated_items[0]
+    assert isinstance(deserialized_item, ToolCallOutputItem)
+
+    # The output should preserve its original structured type (dict) after round-trip
+    assert isinstance(deserialized_item.output, dict), (
+        f"Expected output to preserve its original dict type after serialization/deserialization, "
+        f"but got {type(deserialized_item.output)}: {deserialized_item.output}. "
+        f"Structured outputs should maintain their type through JSON round-trips."
+    )
+
+    # Verify the content matches exactly
+    assert deserialized_item.output == structured_output, (
+        f"Expected output to match original structured output {structured_output}, "
+        f"but got {deserialized_item.output}. The output should round-trip with its "
+        f"original type and content preserved."
+    )
+
+    # Test with a list output as well
+    list_output = ["item1", "item2", {"nested": "value"}]
+    function_output_list: dict[str, Any] = {
+        "type": "function_call_output",
+        "call_id": "call_func_2",
+        "output": list_output,
+    }
+    tool_output_item_list = ToolCallOutputItem(
+        agent=agent,
+        raw_item=function_output_list,
+        output=list_output,  # Structured output (list)
+    )
+    state._generated_items = [tool_output_item_list]
+
+    # Serialize and deserialize again
+    state_json = state.to_json()
+    deserialized_state = await RunStateClass.from_json(agent, state_json)
+
+    # Verify list output is preserved
+    assert len(deserialized_state._generated_items) == 1
+    deserialized_item_list = deserialized_state._generated_items[0]
+    assert isinstance(deserialized_item_list, ToolCallOutputItem)
+
+    assert isinstance(deserialized_item_list.output, list), (
+        f"Expected output to preserve its original list type after serialization/deserialization, "
+        f"but got {type(deserialized_item_list.output)}: {deserialized_item_list.output}. "
+        f"Structured outputs should maintain their type through JSON round-trips."
+    )
+
+    assert deserialized_item_list.output == list_output, (
+        f"Expected output to match original list output {list_output}, "
+        f"but got {deserialized_item_list.output}. The output should round-trip with its "
+        f"original type and content preserved."
+    )
