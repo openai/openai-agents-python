@@ -57,6 +57,7 @@ from .exceptions import (
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
 from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -538,6 +539,9 @@ class RunImpl:
                 )
                 logger.debug("Queuing shell_call %s", call_identifier)
                 shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
+                continue
+            if output_type == "compaction":
+                items.append(CompactionItem(raw_item=cast(dict[str, Any], output), agent=agent))
                 continue
             if output_type == "apply_patch_call":
                 items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))

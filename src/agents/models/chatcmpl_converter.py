@@ -582,7 +582,14 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-            # 8) If we haven't recognized it => fail or ignore
+            # 8) compaction items => reject for chat completions
+            elif isinstance(item, dict) and item.get("type") == "compaction":
+                raise UserError(
+                    "Compaction items are not supported for chat completions. "
+                    "Please use the Responses API to handle compaction."
+                )
+
+            # 9) If we haven't recognized it => fail or ignore
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 
