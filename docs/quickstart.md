@@ -85,7 +85,7 @@ Let's check that the workflow runs and the triage agent correctly routes between
 from agents import Runner
 
 async def main():
-    result = await Runner.run(triage_agent, "What is the capital of France?")
+    result = await Runner.run(triage_agent, "who was the first president of the united states?")
     print(result.final_output)
 ```
 

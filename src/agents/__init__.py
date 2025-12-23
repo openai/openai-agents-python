@@ -77,7 +77,7 @@ from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
 from .run import RunConfig, Runner
-from .run_context import RunContextWrapper, TContext
+from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -291,6 +291,7 @@ __all__ = [
     "SessionABC",
     "SQLiteSession",
     "OpenAIConversationsSession",
+    "AgentHookContext",
     "RunContextWrapper",
     "TContext",
     "RunErrorDetails",

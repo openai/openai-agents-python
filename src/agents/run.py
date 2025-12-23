@@ -64,7 +64,7 @@ from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .result import RunResult, RunResultStreaming
-from .run_context import RunContextWrapper, TContext
+from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -1367,10 +1367,15 @@ class AgentRunner:
         emitted_reasoning_item_ids: set[str] = set()
 
         if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=ItemHelpers.input_to_new_input_list(streamed_result.input),
+            )
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                hooks.on_agent_start(agent_hook_context, agent),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    agent.hooks.on_start(agent_hook_context, agent)
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),
@@ -1591,10 +1596,15 @@ class AgentRunner:
     ) -> SingleStepResult:
         # Ensure we run the hooks before anything else
         if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=ItemHelpers.input_to_new_input_list(original_input),
+            )
             await asyncio.gather(
-                hooks.on_agent_start(context_wrapper, agent),
+                hooks.on_agent_start(agent_hook_context, agent),
                 (
-                    agent.hooks.on_start(context_wrapper, agent)
+                    agent.hooks.on_start(agent_hook_context, agent)
                     if agent.hooks
                     else _coro.noop_coroutine()
                 ),

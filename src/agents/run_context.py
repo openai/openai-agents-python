@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Any, Generic
+from typing import TYPE_CHECKING, Any, Generic
 
 from typing_extensions import TypeVar
 
 from .usage import Usage
+
+if TYPE_CHECKING:
+    from .items import TResponseInputItem
 
 TContext = TypeVar("TContext", default=Any)
 
@@ -24,3 +27,11 @@ class RunContextWrapper(Generic[TContext]):
     """The usage of the agent run so far. For streamed responses, the usage will be stale until the
     last chunk of the stream is processed.
     """
+
+
+@dataclass(eq=False)
+class AgentHookContext(RunContextWrapper[TContext]):
+    """Context passed to agent hooks (on_start, on_end)."""
+
+    turn_input: "list[TResponseInputItem]" = field(default_factory=list)
+    """The input items for the current turn."""
