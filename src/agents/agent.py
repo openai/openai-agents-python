@@ -46,6 +46,25 @@ if TYPE_CHECKING:
     from .run import RunConfig
     from .stream_events import StreamEvent
 
+# Ephemeral map linking tool call IDs to nested agent results within the same run.
+# Keyed by (tool name, call id) to reduce cross-run collisions.
+_agent_tool_run_results: dict[tuple[str, str], RunResult | RunResultStreaming] = {}
+
+
+def consume_agent_tool_run_result(
+    tool_call: ResponseFunctionToolCall,
+) -> RunResult | RunResultStreaming | None:
+    """Return and drop the stored nested agent run result for the given tool call ID."""
+    key = (tool_call.name or "<unknown_tool>", tool_call.call_id)
+    run_result = _agent_tool_run_results.pop(key, None)
+    if run_result is None:
+        # Fallback: if the tool name does not match, try matching by call_id only
+        for candidate_key in list(_agent_tool_run_results.keys()):
+            if candidate_key[1] == tool_call.call_id:
+                run_result = _agent_tool_run_results.pop(candidate_key, None)
+                break
+    return run_result
+
 
 @dataclass
 class ToolsToFinalOutputResult:
@@ -412,6 +431,8 @@ class Agent(AgentBase, Generic[TContext]):
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
         on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
+        needs_approval: bool
+        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
@@ -441,6 +462,7 @@ class Agent(AgentBase, Generic[TContext]):
                 agent run. The callback receives an `AgentToolStreamEvent` containing the nested
                 agent, the originating tool call (when available), and each stream event. When
                 provided, the nested agent is executed in streaming mode.
+            needs_approval: Bool or callable to decide if this agent tool should pause for approval.
             failure_error_function: If provided, generate an error message when the tool (agent) run
                 fails. The message is sent to the LLM. If None, the exception is raised instead.
         """
@@ -449,19 +471,22 @@ class Agent(AgentBase, Generic[TContext]):
             name_override=tool_name or _transforms.transform_string_function_style(self.name),
             description_override=tool_description or "",
             is_enabled=is_enabled,
+            needs_approval=needs_approval,
             failure_error_function=failure_error_function,
         )
         async def run_agent(context: ToolContext, input: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
+            from .tool_context import ToolContext
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
+            nested_context = context if isinstance(context, RunContextWrapper) else context
             run_result: RunResult | RunResultStreaming
 
             if on_stream is not None:
-                run_result = Runner.run_streamed(
-                    starting_agent=self,
+                run_result_streaming = Runner.run_streamed(
+                    starting_agent=cast(Agent[Any], self),
                     input=input,
-                    context=context.context,
+                    context=cast(Any, nested_context),
                     run_config=run_config,
                     max_turns=resolved_max_turns,
                     hooks=hooks,
@@ -503,8 +528,8 @@ class Agent(AgentBase, Generic[TContext]):
                 try:
                     from .stream_events import AgentUpdatedStreamEvent
 
-                    current_agent = run_result.current_agent
-                    async for event in run_result.stream_events():
+                    current_agent = run_result_streaming.current_agent
+                    async for event in run_result_streaming.stream_events():
                         if isinstance(event, AgentUpdatedStreamEvent):
                             current_agent = event.new_agent
 
@@ -518,11 +543,12 @@ class Agent(AgentBase, Generic[TContext]):
                     await event_queue.put(None)
                     await event_queue.join()
                     await dispatch_task
+                run_result = run_result_streaming
             else:
                 run_result = await Runner.run(
-                    starting_agent=self,
+                    starting_agent=cast(Agent[Any], self),
                     input=input,
-                    context=context.context,
+                    context=cast(Any, nested_context),
                     run_config=run_config,
                     max_turns=resolved_max_turns,
                     hooks=hooks,
@@ -530,12 +556,24 @@ class Agent(AgentBase, Generic[TContext]):
                     conversation_id=conversation_id,
                     session=session,
                 )
+
+            # Store the run result by (tool_name, tool_call_id) so nested interruptions can be read
+            # later without cross-run collisions.
+            if isinstance(context, ToolContext):
+                key = (context.tool_name or "<unknown_tool>", context.tool_call_id)
+                _agent_tool_run_results[key] = run_result
+
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)
 
             return run_result.final_output
 
-        return run_agent
+        # Mark the function tool as an agent tool.
+        run_agent_tool = run_agent
+        run_agent_tool._is_agent_tool = True
+        run_agent_tool._agent_instance = self
+
+        return run_agent_tool
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
         if isinstance(self.instructions, str):

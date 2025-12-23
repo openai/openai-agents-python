@@ -21,7 +21,18 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
+from ..util._types import MaybeAwaitable
 from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
+
+
+class RequireApprovalToolList(TypedDict, total=False):
+    tool_names: list[str]
+
+
+class RequireApprovalObject(TypedDict, total=False):
+    always: RequireApprovalToolList
+    never: RequireApprovalToolList
+
 
 T = TypeVar("T")
 
@@ -32,7 +43,11 @@ if TYPE_CHECKING:
 class MCPServer(abc.ABC):
     """Base class for Model Context Protocol servers."""
 
-    def __init__(self, use_structured_content: bool = False):
+    def __init__(
+        self,
+        use_structured_content: bool = False,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+    ):
         """
         Args:
             use_structured_content: Whether to use `tool_result.structured_content` when calling an
@@ -40,8 +55,14 @@ class MCPServer(abc.ABC):
                 include the structured content in the `tool_result.content`, and using it by
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists
+                (mirroring TS requireApproval). Normalized into a needs_approval policy.
         """
         self.use_structured_content = use_structured_content
+        self._needs_approval_policy = self._normalize_needs_approval(
+            require_approval=require_approval
+        )
 
     @abc.abstractmethod
     async def connect(self):
@@ -92,6 +113,71 @@ class MCPServer(abc.ABC):
         """Get a specific prompt from the server."""
         pass
 
+    @staticmethod
+    def _normalize_needs_approval(
+        *,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None,
+    ) -> (
+        bool
+        | dict[str, bool]
+        | Callable[[RunContextWrapper[Any], AgentBase, MCPTool], MaybeAwaitable[bool]]
+    ):
+        """Normalize approval inputs to booleans or a name->bool map."""
+
+        if require_approval is None:
+            return False
+
+        def _to_bool(value: Literal["always", "never"]) -> bool:
+            return value == "always"
+
+        if isinstance(require_approval, dict) and (
+            "always" in require_approval or "never" in require_approval
+        ):
+            always_entry: RequireApprovalToolList | Any = require_approval.get("always", {})
+            never_entry: RequireApprovalToolList | Any = require_approval.get("never", {})
+            always_names = (
+                always_entry.get("tool_names", []) if isinstance(always_entry, dict) else []
+            )
+            never_names = never_entry.get("tool_names", []) if isinstance(never_entry, dict) else []
+            mapping: dict[str, bool] = {}
+            for name in always_names:
+                mapping[str(name)] = True
+            for name in never_names:
+                mapping[str(name)] = False
+            return mapping
+
+        if isinstance(require_approval, dict):
+            # Unrecognized dict shape; default to no approvals.
+            return False
+
+        return _to_bool(require_approval)
+
+    def _get_needs_approval_for_tool(
+        self,
+        tool: MCPTool,
+        agent: AgentBase,
+    ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
+        """Return a FunctionTool.needs_approval value for a given MCP tool."""
+
+        policy = self._needs_approval_policy
+
+        if callable(policy):
+
+            async def _needs_approval(
+                run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str
+            ) -> bool:
+                result = policy(run_context, agent, tool)
+                if inspect.isawaitable(result):
+                    result = await result
+                return bool(result)
+
+            return _needs_approval
+
+        if isinstance(policy, dict):
+            return bool(policy.get(tool.name, False))
+
+        return bool(policy)
+
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
@@ -105,6 +191,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
     ):
         """
         Args:
@@ -128,8 +215,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
         """
-        super().__init__(use_structured_content=use_structured_content)
+        super().__init__(
+            use_structured_content=use_structured_content,
+            require_approval=require_approval,
+        )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
         self._cleanup_lock: asyncio.Lock = asyncio.Lock()
@@ -401,6 +493,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -430,6 +523,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
         """
         super().__init__(
             cache_tools_list,
@@ -439,6 +534,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
         )
 
         self.params = StdioServerParameters(
@@ -503,6 +599,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -534,6 +631,8 @@ class MCPServerSse(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
         """
         super().__init__(
             cache_tools_list,
@@ -543,6 +642,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
         )
 
         self.params = params
@@ -610,6 +710,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -642,6 +743,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            require_approval: Approval policy for tools on this server. Accepts "always"/"never",
+                a dict of tool names to those values, or an object with always/never tool lists.
         """
         super().__init__(
             cache_tools_list,
@@ -651,6 +754,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            require_approval=require_approval,
         )
 
         self.params = params

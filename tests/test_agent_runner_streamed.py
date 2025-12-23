@@ -5,6 +5,7 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from typing_extensions import TypedDict
 
 from agents import (
@@ -22,9 +23,10 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents.items import RunItem
+from agents._run_impl import QueueCompleteSentinel, RunImpl
+from agents.items import RunItem, ToolApprovalItem
 from agents.run import RunConfig
-from agents.stream_events import AgentUpdatedStreamEvent
+from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -34,6 +36,12 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_input_item,
     get_text_message,
+)
+from .utils.hitl import (
+    consume_stream,
+    make_model_and_agent,
+    queue_function_call_and_text,
+    resume_streamed_after_first_approval,
 )
 from .utils.simple_session import SimpleListSession
 
@@ -789,3 +797,79 @@ async def test_dynamic_tool_addition_run_streamed() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_step_items_to_queue_handles_tool_approval_item():
+    """Test that stream_step_items_to_queue handles ToolApprovalItem."""
+    _, agent = make_model_and_agent(name="test")
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = asyncio.Queue()
+
+    # ToolApprovalItem should not be streamed
+    RunImpl.stream_step_items_to_queue([approval_item], queue)
+
+    # Queue should be empty since ToolApprovalItem is not streamed
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_resume_with_approved_tools():
+    """Test resuming streaming run from RunState with approved tools executes them."""
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    # Create a tool that requires approval
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+
+    # First run - tool call that requires approval
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({})),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool")
+    await consume_stream(first)
+
+    # Resume from state - should execute approved tool
+    result2 = await resume_streamed_after_first_approval(agent, first)
+
+    # Tool should have been called
+    assert tool_called is True
+    assert result2.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_server_conversation_tracker_priming():
+    """Test that resuming streaming run from RunState primes server conversation tracker."""
+    model, agent = make_model_and_agent(name="test")
+
+    # First run with conversation_id
+    model.set_next_output([get_text_message("First response")])
+    result1 = Runner.run_streamed(
+        agent, input="test", conversation_id="conv123", previous_response_id="resp123"
+    )
+    await consume_stream(result1)
+
+    # Create state from result
+    state = result1.to_state()
+
+    # Resume with same conversation_id - should not duplicate messages
+    model.set_next_output([get_text_message("Second response")])
+    result2 = Runner.run_streamed(
+        agent, state, conversation_id="conv123", previous_response_id="resp123"
+    )
+    await consume_stream(result2)
+
+    # Should complete successfully without message duplication
+    assert result2.final_output == "Second response"
+    assert len(result2.new_items) >= 1

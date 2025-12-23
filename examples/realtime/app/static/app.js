@@ -298,7 +298,7 @@ class RealtimeDemo {
         this.addRawEvent(event);
 
         // Add to tools panel if it's a tool or handoff event
-        if (event.type === 'tool_start' || event.type === 'tool_end' || event.type === 'handoff') {
+        if (event.type === 'tool_start' || event.type === 'tool_end' || event.type === 'handoff' || event.type === 'tool_approval_required') {
             this.addToolEvent(event);
         }
 
@@ -325,6 +325,9 @@ class RealtimeDemo {
                 if (event.item) {
                     this.addMessageFromItem(event.item);
                 }
+                break;
+            case 'tool_approval_required':
+                this.promptForToolApproval(event);
                 break;
         }
     }
@@ -530,6 +533,14 @@ class RealtimeDemo {
             title = `✅ Tool Completed`;
             description = `${event.tool}: ${event.output || 'No output'}`;
             eventClass = 'tool';
+        } else if (event.type === 'tool_approval_required') {
+            title = `⏸️ Approval Needed`;
+            description = `Waiting on ${event.tool}`;
+            eventClass = 'tool';
+        } else if (event.type === 'tool_approval_decision') {
+            title = event.approved ? '✅ Approved' : '❌ Rejected';
+            description = `${event.tool} (${event.call_id || 'call'})`;
+            eventClass = 'tool';
         }
 
         eventDiv.innerHTML = `
@@ -546,6 +557,26 @@ class RealtimeDemo {
 
         // Auto-scroll tools pane
         this.toolsContent.scrollTop = this.toolsContent.scrollHeight;
+    }
+
+    promptForToolApproval(event) {
+        const args = event.arguments || '';
+        const preview = args ? `${args.slice(0, 180)}${args.length > 180 ? '…' : ''}` : '';
+        const message = `Allow tool "${event.tool}" to run?${preview ? `\nArgs: ${preview}` : ''}`;
+        const approved = window.confirm(message);
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({
+                type: 'tool_approval_decision',
+                call_id: event.call_id,
+                approve: approved
+            }));
+        }
+        this.addToolEvent({
+            type: 'tool_approval_decision',
+            tool: event.tool,
+            call_id: event.call_id,
+            approved
+        });
     }
 
     async playAudio(audioBase64) {
