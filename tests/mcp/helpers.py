@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import shutil
@@ -67,8 +69,12 @@ class FakeMCPServer(MCPServer):
         tools: list[MCPTool] | None = None,
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
+        require_approval: object | None = None,
     ):
-        super().__init__(use_structured_content=False)
+        super().__init__(
+            use_structured_content=False,
+            require_approval=require_approval,  # type: ignore[arg-type]
+        )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []

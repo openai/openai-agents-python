@@ -336,7 +336,9 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     ):
         assert starting_agent is agent
         assert input == "summarize this"
-        assert context is None
+        assert isinstance(context, ToolContext)
+        assert context.tool_call_id == "call_2"
+        assert context.tool_name == "summary_tool"
         assert max_turns == 7
         assert hooks is hooks_obj
         assert run_config is run_config_obj

@@ -4,9 +4,9 @@ import asyncio
 import dataclasses
 import inspect
 import json
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar, cast
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -43,7 +43,7 @@ from openai.types.responses.response_output_item import (
 )
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from .agent import Agent, ToolsToFinalOutputResult
+from .agent import Agent, ToolsToFinalOutputResult, consume_agent_tool_run_result
 from .agent_output import AgentOutputSchemaBase
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchOperation, ApplyPatchResult
@@ -68,6 +68,7 @@ from .items import (
     ModelResponse,
     ReasoningItem,
     RunItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
@@ -77,6 +78,7 @@ from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import ModelTracing
 from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_state import RunState
 from .stream_events import RunItemStreamEvent, StreamEvent
 from .tool import (
     ApplyPatchTool,
@@ -117,6 +119,8 @@ from .tracing import (
 )
 from .util import _coro, _error_tracing
 
+T = TypeVar("T")
+
 if TYPE_CHECKING:
     from .run import RunConfig
 
@@ -128,6 +132,48 @@ class QueueCompleteSentinel:
 QUEUE_COMPLETE_SENTINEL = QueueCompleteSentinel()
 
 _NOT_FINAL_OUTPUT = ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+_REJECTION_MESSAGE = "Tool execution was not approved."
+
+
+def _function_rejection_item(
+    agent: Agent[Any], tool_call: ResponseFunctionToolCall
+) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected function tool call."""
+    return ToolCallOutputItem(
+        output=_REJECTION_MESSAGE,
+        raw_item=ItemHelpers.tool_call_output_item(tool_call, _REJECTION_MESSAGE),
+        agent=agent,
+    )
+
+
+def _shell_rejection_item(agent: Agent[Any], call_id: str) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected shell call."""
+    rejection_output: dict[str, Any] = {
+        "stdout": "",
+        "stderr": _REJECTION_MESSAGE,
+        "outcome": {"type": "exit", "exit_code": 1},
+    }
+    rejection_raw_item: dict[str, Any] = {
+        "type": "shell_call_output",
+        "call_id": call_id,
+        "output": [rejection_output],
+    }
+    return ToolCallOutputItem(agent=agent, output=_REJECTION_MESSAGE, raw_item=rejection_raw_item)
+
+
+def _apply_patch_rejection_item(agent: Agent[Any], call_id: str) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected apply_patch call."""
+    rejection_raw_item: dict[str, Any] = {
+        "type": "apply_patch_call_output",
+        "call_id": call_id,
+        "status": "failed",
+        "output": _REJECTION_MESSAGE,
+    }
+    return ToolCallOutputItem(
+        agent=agent,
+        output=_REJECTION_MESSAGE,
+        raw_item=rejection_raw_item,
+    )
 
 
 @dataclass
@@ -200,6 +246,7 @@ class ProcessedResponse:
     apply_patch_calls: list[ToolRunApplyPatchCall]
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
+    interruptions: list[ToolApprovalItem]  # Tool approval items awaiting user decision
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -215,6 +262,10 @@ class ProcessedResponse:
                 self.mcp_approval_requests,
             ]
         )
+
+    def has_interruptions(self) -> bool:
+        """Check if there are tool calls awaiting approval."""
+        return len(self.interruptions) > 0
 
 
 @dataclass
@@ -233,6 +284,14 @@ class NextStepRunAgain:
 
 
 @dataclass
+class NextStepInterruption:
+    """Represents an interruption in the agent run due to tool approval requests."""
+
+    interruptions: list[ToolApprovalItem]
+    """The list of tool calls awaiting approval."""
+
+
+@dataclass
 class SingleStepResult:
     original_input: str | list[TResponseInputItem]
     """The input items i.e. the items before run() was called. May be mutated by handoff input
@@ -247,7 +306,7 @@ class SingleStepResult:
     new_step_items: list[RunItem]
     """Items generated during this current step."""
 
-    next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
+    next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain | NextStepInterruption
     """The next step to take."""
 
     tool_input_guardrail_results: list[ToolInputGuardrailResult]
@@ -255,6 +314,9 @@ class SingleStepResult:
 
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from this step."""
+
+    processed_response: ProcessedResponse | None = None
+    """The processed model response. This is needed for resuming from interruptions."""
 
     @property
     def generated_items(self) -> list[RunItem]:
@@ -294,8 +356,43 @@ class RunImpl:
         # Make a copy of the generated items
         pre_step_items = list(pre_step_items)
 
+        def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, str | None]:
+            """Return a tuple that uniquely identifies a tool call for deduplication."""
+            call_id = None
+            name = None
+            args = None
+            if isinstance(raw, dict):
+                call_id = raw.get("call_id") or raw.get("callId")
+                name = raw.get("name")
+                args = raw.get("arguments")
+            elif hasattr(raw, "call_id"):
+                call_id = raw.call_id
+                name = getattr(raw, "name", None)
+                args = getattr(raw, "arguments", None)
+            return call_id, name, args
+
+        existing_call_keys: set[tuple[str | None, str | None, str | None]] = set()
+        for item in pre_step_items:
+            if isinstance(item, ToolCallItem):
+                identity = _tool_call_identity(item.raw_item)
+                existing_call_keys.add(identity)
+        approval_items_by_call_id = _index_approval_items_by_call_id(pre_step_items)
+
         new_step_items: list[RunItem] = []
-        new_step_items.extend(processed_response.new_items)
+        mcp_requests_with_callback: list[ToolRunMCPApprovalRequest] = []
+        mcp_requests_requiring_manual_approval: list[ToolRunMCPApprovalRequest] = []
+        for request in processed_response.mcp_approval_requests:
+            if request.mcp_tool.on_approval_request:
+                mcp_requests_with_callback.append(request)
+            else:
+                mcp_requests_requiring_manual_approval.append(request)
+        for item in processed_response.new_items:
+            if isinstance(item, ToolCallItem):
+                identity = _tool_call_identity(item.raw_item)
+                if identity in existing_call_keys:
+                    continue
+                existing_call_keys.add(identity)
+            new_step_items.append(item)
 
         # First, run function tools, computer actions, shell calls, apply_patch calls,
         # and legacy local shell calls.
@@ -342,17 +439,63 @@ class RunImpl:
                 config=run_config,
             ),
         )
-        new_step_items.extend([result.run_item for result in function_results])
+        for result in function_results:
+            new_step_items.append(result.run_item)
+
         new_step_items.extend(computer_results)
-        new_step_items.extend(shell_results)
-        new_step_items.extend(apply_patch_results)
+        for shell_result in shell_results:
+            new_step_items.append(shell_result)
+        for apply_patch_result in apply_patch_results:
+            new_step_items.append(apply_patch_result)
         new_step_items.extend(local_shell_results)
 
+        # Collect approval interruptions so they can be serialized and resumed.
+        interruptions: list[ToolApprovalItem] = []
+        for result in function_results:
+            if isinstance(result.run_item, ToolApprovalItem):
+                interruptions.append(result.run_item)
+            else:
+                if result.interruptions:
+                    interruptions.extend(result.interruptions)
+                elif result.agent_run_result and hasattr(result.agent_run_result, "interruptions"):
+                    nested_interruptions = result.agent_run_result.interruptions
+                    if nested_interruptions:
+                        interruptions.extend(nested_interruptions)
+        for shell_result in shell_results:
+            if isinstance(shell_result, ToolApprovalItem):
+                interruptions.append(shell_result)
+        for apply_patch_result in apply_patch_results:
+            if isinstance(apply_patch_result, ToolApprovalItem):
+                interruptions.append(apply_patch_result)
+        if mcp_requests_requiring_manual_approval:
+            approved_mcp_responses, pending_mcp_approvals = _collect_manual_mcp_approvals(
+                agent=agent,
+                requests=mcp_requests_requiring_manual_approval,
+                context_wrapper=context_wrapper,
+                existing_pending_by_call_id=approval_items_by_call_id,
+            )
+            interruptions.extend(pending_mcp_approvals)
+            new_step_items.extend(approved_mcp_responses)
+            new_step_items.extend(pending_mcp_approvals)
+
+        processed_response.interruptions = interruptions
+
+        if interruptions:
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepInterruption(interruptions=interruptions),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
         # Next, run the MCP approval requests
-        if processed_response.mcp_approval_requests:
+        if mcp_requests_with_callback:
             approval_results = await cls.execute_mcp_approval_requests(
                 agent=agent,
-                approval_requests=processed_response.mcp_approval_requests,
+                approval_requests=mcp_requests_with_callback,
                 context_wrapper=context_wrapper,
             )
             new_step_items.extend(approval_results)
@@ -447,6 +590,538 @@ class RunImpl:
             model_response=new_response,
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
+            next_step=NextStepRunAgain(),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
+
+    @classmethod
+    async def resolve_interrupted_turn(
+        cls,
+        *,
+        agent: Agent[TContext],
+        original_input: str | list[TResponseInputItem],
+        original_pre_step_items: list[RunItem],
+        new_response: ModelResponse,
+        processed_response: ProcessedResponse,
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        run_config: RunConfig,
+        run_state: RunState | None = None,
+    ) -> SingleStepResult:
+        """Continues a turn that was previously interrupted waiting for tool approval.
+
+        Executes the now approved tools and returns the resulting step transition.
+        """
+
+        def _pending_approvals_from_state() -> list[ToolApprovalItem]:
+            """Return pending approval items from state or previous step history."""
+            if (
+                run_state is not None
+                and hasattr(run_state, "_current_step")
+                and isinstance(run_state._current_step, NextStepInterruption)
+            ):
+                return [
+                    item
+                    for item in run_state._current_step.interruptions
+                    if isinstance(item, ToolApprovalItem)
+                ]
+            return [item for item in original_pre_step_items if isinstance(item, ToolApprovalItem)]
+
+        def _record_function_rejection(
+            call_id: str | None, tool_call: ResponseFunctionToolCall
+        ) -> None:
+            rejected_function_outputs.append(_function_rejection_item(agent, tool_call))
+            if isinstance(call_id, str):
+                rejected_function_call_ids.add(call_id)
+
+        async def _function_requires_approval(run: ToolRunFunction) -> bool:
+            call_id = run.tool_call.call_id
+            if call_id and call_id in approval_items_by_call_id:
+                return True
+
+            try:
+                return await _function_needs_approval(
+                    run.function_tool,
+                    context_wrapper,
+                    run.tool_call,
+                )
+            except Exception:
+                return True
+
+        try:
+            context_wrapper.turn_input = ItemHelpers.input_to_new_input_list(original_input)
+        except Exception:
+            context_wrapper.turn_input = []
+
+        # Pending approval items come from persisted state; the run loop handles rewinds
+        # and we use them to rebuild missing function tool runs if needed.
+        pending_approval_items = _pending_approvals_from_state()
+
+        approval_items_by_call_id = _index_approval_items_by_call_id(pending_approval_items)
+
+        rejected_function_outputs: list[RunItem] = []
+        rejected_function_call_ids: set[str] = set()
+        pending_interruptions: list[ToolApprovalItem] = []
+        pending_interruption_keys: set[str] = set()
+
+        mcp_requests_with_callback: list[ToolRunMCPApprovalRequest] = []
+        mcp_requests_requiring_manual_approval: list[ToolRunMCPApprovalRequest] = []
+        for request in processed_response.mcp_approval_requests:
+            if request.mcp_tool.on_approval_request:
+                mcp_requests_with_callback.append(request)
+            else:
+                mcp_requests_requiring_manual_approval.append(request)
+
+        def _has_output_item(call_id: str, expected_type: str) -> bool:
+            for item in original_pre_step_items:
+                if not isinstance(item, ToolCallOutputItem):
+                    continue
+                raw_item = item.raw_item
+                raw_type = None
+                raw_call_id = None
+                if isinstance(raw_item, Mapping):
+                    raw_type = raw_item.get("type")
+                    raw_call_id = raw_item.get("call_id") or raw_item.get("callId")
+                else:
+                    raw_type = getattr(raw_item, "type", None)
+                    raw_call_id = getattr(raw_item, "call_id", None) or getattr(
+                        raw_item, "callId", None
+                    )
+                if raw_type == expected_type and raw_call_id == call_id:
+                    return True
+            return False
+
+        async def _collect_runs_by_approval(
+            runs: Sequence[T],
+            *,
+            call_id_extractor: Callable[[T], str],
+            tool_name_resolver: Callable[[T], str],
+            rejection_builder: Callable[[str], RunItem],
+            needs_approval_checker: Callable[[T], Awaitable[bool]] | None = None,
+            output_exists_checker: Callable[[str], bool] | None = None,
+        ) -> tuple[list[T], list[RunItem]]:
+            approved_runs: list[T] = []
+            rejection_items: list[RunItem] = []
+            for run in runs:
+                call_id = call_id_extractor(run)
+                tool_name = tool_name_resolver(run)
+                existing_pending = approval_items_by_call_id.get(call_id)
+                approval_status = context_wrapper.get_approval_status(
+                    tool_name,
+                    call_id,
+                    existing_pending=existing_pending,
+                )
+
+                if approval_status is False:
+                    rejection_items.append(rejection_builder(call_id))
+                    continue
+
+                if output_exists_checker and output_exists_checker(call_id):
+                    continue
+
+                needs_approval = True
+                if needs_approval_checker:
+                    try:
+                        needs_approval = await needs_approval_checker(run)
+                    except Exception:
+                        needs_approval = True
+
+                if not needs_approval:
+                    approved_runs.append(run)
+                    continue
+
+                if approval_status is True:
+                    approved_runs.append(run)
+                else:
+                    _add_pending_interruption(
+                        ToolApprovalItem(
+                            agent=agent,
+                            raw_item=_get_mapping_or_attr(run, "tool_call"),
+                            tool_name=tool_name,
+                        )
+                    )
+            return approved_runs, rejection_items
+
+        def _shell_call_id_from_run(run: ToolRunShellCall) -> str:
+            return _extract_shell_call_id(run.tool_call)
+
+        def _apply_patch_call_id_from_run(run: ToolRunApplyPatchCall) -> str:
+            return _extract_apply_patch_call_id(run.tool_call)
+
+        def _shell_tool_name(run: ToolRunShellCall) -> str:
+            return run.shell_tool.name
+
+        def _apply_patch_tool_name(run: ToolRunApplyPatchCall) -> str:
+            return run.apply_patch_tool.name
+
+        def _build_shell_rejection(call_id: str) -> RunItem:
+            return _shell_rejection_item(agent, call_id)
+
+        def _build_apply_patch_rejection(call_id: str) -> RunItem:
+            return _apply_patch_rejection_item(agent, call_id)
+
+        async def _shell_needs_approval(run: ToolRunShellCall) -> bool:
+            shell_call = _coerce_shell_call(run.tool_call)
+            return await _evaluate_needs_approval_setting(
+                run.shell_tool.needs_approval,
+                context_wrapper,
+                shell_call.action,
+                shell_call.call_id,
+            )
+
+        async def _apply_patch_needs_approval(run: ToolRunApplyPatchCall) -> bool:
+            operation = _coerce_apply_patch_operation(
+                run.tool_call,
+                context_wrapper=context_wrapper,
+            )
+            call_id = _extract_apply_patch_call_id(run.tool_call)
+            return await _evaluate_needs_approval_setting(
+                run.apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+            )
+
+        def _shell_output_exists(call_id: str) -> bool:
+            return _has_output_item(call_id, "shell_call_output")
+
+        def _apply_patch_output_exists(call_id: str) -> bool:
+            return _has_output_item(call_id, "apply_patch_call_output")
+
+        def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
+            if item is None:
+                return
+            call_id = _extract_tool_call_id(item.raw_item)
+            key = call_id or f"raw:{id(item.raw_item)}"
+            if key in pending_interruption_keys:
+                return
+            pending_interruption_keys.add(key)
+            pending_interruptions.append(item)
+
+        approved_mcp_responses: list[RunItem] = []
+
+        approved_manual_mcp, pending_manual_mcp = _collect_manual_mcp_approvals(
+            agent=agent,
+            requests=mcp_requests_requiring_manual_approval,
+            context_wrapper=context_wrapper,
+            existing_pending_by_call_id=approval_items_by_call_id,
+        )
+        approved_mcp_responses.extend(approved_manual_mcp)
+        for approval_item in pending_manual_mcp:
+            _add_pending_interruption(approval_item)
+
+        async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
+            """Recreate function runs from pending approvals when runs are missing."""
+            if not pending_approval_items:
+                return []
+            all_tools = await agent.get_all_tools(context_wrapper)
+            tool_map: dict[str, FunctionTool] = {
+                tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)
+            }
+            existing_pending_call_ids: set[str] = set()
+            for existing_pending in pending_interruptions:
+                if isinstance(existing_pending, ToolApprovalItem):
+                    existing_call_id = _extract_tool_call_id(existing_pending.raw_item)
+                    if existing_call_id:
+                        existing_pending_call_ids.add(existing_call_id)
+            rebuilt_runs: list[ToolRunFunction] = []
+            for approval in pending_approval_items:
+                if not isinstance(approval, ToolApprovalItem):
+                    continue
+                raw = approval.raw_item
+                if isinstance(raw, dict) and raw.get("type") == "function_call":
+                    name = raw.get("name")
+                    if name and isinstance(name, str) and name in tool_map:
+                        rebuilt_call_id = _extract_tool_call_id(raw)
+                        arguments = raw.get("arguments", "{}")
+                        status = raw.get("status")
+                        if isinstance(rebuilt_call_id, str) and isinstance(arguments, str):
+                            # Validate status is a valid Literal type
+                            valid_status: (
+                                Literal["in_progress", "completed", "incomplete"] | None
+                            ) = None
+                            if isinstance(status, str) and status in (
+                                "in_progress",
+                                "completed",
+                                "incomplete",
+                            ):
+                                valid_status = status  # type: ignore[assignment]
+                            tool_call = ResponseFunctionToolCall(
+                                type="function_call",
+                                name=name,
+                                call_id=rebuilt_call_id,
+                                arguments=arguments,
+                                status=valid_status,
+                            )
+                            approval_status = context_wrapper.get_approval_status(
+                                name, rebuilt_call_id, existing_pending=approval
+                            )
+                            if approval_status is False:
+                                _record_function_rejection(rebuilt_call_id, tool_call)
+                                continue
+                            if approval_status is None:
+                                if rebuilt_call_id not in existing_pending_call_ids:
+                                    _add_pending_interruption(approval)
+                                    existing_pending_call_ids.add(rebuilt_call_id)
+                                continue
+                            rebuilt_runs.append(
+                                ToolRunFunction(function_tool=tool_map[name], tool_call=tool_call)
+                            )
+            return rebuilt_runs
+
+        # Run only the approved function calls for this turn; emit rejections for denied ones.
+        function_tool_runs: list[ToolRunFunction] = []
+        for run in processed_response.functions:
+            call_id = run.tool_call.call_id
+            approval_status = context_wrapper.get_approval_status(
+                run.function_tool.name,
+                call_id,
+                existing_pending=approval_items_by_call_id.get(call_id),
+            )
+
+            requires_approval = await _function_requires_approval(run)
+
+            if approval_status is False:
+                _record_function_rejection(call_id, run.tool_call)
+                continue
+
+            # If the user has already approved this call, run it even if the original tool did
+            # not require approval. This avoids skipping execution when we are resuming from a
+            # purely HITL-driven interruption.
+            if approval_status is True:
+                function_tool_runs.append(run)
+                continue
+
+            # If approval is not required and no explicit rejection is present, skip running again.
+            # The original turn already executed this tool, so resuming after an unrelated approval
+            # should not invoke it a second time.
+            if not requires_approval:
+                continue
+
+            if approval_status is None:
+                _add_pending_interruption(
+                    approval_items_by_call_id.get(run.tool_call.call_id)
+                    or ToolApprovalItem(agent=agent, raw_item=run.tool_call)
+                )
+                continue
+            function_tool_runs.append(run)
+
+        # If state lacks function runs, rebuild them from pending approvals.
+        # This covers resume-from-serialization cases where only ToolApprovalItems were persisted,
+        # so we reconstruct minimal tool calls to apply the user's decision.
+        if not function_tool_runs:
+            function_tool_runs = await _rebuild_function_runs_from_approvals()
+
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+        ) = await cls.execute_function_tool_calls(
+            agent=agent,
+            tool_runs=function_tool_runs,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        # Surface nested interruptions from function tool results (e.g., agent-as-tool HITL).
+        for result in function_results:
+            if result.interruptions:
+                for interruption in result.interruptions:
+                    _add_pending_interruption(interruption)
+
+        # Execute shell/apply_patch only when approved; emit rejections otherwise.
+        approved_shell_calls, rejected_shell_results = await _collect_runs_by_approval(
+            processed_response.shell_calls,
+            call_id_extractor=_shell_call_id_from_run,
+            tool_name_resolver=_shell_tool_name,
+            rejection_builder=_build_shell_rejection,
+            needs_approval_checker=_shell_needs_approval,
+            output_exists_checker=_shell_output_exists,
+        )
+
+        approved_apply_patch_calls, rejected_apply_patch_results = await _collect_runs_by_approval(
+            processed_response.apply_patch_calls,
+            call_id_extractor=_apply_patch_call_id_from_run,
+            tool_name_resolver=_apply_patch_tool_name,
+            rejection_builder=_build_apply_patch_rejection,
+            needs_approval_checker=_apply_patch_needs_approval,
+            output_exists_checker=_apply_patch_output_exists,
+        )
+
+        shell_results = await cls.execute_shell_calls(
+            agent=agent,
+            calls=approved_shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        apply_patch_results = await cls.execute_apply_patch_calls(
+            agent=agent,
+            calls=approved_apply_patch_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        # Resuming reuses the same RunItem objects; skip duplicates by identity.
+        original_pre_step_item_ids = {id(item) for item in original_pre_step_items}
+        new_items: list[RunItem] = []
+        new_items_ids: set[int] = set()
+
+        def append_if_new(item: RunItem) -> None:
+            item_id = id(item)
+            if item_id in original_pre_step_item_ids or item_id in new_items_ids:
+                return
+            new_items.append(item)
+            new_items_ids.add(item_id)
+
+        for function_result in function_results:
+            append_if_new(function_result.run_item)
+        for rejection_item in rejected_function_outputs:
+            append_if_new(rejection_item)
+        for pending_item in pending_interruptions:
+            if pending_item:
+                append_if_new(pending_item)
+
+        processed_response.interruptions = pending_interruptions
+        if pending_interruptions:
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=original_pre_step_items,
+                new_step_items=new_items,
+                next_step=NextStepInterruption(
+                    interruptions=[item for item in pending_interruptions if item]
+                ),
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+                processed_response=processed_response,
+            )
+
+        if mcp_requests_with_callback:
+            approval_results = await cls.execute_mcp_approval_requests(
+                agent=agent,
+                approval_requests=mcp_requests_with_callback,
+                context_wrapper=context_wrapper,
+            )
+            for approval_result in approval_results:
+                append_if_new(approval_result)
+
+        for shell_result in shell_results:
+            append_if_new(shell_result)
+        for shell_rejection in rejected_shell_results:
+            append_if_new(shell_rejection)
+
+        for apply_patch_result in apply_patch_results:
+            append_if_new(apply_patch_result)
+        for apply_patch_rejection in rejected_apply_patch_results:
+            append_if_new(apply_patch_rejection)
+
+        for approved_response in approved_mcp_responses:
+            append_if_new(approved_response)
+
+        (
+            pending_hosted_mcp_approvals,
+            pending_hosted_mcp_approval_ids,
+        ) = _process_hosted_mcp_approvals(
+            original_pre_step_items=original_pre_step_items,
+            mcp_approval_requests=processed_response.mcp_approval_requests,
+            context_wrapper=context_wrapper,
+            agent=agent,
+            append_item=append_if_new,
+        )
+
+        # Keep only unresolved hosted MCP approvals so server-managed conversations
+        # can surface them on the next turn; drop resolved placeholders.
+        pre_step_items = [
+            item
+            for item in original_pre_step_items
+            if _should_keep_hosted_mcp_item(
+                item,
+                pending_hosted_mcp_approvals=pending_hosted_mcp_approvals,
+                pending_hosted_mcp_approval_ids=pending_hosted_mcp_approval_ids,
+            )
+        ]
+
+        if rejected_function_call_ids:
+            pre_step_items = [
+                item
+                for item in pre_step_items
+                if not (
+                    item.type == "tool_call_output_item"
+                    and (
+                        _extract_tool_call_id(getattr(item, "raw_item", None))
+                        in rejected_function_call_ids
+                    )
+                )
+            ]
+
+        # Avoid re-running handoffs that already executed before the interruption.
+        executed_handoff_call_ids: set[str] = set()
+        for item in original_pre_step_items:
+            if isinstance(item, HandoffCallItem):
+                handoff_call_id = _extract_tool_call_id(item.raw_item)
+                if handoff_call_id:
+                    executed_handoff_call_ids.add(handoff_call_id)
+
+        pending_handoffs = [
+            handoff
+            for handoff in processed_response.handoffs
+            if not handoff.tool_call.call_id
+            or handoff.tool_call.call_id not in executed_handoff_call_ids
+        ]
+
+        # If there are pending handoffs that haven't been executed yet, execute them now.
+        if pending_handoffs:
+            return await cls.execute_handoffs(
+                agent=agent,
+                original_input=original_input,
+                pre_step_items=pre_step_items,
+                new_step_items=new_items,
+                new_response=new_response,
+                run_handoffs=pending_handoffs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+            )
+
+        # Check if tool use should result in a final output
+        check_tool_use = await cls._check_for_final_output_from_tools(
+            agent=agent,
+            tool_results=function_results,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+        if check_tool_use.is_final_output:
+            if not agent.output_type or agent.output_type is str:
+                check_tool_use.final_output = str(check_tool_use.final_output)
+
+            if check_tool_use.final_output is None:
+                logger.error(
+                    "Model returned a final output of None. Not raising an error because we assume"
+                    "you know what you're doing."
+                )
+
+            return await cls.execute_final_output(
+                agent=agent,
+                original_input=original_input,
+                new_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_items,
+                final_output=check_tool_use.final_output,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
+
+        # We only ran new tools and side effects. We need to run the rest of the agent
+        return SingleStepResult(
+            original_input=original_input,
+            model_response=new_response,
+            pre_step_items=pre_step_items,
+            new_step_items=new_items,
             next_step=NextStepRunAgain(),
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
@@ -606,19 +1281,19 @@ class RunImpl:
                         )
                     )
                     raise ModelBehaviorError(f"MCP server label {output.server_label} not found")
-                else:
-                    server = hosted_mcp_server_map[output.server_label]
-                    if server.on_approval_request:
-                        mcp_approval_requests.append(
-                            ToolRunMCPApprovalRequest(
-                                request_item=output,
-                                mcp_tool=server,
-                            )
-                        )
-                    else:
-                        logger.warning(
-                            f"MCP server {output.server_label} has no on_approval_request hook"
-                        )
+                server = hosted_mcp_server_map[output.server_label]
+                mcp_approval_requests.append(
+                    ToolRunMCPApprovalRequest(
+                        request_item=output,
+                        mcp_tool=server,
+                    )
+                )
+                if not server.on_approval_request:
+                    logger.debug(
+                        "Hosted MCP server %s has no on_approval_request hook; approvals will be "
+                        "surfaced as interruptions for the caller to handle.",
+                        output.server_label,
+                    )
             elif isinstance(output, McpListTools):
                 items.append(MCPListToolsItem(raw_item=output, agent=agent))
             elif isinstance(output, McpCall):
@@ -632,23 +1307,24 @@ class RunImpl:
                 tools_used.append("code_interpreter")
             elif isinstance(output, LocalShellCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
-                if shell_tool:
+                if local_shell_tool:
+                    tools_used.append("local_shell")
+                    local_shell_calls.append(
+                        ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    )
+                elif shell_tool:
                     tools_used.append(shell_tool.name)
                     shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
                 else:
                     tools_used.append("local_shell")
-                    if not local_shell_tool:
-                        _error_tracing.attach_error_to_current_span(
-                            SpanError(
-                                message="Local shell tool not found",
-                                data={},
-                            )
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Local shell tool not found",
+                            data={},
                         )
-                        raise ModelBehaviorError(
-                            "Model produced local shell call without a local shell tool."
-                        )
-                    local_shell_calls.append(
-                        ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced local shell call without a local shell tool."
                     )
             elif isinstance(output, ResponseCustomToolCall) and _is_apply_patch_name(
                 output.name, apply_patch_tool
@@ -773,6 +1449,7 @@ class RunImpl:
             apply_patch_calls=apply_patch_calls,
             tools_used=tools_used,
             mcp_approval_requests=mcp_approval_requests,
+            interruptions=[],  # Will be populated after tool execution
         )
 
     @classmethod
@@ -952,7 +1629,51 @@ class RunImpl:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    # 1) Run input tool guardrails, if any
+                    needs_approval_result = await _function_needs_approval(
+                        func_tool,
+                        context_wrapper,
+                        tool_call,
+                    )
+
+                    if needs_approval_result:
+                        # Check if tool has been approved/rejected
+                        approval_status = context_wrapper.get_approval_status(
+                            func_tool.name,
+                            tool_call.call_id,
+                        )
+
+                        if approval_status is None:
+                            # Not yet decided - need to interrupt for approval
+                            approval_item = ToolApprovalItem(
+                                agent=agent, raw_item=tool_call, tool_name=func_tool.name
+                            )
+                            return FunctionToolResult(
+                                tool=func_tool, output=None, run_item=approval_item
+                            )
+
+                        if approval_status is False:
+                            # Rejected - return rejection message
+                            span_fn.set_error(
+                                SpanError(
+                                    message=_REJECTION_MESSAGE,
+                                    data={
+                                        "tool_name": func_tool.name,
+                                        "error": (
+                                            f"Tool execution for {tool_call.call_id} "
+                                            "was manually rejected by user."
+                                        ),
+                                    },
+                                )
+                            )
+                            result = _REJECTION_MESSAGE
+                            span_fn.span_data.output = result
+                            return FunctionToolResult(
+                                tool=func_tool,
+                                output=result,
+                                run_item=_function_rejection_item(agent, tool_call),
+                            )
+
+                    # 2) Run input tool guardrails, if any
                     rejected_message = await cls._execute_input_guardrails(
                         func_tool=func_tool,
                         tool_context=tool_context,
@@ -972,6 +1693,9 @@ class RunImpl:
                             hooks=hooks,
                             tool_call=tool_call,
                         )
+
+                        # Note: Agent tools store their run result keyed by tool_call_id
+                        # The result will be consumed later when creating FunctionToolResult
 
                         # 3) Run output tool guardrails, if any
                         final_result = await cls._execute_output_guardrails(
@@ -1016,18 +1740,48 @@ class RunImpl:
 
         results = await asyncio.gather(*tasks)
 
-        function_tool_results = [
-            FunctionToolResult(
-                tool=tool_run.function_tool,
-                output=result,
-                run_item=ToolCallOutputItem(
-                    output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
-                    agent=agent,
-                ),
-            )
-            for tool_run, result in zip(tool_runs, results)
-        ]
+        function_tool_results = []
+        for tool_run, result in zip(tool_runs, results):
+            # If result is already a FunctionToolResult (e.g., from approval interruption),
+            # use it directly instead of wrapping it
+            if isinstance(result, FunctionToolResult):
+                # Check for nested agent run result and populate interruptions
+                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                if nested_run_result:
+                    result.agent_run_result = nested_run_result
+                    nested_interruptions_from_result: list[ToolApprovalItem] = (
+                        nested_run_result.interruptions
+                        if hasattr(nested_run_result, "interruptions")
+                        else []
+                    )
+                    if nested_interruptions_from_result:
+                        result.interruptions = nested_interruptions_from_result
+
+                function_tool_results.append(result)
+            else:
+                # Normal case: wrap the result in a FunctionToolResult
+                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                nested_interruptions: list[ToolApprovalItem] = []
+                if nested_run_result:
+                    nested_interruptions = (
+                        nested_run_result.interruptions
+                        if hasattr(nested_run_result, "interruptions")
+                        else []
+                    )
+
+                function_tool_results.append(
+                    FunctionToolResult(
+                        tool=tool_run.function_tool,
+                        output=result,
+                        run_item=ToolCallOutputItem(
+                            output=result,
+                            raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
+                            agent=agent,
+                        ),
+                        interruptions=nested_interruptions,
+                        agent_run_result=nested_run_result,
+                    )
+                )
 
         return function_tool_results, tool_input_guardrail_results, tool_output_guardrail_results
 
@@ -1332,8 +2086,15 @@ class RunImpl:
             else:
                 result = maybe_awaitable_result
             reason = result.get("reason", None)
+            # Handle both dict and McpApprovalRequest types
+            request_item = approval_request.request_item
+            request_id = (
+                request_item.id
+                if hasattr(request_item, "id")
+                else cast(dict[str, Any], request_item).get("id", "")
+            )
             raw_item: McpApprovalResponse = {
-                "approval_request_id": approval_request.request_item.id,
+                "approval_request_id": request_id,
                 "approve": result["approve"],
                 "type": "mcp_approval_response",
             }
@@ -1363,9 +2124,7 @@ class RunImpl:
         tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     ) -> SingleStepResult:
         # Run the on_end hooks
-        await cls.run_final_output_hooks(
-            agent, hooks, context_wrapper, original_input, final_output
-        )
+        await cls.run_final_output_hooks(agent, hooks, context_wrapper, final_output)
 
         return SingleStepResult(
             original_input=original_input,
@@ -1383,14 +2142,15 @@ class RunImpl:
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
-        original_input: str | list[TResponseInputItem],
         final_output: Any,
     ):
         agent_hook_context = AgentHookContext(
             context=context_wrapper.context,
             usage=context_wrapper.usage,
-            turn_input=ItemHelpers.input_to_new_input_list(original_input),
+            _approvals=context_wrapper._approvals,
+            turn_input=context_wrapper.turn_input,
         )
+
         await asyncio.gather(
             hooks.on_agent_end(agent_hook_context, agent, final_output),
             agent.hooks.on_end(agent_hook_context, agent, final_output)
@@ -1449,6 +2209,9 @@ class RunImpl:
                 event = RunItemStreamEvent(item=item, name="mcp_approval_response")
             elif isinstance(item, MCPListToolsItem):
                 event = RunItemStreamEvent(item=item, name="mcp_list_tools")
+            elif isinstance(item, ToolApprovalItem):
+                # Tool approval items should not be streamed - they represent interruptions
+                event = None
 
             else:
                 logger.warning(f"Unexpected item type: {type(item)}")
@@ -1723,16 +2486,41 @@ class ShellAction:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> RunItem:
+        shell_call = _coerce_shell_call(call.tool_call)
+        shell_tool = call.shell_tool
+
+        # Check if approval is needed
+        needs_approval_result = await _evaluate_needs_approval_setting(
+            shell_tool.needs_approval, context_wrapper, shell_call.action, shell_call.call_id
+        )
+
+        if needs_approval_result:
+            approval_status, approval_item = await _resolve_approval_status(
+                tool_name=shell_tool.name,
+                call_id=shell_call.call_id,
+                raw_item=call.tool_call,
+                agent=agent,
+                context_wrapper=context_wrapper,
+                on_approval=shell_tool.on_approval,
+            )
+
+            approval_interruption = _resolve_approval_interruption(
+                approval_status,
+                approval_item,
+                rejection_factory=lambda: _shell_rejection_item(agent, shell_call.call_id),
+            )
+            if approval_interruption:
+                return approval_interruption
+
+        # Approved or no approval needed - proceed with execution
         await asyncio.gather(
-            hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
+            hooks.on_tool_start(context_wrapper, agent, shell_tool),
             (
-                agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
+                agent.hooks.on_tool_start(context_wrapper, agent, shell_tool)
                 if agent.hooks
                 else _coro.noop_coroutine()
             ),
         )
-
-        shell_call = _coerce_shell_call(call.tool_call)
         request = ShellCommandRequest(ctx_wrapper=context_wrapper, data=shell_call)
         status: Literal["completed", "failed"] = "completed"
         output_text = ""
@@ -1847,6 +2635,38 @@ class ApplyPatchAction:
         config: RunConfig,
     ) -> RunItem:
         apply_patch_tool = call.apply_patch_tool
+        operation = _coerce_apply_patch_operation(
+            call.tool_call,
+            context_wrapper=context_wrapper,
+        )
+
+        # Extract call_id from tool_call
+        call_id = _extract_apply_patch_call_id(call.tool_call)
+
+        # Check if approval is needed
+        needs_approval_result = await _evaluate_needs_approval_setting(
+            apply_patch_tool.needs_approval, context_wrapper, operation, call_id
+        )
+
+        if needs_approval_result:
+            approval_status, approval_item = await _resolve_approval_status(
+                tool_name=apply_patch_tool.name,
+                call_id=call_id,
+                raw_item=call.tool_call,
+                agent=agent,
+                context_wrapper=context_wrapper,
+                on_approval=apply_patch_tool.on_approval,
+            )
+
+            approval_interruption = _resolve_approval_interruption(
+                approval_status,
+                approval_item,
+                rejection_factory=lambda: _apply_patch_rejection_item(agent, call_id),
+            )
+            if approval_interruption:
+                return approval_interruption
+
+        # Approved or no approval needed - proceed with execution
         await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
             (
@@ -2045,10 +2865,265 @@ def _get_mapping_or_attr(target: Any, key: str) -> Any:
     return getattr(target, key, None)
 
 
+def _extract_tool_call_id(raw: Any) -> str | None:
+    """Return a call ID from tool call payloads or approval items."""
+    if isinstance(raw, Mapping):
+        candidate = raw.get("callId") or raw.get("call_id") or raw.get("id")
+        return candidate if isinstance(candidate, str) else None
+    candidate = (
+        _get_mapping_or_attr(raw, "call_id")
+        or _get_mapping_or_attr(raw, "callId")
+        or _get_mapping_or_attr(raw, "id")
+    )
+    return candidate if isinstance(candidate, str) else None
+
+
+def _is_hosted_mcp_approval_request(raw_item: Any) -> bool:
+    if isinstance(raw_item, McpApprovalRequest):
+        return True
+    if not isinstance(raw_item, dict):
+        return False
+    provider_data = raw_item.get("providerData", {}) or raw_item.get("provider_data", {})
+    return (
+        raw_item.get("type") == "hosted_tool_call"
+        and provider_data.get("type") == "mcp_approval_request"
+    )
+
+
+def _extract_mcp_request_id(raw_item: Any) -> str | None:
+    if isinstance(raw_item, dict):
+        candidate = raw_item.get("id")
+        return candidate if isinstance(candidate, str) else None
+    if isinstance(raw_item, McpApprovalRequest):
+        return raw_item.id
+    return None
+
+
+def _extract_mcp_request_id_from_run(mcp_run: ToolRunMCPApprovalRequest) -> str | None:
+    request_item = _get_mapping_or_attr(mcp_run, "request_item")
+    if isinstance(request_item, dict):
+        candidate = request_item.get("id")
+    else:
+        candidate = getattr(request_item, "id", None)
+    return candidate if isinstance(candidate, str) else None
+
+
+def _process_hosted_mcp_approvals(
+    *,
+    original_pre_step_items: Sequence[RunItem],
+    mcp_approval_requests: Sequence[ToolRunMCPApprovalRequest],
+    context_wrapper: RunContextWrapper[Any],
+    agent: Agent[Any],
+    append_item: Callable[[RunItem], None],
+) -> tuple[list[ToolApprovalItem], set[str]]:
+    """Handle hosted MCP approvals and return pending ones."""
+    hosted_mcp_approvals_by_id: dict[str, ToolApprovalItem] = {}
+    for item in original_pre_step_items:
+        if not isinstance(item, ToolApprovalItem):
+            continue
+        raw = item.raw_item
+        if not _is_hosted_mcp_approval_request(raw):
+            continue
+        request_id = _extract_mcp_request_id(raw)
+        if request_id:
+            hosted_mcp_approvals_by_id[request_id] = item
+
+    pending_hosted_mcp_approvals: list[ToolApprovalItem] = []
+    pending_hosted_mcp_approval_ids: set[str] = set()
+
+    for mcp_run in mcp_approval_requests:
+        request_id = _extract_mcp_request_id_from_run(mcp_run)
+        approval_item = hosted_mcp_approvals_by_id.get(request_id) if request_id else None
+        if not approval_item or not request_id:
+            continue
+
+        tool_name = RunContextWrapper._resolve_tool_name(approval_item)
+        approved = context_wrapper.get_approval_status(
+            tool_name=tool_name,
+            call_id=request_id,
+            existing_pending=approval_item,
+        )
+
+        if approved is not None:
+            raw_item: McpApprovalResponse = {
+                "type": "mcp_approval_response",
+                "approval_request_id": request_id,
+                "approve": approved,
+            }
+            response_item = MCPApprovalResponseItem(raw_item=raw_item, agent=agent)
+            append_item(response_item)
+            continue
+
+        if approval_item not in pending_hosted_mcp_approvals:
+            pending_hosted_mcp_approvals.append(approval_item)
+        pending_hosted_mcp_approval_ids.add(request_id)
+        append_item(approval_item)
+
+    return pending_hosted_mcp_approvals, pending_hosted_mcp_approval_ids
+
+
+def _collect_manual_mcp_approvals(
+    *,
+    agent: Agent[Any],
+    requests: Sequence[ToolRunMCPApprovalRequest],
+    context_wrapper: RunContextWrapper[Any],
+    existing_pending_by_call_id: Mapping[str, ToolApprovalItem] | None = None,
+) -> tuple[list[MCPApprovalResponseItem], list[ToolApprovalItem]]:
+    """Return already-approved responses and pending approval items for manual MCP flows."""
+    pending_lookup = existing_pending_by_call_id or {}
+    approved: list[MCPApprovalResponseItem] = []
+    pending: list[ToolApprovalItem] = []
+    seen_request_ids: set[str] = set()
+
+    for request in requests:
+        request_item = request.request_item
+        request_id = _extract_mcp_request_id_from_run(request)
+        if request_id and request_id in seen_request_ids:
+            continue
+        if request_id:
+            seen_request_ids.add(request_id)
+
+        tool_name = RunContextWrapper._to_str_or_none(getattr(request_item, "name", None))
+        tool_name = tool_name or request.mcp_tool.name
+
+        existing_pending = pending_lookup.get(request_id or "")
+        approval_status = context_wrapper.get_approval_status(
+            tool_name, request_id or "", existing_pending=existing_pending
+        )
+
+        if approval_status is not None and request_id:
+            approval_response_raw: McpApprovalResponse = {
+                "type": "mcp_approval_response",
+                "approval_request_id": request_id,
+                "approve": approval_status,
+            }
+            approved.append(MCPApprovalResponseItem(raw_item=approval_response_raw, agent=agent))
+            continue
+
+        if approval_status is not None:
+            continue
+
+        pending.append(
+            existing_pending
+            or ToolApprovalItem(
+                agent=agent,
+                raw_item=request_item,
+                tool_name=tool_name,
+            )
+        )
+
+    return approved, pending
+
+
+def _index_approval_items_by_call_id(items: Sequence[RunItem]) -> dict[str, ToolApprovalItem]:
+    """Build a mapping of tool call IDs to pending approval items."""
+    approvals: dict[str, ToolApprovalItem] = {}
+    for item in items:
+        if not isinstance(item, ToolApprovalItem):
+            continue
+        call_id = _extract_tool_call_id(item.raw_item)
+        if call_id:
+            approvals[call_id] = item
+    return approvals
+
+
+def _should_keep_hosted_mcp_item(
+    item: RunItem,
+    *,
+    pending_hosted_mcp_approvals: Sequence[ToolApprovalItem],
+    pending_hosted_mcp_approval_ids: set[str],
+) -> bool:
+    if not isinstance(item, ToolApprovalItem):
+        return True
+    if not _is_hosted_mcp_approval_request(item.raw_item):
+        return False
+    request_id = _extract_mcp_request_id(item.raw_item)
+    return item in pending_hosted_mcp_approvals or (
+        request_id is not None and request_id in pending_hosted_mcp_approval_ids
+    )
+
+
+async def _evaluate_needs_approval_setting(
+    needs_approval_setting: bool | Callable[..., Any], *args: Any
+) -> bool:
+    """Return bool from a needs_approval setting that may be bool or callable/awaitable."""
+    if isinstance(needs_approval_setting, bool):
+        return needs_approval_setting
+    if callable(needs_approval_setting):
+        maybe_result = needs_approval_setting(*args)
+        if inspect.isawaitable(maybe_result):
+            maybe_result = await maybe_result
+        return bool(maybe_result)
+    raise UserError(
+        f"Invalid needs_approval value: expected a bool or callable, "
+        f"got {type(needs_approval_setting).__name__}."
+    )
+
+
+async def _resolve_approval_status(
+    *,
+    tool_name: str,
+    call_id: str,
+    raw_item: Any,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    on_approval: Callable[[RunContextWrapper[Any], ToolApprovalItem], Any] | None = None,
+) -> tuple[bool | None, ToolApprovalItem]:
+    """Build approval item, run on_approval hook, and return latest approval status."""
+    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
+    if on_approval:
+        decision_result = on_approval(context_wrapper, approval_item)
+        if inspect.isawaitable(decision_result):
+            decision_result = await decision_result
+        if isinstance(decision_result, Mapping):
+            if decision_result.get("approve") is True:
+                context_wrapper.approve_tool(approval_item)
+            elif decision_result.get("approve") is False:
+                context_wrapper.reject_tool(approval_item)
+    approval_status = context_wrapper.get_approval_status(
+        tool_name,
+        call_id,
+        existing_pending=approval_item,
+    )
+    return approval_status, approval_item
+
+
+def _resolve_approval_interruption(
+    approval_status: bool | None,
+    approval_item: ToolApprovalItem,
+    *,
+    rejection_factory: Callable[[], RunItem],
+) -> RunItem | ToolApprovalItem | None:
+    """Return a rejection or pending approval item when approval is required."""
+    if approval_status is False:
+        return rejection_factory()
+    if approval_status is not True:
+        return approval_item
+    return None
+
+
+async def _function_needs_approval(
+    function_tool: FunctionTool,
+    context_wrapper: RunContextWrapper[Any],
+    tool_call: ResponseFunctionToolCall,
+) -> bool:
+    """Evaluate a function tool's needs_approval setting with parsed args."""
+    parsed_args: dict[str, Any] = {}
+    if callable(function_tool.needs_approval):
+        try:
+            parsed_args = json.loads(tool_call.arguments or "{}")
+        except json.JSONDecodeError:
+            parsed_args = {}
+    return await _evaluate_needs_approval_setting(
+        function_tool.needs_approval,
+        context_wrapper,
+        parsed_args,
+        tool_call.call_id,
+    )
+
+
 def _extract_shell_call_id(tool_call: Any) -> str:
-    value = _get_mapping_or_attr(tool_call, "call_id")
-    if not value:
-        value = _get_mapping_or_attr(tool_call, "callId")
+    value = _extract_tool_call_id(tool_call)
     if not value:
         raise ModelBehaviorError("Shell call is missing call_id.")
     return str(value)
@@ -2122,9 +3197,7 @@ def _parse_apply_patch_function_args(arguments: str) -> dict[str, Any]:
 
 
 def _extract_apply_patch_call_id(tool_call: Any) -> str:
-    value = _get_mapping_or_attr(tool_call, "call_id")
-    if not value:
-        value = _get_mapping_or_attr(tool_call, "callId")
+    value = _extract_tool_call_id(tool_call)
     if not value:
         raise ModelBehaviorError("Apply patch call is missing call_id.")
     return str(value)
@@ -2196,8 +3269,6 @@ def _is_apply_patch_name(name: str | None, tool: ApplyPatchTool | None) -> bool:
 def _build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
     async def on_invoke_tool(_ctx: ToolContext[Any], value: Any) -> Any:
         if isinstance(value, str):
-            import json
-
             return json.loads(value)
         return value
 

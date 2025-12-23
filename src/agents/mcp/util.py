@@ -149,11 +149,17 @@ class MCPUtil:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
-        return [cls.to_function_tool(tool, server, convert_schemas_to_strict) for tool in tools]
+        return [
+            cls.to_function_tool(tool, server, convert_schemas_to_strict, agent) for tool in tools
+        ]
 
     @classmethod
     def to_function_tool(
-        cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
+        cls,
+        tool: "MCPTool",
+        server: "MCPServer",
+        convert_schemas_to_strict: bool,
+        agent: "AgentBase",
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
         invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
@@ -176,6 +182,7 @@ class MCPUtil:
             params_json_schema=schema,
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
+            needs_approval=server._get_needs_approval_for_tool(tool, agent),
         )
 
     @classmethod

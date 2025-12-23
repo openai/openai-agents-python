@@ -124,6 +124,7 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["tests", "src/agents"]
+omit = ["tests/extensions/memory/test_dapr_redis_integration.py"]
 
 [tool.coverage.report]
 show_missing = true

@@ -5,11 +5,9 @@ import asyncio
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
-from typing_extensions import TypeVar
-
-from ._run_impl import QueueCompleteSentinel
+from ._run_impl import NextStepInterruption, ProcessedResponse, QueueCompleteSentinel
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import (
@@ -19,22 +17,50 @@ from .exceptions import (
     RunErrorDetails,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
-from .items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
+from .items import (
+    ItemHelpers,
+    ModelResponse,
+    RunItem,
+    ToolApprovalItem,
+    TResponseInputItem,
+)
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_state import RunState
 from .stream_events import StreamEvent
+from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .util._pretty_print import (
     pretty_print_result,
     pretty_print_run_result_streaming,
 )
 
-if TYPE_CHECKING:
-    from ._run_impl import QueueCompleteSentinel
-    from .agent import Agent
-    from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-
 T = TypeVar("T")
+
+
+def _populate_state_from_result(
+    state: RunState[Any],
+    result: RunResultBase,
+    *,
+    current_turn: int,
+    last_processed_response: ProcessedResponse | None,
+    current_turn_persisted_item_count: int,
+    tool_use_tracker_snapshot: dict[str, list[str]],
+) -> RunState[Any]:
+    """Populate a RunState with common fields from a RunResult."""
+    state._generated_items = result.new_items
+    state._model_responses = result.raw_responses
+    state._input_guardrail_results = result.input_guardrail_results
+    state._output_guardrail_results = result.output_guardrail_results
+    state._last_processed_response = last_processed_response
+    state._current_turn = current_turn
+    state._current_turn_persisted_item_count = current_turn_persisted_item_count
+    state.set_tool_use_tracker_snapshot(tool_use_tracker_snapshot)
+
+    if result.interruptions:
+        state._current_step = NextStepInterruption(interruptions=result.interruptions)
+
+    return state
 
 
 @dataclass
@@ -69,6 +95,9 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    interruptions: list[ToolApprovalItem]
+    """Pending tool approval requests (interruptions) for this run."""
 
     @property
     @abc.abstractmethod
@@ -146,6 +175,19 @@ class RunResult(RunResultBase):
         repr=False,
         default=None,
     )
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
+    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    _current_turn_persisted_item_count: int = 0
+    """Number of items from new_items already persisted to session for the
+    current turn."""
+    _current_turn: int = 0
+    """The current turn number. This is preserved when converting to RunState."""
+    _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
+    """The original input from the first turn. Unlike `input`, this is never updated during the run.
+    Used by to_state() to preserve the correct originalInput when serializing state."""
+    max_turns: int = 10
+    """The maximum number of turns allowed for this run."""
 
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
@@ -169,6 +211,50 @@ class RunResult(RunResultBase):
         self._last_agent_ref = weakref.ref(agent)
         # Preserve dataclass field so repr/asdict continue to succeed.
         self.__dict__["_last_agent"] = None
+
+    def to_state(self) -> RunState[Any]:
+        """Create a RunState from this result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = await Runner.run(agent, "Use the delete_file tool")
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = await Runner.run(agent, state)
+            ```
+        """
+        # Create a RunState from the current result
+        original_input_for_state = getattr(self, "_original_input", None)
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=original_input_for_state
+            if original_input_for_state is not None
+            else self.input,
+            starting_agent=self.last_agent,
+            max_turns=self.max_turns,
+        )
+
+        return _populate_state_from_result(
+            state,
+            self,
+            current_turn=self._current_turn,
+            last_processed_response=self._last_processed_response,
+            current_turn_persisted_item_count=self._current_turn_persisted_item_count,
+            tool_use_tracker_snapshot=self._tool_use_tracker_snapshot,
+        )
 
     def __str__(self) -> str:
         return pretty_print_result(self)
@@ -208,6 +294,8 @@ class RunResultStreaming(RunResultBase):
         repr=False,
         default=None,
     )
+    _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
+    """The last processed model response. This is needed for resuming from interruptions."""
 
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
@@ -222,12 +310,34 @@ class RunResultStreaming(RunResultBase):
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
+    _waiting_on_event_queue: bool = field(default=False, repr=False)
+
+    _current_turn_persisted_item_count: int = 0
+    """Number of items from new_items already persisted to session for the
+    current turn."""
+
+    _stream_input_persisted: bool = False
+    """Whether the input has been persisted to the session. Prevents double-saving."""
+
+    _original_input_for_persistence: list[TResponseInputItem] = field(default_factory=list)
+    """Original turn input before session history was merged, used for
+    persistence (matches JS sessionInputOriginalSnapshot)."""
 
     # Soft cancel state
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
 
+    _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
+    """The original input from the first turn. Unlike `input`, this is never updated during the run.
+    Used by to_state() to preserve the correct originalInput when serializing state."""
+    _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    _state: Any = field(default=None, repr=False)
+    """Internal reference to the RunState for streaming results."""
+
     def __post_init__(self) -> None:
         self._current_agent_ref = weakref.ref(self.current_agent)
+        # Store the original input at creation time (it will be set via input field)
+        if self._original_input is None:
+            self._original_input = self.input
 
     @property
     def last_agent(self) -> Agent[Any]:
@@ -285,11 +395,13 @@ class RunResultStreaming(RunResultBase):
             self._cleanup_tasks()  # Cancel all running tasks
             self.is_complete = True  # Mark the run as complete to stop event streaming
 
-            # Optionally, clear the event queue to prevent processing stale events
-            while not self._event_queue.empty():
-                self._event_queue.get_nowait()
             while not self._input_guardrail_queue.empty():
                 self._input_guardrail_queue.get_nowait()
+
+            # Unblock any streamers waiting on the event queue.
+            self._event_queue.put_nowait(QueueCompleteSentinel())
+            if not self._waiting_on_event_queue:
+                self._drain_event_queue()
 
         elif mode == "after_turn":
             # Soft cancel - just set the flag
@@ -319,11 +431,14 @@ class RunResultStreaming(RunResultBase):
                     break
 
                 try:
+                    self._waiting_on_event_queue = True
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
                     cancelled = True
                     self.cancel()
                     raise
+                finally:
+                    self._waiting_on_event_queue = False
 
                 if isinstance(item, QueueCompleteSentinel):
                     # Await input guardrails if they are still running, so late
@@ -350,6 +465,14 @@ class RunResultStreaming(RunResultBase):
                 await self._await_task_safely(self._run_impl_task)
                 # Safely terminate all background tasks after main execution has finished
                 self._cleanup_tasks()
+
+            # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
+            # completion sentinels before we clear the queues for observability.
+            await asyncio.sleep(0)
+
+            # Drain queues so callers observing internal state see them empty after completion.
+            self._drain_event_queue()
+            self._drain_input_guardrail_queue()
 
         if self._stored_exception:
             raise self._stored_exception
@@ -382,25 +505,31 @@ class RunResultStreaming(RunResultBase):
 
         # Check the tasks for any exceptions
         if self._run_impl_task and self._run_impl_task.done():
-            run_impl_exc = self._run_impl_task.exception()
-            if run_impl_exc and isinstance(run_impl_exc, Exception):
-                if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
-                    run_impl_exc.run_data = self._create_error_details()
-                self._stored_exception = run_impl_exc
+            if not self._run_impl_task.cancelled():
+                run_impl_exc = self._run_impl_task.exception()
+                if run_impl_exc and isinstance(run_impl_exc, Exception):
+                    if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
+                        run_impl_exc.run_data = self._create_error_details()
+                    self._stored_exception = run_impl_exc
 
         if self._input_guardrails_task and self._input_guardrails_task.done():
-            in_guard_exc = self._input_guardrails_task.exception()
-            if in_guard_exc and isinstance(in_guard_exc, Exception):
-                if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
-                    in_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = in_guard_exc
+            if not self._input_guardrails_task.cancelled():
+                in_guard_exc = self._input_guardrails_task.exception()
+                if in_guard_exc and isinstance(in_guard_exc, Exception):
+                    if isinstance(in_guard_exc, AgentsException) and in_guard_exc.run_data is None:
+                        in_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = in_guard_exc
 
         if self._output_guardrails_task and self._output_guardrails_task.done():
-            out_guard_exc = self._output_guardrails_task.exception()
-            if out_guard_exc and isinstance(out_guard_exc, Exception):
-                if isinstance(out_guard_exc, AgentsException) and out_guard_exc.run_data is None:
-                    out_guard_exc.run_data = self._create_error_details()
-                self._stored_exception = out_guard_exc
+            if not self._output_guardrails_task.cancelled():
+                out_guard_exc = self._output_guardrails_task.exception()
+                if out_guard_exc and isinstance(out_guard_exc, Exception):
+                    if (
+                        isinstance(out_guard_exc, AgentsException)
+                        and out_guard_exc.run_data is None
+                    ):
+                        out_guard_exc.run_data = self._create_error_details()
+                    self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):
         if self._run_impl_task and not self._run_impl_task.done():
@@ -430,3 +559,70 @@ class RunResultStreaming(RunResultBase):
             except Exception:
                 # The exception will be surfaced via _check_errors() if needed.
                 pass
+
+    def _drain_event_queue(self) -> None:
+        """Remove any pending items from the event queue and mark them done."""
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+                self._event_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+            except ValueError:
+                # task_done called too many times; nothing more to drain.
+                break
+
+    def _drain_input_guardrail_queue(self) -> None:
+        """Remove any pending items from the input guardrail queue."""
+        while not self._input_guardrail_queue.empty():
+            try:
+                self._input_guardrail_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    def to_state(self) -> RunState[Any]:
+        """Create a RunState from this streaming result to resume execution.
+
+        This is useful when the run was interrupted (e.g., for tool approval). You can
+        approve or reject the tool calls on the returned state, then pass it back to
+        `Runner.run_streamed()` to continue execution.
+
+        Returns:
+            A RunState that can be used to resume the run.
+
+        Example:
+            ```python
+            # Run agent until it needs approval
+            result = Runner.run_streamed(agent, "Use the delete_file tool")
+            async for event in result.stream_events():
+                pass
+
+            if result.interruptions:
+                # Approve the tool call
+                state = result.to_state()
+                state.approve(result.interruptions[0])
+
+                # Resume the run
+                result = Runner.run_streamed(agent, state)
+                async for event in result.stream_events():
+                    pass
+            ```
+        """
+        # Create a RunState from the current result
+        # Use _original_input (the input from the first turn) instead of input
+        # (which may have been updated during the run)
+        state = RunState(
+            context=self.context_wrapper,
+            original_input=self._original_input if self._original_input is not None else self.input,
+            starting_agent=self.last_agent,
+            max_turns=self.max_turns,
+        )
+
+        return _populate_state_from_result(
+            state,
+            self,
+            current_turn=self.current_turn,
+            last_processed_response=self._last_processed_response,
+            current_turn_persisted_item_count=self._current_turn_persisted_item_count,
+            tool_use_tracker_snapshot=self._tool_use_tracker_snapshot,
+        )

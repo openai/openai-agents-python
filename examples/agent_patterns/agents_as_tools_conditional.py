@@ -2,7 +2,8 @@ import asyncio
 
 from pydantic import BaseModel
 
-from agents import Agent, AgentBase, RunContextWrapper, Runner, trace
+from agents import Agent, AgentBase, ModelSettings, RunContextWrapper, Runner, trace
+from agents.tool import function_tool
 
 """
 This example demonstrates the agents-as-tools pattern with conditional tool enabling.
@@ -25,10 +26,18 @@ def european_enabled(ctx: RunContextWrapper[AppContext], agent: AgentBase) -> bo
     return ctx.context.language_preference == "european"
 
 
+@function_tool(needs_approval=True)
+async def get_user_name() -> str:
+    print("Getting the user's name...")
+    return "Kaz"
+
+
 # Create specialized agents
 spanish_agent = Agent(
     name="spanish_agent",
-    instructions="You respond in Spanish. Always reply to the user's question in Spanish.",
+    instructions="You respond in Spanish. Always reply to the user's question in Spanish. You must call all the tools to best answer the user's question.",
+    model_settings=ModelSettings(tool_choice="required"),
+    tools=[get_user_name],
 )
 
 french_agent = Agent(
@@ -54,6 +63,7 @@ orchestrator = Agent(
             tool_name="respond_spanish",
             tool_description="Respond to the user's question in Spanish",
             is_enabled=True,  # Always enabled
+            needs_approval=True,  # HITL
         ),
         french_agent.as_tool(
             tool_name="respond_french",
@@ -105,8 +115,27 @@ async def main():
             input=user_request,
             context=context.context,
         )
+        while result.interruptions:
 
-        print(f"\nResponse:\n{result.final_output}")
+            async def confirm(question: str) -> bool:
+                loop = asyncio.get_event_loop()
+                answer = await loop.run_in_executor(None, input, f"{question} (y/n): ")
+                normalized = answer.strip().lower()
+                return normalized in ("y", "yes")
+
+            state = result.to_state()
+            for interruption in result.interruptions:
+                prompt = f"\nDo you approve this tool call: {interruption.name} with arguments {interruption.arguments}?"
+                confirmed = await confirm(prompt)
+                if confirmed:
+                    state.approve(interruption)
+                    print(f"✓ Approved: {interruption.name}")
+                else:
+                    state.reject(interruption)
+                    print(f"✗ Rejected: {interruption.name}")
+            result = await Runner.run(orchestrator, state)
+
+    print(f"\nResponse:\n{result.final_output}")
 
 
 if __name__ == "__main__":

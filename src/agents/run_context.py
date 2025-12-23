@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic
 
@@ -6,9 +8,24 @@ from typing_extensions import TypeVar
 from .usage import Usage
 
 if TYPE_CHECKING:
-    from .items import TResponseInputItem
+    from .items import ToolApprovalItem, TResponseInputItem
 
 TContext = TypeVar("TContext", default=Any)
+
+
+class _ApprovalRecord:
+    """Tracks approval/rejection state for a tool.
+
+    ``approved`` and ``rejected`` are either booleans (permanent allow/deny)
+    or lists of call IDs when approval is scoped to specific tool calls.
+    """
+
+    approved: bool | list[str]
+    rejected: bool | list[str]
+
+    def __init__(self):
+        self.approved = []
+        self.rejected = []
 
 
 @dataclass(eq=False)
@@ -28,10 +45,136 @@ class RunContextWrapper(Generic[TContext]):
     last chunk of the stream is processed.
     """
 
+    _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
+    turn_input: list[TResponseInputItem] = field(default_factory=list)
 
-@dataclass(eq=False)
-class AgentHookContext(RunContextWrapper[TContext]):
-    """Context passed to agent hooks (on_start, on_end)."""
+    @staticmethod
+    def _to_str_or_none(value: Any) -> str | None:
+        if isinstance(value, str):
+            return value
+        if value is not None:
+            try:
+                return str(value)
+            except Exception:
+                return None
+        return None
 
-    turn_input: "list[TResponseInputItem]" = field(default_factory=list)
-    """The input items for the current turn."""
+    @staticmethod
+    def _resolve_tool_name(approval_item: ToolApprovalItem) -> str:
+        raw = approval_item.raw_item
+        if approval_item.tool_name:
+            return approval_item.tool_name
+        candidate: Any | None
+        if isinstance(raw, dict):
+            candidate = raw.get("name") or raw.get("type")
+        else:
+            candidate = getattr(raw, "name", None) or getattr(raw, "type", None)
+        return RunContextWrapper._to_str_or_none(candidate) or "unknown_tool"
+
+    @staticmethod
+    def _resolve_call_id(approval_item: ToolApprovalItem) -> str | None:
+        raw = approval_item.raw_item
+        if isinstance(raw, dict):
+            candidate = raw.get("callId") or raw.get("call_id") or raw.get("id")
+        else:
+            candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
+        return RunContextWrapper._to_str_or_none(candidate)
+
+    def _get_or_create_approval_entry(self, tool_name: str) -> _ApprovalRecord:
+        approval_entry = self._approvals.get(tool_name)
+        if approval_entry is None:
+            approval_entry = _ApprovalRecord()
+            self._approvals[tool_name] = approval_entry
+        return approval_entry
+
+    def is_tool_approved(self, tool_name: str, call_id: str) -> bool | None:
+        """Return True/False/None for the given tool call."""
+        approval_entry = self._approvals.get(tool_name)
+        if not approval_entry:
+            return None
+
+        # Check for permanent approval/rejection
+        if approval_entry.approved is True and approval_entry.rejected is True:
+            # Approval takes precedence
+            return True
+
+        if approval_entry.approved is True:
+            return True
+
+        if approval_entry.rejected is True:
+            return False
+
+        approved_ids = (
+            set(approval_entry.approved) if isinstance(approval_entry.approved, list) else set()
+        )
+        rejected_ids = (
+            set(approval_entry.rejected) if isinstance(approval_entry.rejected, list) else set()
+        )
+
+        if call_id in approved_ids:
+            return True
+        if call_id in rejected_ids:
+            return False
+        # Reuse past rejections to avoid re-prompting when the model retries with a new call ID.
+        if rejected_ids and not approved_ids:
+            return False
+        # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
+        return None
+
+    def _apply_approval_decision(
+        self, approval_item: ToolApprovalItem, *, always: bool, approve: bool
+    ) -> None:
+        """Record an approval or rejection decision."""
+        tool_name = self._resolve_tool_name(approval_item)
+        call_id = self._resolve_call_id(approval_item)
+
+        approval_entry = self._get_or_create_approval_entry(tool_name)
+        if always or call_id is None:
+            approval_entry.approved = approve
+            approval_entry.rejected = [] if approve else True
+            if not approve:
+                approval_entry.approved = False
+            return
+
+        target = approval_entry.approved if approve else approval_entry.rejected
+        if isinstance(target, list) and call_id not in target:
+            target.append(call_id)
+
+    def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
+        """Approve a tool call, optionally for all future calls."""
+        self._apply_approval_decision(
+            approval_item,
+            always=always_approve,
+            approve=True,
+        )
+
+    def reject_tool(self, approval_item: ToolApprovalItem, always_reject: bool = False) -> None:
+        """Reject a tool call, optionally for all future calls."""
+        self._apply_approval_decision(
+            approval_item,
+            always=always_reject,
+            approve=False,
+        )
+
+    def get_approval_status(
+        self, tool_name: str, call_id: str, *, existing_pending: ToolApprovalItem | None = None
+    ) -> bool | None:
+        """Return approval status, retrying with pending item's tool name if necessary."""
+        status = self.is_tool_approved(tool_name, call_id)
+        if status is None and existing_pending:
+            fallback_tool_name = self._resolve_tool_name(existing_pending)
+            status = self.is_tool_approved(fallback_tool_name, call_id)
+        return status
+
+    def _rebuild_approvals(self, approvals: dict[str, dict[str, Any]]) -> None:
+        """Restore approvals from serialized state."""
+        self._approvals = {}
+        for tool_name, record_dict in approvals.items():
+            record = _ApprovalRecord()
+            record.approved = record_dict.get("approved", [])
+            record.rejected = record_dict.get("rejected", [])
+            self._approvals[tool_name] = record
+
+
+# Backwards compatibility alias.
+AgentHookContext = RunContextWrapper
