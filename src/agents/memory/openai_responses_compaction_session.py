@@ -25,11 +25,9 @@ DEFAULT_COMPACTION_THRESHOLD = 10
 def select_compaction_candidate_items(
     items: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
-    """Select items that are candidates for compaction.
+    """Select compaction candidate items.
 
-    Excludes:
-    - User messages (type=message, role=user)
-    - Compaction items (type=compaction)
+    Excludes user messages and compaction items.
     """
     return [
         item
@@ -52,7 +50,7 @@ def is_openai_model_name(model: str) -> bool:
     if not trimmed:
         return False
 
-    # Handle fine-tuned models: ft:gpt-4o-mini:org:proj:suffix
+    # Handle fine-tuned models: ft:gpt-4.1:org:proj:suffix
     without_ft_prefix = trimmed[3:] if trimmed.startswith("ft:") else trimmed
     root = without_ft_prefix.split(":", 1)[0]
 
@@ -68,8 +66,9 @@ def is_openai_model_name(model: str) -> bool:
 class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwareSession):
     """Session decorator that triggers responses.compact when stored history grows.
 
-    Wraps any Session (except OpenAIConversationsSession) and automatically calls
-    the OpenAI responses.compact API after each turn when the decision hook returns True.
+    Works with OpenAI Responses API models only. Wraps any Session (except
+    OpenAIConversationsSession) and automatically calls the OpenAI responses.compact
+    API after each turn when the decision hook returns True.
     """
 
     def __init__(
@@ -78,9 +77,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         underlying_session: Session,
         *,
         client: AsyncOpenAI | None = None,
-        model: str = "gpt-4o",
+        model: str = "gpt-4.1",
         should_trigger_compaction: Callable[[dict[str, Any]], bool] | None = None,
     ):
+        """Initialize the compaction session.
+
+        Args:
+            session_id: Identifier for this session.
+            underlying_session: Session store that holds the compacted history. Cannot be
+                OpenAIConversationsSession.
+            client: OpenAI client for responses.compact API calls. Defaults to
+                get_default_openai_client() or new AsyncOpenAI().
+            model: Model to use for responses.compact. Defaults to "gpt-4.1". Must be an
+                OpenAI model name (gpt-*, o*, or ft:gpt-*).
+            should_trigger_compaction: Custom decision hook. Defaults to triggering when
+                10+ compaction candidates exist.
+        """
         if isinstance(underlying_session, OpenAIConversationsSession):
             raise ValueError(
                 "OpenAIResponsesCompactionSession cannot wrap OpenAIConversationsSession "
@@ -119,10 +131,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 "OpenAIResponsesCompactionSession.run_compaction requires a response_id"
             )
 
-        # Get compaction candidates
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
 
-        # Check if should compact
         force = args.get("force", False) if args else False
         should_compact = force or self.should_trigger_compaction(
             {
@@ -138,18 +148,14 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         logger.debug(f"compact: start for {self._response_id} using {self.model}")
 
-        # Call OpenAI responses.compact API
         compacted = await self.client.responses.compact(
             previous_response_id=self._response_id,
             model=self.model,
         )
 
-        # Replace entire session with compacted output
         await self.underlying_session.clear_session()
         output_items: list[TResponseInputItem] = []
         if compacted.output:
-            # We assume output items from API are compatible with input items (dicts)
-            # or we cast them accordingly. The SDK types usually allow this.
             for item in compacted.output:
                 if isinstance(item, dict):
                     output_items.append(item)
@@ -159,7 +165,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if output_items:
             await self.underlying_session.add_items(output_items)
 
-        # Update caches
         self._compaction_candidate_items = select_compaction_candidate_items(output_items)
         self._session_items = output_items
 
@@ -168,13 +173,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"(output={len(output_items)}, candidates={len(self._compaction_candidate_items)})"
         )
 
-    # Delegate all Session methods to underlying_session
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         await self.underlying_session.add_items(items)
-        # Update caches incrementally
         if self._compaction_candidate_items is not None:
             new_candidates = select_compaction_candidate_items(items)
             if new_candidates:
@@ -184,7 +187,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
     async def pop_item(self) -> TResponseInputItem | None:
         popped = await self.underlying_session.pop_item()
-        # Invalidate caches on pop (simple approach)
         if popped:
             self._compaction_candidate_items = None
             self._session_items = None
