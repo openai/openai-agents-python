@@ -38,7 +38,7 @@ async def faq_lookup_tool(question: str) -> str:
     return "I'm sorry, I don't know the answer to that question."
 
 
-@function_tool
+@function_tool(needs_approval=True)
 async def update_seat(confirmation_number: str, new_seat: str) -> str:
     """
     Update the seat for a given confirmation number.

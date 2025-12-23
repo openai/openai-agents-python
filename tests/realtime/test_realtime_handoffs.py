@@ -1,6 +1,9 @@
 """Tests for realtime handoff functionality."""
 
-from typing import Any
+import asyncio
+import inspect
+from collections.abc import Awaitable, Coroutine
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -71,6 +74,13 @@ def test_realtime_handoff_with_on_handoff_callback():
         on_handoff=on_handoff_callback,
     )
 
+    asyncio.run(
+        cast(
+            Coroutine[Any, Any, RealtimeAgent[Any]],
+            handoff_obj.on_invoke_handoff(RunContextWrapper(None), ""),
+        )
+    )
+    assert callback_called == [True]
     assert handoff_obj.agent_name == "callback_agent"
 
 
@@ -106,6 +116,7 @@ def test_realtime_handoff_invalid_param_counts_raise():
     def bad2(a):  # only one parameter
         return None
 
+    assert bad2(None) is None
     with pytest.raises(UserError):
         realtime_handoff(rt, on_handoff=bad2, input_type=int)  # type: ignore[arg-type]
 
@@ -113,6 +124,7 @@ def test_realtime_handoff_invalid_param_counts_raise():
     def bad1(a, b):  # two parameters
         return None
 
+    assert bad1(None, None) is None
     with pytest.raises(UserError):
         realtime_handoff(rt, on_handoff=bad1)  # type: ignore[arg-type]
 
@@ -129,6 +141,8 @@ async def test_realtime_handoff_missing_input_json_raises_model_error():
     with pytest.raises(ModelBehaviorError):
         await h.on_invoke_handoff(RunContextWrapper(None), "null")
 
+    await with_input(RunContextWrapper(None), 1)
+
 
 @pytest.mark.asyncio
 async def test_realtime_handoff_is_enabled_async(monkeypatch):
@@ -138,9 +152,80 @@ async def test_realtime_handoff_is_enabled_async(monkeypatch):
         return True
 
     h = realtime_handoff(rt, is_enabled=is_enabled)
-
-    from collections.abc import Awaitable
-    from typing import cast as _cast
-
     assert callable(h.is_enabled)
-    assert await _cast(Awaitable[bool], h.is_enabled(RunContextWrapper(None), rt))
+    result = h.is_enabled(RunContextWrapper(None), rt)
+    assert isinstance(result, Awaitable)
+    assert await result
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_rejects_none_input() -> None:
+    rt = RealtimeAgent(name="x")
+
+    async def with_input(ctx: RunContextWrapper[Any], data: int) -> None:
+        return None
+
+    handoff_obj = realtime_handoff(rt, on_handoff=with_input, input_type=int)
+
+    with pytest.raises(ModelBehaviorError):
+        await handoff_obj.on_invoke_handoff(RunContextWrapper(None), cast(str, None))
+
+    await with_input(RunContextWrapper(None), 2)
+
+
+@pytest.mark.asyncio
+async def test_realtime_handoff_sync_is_enabled_callable() -> None:
+    rt = RealtimeAgent(name="x")
+    calls: list[bool] = []
+
+    def is_enabled(ctx: RunContextWrapper[Any], agent: RealtimeAgent[Any]) -> bool:
+        calls.append(True)
+        assert agent is rt
+        return False
+
+    handoff_obj = realtime_handoff(rt, is_enabled=is_enabled)
+    assert callable(handoff_obj.is_enabled)
+    enabled_result = handoff_obj.is_enabled(RunContextWrapper(None), rt)
+    if inspect.isawaitable(enabled_result):
+        assert await enabled_result is False
+    else:
+        assert enabled_result is False
+    assert calls, "is_enabled callback should be invoked"
+
+
+def test_realtime_handoff_sync_on_handoff_executes() -> None:
+    rt = RealtimeAgent(name="sync")
+    called: list[int] = []
+
+    def on_handoff(ctx: RunContextWrapper[Any], value: int) -> None:
+        called.append(value)
+
+    handoff_obj = realtime_handoff(rt, on_handoff=on_handoff, input_type=int)
+    result: RealtimeAgent[Any] = asyncio.run(
+        cast(
+            Coroutine[Any, Any, RealtimeAgent[Any]],
+            handoff_obj.on_invoke_handoff(RunContextWrapper(None), "5"),
+        )
+    )
+
+    assert result is rt
+    assert called == [5]
+
+
+def test_realtime_handoff_on_handoff_without_input_runs() -> None:
+    rt = RealtimeAgent(name="no_input")
+    called: list[bool] = []
+
+    def on_handoff(ctx: RunContextWrapper[Any]) -> None:
+        called.append(True)
+
+    handoff_obj = realtime_handoff(rt, on_handoff=on_handoff)
+    result: RealtimeAgent[Any] = asyncio.run(
+        cast(
+            Coroutine[Any, Any, RealtimeAgent[Any]],
+            handoff_obj.on_invoke_handoff(RunContextWrapper(None), ""),
+        )
+    )
+
+    assert result is rt
+    assert called == [True]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import dataclasses
 import gc
 import weakref
@@ -7,22 +9,35 @@ import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from pydantic import BaseModel
 
-from agents import Agent, MessageOutputItem, RunContextWrapper, RunResult, RunResultStreaming
+from agents import (
+    Agent,
+    MessageOutputItem,
+    RunContextWrapper,
+    RunItem,
+    RunResult,
+    RunResultStreaming,
+)
 from agents.exceptions import AgentsException
 
 
-def create_run_result(final_output: Any) -> RunResult:
+def create_run_result(
+    final_output: Any | None,
+    *,
+    new_items: list[RunItem] | None = None,
+    last_agent: Agent[Any] | None = None,
+) -> RunResult:
     return RunResult(
         input="test",
-        new_items=[],
+        new_items=new_items or [],
         raw_responses=[],
         final_output=final_output,
         input_guardrail_results=[],
         output_guardrail_results=[],
         tool_input_guardrail_results=[],
         tool_output_guardrail_results=[],
-        _last_agent=Agent(name="test"),
+        _last_agent=last_agent or Agent(name="test"),
         context_wrapper=RunContextWrapper(context=None),
+        interruptions=[],
     )
 
 
@@ -80,18 +95,7 @@ def test_run_result_release_agents_breaks_strong_refs() -> None:
     message = _create_message("hello")
     agent = Agent(name="leak-test-agent")
     item = MessageOutputItem(agent=agent, raw_item=message)
-    result = RunResult(
-        input="test",
-        new_items=[item],
-        raw_responses=[],
-        final_output=None,
-        input_guardrail_results=[],
-        output_guardrail_results=[],
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
-        _last_agent=agent,
-        context_wrapper=RunContextWrapper(context=None),
-    )
+    result = create_run_result(None, new_items=[item], last_agent=agent)
     assert item.agent is not None
     assert item.agent.name == "leak-test-agent"
 
@@ -111,18 +115,7 @@ def test_run_item_retains_agent_when_result_is_garbage_collected() -> None:
         message = _create_message("persist")
         agent = Agent(name="persisted-agent")
         item = MessageOutputItem(agent=agent, raw_item=message)
-        result = RunResult(
-            input="test",
-            new_items=[item],
-            raw_responses=[],
-            final_output=None,
-            input_guardrail_results=[],
-            output_guardrail_results=[],
-            tool_input_guardrail_results=[],
-            tool_output_guardrail_results=[],
-            _last_agent=agent,
-            context_wrapper=RunContextWrapper(context=None),
-        )
+        result = create_run_result(None, new_items=[item], last_agent=agent)
         return item, weakref.ref(result)
 
     item, result_ref = build_item()
@@ -161,18 +154,7 @@ def test_run_item_repr_and_asdict_after_release() -> None:
 
 def test_run_result_repr_and_asdict_after_release_agents() -> None:
     agent = Agent(name="repr-result-agent")
-    result = RunResult(
-        input="test",
-        new_items=[],
-        raw_responses=[],
-        final_output=None,
-        input_guardrail_results=[],
-        output_guardrail_results=[],
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
-        _last_agent=agent,
-        context_wrapper=RunContextWrapper(context=None),
-    )
+    result = create_run_result(None, last_agent=agent)
 
     result.release_agents()
 
@@ -188,18 +170,7 @@ def test_run_result_release_agents_without_releasing_new_items() -> None:
     item_agent = Agent(name="item-agent")
     last_agent = Agent(name="last-agent")
     item = MessageOutputItem(agent=item_agent, raw_item=message)
-    result = RunResult(
-        input="test",
-        new_items=[item],
-        raw_responses=[],
-        final_output=None,
-        input_guardrail_results=[],
-        output_guardrail_results=[],
-        tool_input_guardrail_results=[],
-        tool_output_guardrail_results=[],
-        _last_agent=last_agent,
-        context_wrapper=RunContextWrapper(context=None),
-    )
+    result = create_run_result(None, new_items=[item], last_agent=last_agent)
 
     result.release_agents(release_new_items=False)
 
@@ -229,6 +200,7 @@ def test_run_result_release_agents_is_idempotent() -> None:
         tool_output_guardrail_results=[],
         _last_agent=agent,
         context_wrapper=RunContextWrapper(context=None),
+        interruptions=[],
     )
 
     result.release_agents()
@@ -263,6 +235,7 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
         max_turns=1,
         _current_agent_output_schema=None,
         trace=None,
+        interruptions=[],
     )
 
     streaming_result.release_agents(release_new_items=False)

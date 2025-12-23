@@ -34,6 +34,10 @@ To use the same UI with your own agents, edit `agent.py` and ensure get_starting
 6. Monitor raw events in the right pane (click to expand/collapse)
 7. Click **Disconnect** when done
 
+### Human-in-the-loop approvals
+
+- The seat update tool now requires approval. When the agent wants to run it, the browser shows a `window.confirm` dialog so you can allow or deny the tool call before it executes.
+
 ## Architecture
 
 -   **Backend**: FastAPI server with WebSocket connections for real-time communication

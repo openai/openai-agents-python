@@ -41,7 +41,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import ToolCallOutputItem
+from agents.items import normalize_function_call_output_payload
 
 
 def make_message(
@@ -211,12 +211,14 @@ def test_handoff_output_item_retains_agents_until_gc() -> None:
     assert item.target_agent is None
 
 
-def test_handoff_output_item_converts_api_payload() -> None:
+def test_handoff_output_item_converts_protocol_payload() -> None:
     raw_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_output",
+            "type": "function_call_result",
             "call_id": "call-123",
+            "name": "transfer_to_weather",
+            "status": "completed",
             "output": "ok",
         },
     )
@@ -231,18 +233,20 @@ def test_handoff_output_item_converts_api_payload() -> None:
     )
 
     converted = item.to_input_item()
-    # HandoffOutputItem should be passthrough for API-shaped payloads, not mutate fields.
     assert converted["type"] == "function_call_output"
     assert converted["call_id"] == "call-123"
-    assert converted["output"] == "ok"
+    assert "status" not in converted
+    assert "name" not in converted
 
 
 def test_handoff_output_item_stringifies_object_output() -> None:
     raw_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_output",
+            "type": "function_call_result",
             "call_id": "call-obj",
+            "name": "transfer_to_weather",
+            "status": "completed",
             "output": {"assistant": "Weather Assistant"},
         },
     )
@@ -258,24 +262,18 @@ def test_handoff_output_item_stringifies_object_output() -> None:
 
     converted = item.to_input_item()
     assert converted["type"] == "function_call_output"
-    assert converted["call_id"] == "call-obj"
-    assert isinstance(converted["output"], dict)
-    assert converted["output"] == {"assistant": "Weather Assistant"}
+    assert isinstance(converted["output"], str)
+    assert "Weather Assistant" in converted["output"]
 
 
-def test_tool_call_output_item_preserves_function_output_structure() -> None:
-    agent = Agent(name="tester")
-    raw_item = {
+def test_normalize_function_call_output_payload_handles_lists() -> None:
+    payload = {
         "type": "function_call_output",
-        "call_id": "call-keep",
-        "output": [{"type": "output_text", "text": "value"}],
+        "output": [{"type": "text", "text": "value"}],
     }
-    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="value")
-
-    payload = item.to_input_item()
-    assert isinstance(payload, dict)
-    assert payload["type"] == "function_call_output"
-    assert payload["output"] == raw_item["output"]
+    normalized = normalize_function_call_output_payload(payload)
+    assert isinstance(normalized["output"], str)
+    assert "value" in normalized["output"]
 
 
 def test_tool_call_output_item_constructs_function_call_output_dict():

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import field
-from typing import Annotated
+from typing import Annotated, Any
 
 from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, TypeAdapter, ValidationError
 from pydantic.dataclasses import dataclass
 
 
@@ -29,6 +30,101 @@ def _normalize_output_tokens_details(
     if isinstance(v, CompletionTokensDetails):
         return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
     return v
+
+
+def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
+    """Serialize token details while applying the given default when empty."""
+    if hasattr(details, "model_dump"):
+        serialized = details.model_dump()
+        if isinstance(serialized, dict) and serialized:
+            return serialized
+    return dict(default)
+
+
+def serialize_usage(usage: Usage) -> dict[str, Any]:
+    """Serialize a Usage object into a JSON-friendly dictionary."""
+    input_details = _serialize_usage_details(usage.input_tokens_details, {"cached_tokens": 0})
+    output_details = _serialize_usage_details(usage.output_tokens_details, {"reasoning_tokens": 0})
+
+    def _serialize_request_entry(entry: RequestUsage) -> dict[str, Any]:
+        return {
+            "inputTokens": entry.input_tokens,
+            "outputTokens": entry.output_tokens,
+            "totalTokens": entry.total_tokens,
+            "inputTokensDetails": _serialize_usage_details(
+                entry.input_tokens_details, {"cached_tokens": 0}
+            ),
+            "outputTokensDetails": _serialize_usage_details(
+                entry.output_tokens_details, {"reasoning_tokens": 0}
+            ),
+        }
+
+    return {
+        "requests": usage.requests,
+        "inputTokens": usage.input_tokens,
+        "inputTokensDetails": [input_details],
+        "outputTokens": usage.output_tokens,
+        "outputTokensDetails": [output_details],
+        "totalTokens": usage.total_tokens,
+        "requestUsageEntries": [
+            _serialize_request_entry(entry) for entry in usage.request_usage_entries
+        ],
+    }
+
+
+def _coerce_token_details(adapter: TypeAdapter[Any], raw_value: Any, default: Any) -> Any:
+    """Deserialize token details safely with a fallback value."""
+    candidate = raw_value
+    if isinstance(candidate, list) and candidate:
+        candidate = candidate[0]
+    try:
+        return adapter.validate_python(candidate)
+    except ValidationError:
+        return default
+
+
+def deserialize_usage(usage_data: Mapping[str, Any]) -> Usage:
+    """Rebuild a Usage object from serialized JSON data."""
+    input_details = _coerce_token_details(
+        TypeAdapter(InputTokensDetails),
+        usage_data.get("inputTokensDetails") or {"cached_tokens": 0},
+        InputTokensDetails(cached_tokens=0),
+    )
+    output_details = _coerce_token_details(
+        TypeAdapter(OutputTokensDetails),
+        usage_data.get("outputTokensDetails") or {"reasoning_tokens": 0},
+        OutputTokensDetails(reasoning_tokens=0),
+    )
+
+    request_entries: list[RequestUsage] = []
+    for entry in usage_data.get("requestUsageEntries", []):
+        request_entries.append(
+            RequestUsage(
+                input_tokens=entry.get("inputTokens", 0),
+                output_tokens=entry.get("outputTokens", 0),
+                total_tokens=entry.get("totalTokens", 0),
+                input_tokens_details=_coerce_token_details(
+                    TypeAdapter(InputTokensDetails),
+                    entry.get("inputTokensDetails") or {"cached_tokens": 0},
+                    InputTokensDetails(cached_tokens=0),
+                ),
+                output_tokens_details=_coerce_token_details(
+                    TypeAdapter(OutputTokensDetails),
+                    entry.get("outputTokensDetails") or {"reasoning_tokens": 0},
+                    OutputTokensDetails(reasoning_tokens=0),
+                ),
+            )
+        )
+
+    return Usage(
+        requests=usage_data.get("requests", 0),
+        input_tokens=usage_data.get("inputTokens", 0),
+        output_tokens=usage_data.get("outputTokens", 0),
+        total_tokens=usage_data.get("totalTokens", 0),
+        input_tokens_details=input_details,
+        output_tokens_details=output_details,
+        request_usage_entries=request_entries,
+    )
 
 
 @dataclass

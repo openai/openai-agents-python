@@ -69,6 +69,20 @@ def _make_message(text: str) -> ResponseOutputMessage:
     )
 
 
+def test_fake_computer_implements_interface() -> None:
+    computer = FakeComputer("iface")
+
+    computer.screenshot()
+    computer.click(0, 0, "left")
+    computer.double_click(0, 0)
+    computer.scroll(0, 0, 1, 1)
+    computer.type("hello")
+    computer.wait()
+    computer.move(1, 1)
+    computer.keypress(["enter"])
+    computer.drag([(0, 0), (1, 1)])
+
+
 @pytest.mark.asyncio
 async def test_resolve_computer_per_run_context() -> None:
     counter = 0

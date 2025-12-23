@@ -15,17 +15,21 @@ from agents import (
     ShellTool,
     trace,
 )
+from agents.items import ToolApprovalItem
+from agents.run_context import RunContextWrapper
+from agents.tool import ShellOnApprovalFunctionResult
+
+SHELL_AUTO_APPROVE = os.environ.get("SHELL_AUTO_APPROVE") == "1"
 
 
 class ShellExecutor:
-    """Executes shell commands with optional approval."""
+    """Executes shell commands; approval is handled via ShellTool."""
 
     def __init__(self, cwd: Path | None = None):
         self.cwd = Path(cwd or Path.cwd())
 
     async def __call__(self, request: ShellCommandRequest) -> ShellResult:
         action = request.data.action
-        await require_approval(action.commands)
 
         outputs: list[ShellCommandOutput] = []
         for command in action.commands:
@@ -70,20 +74,37 @@ class ShellExecutor:
         )
 
 
-async def require_approval(commands: Sequence[str]) -> None:
-    if os.environ.get("SHELL_AUTO_APPROVE") == "1":
-        return
+async def prompt_shell_approval(commands: Sequence[str]) -> bool:
+    """Simple CLI prompt for shell approvals."""
+    if SHELL_AUTO_APPROVE:
+        return True
     print("Shell command approval required:")
     for entry in commands:
         print(" ", entry)
     response = input("Proceed? [y/N] ").strip().lower()
-    if response not in {"y", "yes"}:
-        raise RuntimeError("Shell command execution rejected by user.")
+    return response in {"y", "yes"}
 
 
 async def main(prompt: str, model: str) -> None:
     with trace("shell_example"):
         print(f"[info] Using model: {model}")
+
+        async def on_shell_approval(
+            _context: RunContextWrapper, approval_item: ToolApprovalItem
+        ) -> ShellOnApprovalFunctionResult:
+            raw = approval_item.raw_item
+            commands: Sequence[str] = ()
+            if isinstance(raw, dict):
+                action = raw.get("action", {})
+                if isinstance(action, dict):
+                    commands = action.get("commands", [])
+            else:
+                action_obj = getattr(raw, "action", None)
+                if action_obj and hasattr(action_obj, "commands"):
+                    commands = action_obj.commands
+            approved = await prompt_shell_approval(commands)
+            return {"approve": approved, "reason": "user rejected" if not approved else "approved"}
+
         agent = Agent(
             name="Shell Assistant",
             model=model,
@@ -91,7 +112,13 @@ async def main(prompt: str, model: str) -> None:
                 "You can run shell commands using the shell tool. "
                 "Keep responses concise and include command output when helpful."
             ),
-            tools=[ShellTool(executor=ShellExecutor())],
+            tools=[
+                ShellTool(
+                    executor=ShellExecutor(),
+                    needs_approval=True,
+                    on_approval=on_shell_approval,
+                )
+            ],
             model_settings=ModelSettings(tool_choice="required"),
         )
 

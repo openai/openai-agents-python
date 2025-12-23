@@ -9,6 +9,7 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
@@ -121,8 +122,29 @@ class FakeModel(Model):
                 )
                 raise output
 
+            # Convert apply_patch_call dicts to ResponseCustomToolCall
+            # to avoid Pydantic validation errors
+            converted_output = []
+            for item in output:
+                if isinstance(item, dict) and item.get("type") == "apply_patch_call":
+                    import json
+
+                    operation = item.get("operation", {})
+                    operation_json = (
+                        json.dumps(operation) if isinstance(operation, dict) else str(operation)
+                    )
+                    converted_item = ResponseCustomToolCall(
+                        type="custom_tool_call",
+                        name="apply_patch",
+                        call_id=item.get("call_id") or item.get("callId", ""),
+                        input=operation_json,
+                    )
+                    converted_output.append(converted_item)
+                else:
+                    converted_output.append(item)
+
             return ModelResponse(
-                output=output,
+                output=converted_output,
                 usage=self.hardcoded_usage or Usage(),
                 response_id="resp-789",
             )

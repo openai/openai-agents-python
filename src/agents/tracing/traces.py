@@ -230,7 +230,7 @@ class TraceImpl(Trace):
         group_id: str | None,
         metadata: dict[str, Any] | None,
         processor: TracingProcessor,
-        tracing_api_key: str | None,
+        tracing_api_key: str | None = None,
     ):
         self._name = name
         self._trace_id = trace_id or util.gen_trace_id()

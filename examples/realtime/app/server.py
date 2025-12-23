@@ -103,6 +103,20 @@ class RealtimeWebSocketManager:
             return
         await session.send_message(message)  # delegates to RealtimeModelSendUserInput path
 
+    async def approve_tool_call(self, session_id: str, call_id: str, *, always: bool = False):
+        """Approve a pending tool call for a session."""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        await session.approve_tool_call(call_id, always=always)
+
+    async def reject_tool_call(self, session_id: str, call_id: str, *, always: bool = False):
+        """Reject a pending tool call for a session."""
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return
+        await session.reject_tool_call(call_id, always=always)
+
     async def interrupt(self, session_id: str) -> None:
         """Interrupt current model playback/response for a session."""
         session = self.active_sessions.get(session_id)
@@ -156,6 +170,11 @@ class RealtimeWebSocketManager:
         elif event.type == "tool_end":
             base_event["tool"] = event.tool.name
             base_event["output"] = str(event.output)
+        elif event.type == "tool_approval_required":
+            base_event["tool"] = event.tool.name
+            base_event["call_id"] = event.call_id
+            base_event["arguments"] = event.arguments
+            base_event["agent"] = event.agent.name
         elif event.type == "audio":
             base_event["audio"] = base64.b64encode(event.audio.data).decode("utf-8")
         elif event.type == "audio_interrupted":
@@ -331,6 +350,24 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         await websocket.send_text(
                             json.dumps({"type": "error", "error": "Empty image."})
                         )
+            elif message["type"] == "tool_approval_decision":
+                call_id = message.get("call_id")
+                approve = bool(message.get("approve"))
+                always = bool(message.get("always", False))
+                if not call_id:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "error": "Missing call_id for tool approval decision.",
+                            }
+                        )
+                    )
+                    continue
+                if approve:
+                    await manager.approve_tool_call(session_id, call_id, always=always)
+                else:
+                    await manager.reject_tool_call(session_id, call_id, always=always)
             elif message["type"] == "interrupt":
                 await manager.interrupt(session_id)
 

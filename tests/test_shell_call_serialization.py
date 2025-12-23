@@ -3,8 +3,11 @@ from __future__ import annotations
 import pytest
 
 from agents import _run_impl as run_impl
+from agents.agent import Agent
 from agents.exceptions import ModelBehaviorError
+from agents.items import ToolCallOutputItem
 from agents.tool import ShellCallOutcome, ShellCommandOutput
+from tests.fake_model import FakeModel
 
 
 def test_coerce_shell_call_reads_max_output_length() -> None:
@@ -61,3 +64,54 @@ def test_serialize_shell_output_emits_canonical_outcome() -> None:
     assert payload["outcome"]["type"] == "exit"
     assert payload["outcome"]["exit_code"] == 0
     assert "exitCode" not in payload["outcome"]
+
+
+def test_shell_rejection_payload_sets_exit_code() -> None:
+    agent = Agent(name="tester", model=FakeModel())
+    raw_item = {
+        "type": "shell_call_output",
+        "call_id": "call-1",
+        "output": [
+            {
+                "stdout": "",
+                "stderr": "rejected",
+                "outcome": {"type": "exit", "exit_code": None},
+            }
+        ],
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="rejected")
+    payload = item.to_input_item()
+    assert isinstance(payload, dict)
+    outputs = payload.get("output")
+    assert isinstance(outputs, list)
+    first_output = outputs[0]
+    assert isinstance(first_output, dict)
+    outcome = first_output.get("outcome")
+    assert isinstance(outcome, dict)
+    assert outcome["exit_code"] == 1
+
+
+def test_shell_output_preserves_zero_exit_code() -> None:
+    agent = Agent(name="tester", model=FakeModel())
+    raw_item = {
+        "type": "shell_call_output",
+        "call_id": "call-2",
+        "output": [
+            {
+                "stdout": "ok",
+                "stderr": "",
+                "outcome": {"type": "exit", "exitCode": 0},
+            }
+        ],
+    }
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="ok")
+    payload = item.to_input_item()
+    assert isinstance(payload, dict)
+    outputs = payload.get("output")
+    assert isinstance(outputs, list)
+    first_output = outputs[0]
+    assert isinstance(first_output, dict)
+    outcome = first_output.get("outcome")
+    assert isinstance(outcome, dict)
+    assert outcome["exit_code"] == 0
+    assert "exitCode" not in outcome

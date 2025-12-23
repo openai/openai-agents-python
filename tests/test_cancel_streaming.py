@@ -176,3 +176,57 @@ async def test_stream_events_respects_asyncio_timeout_cancellation():
 
     assert elapsed < 0.3, "Cancellation should propagate promptly when waiting for events."
     result.cancel()
+
+
+@pytest.mark.asyncio
+async def test_cancel_immediate_unblocks_waiting_stream_consumer():
+    block_event = asyncio.Event()
+
+    class BlockingFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            await block_event.wait()
+            async for event in super().stream_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            ):
+                yield event
+
+    model = BlockingFakeModel()
+    agent = Agent(name="Joker", model=model)
+
+    result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
+
+    async def consume_events():
+        return [event async for event in result.stream_events()]
+
+    consumer_task = asyncio.create_task(consume_events())
+    await asyncio.sleep(0)
+
+    result.cancel(mode="immediate")
+
+    events = await asyncio.wait_for(consumer_task, timeout=1)
+
+    assert len(events) <= 1
+    assert not block_event.is_set()
+    assert result.is_complete
