@@ -50,6 +50,15 @@ class RequestUsage:
     output_tokens_details: OutputTokensDetails
     """Details about the output tokens for this individual request."""
 
+    model_name: str = ""
+    """The model name used for this request."""
+
+    agent_name: str = ""
+    """The agent name that made this request."""
+
+    response_id: str | None = None
+    """The response ID from the API for this request."""
+
 
 @dataclass
 class Usage:
@@ -106,13 +115,22 @@ class Usage:
         if output_details_none or output_reasoning_none:
             self.output_tokens_details = OutputTokensDetails(reasoning_tokens=0)
 
-    def add(self, other: Usage) -> None:
+    def add(
+        self,
+        other: Usage,
+        model_name: str = "",
+        agent_name: str = "",
+        response_id: str | None = None,
+    ) -> None:
         """Add another Usage object to this one, aggregating all fields.
 
         This method automatically preserves request_usage_entries.
 
         Args:
             other: The Usage object to add to this one.
+            model_name: The model name used for this request.
+            agent_name: The agent name that made this request.
+            response_id: The response ID from the API for this request.
         """
         self.requests += other.requests if other.requests else 0
         self.input_tokens += other.input_tokens if other.input_tokens else 0
@@ -158,6 +176,9 @@ class Usage:
                 total_tokens=other.total_tokens,
                 input_tokens_details=input_details,
                 output_tokens_details=output_details,
+                model_name=model_name,
+                agent_name=agent_name,
+                response_id=response_id,
             )
             self.request_usage_entries.append(request_usage)
         elif other.request_usage_entries:

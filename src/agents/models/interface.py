@@ -36,6 +36,9 @@ class ModelTracing(enum.Enum):
 class Model(abc.ABC):
     """The base interface for calling an LLM."""
 
+    # The model name. Subclasses can set this in __init__.
+    model: str = ""
+
     @abc.abstractmethod
     async def get_response(
         self,
