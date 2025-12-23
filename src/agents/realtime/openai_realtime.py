@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, Callable, Literal, TypeAlias, Union, cast
+from typing import Annotated, Any, Callable, Literal, Union, cast
 
 import pydantic
 import websockets
@@ -79,7 +79,7 @@ from openai.types.realtime.session_update_event import (
 )
 from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
-from typing_extensions import assert_never
+from typing_extensions import TypeAlias, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
