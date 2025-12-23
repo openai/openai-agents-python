@@ -21,6 +21,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
+from ..tool import MCPToolApprovalFunction
 from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
 
 T = TypeVar("T")
@@ -105,6 +106,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        require_approval: Literal["always", "never"]
+        | dict[str, Literal["always", "never"]] = "never",
     ):
         """
         Args:
@@ -128,6 +132,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            on_approval_request: An optional function that will be called if approval is requested
+                for an MCP tool. If not provided and approval is required, tools will execute
+                without approval (with a warning logged).
+            require_approval: Policy for requiring approval before tool execution. Can be "always",
+                "never", or a dict mapping tool names to policies. Defaults to "never".
         """
         super().__init__(use_structured_content=use_structured_content)
         self.session: ClientSession | None = None
@@ -146,6 +155,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
+
+        # Validate require_approval parameter
+        if isinstance(require_approval, dict):
+            for tool_name, policy in require_approval.items():
+                if policy not in ("always", "never"):
+                    raise UserError(
+                        f"require_approval dict values must be 'always' or 'never', got {policy!r} for tool {tool_name!r}"  # noqa: E501
+                    )
+
+        self.on_approval_request = on_approval_request
+        self.require_approval = require_approval
 
     async def _apply_tool_filter(
         self,
@@ -226,6 +246,23 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 continue
 
         return filtered_tools
+
+    def _should_require_approval(self, tool_name: str) -> bool:
+        """Check if approval is required for a specific tool.
+
+        Args:
+            tool_name: The name of the tool to check.
+
+        Returns:
+            True if approval is required, False otherwise.
+        """
+        if self.require_approval == "never":
+            return False
+        if self.require_approval == "always":
+            return True
+        if isinstance(self.require_approval, dict):
+            return self.require_approval.get(tool_name, "never") == "always"
+        return False
 
     @abc.abstractmethod
     def create_streams(
@@ -401,6 +438,9 @@ class MCPServerStdio(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        require_approval: Literal["always", "never"]
+        | dict[str, Literal["always", "never"]] = "never",
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -430,6 +470,11 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            on_approval_request: An optional function that will be called if approval is requested
+                for an MCP tool. If not provided and approval is required, tools will execute
+                without approval (with a warning logged).
+            require_approval: Policy for requiring approval before tool execution. Can be "always",
+                "never", or a dict mapping tool names to policies. Defaults to "never".
         """
         super().__init__(
             cache_tools_list,
@@ -439,6 +484,8 @@ class MCPServerStdio(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            on_approval_request=on_approval_request,
+            require_approval=require_approval,
         )
 
         self.params = StdioServerParameters(
@@ -503,6 +550,9 @@ class MCPServerSse(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        require_approval: Literal["always", "never"]
+        | dict[str, Literal["always", "never"]] = "never",
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -534,6 +584,11 @@ class MCPServerSse(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            on_approval_request: An optional function that will be called if approval is requested
+                for an MCP tool. If not provided and approval is required, tools will execute
+                without approval (with a warning logged).
+            require_approval: Policy for requiring approval before tool execution. Can be "always",
+                "never", or a dict mapping tool names to policies. Defaults to "never".
         """
         super().__init__(
             cache_tools_list,
@@ -543,6 +598,8 @@ class MCPServerSse(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            on_approval_request=on_approval_request,
+            require_approval=require_approval,
         )
 
         self.params = params
@@ -610,6 +667,9 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
+        on_approval_request: MCPToolApprovalFunction | None = None,
+        require_approval: Literal["always", "never"]
+        | dict[str, Literal["always", "never"]] = "never",
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -642,6 +702,11 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 backoff between retries.
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
+            on_approval_request: An optional function that will be called if approval is requested
+                for an MCP tool. If not provided and approval is required, tools will execute
+                without approval (with a warning logged).
+            require_approval: Policy for requiring approval before tool execution. Can be "always",
+                "never", or a dict mapping tool names to policies. Defaults to "never".
         """
         super().__init__(
             cache_tools_list,
@@ -651,6 +716,8 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             max_retry_attempts,
             retry_backoff_seconds_base,
             message_handler=message_handler,
+            on_approval_request=on_approval_request,
+            require_approval=require_approval,
         )
 
         self.params = params

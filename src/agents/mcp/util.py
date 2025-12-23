@@ -1,9 +1,12 @@
 import functools
+import inspect
 import json
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
 
 import httpx
+from openai.types.responses.response_output_item import McpApprovalRequest
 from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
@@ -11,7 +14,7 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
+from ..tool import FunctionTool, MCPToolApprovalRequest, Tool
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
@@ -198,6 +201,62 @@ class MCPUtil:
             logger.debug(f"Invoking MCP tool {tool.name}")
         else:
             logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+
+        # Check if approval is required before executing the tool
+        if hasattr(server, "_should_require_approval") and server._should_require_approval(
+            tool.name
+        ):
+            if (
+                not hasattr(server, "on_approval_request")
+                or getattr(server, "on_approval_request", None) is None
+            ):
+                logger.warning(
+                    f"MCP server '{server.name}' requires approval for tool '{tool.name}' but no "
+                    f"on_approval_request callback provided. Tool will execute without approval."
+                )
+            else:
+                # Create synthetic McpApprovalRequest
+                synthetic_request = McpApprovalRequest(
+                    id=str(uuid.uuid4()),
+                    arguments=json.dumps(json_data),
+                    name=tool.name,
+                    server_label=server.name,
+                    type="mcp_approval_request",
+                )
+
+                # Wrap in MCPToolApprovalRequest (reuse existing class)
+                approval_request = MCPToolApprovalRequest(context, synthetic_request)
+
+                # Invoke callback
+                try:
+                    maybe_awaitable_result = server.on_approval_request(approval_request)
+                    if inspect.isawaitable(maybe_awaitable_result):
+                        approval_result = await maybe_awaitable_result
+                    else:
+                        approval_result = maybe_awaitable_result
+
+                    # Check approval result
+                    if not approval_result.get("approve", False):
+                        reason = approval_result.get("reason", "No reason provided")
+                        # Return a rejection result instead of raising an error
+                        # This allows the model to handle the rejection gracefully and continue
+                        rejection_message = "Tool execution was rejected"
+                        if reason:
+                            rejection_message += f": {reason}"
+                        # Return as JSON string to match tool output format
+                        return json.dumps({"error": rejection_message, "rejected": True})
+                except Exception as e:
+                    # If callback raises an exception, log it and return an error result
+                    # This allows the model to handle it gracefully rather than halting execution
+                    logger.error(
+                        f"Error in approval callback for MCP tool '{tool.name}' on server '{server.name}': {e}"  # noqa: E501
+                    )
+                    return json.dumps(
+                        {
+                            "error": f"Error in approval callback: {e}",
+                            "rejected": True,
+                        }
+                    )
 
         try:
             result = await server.call_tool(tool.name, json_data)
