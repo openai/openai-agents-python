@@ -135,7 +135,14 @@ from .model_inputs import (
     RealtimeModelSendUserInput,
 )
 
-FormatInput: TypeAlias = str | AudioPCM | AudioPCMU | AudioPCMA | Mapping[str, Any] | None
+FormatInput: TypeAlias = Union[
+    str,
+    AudioPCM,
+    AudioPCMU,
+    AudioPCMA,
+    Mapping[str, Any],
+    None,
+]
 
 
 # Avoid direct imports of non-exported names by referencing via module
