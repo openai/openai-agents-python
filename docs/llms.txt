@@ -36,7 +36,7 @@ The SDK focuses on a concise set of primitives so you can orchestrate multi-agen
 ## Modalities and Interfaces
 - [Voice quickstart](https://openai.github.io/openai-agents-python/voice/quickstart/): Build speech-enabled agents with streaming transcription and TTS.
 - [Voice pipeline](https://openai.github.io/openai-agents-python/voice/pipeline/): Customize audio ingestion, tool execution, and response rendering.
-- [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/): Stand up low-latency realtime agents with WebRTC and websocket transports.
+- [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/): Stand up low-latency realtime agents with websocket transport (WebRTC is not available in the Python SDK).
 - [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into session lifecycle, event formats, and concurrency patterns.
 
 ## API Reference Highlights
