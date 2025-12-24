@@ -14,6 +14,15 @@ from .spans import NoOpSpan, Span, SpanImpl, TSpanData
 from .traces import NoOpTrace, Trace, TraceImpl
 
 
+def _safe_debug(message: str) -> None:
+    """Best-effort debug logging that tolerates closed streams during shutdown."""
+    try:
+        logger.debug(message)
+    except Exception:
+        # Avoid noisy shutdown errors when the underlying stream is already closed.
+        return
+
+
 class SynchronousMultiTracingProcessor(TracingProcessor):
     """
     Forwards all calls to a list of TracingProcessors, in order of registration.
@@ -83,7 +92,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         Called when the application stops.
         """
         for processor in self._processors:
-            logger.debug(f"Shutting down trace processor {processor}")
+            _safe_debug(f"Shutting down trace processor {processor}")
             try:
                 processor.shutdown()
             except Exception as e:
@@ -306,7 +315,7 @@ class DefaultTraceProvider(TraceProvider):
             return
 
         try:
-            logger.debug("Shutting down trace provider")
+            _safe_debug("Shutting down trace provider")
             self._multi_processor.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down trace provider: {e}")
