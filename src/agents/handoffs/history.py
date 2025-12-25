@@ -21,6 +21,10 @@ __all__ = [
     "set_conversation_history_wrappers",
 ]
 
+# Content types that represent multimodal data (images, files, audio) which should be
+# preserved during handoffs rather than being converted to text summaries.
+_MULTIMODAL_CONTENT_TYPES = frozenset({"input_image", "input_file", "input_audio"})
+
 _DEFAULT_CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
 _DEFAULT_CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
 _conversation_history_start = _DEFAULT_CONVERSATION_HISTORY_START
@@ -90,10 +94,28 @@ def nest_handoff_history(
 def default_handoff_history_mapper(
     transcript: list[TResponseInputItem],
 ) -> list[TResponseInputItem]:
-    """Return a single assistant message summarizing the transcript."""
+    """Return a summary of the transcript, preserving multimodal content.
 
+    The returned list contains:
+    1. An assistant message summarizing the text conversation
+    2. A user message with any multimodal content (images, files, audio) if present
+
+    This ensures that multimodal content uploaded by users is preserved during handoffs.
+    """
+    multimodal_content = _extract_multimodal_content(transcript)
     summary_message = _build_summary_message(transcript)
-    return [summary_message]
+
+    result: list[TResponseInputItem] = [summary_message]
+
+    # If there's multimodal content, add it as a user message so the next agent can see it.
+    if multimodal_content:
+        user_message: dict[str, Any] = {
+            "role": "user",
+            "content": multimodal_content,
+        }
+        result.append(cast(TResponseInputItem, user_message))
+
+    return result
 
 
 def _normalize_input_history(
@@ -157,10 +179,59 @@ def _stringify_content(content: Any) -> str:
         return ""
     if isinstance(content, str):
         return content
+    # Handle multimodal content (list of content parts).
+    if isinstance(content, list):
+        return _stringify_content_list(content)
     try:
         return json.dumps(content, ensure_ascii=False, default=str)
     except TypeError:
         return str(content)
+
+
+def _stringify_content_list(content_list: list[Any]) -> str:
+    """Convert a list of content parts to a human-readable string.
+
+    For multimodal content, this provides a summary that indicates the presence
+    of images, files, and audio without including their binary data.
+    """
+    parts: list[str] = []
+    image_count = 0
+    file_count = 0
+    audio_count = 0
+
+    for part in content_list:
+        if isinstance(part, dict):
+            part_type = part.get("type")
+            if part_type == "input_text":
+                text = part.get("text", "")
+                if text:
+                    parts.append(text)
+            elif part_type == "input_image":
+                image_count += 1
+            elif part_type == "input_file":
+                file_count += 1
+            elif part_type == "input_audio":
+                audio_count += 1
+            else:
+                # Unknown type, try to stringify it.
+                try:
+                    parts.append(json.dumps(part, ensure_ascii=False, default=str))
+                except TypeError:
+                    parts.append(str(part))
+        elif isinstance(part, str):
+            parts.append(part)
+        else:
+            parts.append(str(part))
+
+    # Add indicators for multimodal content.
+    if image_count > 0:
+        parts.append(f"[{image_count} image(s) attached]")
+    if file_count > 0:
+        parts.append(f"[{file_count} file(s) attached]")
+    if audio_count > 0:
+        parts.append(f"[{audio_count} audio file(s) attached]")
+
+    return " ".join(parts)
 
 
 def _flatten_nested_history_messages(
@@ -234,3 +305,37 @@ def _split_role_and_name(role_text: str) -> tuple[str, str | None]:
 def _get_run_item_role(run_item: RunItem) -> str | None:
     role_candidate = run_item.to_input_item().get("role")
     return role_candidate if isinstance(role_candidate, str) else None
+
+
+def _extract_multimodal_content(
+    transcript: list[TResponseInputItem],
+) -> list[dict[str, Any]]:
+    """Extract multimodal content (images, files, audio) from user messages in the transcript.
+
+    This function scans through all user messages and extracts any multimodal content parts
+    (input_image, input_file, input_audio) so they can be preserved during handoffs.
+
+    Returns:
+        A list of multimodal content items, or an empty list if none found.
+    """
+    multimodal_parts: list[dict[str, Any]] = []
+
+    for item in transcript:
+        # Only extract multimodal content from user messages.
+        role = item.get("role")
+        if role != "user":
+            continue
+
+        content = item.get("content")
+        if content is None:
+            continue
+
+        # If content is a list, check each part for multimodal types.
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
+                    if part_type in _MULTIMODAL_CONTENT_TYPES:
+                        multimodal_parts.append(deepcopy(part))
+
+    return multimodal_parts
