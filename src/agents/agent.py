@@ -479,7 +479,12 @@ class Agent(AgentBase, Generic[TContext]):
             from .tool_context import ToolContext
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
-            nested_context = context if isinstance(context, RunContextWrapper) else context
+            if isinstance(context, ToolContext):
+                nested_context = context
+            elif isinstance(context, RunContextWrapper):
+                nested_context = context.context
+            else:
+                nested_context = context
             run_result: RunResult | RunResultStreaming
 
             if on_stream is not None:

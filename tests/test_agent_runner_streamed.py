@@ -23,9 +23,10 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents._run_impl import QueueCompleteSentinel, RunImpl
 from agents.items import RunItem, ToolApprovalItem
 from agents.run import RunConfig
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
 
 from .fake_model import FakeModel
@@ -810,7 +811,7 @@ async def test_stream_step_items_to_queue_handles_tool_approval_item():
     queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = asyncio.Queue()
 
     # ToolApprovalItem should not be streamed
-    RunImpl.stream_step_items_to_queue([approval_item], queue)
+    run_loop.stream_step_items_to_queue([approval_item], queue)
 
     # Queue should be empty since ToolApprovalItem is not streamed
     assert queue.empty()

@@ -6,9 +6,9 @@ from typing import Any, cast
 import pytest
 
 from agents import Agent, ApplyPatchTool, RunConfig, RunContextWrapper, RunHooks
-from agents._run_impl import ApplyPatchAction, ToolRunApplyPatchCall
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem
+from agents.run_internal.run_loop import ApplyPatchAction, ToolRunApplyPatchCall
 
 from .utils.hitl import (
     HITL_REJECTION_MSG,
