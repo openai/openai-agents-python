@@ -2,12 +2,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
 from agents.run_context import RunContextWrapper
-from agents.tool_context import (
-    ToolContext,
-    _assert_must_pass_tool_arguments,
-    _assert_must_pass_tool_call_id,
-    _assert_must_pass_tool_name,
-)
+from agents.tool_context import ToolContext
 from tests.utils.hitl import make_context_wrapper
 
 
@@ -18,12 +13,13 @@ def test_tool_context_requires_fields() -> None:
 
 
 def test_tool_context_missing_defaults_raise() -> None:
+    base_ctx: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
     with pytest.raises(ValueError):
-        _assert_must_pass_tool_call_id()
+        ToolContext(context=base_ctx.context, tool_call_id="call-1", tool_arguments="")
     with pytest.raises(ValueError):
-        _assert_must_pass_tool_name()
+        ToolContext(context=base_ctx.context, tool_name="name", tool_arguments="")
     with pytest.raises(ValueError):
-        _assert_must_pass_tool_arguments()
+        ToolContext(context=base_ctx.context, tool_name="name", tool_call_id="call-1")
 
 
 def test_tool_context_from_agent_context_populates_fields() -> None:

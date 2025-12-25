@@ -8,9 +8,9 @@ from typing import Any, Callable, cast
 from openai.types.responses import ResponseCustomToolCall, ResponseFunctionToolCall
 
 from agents import Agent, Runner, RunResult, RunResultStreaming
-from agents._run_impl import NextStepInterruption, SingleStepResult
 from agents.items import ToolApprovalItem, ToolCallOutputItem, TResponseOutputItem
 from agents.run_context import RunContextWrapper
+from agents.run_internal.run_loop import NextStepInterruption, SingleStepResult
 from agents.run_state import RunState as RunStateClass
 
 from ..fake_model import FakeModel

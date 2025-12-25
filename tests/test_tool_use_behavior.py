@@ -16,7 +16,7 @@ from agents import (
     ToolsToFinalOutputResult,
     UserError,
 )
-from agents._run_impl import RunImpl
+from agents.run_internal import run_loop
 
 from .test_responses import get_function_tool
 
@@ -43,7 +43,7 @@ def _make_function_tool_result(
 async def test_no_tool_results_returns_not_final_output() -> None:
     # If there are no tool results at all, tool_use_behavior should not produce a final output.
     agent = Agent(name="test")
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=[],
         context_wrapper=RunContextWrapper(context=None),
@@ -58,7 +58,7 @@ async def test_run_llm_again_behavior() -> None:
     # With the default run_llm_again behavior, even with tools we still expect to keep running.
     agent = Agent(name="test", tool_use_behavior="run_llm_again")
     tool_results = [_make_function_tool_result(agent, "ignored")]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
@@ -76,7 +76,7 @@ async def test_stop_on_first_tool_behavior() -> None:
         _make_function_tool_result(agent, "first_tool_output"),
         _make_function_tool_result(agent, "ignored"),
     ]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
@@ -102,7 +102,7 @@ async def test_custom_tool_use_behavior_sync() -> None:
         _make_function_tool_result(agent, "ignored2"),
         _make_function_tool_result(agent, "ignored3"),
     ]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
@@ -128,7 +128,7 @@ async def test_custom_tool_use_behavior_async() -> None:
         _make_function_tool_result(agent, "ignored2"),
         _make_function_tool_result(agent, "ignored3"),
     ]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
@@ -146,7 +146,7 @@ async def test_invalid_tool_use_behavior_raises() -> None:
     agent.tool_use_behavior = "bad_value"  # type: ignore[assignment]
     tool_results = [_make_function_tool_result(agent, "ignored")]
     with pytest.raises(UserError):
-        await RunImpl._check_for_final_output_from_tools(
+        await run_loop.check_for_final_output_from_tools(
             agent=agent,
             tool_results=tool_results,
             context_wrapper=RunContextWrapper(context=None),
@@ -170,7 +170,7 @@ async def test_tool_names_to_stop_at_behavior() -> None:
         _make_function_tool_result(agent, "ignored1", "tool2"),
         _make_function_tool_result(agent, "ignored3", "tool3"),
     ]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
@@ -184,7 +184,7 @@ async def test_tool_names_to_stop_at_behavior() -> None:
         _make_function_tool_result(agent, "ignored2", "tool2"),
         _make_function_tool_result(agent, "ignored3", "tool3"),
     ]
-    result = await RunImpl._check_for_final_output_from_tools(
+    result = await run_loop.check_for_final_output_from_tools(
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),

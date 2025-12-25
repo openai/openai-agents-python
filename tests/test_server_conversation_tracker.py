@@ -1,12 +1,12 @@
 from typing import Any, cast
 
 from agents.items import ModelResponse, TResponseInputItem
-from agents.run import _ServerConversationTracker
+from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.usage import Usage
 
 
 class DummyRunItem:
-    """Minimal stand-in for RunItem with the attributes used by _ServerConversationTracker."""
+    """Minimal stand-in for RunItem with the attributes used by OpenAIServerConversationTracker."""
 
     def __init__(self, raw_item: dict[str, Any], type: str = "message") -> None:
         self.raw_item = raw_item
@@ -14,7 +14,7 @@ class DummyRunItem:
 
 
 def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
-    tracker = _ServerConversationTracker(conversation_id="conv", previous_response_id=None)
+    tracker = OpenAIServerConversationTracker(conversation_id="conv", previous_response_id=None)
 
     original_input: list[TResponseInputItem] = [
         cast(TResponseInputItem, {"id": "input-1", "type": "message"}),
@@ -38,14 +38,14 @@ def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
 
     tracker.hydrate_from_state(
         original_input=original_input,
-        generated_items=generated_items,  # type: ignore[arg-type]
+        generated_items=cast(list[Any], generated_items),
         model_responses=[model_response],
         session_items=session_items,
     )
 
     prepared = tracker.prepare_input(
         original_input=original_input,
-        generated_items=generated_items,  # type: ignore[arg-type]
+        generated_items=cast(list[Any], generated_items),
     )
 
     assert prepared == [new_raw_item]
@@ -54,7 +54,7 @@ def test_prepare_input_filters_items_seen_by_server_and_tool_calls() -> None:
 
 
 def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() -> None:
-    tracker = _ServerConversationTracker(conversation_id="conv2", previous_response_id=None)
+    tracker = OpenAIServerConversationTracker(conversation_id="conv2", previous_response_id=None)
     pending_1: TResponseInputItem = cast(TResponseInputItem, {"id": "p-1", "type": "message"})
     pending_2: TResponseInputItem = cast(TResponseInputItem, {"id": "p-2", "type": "message"})
     tracker.remaining_initial_input = [pending_1, pending_2]
@@ -69,7 +69,7 @@ def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() 
 
 
 def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> None:
-    tracker = _ServerConversationTracker(conversation_id="conv3", previous_response_id=None)
+    tracker = OpenAIServerConversationTracker(conversation_id="conv3", previous_response_id=None)
     pending_kept: TResponseInputItem = cast(
         TResponseInputItem, {"id": "keep-me", "type": "message"}
     )

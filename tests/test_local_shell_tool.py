@@ -19,8 +19,8 @@ from agents import (
     RunHooks,
     Runner,
 )
-from agents._run_impl import LocalShellAction, ToolRunLocalShellCall
 from agents.items import ToolCallOutputItem
+from agents.run_internal.run_loop import LocalShellAction, ToolRunLocalShellCall
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message

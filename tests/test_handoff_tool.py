@@ -16,7 +16,7 @@ from agents import (
     UserError,
     handoff,
 )
-from agents.run import AgentRunner
+from agents.run_internal.run_loop import get_handoffs
 
 
 def message_item(content: str, agent: Agent[Any]) -> MessageOutputItem:
@@ -49,9 +49,9 @@ async def test_single_handoff_setup():
     assert not agent_1.handoffs
     assert agent_2.handoffs == [agent_1]
 
-    assert not (await AgentRunner._get_handoffs(agent_1, RunContextWrapper(agent_1)))
+    assert not (await get_handoffs(agent_1, RunContextWrapper(agent_1)))
 
-    handoff_objects = await AgentRunner._get_handoffs(agent_2, RunContextWrapper(agent_2))
+    handoff_objects = await get_handoffs(agent_2, RunContextWrapper(agent_2))
     assert len(handoff_objects) == 1
     obj = handoff_objects[0]
     assert obj.tool_name == Handoff.default_tool_name(agent_1)
@@ -69,7 +69,7 @@ async def test_multiple_handoffs_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(agent_3))
+    handoff_objects = await get_handoffs(agent_3, RunContextWrapper(agent_3))
     assert len(handoff_objects) == 2
     assert handoff_objects[0].tool_name == Handoff.default_tool_name(agent_1)
     assert handoff_objects[1].tool_name == Handoff.default_tool_name(agent_2)
@@ -101,7 +101,7 @@ async def test_custom_handoff_setup():
     assert not agent_1.handoffs
     assert not agent_2.handoffs
 
-    handoff_objects = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(agent_3))
+    handoff_objects = await get_handoffs(agent_3, RunContextWrapper(agent_3))
     assert len(handoff_objects) == 2
 
     first_handoff = handoff_objects[0]
@@ -373,7 +373,7 @@ async def test_handoff_is_enabled_filtering_integration():
     context_wrapper = RunContextWrapper(main_agent)
 
     # Get filtered handoffs using the runner's method
-    filtered_handoffs = await AgentRunner._get_handoffs(main_agent, context_wrapper)
+    filtered_handoffs = await get_handoffs(main_agent, context_wrapper)
 
     # Should only have 2 handoffs (agent_1 and agent_3), agent_2 should be filtered out
     assert len(filtered_handoffs) == 2

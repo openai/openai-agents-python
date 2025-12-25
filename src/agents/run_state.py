@@ -67,13 +67,13 @@ from .tool import (
 from .usage import deserialize_usage, serialize_usage
 
 if TYPE_CHECKING:
-    from ._run_impl import (
-        NextStepInterruption,
-        ProcessedResponse,
-    )
     from .agent import Agent
     from .guardrail import InputGuardrailResult, OutputGuardrailResult
     from .items import ModelResponse, RunItem
+    from .run_internal.run_steps import (
+        NextStepInterruption,
+        ProcessedResponse,
+    )
 
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
@@ -99,56 +99,6 @@ _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
 _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
-
-
-def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
-    """Return attribute value if present, otherwise the provided default."""
-    return getattr(obj, attr, default)
-
-
-def _transform_field_names(
-    data: dict[str, Any] | list[Any] | Any, field_map: Mapping[str, str]
-) -> Any:
-    """Recursively remap field names using the provided mapping."""
-    if isinstance(data, dict):
-        transformed: dict[str, Any] = {}
-        for key, value in data.items():
-            mapped_key = field_map.get(key, key)
-            if isinstance(value, (dict, list)):
-                transformed[mapped_key] = _transform_field_names(value, field_map)
-            else:
-                transformed[mapped_key] = value
-        return transformed
-
-    if isinstance(data, list):
-        return [
-            _transform_field_names(item, field_map) if isinstance(item, (dict, list)) else item
-            for item in data
-        ]
-
-    return data
-
-
-def _build_named_tool_map(tools: Sequence[Any], tool_type: type[Any]) -> dict[str, Any]:
-    """Build a name-indexed map for tools of a given type."""
-    return {
-        tool.name: tool for tool in tools if isinstance(tool, tool_type) and hasattr(tool, "name")
-    }
-
-
-def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Agent[Any]]]:
-    """Map handoff tool names to their definitions for quick lookup."""
-    handoffs_map: dict[str, Handoff[Any, Agent[Any]]] = {}
-    if not hasattr(current_agent, "handoffs"):
-        return handoffs_map
-
-    for handoff in current_agent.handoffs:
-        if not isinstance(handoff, Handoff):
-            continue
-        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
-        if handoff_name:
-            handoffs_map[handoff_name] = handoff
-    return handoffs_map
 
 
 @dataclass
@@ -219,7 +169,7 @@ class RunState(Generic[TContext, TAgent]):
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
         # Import at runtime to avoid circular import
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return []
@@ -236,179 +186,6 @@ class RunState(Generic[TContext, TAgent]):
         if self._context is None:
             raise UserError("Cannot reject tool: RunState has no context")
         self._context.reject_tool(approval_item, always_reject=always_reject)
-
-    def _serialize_tool_call_data(self, tool_call: Any) -> Any:
-        """Convert a tool call to a camelCase-friendly dictionary."""
-        serialized_call = self._serialize_raw_item(tool_call)
-        return self._camelize_field_names(serialized_call)
-
-    def _serialize_tool_metadata(
-        self,
-        tool: Any,
-        *,
-        include_description: bool = False,
-        include_params_schema: bool = False,
-    ) -> dict[str, Any]:
-        """Build a dictionary of tool metadata for serialization."""
-        metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
-        if include_description and hasattr(tool, "description"):
-            metadata["description"] = tool.description
-        if include_params_schema and hasattr(tool, "params_json_schema"):
-            metadata["paramsJsonSchema"] = tool.params_json_schema
-        return metadata
-
-    def _serialize_tool_actions(
-        self,
-        actions: Sequence[Any],
-        *,
-        tool_attr: str,
-        wrapper_key: str,
-        include_description: bool = False,
-        include_params_schema: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Serialize tool action runs that share the same structure."""
-        serialized_actions = []
-        for action in actions:
-            tool = getattr(action, tool_attr)
-            tool_dict = self._serialize_tool_metadata(
-                tool,
-                include_description=include_description,
-                include_params_schema=include_params_schema,
-            )
-            serialized_actions.append(
-                {
-                    "toolCall": self._serialize_tool_call_data(action.tool_call),
-                    wrapper_key: tool_dict,
-                }
-            )
-        return serialized_actions
-
-    def _serialize_tool_action_groups(
-        self, processed_response: ProcessedResponse
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Serialize tool-related action groups using a shared spec."""
-        action_specs: list[
-            tuple[str, list[Any], str, str, bool, bool]
-        ] = [  # Key, actions, tool_attr, wrapper_key, include_description, include_params_schema.
-            (
-                "functions",
-                processed_response.functions,
-                "function_tool",
-                "tool",
-                True,
-                True,
-            ),
-            (
-                "computerActions",
-                processed_response.computer_actions,
-                "computer_tool",
-                "computer",
-                True,
-                False,
-            ),
-            (
-                "localShellActions",
-                processed_response.local_shell_calls,
-                "local_shell_tool",
-                "localShell",
-                True,
-                False,
-            ),
-            (
-                "shellActions",
-                processed_response.shell_calls,
-                "shell_tool",
-                "shell",
-                True,
-                False,
-            ),
-            (
-                "applyPatchActions",
-                processed_response.apply_patch_calls,
-                "apply_patch_tool",
-                "applyPatch",
-                True,
-                False,
-            ),
-        ]
-
-        serialized: dict[str, list[dict[str, Any]]] = {
-            key: self._serialize_tool_actions(
-                actions,
-                tool_attr=tool_attr,
-                wrapper_key=wrapper_key,
-                include_description=include_description,
-                include_params_schema=include_params_schema,
-            )
-            for (
-                key,
-                actions,
-                tool_attr,
-                wrapper_key,
-                include_description,
-                include_params_schema,
-            ) in action_specs
-        }
-        serialized["handoffs"] = self._serialize_handoffs(processed_response.handoffs)
-        serialized["mcpApprovalRequests"] = self._serialize_mcp_approval_requests(
-            processed_response.mcp_approval_requests
-        )
-        return serialized
-
-    def _serialize_handoffs(self, handoffs: Sequence[Any]) -> list[dict[str, Any]]:
-        """Serialize handoff tool calls."""
-        serialized_handoffs = []
-        for handoff in handoffs:
-            handoff_target = handoff.handoff
-            handoff_name = _get_attr(handoff_target, "tool_name") or _get_attr(
-                handoff_target, "name"
-            )
-            serialized_handoffs.append(
-                {
-                    "toolCall": self._serialize_tool_call_data(handoff.tool_call),
-                    "handoff": {"toolName": handoff_name},
-                }
-            )
-        return serialized_handoffs
-
-    def _serialize_mcp_approval_requests(self, requests: Sequence[Any]) -> list[dict[str, Any]]:
-        """Serialize MCP approval requests in a consistent format."""
-        serialized_requests = []
-        for request in requests:
-            request_item_dict = self._serialize_raw_item(request.request_item)
-            serialized_requests.append(
-                {
-                    "requestItem": {
-                        "rawItem": self._camelize_field_names(request_item_dict),
-                    },
-                    "mcpTool": request.mcp_tool.to_json()
-                    if hasattr(request.mcp_tool, "to_json")
-                    else request.mcp_tool,
-                }
-            )
-        return serialized_requests
-
-    def _serialize_tool_approval_interruption(
-        self, interruption: ToolApprovalItem, *, include_tool_name: bool
-    ) -> dict[str, Any]:
-        """Serialize a ToolApprovalItem interruption."""
-        interruption_dict: dict[str, Any] = {
-            "type": "tool_approval_item",
-            "rawItem": self._camelize_field_names(self._serialize_raw_item(interruption.raw_item)),
-            "agent": {"name": interruption.agent.name},
-        }
-        if include_tool_name and interruption.tool_name is not None:
-            interruption_dict["toolName"] = interruption.tool_name
-        return interruption_dict
-
-    @staticmethod
-    def _serialize_raw_item(raw_item: Any) -> Any:
-        """Return a serializable representation of a raw item."""
-        if hasattr(raw_item, "model_dump"):
-            return raw_item.model_dump(exclude_unset=True)
-        if isinstance(raw_item, dict):
-            return dict(raw_item)
-        return raw_item
 
     def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
         """Serialize approval records into a JSON-friendly mapping."""
@@ -432,8 +209,7 @@ class RunState(Generic[TContext, TAgent]):
             {
                 "usage": serialize_usage(resp.usage),
                 "output": [
-                    self._camelize_field_names(self._serialize_raw_item(item))
-                    for item in resp.output
+                    _camelize_field_names(_serialize_raw_item_value(item)) for item in resp.output
                 ],
                 "responseId": resp.response_id,
             }
@@ -464,7 +240,7 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["content"] = [{"type": "output_text", "text": content}]
                     if "status" not in normalized_item:
                         normalized_item["status"] = "completed"
-                normalized_items.append(self._camelize_field_names(normalized_item))
+                normalized_items.append(_camelize_field_names(normalized_item))
             else:
                 normalized_items.append(item)
         return normalized_items
@@ -482,28 +258,6 @@ class RunState(Generic[TContext, TAgent]):
             "RunState serialization requires context to be a mapping. "
             "Provide a dict-like context or pass context_override when deserializing."
         )
-
-    def _serialize_guardrail_results(
-        self, results: Sequence[InputGuardrailResult | OutputGuardrailResult]
-    ) -> list[dict[str, Any]]:
-        """Serialize guardrail results for persistence."""
-        serialized: list[dict[str, Any]] = []
-        for result in results:
-            entry = {
-                "guardrail": {
-                    "type": "output" if isinstance(result, OutputGuardrailResult) else "input",
-                    "name": result.guardrail.name,
-                },
-                "output": {
-                    "tripwireTriggered": result.output.tripwire_triggered,
-                    "outputInfo": result.output.output_info,
-                },
-            }
-            if isinstance(result, OutputGuardrailResult):
-                entry["agentOutput"] = result.agent_output
-                entry["agent"] = {"name": result.agent.name}
-            serialized.append(entry)
-        return serialized
 
     def _merge_generated_items_with_processed(self) -> list[RunItem]:
         """Merge persisted and newly processed items without duplication."""
@@ -554,27 +308,6 @@ class RunState(Generic[TContext, TAgent]):
             generated_items.append(new_item)
         return generated_items
 
-    def _serialize_last_model_response(self, model_responses: list[dict[str, Any]]) -> Any:
-        """Return the last serialized model response, if any."""
-        if not model_responses:
-            return None
-        return model_responses[-1]
-
-    @staticmethod
-    def _camelize_field_names(data: dict[str, Any] | list[Any] | Any) -> Any:
-        """Convert snake_case field names to camelCase for JSON serialization.
-
-        This function converts common field names from Python's snake_case convention
-        to JSON's camelCase convention.
-
-        Args:
-            data: Dictionary, list, or value with potentially snake_case field names.
-
-        Returns:
-            Dictionary, list, or value with normalized camelCase field names.
-        """
-        return _transform_field_names(data, _SNAKE_TO_CAMEL_FIELD_MAP)
-
     def to_json(self) -> dict[str, Any]:
         """Serializes the run state to a JSON-compatible dictionary.
 
@@ -613,18 +346,14 @@ class RunState(Generic[TContext, TAgent]):
             "toolUseTracker": copy.deepcopy(self._tool_use_tracker_snapshot),
             "maxTurns": self._max_turns,
             "noActiveAgentRun": True,
-            "inputGuardrailResults": self._serialize_guardrail_results(
-                self._input_guardrail_results
-            ),
-            "outputGuardrailResults": self._serialize_guardrail_results(
-                self._output_guardrail_results
-            ),
+            "inputGuardrailResults": _serialize_guardrail_results(self._input_guardrail_results),
+            "outputGuardrailResults": _serialize_guardrail_results(self._output_guardrail_results),
         }
 
         generated_items = self._merge_generated_items_with_processed()
         result["generatedItems"] = [self._serialize_item(item) for item in generated_items]
         result["currentStep"] = self._serialize_current_step()
-        result["lastModelResponse"] = self._serialize_last_model_response(model_responses)
+        result["lastModelResponse"] = _serialize_last_model_response(model_responses)
         result["lastProcessedResponse"] = (
             self._serialize_processed_response(self._last_processed_response)
             if self._last_processed_response
@@ -647,10 +376,10 @@ class RunState(Generic[TContext, TAgent]):
             A dictionary representation of the ProcessedResponse.
         """
 
-        action_groups = self._serialize_tool_action_groups(processed_response)
+        action_groups = _serialize_tool_action_groups(processed_response)
 
         interruptions_data = [
-            self._serialize_tool_approval_interruption(interruption, include_tool_name=True)
+            _serialize_tool_approval_interruption(interruption, include_tool_name=True)
             for interruption in processed_response.interruptions
             if isinstance(interruption, ToolApprovalItem)
         ]
@@ -665,13 +394,13 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
         # Import at runtime to avoid circular import
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         if self._current_step is None or not isinstance(self._current_step, NextStepInterruption):
             return None
 
         interruptions_data = [
-            self._serialize_tool_approval_interruption(
+            _serialize_tool_approval_interruption(
                 item, include_tool_name=item.tool_name is not None
             )
             for item in self._current_step.interruptions
@@ -687,7 +416,7 @@ class RunState(Generic[TContext, TAgent]):
 
     def _serialize_item(self, item: RunItem) -> dict[str, Any]:
         """Serialize a run item to JSON-compatible dict."""
-        raw_item_dict: Any = self._serialize_raw_item(item.raw_item)
+        raw_item_dict: Any = _serialize_raw_item_value(item.raw_item)
 
         # Convert tool output-like items into protocol format for cross-SDK compatibility.
         if item.type in {"tool_call_output_item", "handoff_output_item"} and isinstance(
@@ -696,7 +425,7 @@ class RunState(Generic[TContext, TAgent]):
             raw_item_dict = self._convert_output_item_to_protocol(raw_item_dict)
 
         # Convert snake_case to camelCase for JSON serialization
-        raw_item_dict = self._camelize_field_names(raw_item_dict)
+        raw_item_dict = _camelize_field_names(raw_item_dict)
 
         result: dict[str, Any] = {
             "type": item.type,
@@ -899,6 +628,272 @@ class RunState(Generic[TContext, TAgent]):
         )
 
 
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
+    """Return attribute value if present, otherwise the provided default."""
+    return getattr(obj, attr, default)
+
+
+def _transform_field_names(
+    data: dict[str, Any] | list[Any] | Any, field_map: Mapping[str, str]
+) -> Any:
+    """Recursively remap field names using the provided mapping."""
+    if isinstance(data, dict):
+        transformed: dict[str, Any] = {}
+        for key, value in data.items():
+            mapped_key = field_map.get(key, key)
+            if isinstance(value, (dict, list)):
+                transformed[mapped_key] = _transform_field_names(value, field_map)
+            else:
+                transformed[mapped_key] = value
+        return transformed
+
+    if isinstance(data, list):
+        return [
+            _transform_field_names(item, field_map) if isinstance(item, (dict, list)) else item
+            for item in data
+        ]
+
+    return data
+
+
+def _camelize_field_names(data: dict[str, Any] | list[Any] | Any) -> Any:
+    """Convert snake_case field names to camelCase for JSON serialization."""
+    return _transform_field_names(data, _SNAKE_TO_CAMEL_FIELD_MAP)
+
+
+def _serialize_raw_item_value(raw_item: Any) -> Any:
+    """Return a serializable representation of a raw item."""
+    if hasattr(raw_item, "model_dump"):
+        return raw_item.model_dump(exclude_unset=True)
+    if isinstance(raw_item, dict):
+        return dict(raw_item)
+    return raw_item
+
+
+def _serialize_tool_call_data(tool_call: Any) -> Any:
+    """Convert a tool call to a camelCase-friendly dictionary."""
+    serialized_call = _serialize_raw_item_value(tool_call)
+    return _camelize_field_names(serialized_call)
+
+
+def _serialize_tool_metadata(
+    tool: Any,
+    *,
+    include_description: bool = False,
+    include_params_schema: bool = False,
+) -> dict[str, Any]:
+    """Build a dictionary of tool metadata for serialization."""
+    metadata: dict[str, Any] = {"name": tool.name if hasattr(tool, "name") else None}
+    if include_description and hasattr(tool, "description"):
+        metadata["description"] = tool.description
+    if include_params_schema and hasattr(tool, "params_json_schema"):
+        metadata["paramsJsonSchema"] = tool.params_json_schema
+    return metadata
+
+
+def _serialize_tool_actions(
+    actions: Sequence[Any],
+    *,
+    tool_attr: str,
+    wrapper_key: str,
+    include_description: bool = False,
+    include_params_schema: bool = False,
+) -> list[dict[str, Any]]:
+    """Serialize tool action runs that share the same structure."""
+    serialized_actions = []
+    for action in actions:
+        tool = getattr(action, tool_attr)
+        tool_dict = _serialize_tool_metadata(
+            tool,
+            include_description=include_description,
+            include_params_schema=include_params_schema,
+        )
+        serialized_actions.append(
+            {
+                "toolCall": _serialize_tool_call_data(action.tool_call),
+                wrapper_key: tool_dict,
+            }
+        )
+    return serialized_actions
+
+
+def _serialize_handoffs(handoffs: Sequence[Any]) -> list[dict[str, Any]]:
+    """Serialize handoff tool calls."""
+    serialized_handoffs = []
+    for handoff in handoffs:
+        handoff_target = handoff.handoff
+        handoff_name = _get_attr(handoff_target, "tool_name") or _get_attr(handoff_target, "name")
+        serialized_handoffs.append(
+            {
+                "toolCall": _serialize_tool_call_data(handoff.tool_call),
+                "handoff": {"toolName": handoff_name},
+            }
+        )
+    return serialized_handoffs
+
+
+def _serialize_mcp_approval_requests(requests: Sequence[Any]) -> list[dict[str, Any]]:
+    """Serialize MCP approval requests in a consistent format."""
+    serialized_requests = []
+    for request in requests:
+        request_item_dict = _serialize_raw_item_value(request.request_item)
+        serialized_requests.append(
+            {
+                "requestItem": {
+                    "rawItem": _camelize_field_names(request_item_dict),
+                },
+                "mcpTool": request.mcp_tool.to_json()
+                if hasattr(request.mcp_tool, "to_json")
+                else request.mcp_tool,
+            }
+        )
+    return serialized_requests
+
+
+def _serialize_tool_approval_interruption(
+    interruption: ToolApprovalItem, *, include_tool_name: bool
+) -> dict[str, Any]:
+    """Serialize a ToolApprovalItem interruption."""
+    interruption_dict: dict[str, Any] = {
+        "type": "tool_approval_item",
+        "rawItem": _camelize_field_names(_serialize_raw_item_value(interruption.raw_item)),
+        "agent": {"name": interruption.agent.name},
+    }
+    if include_tool_name and interruption.tool_name is not None:
+        interruption_dict["toolName"] = interruption.tool_name
+    return interruption_dict
+
+
+def _serialize_tool_action_groups(
+    processed_response: ProcessedResponse,
+) -> dict[str, list[dict[str, Any]]]:
+    """Serialize tool-related action groups using a shared spec."""
+    action_specs: list[
+        tuple[str, list[Any], str, str, bool, bool]
+    ] = [  # Key, actions, tool_attr, wrapper_key, include_description, include_params_schema.
+        (
+            "functions",
+            processed_response.functions,
+            "function_tool",
+            "tool",
+            True,
+            True,
+        ),
+        (
+            "computerActions",
+            processed_response.computer_actions,
+            "computer_tool",
+            "computer",
+            True,
+            False,
+        ),
+        (
+            "localShellActions",
+            processed_response.local_shell_calls,
+            "local_shell_tool",
+            "localShell",
+            True,
+            False,
+        ),
+        (
+            "shellActions",
+            processed_response.shell_calls,
+            "shell_tool",
+            "shell",
+            True,
+            False,
+        ),
+        (
+            "applyPatchActions",
+            processed_response.apply_patch_calls,
+            "apply_patch_tool",
+            "applyPatch",
+            True,
+            False,
+        ),
+    ]
+
+    serialized: dict[str, list[dict[str, Any]]] = {
+        key: _serialize_tool_actions(
+            actions,
+            tool_attr=tool_attr,
+            wrapper_key=wrapper_key,
+            include_description=include_description,
+            include_params_schema=include_params_schema,
+        )
+        for (
+            key,
+            actions,
+            tool_attr,
+            wrapper_key,
+            include_description,
+            include_params_schema,
+        ) in action_specs
+    }
+    serialized["handoffs"] = _serialize_handoffs(processed_response.handoffs)
+    serialized["mcpApprovalRequests"] = _serialize_mcp_approval_requests(
+        processed_response.mcp_approval_requests
+    )
+    return serialized
+
+
+def _serialize_guardrail_results(
+    results: Sequence[InputGuardrailResult | OutputGuardrailResult],
+) -> list[dict[str, Any]]:
+    """Serialize guardrail results for persistence."""
+    serialized: list[dict[str, Any]] = []
+    for result in results:
+        entry = {
+            "guardrail": {
+                "type": "output" if isinstance(result, OutputGuardrailResult) else "input",
+                "name": result.guardrail.name,
+            },
+            "output": {
+                "tripwireTriggered": result.output.tripwire_triggered,
+                "outputInfo": result.output.output_info,
+            },
+        }
+        if isinstance(result, OutputGuardrailResult):
+            entry["agentOutput"] = result.agent_output
+            entry["agent"] = {"name": result.agent.name}
+        serialized.append(entry)
+    return serialized
+
+
+def _serialize_last_model_response(model_responses: list[dict[str, Any]]) -> Any:
+    """Return the last serialized model response, if any."""
+    if not model_responses:
+        return None
+    return model_responses[-1]
+
+
+def _build_named_tool_map(tools: Sequence[Any], tool_type: type[Any]) -> dict[str, Any]:
+    """Build a name-indexed map for tools of a given type."""
+    return {
+        tool.name: tool for tool in tools if isinstance(tool, tool_type) and hasattr(tool, "name")
+    }
+
+
+def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Agent[Any]]]:
+    """Map handoff tool names to their definitions for quick lookup."""
+    handoffs_map: dict[str, Handoff[Any, Agent[Any]]] = {}
+    if not hasattr(current_agent, "handoffs"):
+        return handoffs_map
+
+    for handoff in current_agent.handoffs:
+        if not isinstance(handoff, Handoff):
+            continue
+        handoff_name = getattr(handoff, "tool_name", None) or getattr(handoff, "name", None)
+        if handoff_name:
+            handoffs_map[handoff_name] = handoff
+    return handoffs_map
+
+
 async def _deserialize_processed_response(
     processed_response_data: dict[str, Any],
     current_agent: Agent[Any],
@@ -931,7 +926,7 @@ async def _deserialize_processed_response(
     mcp_tools_map = _build_named_tool_map(all_tools, HostedMCPTool)
     handoffs_map = _build_handoffs_map(current_agent)
 
-    from ._run_impl import (
+    from .run_internal.run_steps import (
         ProcessedResponse,
         ToolRunApplyPatchCall,
         ToolRunComputerAction,
@@ -1426,7 +1421,7 @@ async def _build_run_state_from_json(
             if approval_item is not None:
                 interruptions.append(approval_item)
 
-        from ._run_impl import NextStepInterruption
+        from .run_internal.run_steps import NextStepInterruption
 
         state._current_step = NextStepInterruption(
             interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]

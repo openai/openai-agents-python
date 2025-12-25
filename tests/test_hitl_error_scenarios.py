@@ -22,16 +22,6 @@ from agents import (
     ToolApprovalItem,
     function_tool,
 )
-from agents._run_impl import (
-    NextStepInterruption,
-    NextStepRunAgain,
-    ProcessedResponse,
-    RunImpl,
-    ToolRunFunction,
-    ToolRunMCPApprovalRequest,
-    ToolRunShellCall,
-    _extract_tool_call_id,
-)
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.items import (
     MCPApprovalResponseItem,
@@ -43,6 +33,16 @@ from agents.items import (
 )
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import (
+    NextStepInterruption,
+    NextStepRunAgain,
+    ProcessedResponse,
+    ToolRunFunction,
+    ToolRunMCPApprovalRequest,
+    ToolRunShellCall,
+    extract_tool_call_id,
+)
 from agents.run_state import RunState as RunStateClass
 from agents.tool import HostedMCPTool
 from agents.usage import Usage
@@ -522,7 +522,7 @@ async def test_hosted_mcp_approval_matches_unknown_tool_key() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="test",
         original_pre_step_items=[approval_item],
@@ -562,7 +562,7 @@ async def test_shell_call_without_call_id_raises() -> None:
     )
 
     with pytest.raises(ModelBehaviorError):
-        await RunImpl.resolve_interrupted_turn(
+        await run_loop.resolve_interrupted_turn(
             agent=agent,
             original_input="test",
             original_pre_step_items=[],
@@ -771,7 +771,7 @@ async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="resume approvals",
         original_pre_step_items=[],
@@ -787,7 +787,7 @@ async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
         "Approved function should run instead of requesting approval again"
     )
     executed_call_ids = {
-        _extract_tool_call_id(item.raw_item)
+        extract_tool_call_id(item.raw_item)
         for item in result.new_step_items
         if isinstance(item, ToolCallOutputItem)
     }
@@ -818,7 +818,7 @@ async def test_resume_skips_non_hitl_function_calls() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="resume run",
         original_pre_step_items=[],
@@ -873,7 +873,7 @@ async def test_resume_skips_shell_calls_with_existing_output() -> None:
         )
     ]
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="resume shell",
         original_pre_step_items=cast(list[RunItem], original_pre_step_items),
@@ -935,7 +935,7 @@ async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="resume approvals",
         original_pre_step_items=[],
@@ -988,7 +988,7 @@ async def test_rejected_shell_calls_emit_rejection_output() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="resume shell rejection",
         original_pre_step_items=[],
@@ -1052,7 +1052,7 @@ async def test_mcp_callback_approvals_are_processed() -> None:
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="handle mcp",
         original_pre_step_items=[],

@@ -1,6 +1,7 @@
 import atexit
 
 from .config import TracingConfig
+from .context import TraceCtxManager
 from .create import (
     agent_span,
     custom_span,
@@ -55,6 +56,7 @@ __all__ = [
     "set_trace_provider",
     "set_tracing_disabled",
     "TracingConfig",
+    "TraceCtxManager",
     "trace",
     "Trace",
     "SpanError",

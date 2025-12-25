@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-from .._run_impl import TraceCtxManager
 from ..exceptions import UserError
 from ..logger import logger
+from ..tracing import TraceCtxManager
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
