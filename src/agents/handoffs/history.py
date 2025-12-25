@@ -25,6 +25,10 @@ __all__ = [
 # preserved during handoffs rather than being converted to text summaries.
 _MULTIMODAL_CONTENT_TYPES = frozenset({"input_image", "input_file", "input_audio"})
 
+# Marker name used to identify user messages that contain preserved multimodal content
+# from a previous handoff. This prevents re-extraction and duplication across chained handoffs.
+_PRESERVED_MULTIMODAL_MARKER = "__multimodal_preserved__"
+
 _DEFAULT_CONVERSATION_HISTORY_START = "<CONVERSATION HISTORY>"
 _DEFAULT_CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
 _conversation_history_start = _DEFAULT_CONVERSATION_HISTORY_START
@@ -101,17 +105,28 @@ def default_handoff_history_mapper(
     2. A user message with any multimodal content (images, files, audio) if present
 
     This ensures that multimodal content uploaded by users is preserved during handoffs.
+    Multimodal content is only extracted once and carried forward across chained handoffs.
     """
-    multimodal_content = _extract_multimodal_content(transcript)
+    # Extract NEW multimodal content from user messages (excludes already-preserved content).
+    new_multimodal_content = _extract_multimodal_content(transcript)
+
+    # Also collect any already-preserved multimodal content from previous handoffs.
+    existing_multimodal_content = _collect_preserved_multimodal_content(transcript)
+
+    # Combine new and existing multimodal content.
+    all_multimodal_content = existing_multimodal_content + new_multimodal_content
+
     summary_message = _build_summary_message(transcript)
 
     result: list[TResponseInputItem] = [summary_message]
 
     # If there's multimodal content, add it as a user message so the next agent can see it.
-    if multimodal_content:
+    # Mark it with a special name to prevent re-extraction in subsequent handoffs.
+    if all_multimodal_content:
         user_message: dict[str, Any] = {
             "role": "user",
-            "content": multimodal_content,
+            "name": _PRESERVED_MULTIMODAL_MARKER,
+            "content": all_multimodal_content,
         }
         result.append(cast(TResponseInputItem, user_message))
 
@@ -326,6 +341,12 @@ def _extract_multimodal_content(
         if role != "user":
             continue
 
+        # Skip messages that are already preserved multimodal content from a previous handoff.
+        # This prevents duplication across chained handoffs.
+        name = item.get("name")
+        if name == _PRESERVED_MULTIMODAL_MARKER:
+            continue
+
         content = item.get("content")
         if content is None:
             continue
@@ -339,3 +360,38 @@ def _extract_multimodal_content(
                         multimodal_parts.append(deepcopy(part))
 
     return multimodal_parts
+
+
+def _collect_preserved_multimodal_content(
+    transcript: list[TResponseInputItem],
+) -> list[dict[str, Any]]:
+    """Collect multimodal content from messages already marked as preserved.
+
+    This function finds user messages marked with the preservation marker from previous
+    handoffs and collects their content to carry forward.
+
+    Returns:
+        A list of multimodal content items from preserved messages, or an empty list if none.
+    """
+    preserved_parts: list[dict[str, Any]] = []
+
+    for item in transcript:
+        role = item.get("role")
+        if role != "user":
+            continue
+
+        name = item.get("name")
+        if name != _PRESERVED_MULTIMODAL_MARKER:
+            continue
+
+        content = item.get("content")
+        if content is None:
+            continue
+
+        # The preserved message content is a list of multimodal items.
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    preserved_parts.append(deepcopy(part))
+
+    return preserved_parts

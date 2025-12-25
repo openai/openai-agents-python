@@ -611,3 +611,65 @@ def test_nest_handoff_history_preserves_audio_content() -> None:
     assert isinstance(audio_content, list)
     assert len(audio_content) == 1
     assert audio_content[0]["type"] == "input_audio"
+
+
+def test_nest_handoff_history_no_duplicate_on_chained_handoffs() -> None:
+    """Test that multimodal content is not duplicated across chained handoffs.
+
+    When an agent hands off to another agent, and that agent hands off again,
+    the multimodal content should only appear once, not be re-extracted and duplicated.
+    """
+    image_url = "https://example.com/test-image.jpg"
+
+    # First handoff: user sends image, agent responds and hands off.
+    first_data = HandoffInputData(
+        input_history=(_get_user_input_item_with_image("What's in this image?", image_url),),
+        pre_handoff_items=(_get_message_output_run_item("Let me hand this off"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    first_nested = nest_handoff_history(first_data)
+
+    # Verify first handoff has 2 items: summary + preserved image.
+    assert len(first_nested.input_history) == 2
+    first_preserved = _as_message(first_nested.input_history[1])
+    assert first_preserved["role"] == "user"
+    first_content = first_preserved["content"]
+    assert isinstance(first_content, list)
+    assert len(first_content) == 1
+    assert first_content[0]["type"] == "input_image"
+
+    # Second handoff: the new agent responds and hands off again.
+    # The input_history now contains the result from the first handoff.
+    second_data = HandoffInputData(
+        input_history=first_nested.input_history,
+        pre_handoff_items=(_get_message_output_run_item("Handing off again"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    second_nested = nest_handoff_history(second_data)
+
+    # The second handoff should still only have 2 items, not 3.
+    # The preserved image from the first handoff should not be re-extracted.
+    assert len(second_nested.input_history) == 2
+
+    # Verify the image is still preserved (only once).
+    second_preserved = _as_message(second_nested.input_history[1])
+    assert second_preserved["role"] == "user"
+    second_content = second_preserved["content"]
+    assert isinstance(second_content, list)
+    assert len(second_content) == 1
+    assert second_content[0]["type"] == "input_image"
+    assert second_content[0]["image_url"] == image_url
+
+    # Third handoff: verify it still doesn't duplicate.
+    third_data = HandoffInputData(
+        input_history=second_nested.input_history,
+        pre_handoff_items=(_get_message_output_run_item("One more handoff"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    third_nested = nest_handoff_history(third_data)
+
+    # Still only 2 items after three handoffs.
+    assert len(third_nested.input_history) == 2
