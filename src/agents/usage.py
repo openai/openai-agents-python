@@ -10,79 +10,6 @@ from pydantic import BeforeValidator, TypeAdapter, ValidationError
 from pydantic.dataclasses import dataclass
 
 
-def _normalize_input_tokens_details(
-    v: InputTokensDetails | PromptTokensDetails | None,
-) -> InputTokensDetails:
-    """Converts None or PromptTokensDetails to InputTokensDetails."""
-    if v is None:
-        return InputTokensDetails(cached_tokens=0)
-    if isinstance(v, PromptTokensDetails):
-        return InputTokensDetails(cached_tokens=v.cached_tokens or 0)
-    return v
-
-
-def _normalize_output_tokens_details(
-    v: OutputTokensDetails | CompletionTokensDetails | None,
-) -> OutputTokensDetails:
-    """Converts None or CompletionTokensDetails to OutputTokensDetails."""
-    if v is None:
-        return OutputTokensDetails(reasoning_tokens=0)
-    if isinstance(v, CompletionTokensDetails):
-        return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
-    return v
-
-
-def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
-    """Serialize token details while applying the given default when empty."""
-    if hasattr(details, "model_dump"):
-        serialized = details.model_dump()
-        if isinstance(serialized, dict) and serialized:
-            return serialized
-    return dict(default)
-
-
-def serialize_usage(usage: Usage) -> dict[str, Any]:
-    """Serialize a Usage object into a JSON-friendly dictionary."""
-    input_details = _serialize_usage_details(usage.input_tokens_details, {"cached_tokens": 0})
-    output_details = _serialize_usage_details(usage.output_tokens_details, {"reasoning_tokens": 0})
-
-    def _serialize_request_entry(entry: RequestUsage) -> dict[str, Any]:
-        return {
-            "inputTokens": entry.input_tokens,
-            "outputTokens": entry.output_tokens,
-            "totalTokens": entry.total_tokens,
-            "inputTokensDetails": _serialize_usage_details(
-                entry.input_tokens_details, {"cached_tokens": 0}
-            ),
-            "outputTokensDetails": _serialize_usage_details(
-                entry.output_tokens_details, {"reasoning_tokens": 0}
-            ),
-        }
-
-    return {
-        "requests": usage.requests,
-        "inputTokens": usage.input_tokens,
-        "inputTokensDetails": [input_details],
-        "outputTokens": usage.output_tokens,
-        "outputTokensDetails": [output_details],
-        "totalTokens": usage.total_tokens,
-        "requestUsageEntries": [
-            _serialize_request_entry(entry) for entry in usage.request_usage_entries
-        ],
-    }
-
-
-def _coerce_token_details(adapter: TypeAdapter[Any], raw_value: Any, default: Any) -> Any:
-    """Deserialize token details safely with a fallback value."""
-    candidate = raw_value
-    if isinstance(candidate, list) and candidate:
-        candidate = candidate[0]
-    try:
-        return adapter.validate_python(candidate)
-    except ValidationError:
-        return default
-
-
 def deserialize_usage(usage_data: Mapping[str, Any]) -> Usage:
     """Rebuild a Usage object from serialized JSON data."""
     input_details = _coerce_token_details(
@@ -259,3 +186,81 @@ class Usage:
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
             self.request_usage_entries.extend(other.request_usage_entries)
+
+
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _normalize_input_tokens_details(
+    v: InputTokensDetails | PromptTokensDetails | None,
+) -> InputTokensDetails:
+    """Converts None or PromptTokensDetails to InputTokensDetails."""
+    if v is None:
+        return InputTokensDetails(cached_tokens=0)
+    if isinstance(v, PromptTokensDetails):
+        return InputTokensDetails(cached_tokens=v.cached_tokens or 0)
+    return v
+
+
+def _normalize_output_tokens_details(
+    v: OutputTokensDetails | CompletionTokensDetails | None,
+) -> OutputTokensDetails:
+    """Converts None or CompletionTokensDetails to OutputTokensDetails."""
+    if v is None:
+        return OutputTokensDetails(reasoning_tokens=0)
+    if isinstance(v, CompletionTokensDetails):
+        return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
+    return v
+
+
+def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
+    """Serialize token details while applying the given default when empty."""
+    if hasattr(details, "model_dump"):
+        serialized = details.model_dump()
+        if isinstance(serialized, dict) and serialized:
+            return serialized
+    return dict(default)
+
+
+def serialize_usage(usage: Usage) -> dict[str, Any]:
+    """Serialize a Usage object into a JSON-friendly dictionary."""
+    input_details = _serialize_usage_details(usage.input_tokens_details, {"cached_tokens": 0})
+    output_details = _serialize_usage_details(usage.output_tokens_details, {"reasoning_tokens": 0})
+
+    def _serialize_request_entry(entry: RequestUsage) -> dict[str, Any]:
+        return {
+            "inputTokens": entry.input_tokens,
+            "outputTokens": entry.output_tokens,
+            "totalTokens": entry.total_tokens,
+            "inputTokensDetails": _serialize_usage_details(
+                entry.input_tokens_details, {"cached_tokens": 0}
+            ),
+            "outputTokensDetails": _serialize_usage_details(
+                entry.output_tokens_details, {"reasoning_tokens": 0}
+            ),
+        }
+
+    return {
+        "requests": usage.requests,
+        "inputTokens": usage.input_tokens,
+        "inputTokensDetails": [input_details],
+        "outputTokens": usage.output_tokens,
+        "outputTokensDetails": [output_details],
+        "totalTokens": usage.total_tokens,
+        "requestUsageEntries": [
+            _serialize_request_entry(entry) for entry in usage.request_usage_entries
+        ],
+    }
+
+
+def _coerce_token_details(adapter: TypeAdapter[Any], raw_value: Any, default: Any) -> Any:
+    """Deserialize token details safely with a fallback value."""
+    candidate = raw_value
+    if isinstance(candidate, list) and candidate:
+        candidate = candidate[0]
+    try:
+        return adapter.validate_python(candidate)
+    except ValidationError:
+        return default

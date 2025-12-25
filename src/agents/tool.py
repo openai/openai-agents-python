@@ -343,41 +343,6 @@ _computers_by_run_context: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 
 
-def _is_computer_provider(candidate: object) -> bool:
-    return isinstance(candidate, ComputerProvider) or (
-        hasattr(candidate, "create") and callable(candidate.create)
-    )
-
-
-def _store_computer_initializer(tool: ComputerTool[Any]) -> None:
-    config = tool.computer
-    if callable(config) or _is_computer_provider(config):
-        _computer_initializer_map[tool] = config
-
-
-def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig[Any] | None:
-    if tool in _computer_initializer_map:
-        return _computer_initializer_map[tool]
-
-    if callable(tool.computer) or _is_computer_provider(tool.computer):
-        return tool.computer
-
-    return None
-
-
-def _track_resolved_computer(
-    *,
-    tool: ComputerTool[Any],
-    run_context: RunContextWrapper[Any],
-    resolved: _ResolvedComputer,
-) -> None:
-    resolved_by_run = _computers_by_run_context.get(run_context)
-    if resolved_by_run is None:
-        resolved_by_run = {}
-        _computers_by_run_context[run_context] = resolved_by_run
-    resolved_by_run[tool] = resolved
-
-
 async def resolve_computer(
     *, tool: ComputerTool[Any], run_context: RunContextWrapper[Any]
 ) -> ComputerLike:
@@ -639,17 +604,13 @@ class ShellCallOutcome:
     exit_code: int | None = None
 
 
-def _default_shell_outcome() -> ShellCallOutcome:
-    return ShellCallOutcome(type="exit")
-
-
 @dataclass
 class ShellCommandOutput:
     """Structured output for a single shell command execution."""
 
     stdout: str = ""
     stderr: str = ""
-    outcome: ShellCallOutcome = field(default_factory=_default_shell_outcome)
+    outcome: ShellCallOutcome = field(default_factory=lambda: ShellCallOutcome(type="exit"))
     command: str | None = None
     provider_data: dict[str, Any] | None = None
 
@@ -973,3 +934,43 @@ def function_tool(
         return _create_function_tool(real_func)
 
     return decorator
+
+
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _is_computer_provider(candidate: object) -> bool:
+    return isinstance(candidate, ComputerProvider) or (
+        hasattr(candidate, "create") and callable(candidate.create)
+    )
+
+
+def _store_computer_initializer(tool: ComputerTool[Any]) -> None:
+    config = tool.computer
+    if callable(config) or _is_computer_provider(config):
+        _computer_initializer_map[tool] = config
+
+
+def _get_computer_initializer(tool: ComputerTool[Any]) -> ComputerConfig[Any] | None:
+    if tool in _computer_initializer_map:
+        return _computer_initializer_map[tool]
+
+    if callable(tool.computer) or _is_computer_provider(tool.computer):
+        return tool.computer
+
+    return None
+
+
+def _track_resolved_computer(
+    *,
+    tool: ComputerTool[Any],
+    run_context: RunContextWrapper[Any],
+    resolved: _ResolvedComputer,
+) -> None:
+    resolved_by_run = _computers_by_run_context.get(run_context)
+    if resolved_by_run is None:
+        resolved_by_run = {}
+        _computers_by_run_context[run_context] = resolved_by_run
+    resolved_by_run[tool] = resolved

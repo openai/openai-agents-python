@@ -19,17 +19,6 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 
 from agents import Agent, Runner, handoff
-from agents._run_impl import (
-    NextStepInterruption,
-    ProcessedResponse,
-    ToolRunApplyPatchCall,
-    ToolRunComputerAction,
-    ToolRunFunction,
-    ToolRunHandoff,
-    ToolRunLocalShellCall,
-    ToolRunMCPApprovalRequest,
-    ToolRunShellCall,
-)
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -51,13 +40,27 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.run_loop import (
+    NextStepInterruption,
+    ProcessedResponse,
+    ToolRunApplyPatchCall,
+    ToolRunComputerAction,
+    ToolRunFunction,
+    ToolRunHandoff,
+    ToolRunLocalShellCall,
+    ToolRunMCPApprovalRequest,
+    ToolRunShellCall,
+)
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
     RunState,
     _build_agent_map,
+    _camelize_field_names,
     _deserialize_items,
     _deserialize_processed_response,
     _normalize_field_names,
+    _serialize_guardrail_results,
+    _serialize_tool_action_groups,
 )
 from agents.tool import (
     ApplyPatchTool,
@@ -1550,7 +1553,7 @@ class TestRunStateResumption:
         state = result.to_state()
 
         # State should have _current_step set to NextStepInterruption
-        from agents._run_impl import NextStepInterruption
+        from agents.run_internal.run_loop import NextStepInterruption
 
         assert state._current_step is not None
         assert isinstance(state._current_step, NextStepInterruption)
@@ -1711,7 +1714,7 @@ class TestRunStateSerializationEdgeCases:
                 "nested_list": [{"call_id": "call456"}],
             },
         }
-        result = RunState._camelize_field_names(data)
+        result = _camelize_field_names(data)
         # The method converts call_id to callId and response_id to responseId
         assert "callId" in result
         assert result["callId"] == "call123"
@@ -1723,14 +1726,112 @@ class TestRunStateSerializationEdgeCases:
 
         # Test with list
         data_list = [{"call_id": "call1"}, {"response_id": "resp1"}]
-        result_list = RunState._camelize_field_names(data_list)
+        result_list = _camelize_field_names(data_list)
         assert len(result_list) == 2
         assert "callId" in result_list[0]
         assert "responseId" in result_list[1]
 
         # Test with non-dict/list (should return as-is)
-        result_scalar = RunState._camelize_field_names("string")
+        result_scalar = _camelize_field_names("string")
         assert result_scalar == "string"
+
+    def test_serialize_tool_action_groups(self):
+        """Ensure tool action groups serialize with expected wrapper keys and call IDs."""
+
+        class _Tool:
+            def __init__(self, name: str):
+                self.name = name
+
+        class _Action:
+            def __init__(self, tool_attr: str, tool_name: str, call_id: str):
+                self.tool_call = {"type": "function_call", "call_id": call_id}
+                setattr(self, tool_attr, _Tool(tool_name))
+
+        class _Handoff:
+            def __init__(self):
+                self.handoff = _Tool("handoff_tool")
+                self.tool_call = {"type": "function_call", "call_id": "handoff-call"}
+
+        class _MCPRequest:
+            def __init__(self):
+                self.request_item = {"type": "mcp_approval_request"}
+
+                class _MCPTool:
+                    def __init__(self):
+                        self.name = "mcp_tool"
+
+                    def to_json(self) -> dict[str, str]:
+                        return {"name": self.name}
+
+                self.mcp_tool = _MCPTool()
+
+        processed_response = ProcessedResponse(
+            new_items=[],
+            handoffs=cast(list[ToolRunHandoff], [_Handoff()]),
+            functions=cast(
+                list[ToolRunFunction], [_Action("function_tool", "func_tool", "func-call")]
+            ),
+            computer_actions=cast(
+                list[ToolRunComputerAction],
+                [_Action("computer_tool", "computer_tool", "comp-call")],
+            ),
+            local_shell_calls=cast(
+                list[ToolRunLocalShellCall],
+                [_Action("local_shell_tool", "local_shell_tool", "local-call")],
+            ),
+            shell_calls=cast(
+                list[ToolRunShellCall], [_Action("shell_tool", "shell_tool", "shell-call")]
+            ),
+            apply_patch_calls=cast(
+                list[ToolRunApplyPatchCall],
+                [_Action("apply_patch_tool", "apply_patch_tool", "patch-call")],
+            ),
+            tools_used=[],
+            mcp_approval_requests=cast(list[ToolRunMCPApprovalRequest], [_MCPRequest()]),
+            interruptions=[],
+        )
+
+        serialized = _serialize_tool_action_groups(processed_response)
+        assert set(serialized.keys()) == {
+            "functions",
+            "computerActions",
+            "localShellActions",
+            "shellActions",
+            "applyPatchActions",
+            "handoffs",
+            "mcpApprovalRequests",
+        }
+        assert serialized["functions"][0]["tool"]["name"] == "func_tool"
+        assert serialized["functions"][0]["toolCall"]["callId"] == "func-call"
+        assert serialized["handoffs"][0]["handoff"]["toolName"] == "handoff_tool"
+        assert serialized["mcpApprovalRequests"][0]["mcpTool"]["name"] == "mcp_tool"
+
+    def test_serialize_guardrail_results(self):
+        """Serialize both input and output guardrail results with agent data."""
+        guardrail_output = GuardrailFunctionOutput(
+            output_info={"info": "details"}, tripwire_triggered=False
+        )
+        input_guardrail = InputGuardrail(
+            guardrail_function=lambda *_args, **_kwargs: guardrail_output, name="input"
+        )
+        output_guardrail = OutputGuardrail(
+            guardrail_function=lambda *_args, **_kwargs: guardrail_output, name="output"
+        )
+
+        agent = Agent(name="AgentA")
+        output_result = OutputGuardrailResult(
+            guardrail=output_guardrail,
+            agent_output="some_output",
+            agent=agent,
+            output=guardrail_output,
+        )
+        input_result = InputGuardrailResult(guardrail=input_guardrail, output=guardrail_output)
+
+        serialized = _serialize_guardrail_results([input_result, output_result])
+        assert {entry["guardrail"]["type"] for entry in serialized} == {"input", "output"}
+        output_entry = next(entry for entry in serialized if entry["guardrail"]["type"] == "output")
+        assert output_entry["agentOutput"] == "some_output"
+        assert output_entry["agent"]["name"] == "AgentA"
 
     async def test_serialize_handoff_with_name_fallback(self):
         """Test serialization of handoff with name fallback when tool_name is missing."""

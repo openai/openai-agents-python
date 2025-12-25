@@ -1,0 +1,219 @@
+"""
+Item utilities for the run pipeline. Hosts input normalization helpers and lightweight builders
+for synthetic run items or IDs used during tool execution. Internal use only.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from typing import Any, cast
+
+from ..items import (
+    ItemHelpers,
+    ToolCallOutputItem,
+    TResponseInputItem,
+    ensure_function_call_output_format,
+)
+from ..run_state import _normalize_field_names
+
+REJECTION_MESSAGE = "Tool execution was not approved."
+
+__all__ = [
+    "REJECTION_MESSAGE",
+    "copy_input_items",
+    "drop_orphan_function_calls",
+    "ensure_input_item_format",
+    "normalize_input_items_for_api",
+    "fingerprint_input_item",
+    "deduplicate_input_items",
+    "function_rejection_item",
+    "shell_rejection_item",
+    "apply_patch_rejection_item",
+    "extract_mcp_request_id",
+    "extract_mcp_request_id_from_run",
+]
+
+
+def copy_input_items(value: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
+    """Return a shallow copy of input items so mutations do not leak between turns."""
+    return value if isinstance(value, str) else value.copy()
+
+
+def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+    """
+    Remove function_call items that do not have corresponding outputs so resumptions or retries do
+    not replay stale tool calls.
+    """
+
+    completed_call_ids = _completed_call_ids(items)
+
+    filtered: list[TResponseInputItem] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            filtered.append(entry)
+            continue
+        if entry.get("type") != "function_call":
+            filtered.append(entry)
+            continue
+        call_id = entry.get("call_id") or entry.get("callId")
+        if call_id and call_id in completed_call_ids:
+            filtered.append(entry)
+    return filtered
+
+
+def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
+    """Ensure a single item is normalized for model input (function_call_output, snake_case)."""
+    coerced = _coerce_to_dict(item)
+    if coerced is None:
+        return item
+
+    normalized = ensure_function_call_output_format(dict(coerced))
+    return cast(TResponseInputItem, normalized)
+
+
+def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
+    """Normalize input items for API submission and strip provider data for downstream services."""
+
+    normalized: list[TResponseInputItem] = []
+    for item in items:
+        coerced = _coerce_to_dict(item)
+        if coerced is None:
+            normalized.append(item)
+            continue
+
+        normalized_item = dict(coerced)
+        normalized_item.pop("providerData", None)
+        normalized_item.pop("provider_data", None)
+        normalized_item = ensure_function_call_output_format(normalized_item)
+        normalized_item = _normalize_field_names(normalized_item)
+        normalized.append(cast(TResponseInputItem, normalized_item))
+    return normalized
+
+
+def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) -> str | None:
+    """Hashable fingerprint used to dedupe or rewind input items across resumes."""
+    if item is None:
+        return None
+
+    try:
+        if hasattr(item, "model_dump"):
+            payload = item.model_dump(exclude_unset=True)
+        elif isinstance(item, dict):
+            payload = dict(item)
+            if ignore_ids_for_matching:
+                payload.pop("id", None)
+        else:
+            payload = ensure_input_item_format(item)
+            if ignore_ids_for_matching and isinstance(payload, dict):
+                payload.pop("id", None)
+
+        return json.dumps(payload, sort_keys=True, default=str)
+    except Exception:
+        return None
+
+
+def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TResponseInputItem]:
+    """Remove duplicate items based on fingerprints to prevent re-sending the same content."""
+    seen_keys: set[str] = set()
+    deduplicated: list[TResponseInputItem] = []
+    for item in items:
+        serialized = fingerprint_input_item(item) or repr(item)
+        if serialized in seen_keys:
+            continue
+        seen_keys.add(serialized)
+        deduplicated.append(item)
+    return deduplicated
+
+
+def function_rejection_item(agent: Any, tool_call: Any) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected function tool call."""
+    return ToolCallOutputItem(
+        output=REJECTION_MESSAGE,
+        raw_item=ItemHelpers.tool_call_output_item(tool_call, REJECTION_MESSAGE),
+        agent=agent,
+    )
+
+
+def shell_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected shell call."""
+    rejection_output: dict[str, Any] = {
+        "stdout": "",
+        "stderr": REJECTION_MESSAGE,
+        "outcome": {"type": "exit", "exit_code": 1},
+    }
+    rejection_raw_item: dict[str, Any] = {
+        "type": "shell_call_output",
+        "call_id": call_id,
+        "output": [rejection_output],
+    }
+    return ToolCallOutputItem(agent=agent, output=REJECTION_MESSAGE, raw_item=rejection_raw_item)
+
+
+def apply_patch_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
+    """Build a ToolCallOutputItem representing a rejected apply_patch call."""
+    rejection_raw_item: dict[str, Any] = {
+        "type": "apply_patch_call_output",
+        "call_id": call_id,
+        "status": "failed",
+        "output": REJECTION_MESSAGE,
+    }
+    return ToolCallOutputItem(
+        agent=agent,
+        output=REJECTION_MESSAGE,
+        raw_item=rejection_raw_item,
+    )
+
+
+def extract_mcp_request_id(raw_item: Any) -> str | None:
+    """Pull the request id from hosted MCP approval payloads."""
+    if isinstance(raw_item, dict):
+        candidate = raw_item.get("id")
+        return candidate if isinstance(candidate, str) else None
+    try:
+        candidate = getattr(raw_item, "id", None)
+    except Exception:
+        candidate = None
+    return candidate if isinstance(candidate, str) else None
+
+
+def extract_mcp_request_id_from_run(mcp_run: Any) -> str | None:
+    """Extract the hosted MCP request id from a streaming run item."""
+    request_item = getattr(mcp_run, "request_item", None) or getattr(mcp_run, "requestItem", None)
+    if isinstance(request_item, dict):
+        candidate = request_item.get("id")
+    else:
+        candidate = getattr(request_item, "id", None)
+    return candidate if isinstance(candidate, str) else None
+
+
+# --------------------------
+# Private helpers
+# --------------------------
+
+
+def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
+    """Return the call ids that already have outputs."""
+    completed: set[str] = set()
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        item_type = entry.get("type")
+        if item_type not in ("function_call_output", "function_call_result"):
+            continue
+        call_id = entry.get("call_id") or entry.get("callId")
+        if call_id and isinstance(call_id, str):
+            completed.add(call_id)
+    return completed
+
+
+def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+    """Convert model items to dicts so fields can be renamed and sanitized."""
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "model_dump"):
+        try:
+            return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+        except Exception:
+            return None
+    return None

@@ -31,7 +31,6 @@ from agents import (
     UserError,
     handoff,
 )
-from agents._run_impl import AgentToolUseTracker
 from agents.agent import ToolsToFinalOutputResult
 from agents.computer import Computer
 from agents.items import (
@@ -42,13 +41,22 @@ from agents.items import (
     TResponseInputItem,
 )
 from agents.lifecycle import RunHooks
-from agents.run import (
-    AgentRunner,
-    _default_trace_include_sensitive_data,
-    _ServerConversationTracker,
-    get_default_agent_runner,
-    set_default_agent_runner,
+from agents.run import AgentRunner, get_default_agent_runner, set_default_agent_runner
+from agents.run_config import _default_trace_include_sensitive_data
+from agents.run_internal.items import (
+    drop_orphan_function_calls,
+    ensure_input_item_format,
+    normalize_input_items_for_api,
 )
+from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
+from agents.run_internal.run_loop import get_new_response
+from agents.run_internal.session_persistence import (
+    prepare_input_with_session,
+    rewind_session_items,
+    save_result_to_session,
+)
+from agents.run_internal.tool_execution import execute_approved_tools
+from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
 from agents.tool import ComputerTool, FunctionToolResult, function_tool
 from agents.usage import Usage
@@ -81,7 +89,6 @@ async def run_execute_approved_tools(
     approval_item: ToolApprovalItem,
     *,
     approve: bool | None,
-    use_instance_method: bool = False,
 ) -> list[RunItem]:
     """Execute approved tools with a consistent setup."""
 
@@ -100,25 +107,16 @@ async def run_execute_approved_tools(
 
     generated_items: list[RunItem] = []
 
-    if use_instance_method:
-        runner = AgentRunner()
-        await runner._execute_approved_tools(
-            agent=agent,
-            interruptions=[approval_item],
-            context_wrapper=context_wrapper,
-            generated_items=generated_items,
-            run_config=RunConfig(),
-            hooks=RunHooks(),
-        )
-    else:
-        await AgentRunner._execute_approved_tools_static(
-            agent=agent,
-            interruptions=[approval_item],
-            context_wrapper=context_wrapper,
-            generated_items=generated_items,
-            run_config=RunConfig(),
-            hooks=RunHooks(),
-        )
+    all_tools = await agent.get_all_tools(context_wrapper)
+    await execute_approved_tools(
+        agent=agent,
+        interruptions=[approval_item],
+        context_wrapper=context_wrapper,
+        generated_items=generated_items,
+        run_config=RunConfig(),
+        hooks=RunHooks(),
+        all_tools=all_tools,
+    )
 
     return generated_items
 
@@ -141,7 +139,7 @@ def test_default_trace_include_sensitive_data_env(monkeypatch: pytest.MonkeyPatc
     assert _default_trace_include_sensitive_data() is True
 
 
-def test_filter_incomplete_function_calls_removes_orphans():
+def testdrop_orphan_function_calls_removes_orphans():
     items: list[TResponseInputItem] = [
         cast(
             TResponseInputItem,
@@ -168,14 +166,14 @@ def test_filter_incomplete_function_calls_removes_orphans():
         ),
     ]
 
-    filtered = AgentRunner._filter_incomplete_function_calls(items)
+    filtered = drop_orphan_function_calls(items)
     assert len(filtered) == 3
     for entry in filtered:
         if isinstance(entry, dict):
             assert entry.get("call_id") != "call_orphan"
 
 
-def test_normalize_input_items_strips_provider_data():
+def testnormalize_input_items_for_api_strips_provider_data():
     items: list[TResponseInputItem] = [
         cast(
             TResponseInputItem,
@@ -198,7 +196,7 @@ def test_normalize_input_items_strips_provider_data():
         ),
     ]
 
-    normalized = AgentRunner._normalize_input_items(items)
+    normalized = normalize_input_items_for_api(items)
     first = cast(dict[str, Any], normalized[0])
     second = cast(dict[str, Any], normalized[1])
 
@@ -209,7 +207,7 @@ def test_normalize_input_items_strips_provider_data():
 
 
 def test_server_conversation_tracker_tracks_previous_response_id():
-    tracker = _ServerConversationTracker(conversation_id=None, previous_response_id="resp_a")
+    tracker = OpenAIServerConversationTracker(conversation_id=None, previous_response_id="resp_a")
     response = ModelResponse(
         output=[get_text_message("hello")],
         usage=Usage(),
@@ -869,9 +867,7 @@ async def test_prepare_input_with_session_converts_protocol_history():
     )
     session = SimpleListSession(history=[history_item])
 
-    prepared_input, session_items = await AgentRunner._prepare_input_with_session(
-        "hello", session, None
-    )
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
 
     assert isinstance(prepared_input, list)
     assert len(session_items) == 1
@@ -897,7 +893,7 @@ def test_ensure_api_input_item_handles_model_dump_objects():
             }
 
     dummy_item: Any = _ModelDumpItem()
-    converted = AgentRunner._ensure_api_input_item(dummy_item)
+    converted = ensure_input_item_format(dummy_item)
     assert converted["type"] == "function_call_output"
     assert "name" not in converted
     assert "status" not in converted
@@ -914,7 +910,7 @@ def test_ensure_api_input_item_stringifies_object_output():
         },
     )
 
-    converted = AgentRunner._ensure_api_input_item(payload)
+    converted = ensure_input_item_format(payload)
     assert converted["type"] == "function_call_output"
     assert isinstance(converted["output"], str)
     assert "complex" in converted["output"]
@@ -932,9 +928,7 @@ async def test_prepare_input_with_session_uses_sync_callback():
         assert first["role"] == "user"
         return history + new_input
 
-    prepared, session_items = await AgentRunner._prepare_input_with_session(
-        "second", session, callback
-    )
+    prepared, session_items = await prepare_input_with_session("second", session, callback)
     assert len(prepared) == 2
     last_item = cast(dict[str, Any], prepared[-1])
     assert last_item["role"] == "user"
@@ -955,9 +949,7 @@ async def test_prepare_input_with_session_awaits_async_callback():
         await asyncio.sleep(0)
         return history + new_input
 
-    prepared, session_items = await AgentRunner._prepare_input_with_session(
-        "later", session, callback
-    )
+    prepared, session_items = await prepare_input_with_session("later", session, callback)
     assert len(prepared) == 2
     first_item = cast(dict[str, Any], prepared[0])
     assert first_item["role"] == "user"
@@ -989,7 +981,7 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     model.add_multiple_turn_outputs([locked_error, [get_text_message("ok")]])
     agent = Agent(name="test", model=model)
 
-    result = await AgentRunner._get_new_response(
+    result = await get_new_response(
         agent=agent,
         system_prompt=None,
         input=[history_item, new_item],
@@ -1032,7 +1024,7 @@ async def test_save_result_to_session_strips_protocol_fields():
     }
     dummy_run_item = _DummyRunItem(run_item_payload)
 
-    await AgentRunner._save_result_to_session(
+    await save_result_to_session(
         session,
         [original_item],
         [cast(RunItem, dummy_run_item)],
@@ -1052,7 +1044,7 @@ async def test_rewind_handles_id_stripped_sessions() -> None:
     item = cast(TResponseInputItem, {"id": "message-1", "type": "message", "content": "hello"})
     await session.add_items([item])
 
-    await AgentRunner._rewind_session_items(session, [item])
+    await rewind_session_items(session, [item])
 
     assert session.pop_calls == 1
     assert session.saved_items == []
@@ -1074,7 +1066,7 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
         max_turns=1,
     )
 
-    await AgentRunner._save_result_to_session(
+    await save_result_to_session(
         session,
         [],
         cast(list[RunItem], [approval_item]),
@@ -2132,7 +2124,7 @@ async def test_execute_approved_tools_with_missing_tool():
 
 @pytest.mark.asyncio
 async def test_execute_approved_tools_instance_method():
-    """Test the instance method wrapper for _execute_approved_tools."""
+    """Ensure execute_approved_tools runs approved tools as expected."""
     tool_called = False
 
     async def test_tool() -> str:
@@ -2152,7 +2144,6 @@ async def test_execute_approved_tools_instance_method():
         agent=agent,
         approval_item=approval_item,
         approve=True,
-        use_instance_method=True,
     )
 
     # Tool should have been called

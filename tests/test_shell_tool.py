@@ -14,8 +14,8 @@ from agents import (
     ShellResult,
     ShellTool,
 )
-from agents._run_impl import ShellAction, ToolRunShellCall
 from agents.items import ToolApprovalItem, ToolCallOutputItem
+from agents.run_internal.run_loop import ShellAction, ToolRunShellCall
 
 from .utils.hitl import (
     HITL_REJECTION_MSG,

@@ -27,13 +27,13 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents._run_impl import (
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import (
     NextStepFinalOutput,
     NextStepHandoff,
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
-    RunImpl,
     SingleStepResult,
     ToolRunApplyPatchCall,
     ToolRunComputerAction,
@@ -42,8 +42,9 @@ from agents._run_impl import (
     ToolRunLocalShellCall,
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
+    get_handoffs,
+    get_output_schema,
 )
-from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
 
@@ -383,17 +384,17 @@ async def get_execute_result(
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
-    output_schema = AgentRunner._get_output_schema(agent)
-    handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
+    output_schema = get_output_schema(agent)
+    handoffs = await get_handoffs(agent, context_wrapper or RunContextWrapper(None))
 
-    processed_response = RunImpl.process_model_response(
+    processed_response = run_loop.process_model_response(
         agent=agent,
         all_tools=await agent.get_all_tools(context_wrapper or RunContextWrapper(None)),
         response=response,
         output_schema=output_schema,
         handoffs=handoffs,
     )
-    return await RunImpl.execute_tools_and_side_effects(
+    return await run_loop.execute_tools_and_side_effects(
         agent=agent,
         original_input=original_input or "hello",
         new_response=response,
@@ -411,11 +412,11 @@ async def run_execute_with_processed_response(
 ) -> SingleStepResult:
     """Execute tools for a pre-constructed ProcessedResponse."""
 
-    return await RunImpl.execute_tools_and_side_effects(
+    return await run_loop.execute_tools_and_side_effects(
         agent=agent,
         original_input="test",
         pre_step_items=[],
-        new_response=None,  # type: ignore[arg-type]
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
         processed_response=processed_response,
         output_schema=None,
         hooks=RunHooks(),
@@ -610,11 +611,11 @@ async def test_execute_tools_emits_hosted_mcp_rejection_response():
     context_wrapper = make_context_wrapper()
     reject_tool_call(context_wrapper, agent, request_item, tool_name="list_repo_languages")
 
-    result = await RunImpl.execute_tools_and_side_effects(
+    result = await run_loop.execute_tools_and_side_effects(
         agent=agent,
         original_input="test",
         pre_step_items=[],
-        new_response=None,  # type: ignore[arg-type]
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
         processed_response=processed_response,
         output_schema=None,
         hooks=RunHooks(),

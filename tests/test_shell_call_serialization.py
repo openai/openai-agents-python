@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from agents import _run_impl as run_impl
 from agents.agent import Agent
 from agents.exceptions import ModelBehaviorError
 from agents.items import ToolCallOutputItem
+from agents.run_internal import run_loop
 from agents.tool import ShellCallOutcome, ShellCommandOutput
 from tests.fake_model import FakeModel
 
@@ -19,14 +19,14 @@ def test_coerce_shell_call_reads_max_output_length() -> None:
         },
         "status": "in_progress",
     }
-    result = run_impl._coerce_shell_call(tool_call)
+    result = run_loop.coerce_shell_call(tool_call)
     assert result.action.max_output_length == 512
 
 
 def test_coerce_shell_call_requires_commands() -> None:
     tool_call = {"call_id": "shell-2", "action": {"commands": []}}
     with pytest.raises(ModelBehaviorError):
-        run_impl._coerce_shell_call(tool_call)
+        run_loop.coerce_shell_call(tool_call)
 
 
 def test_normalize_shell_output_handles_timeout() -> None:
@@ -36,7 +36,7 @@ def test_normalize_shell_output_handles_timeout() -> None:
         "outcome": {"type": "timeout"},
         "provider_data": {"truncated": True},
     }
-    normalized = run_impl._normalize_shell_output(entry)
+    normalized = run_loop.normalize_shell_output(entry)
     assert normalized.status == "timeout"
     assert normalized.provider_data == {"truncated": True}
 
@@ -49,7 +49,7 @@ def test_normalize_shell_output_converts_string_outcome() -> None:
         "outcome": "success",
         "exit_code": 0,
     }
-    normalized = run_impl._normalize_shell_output(entry)
+    normalized = run_loop.normalize_shell_output(entry)
     assert normalized.status == "completed"
     assert normalized.exit_code in (None, 0)
 
@@ -60,7 +60,7 @@ def test_serialize_shell_output_emits_canonical_outcome() -> None:
         stderr="",
         outcome=ShellCallOutcome(type="exit", exit_code=0),
     )
-    payload = run_impl._serialize_shell_output(output)
+    payload = run_loop.serialize_shell_output(output)
     assert payload["outcome"]["type"] == "exit"
     assert payload["outcome"]["exit_code"] == 0
     assert "exitCode" not in payload["outcome"]

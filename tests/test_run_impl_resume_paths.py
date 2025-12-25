@@ -1,16 +1,12 @@
 import pytest
 
 from agents import Agent
-from agents._run_impl import (
-    NextStepFinalOutput,
-    ProcessedResponse,
-    RunImpl,
-    SingleStepResult,
-)
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import ModelResponse
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import NextStepFinalOutput, ProcessedResponse, SingleStepResult
 from agents.usage import Usage
 from tests.fake_model import FakeModel
 from tests.utils.hitl import make_agent, make_context_wrapper
@@ -54,13 +50,13 @@ async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) 
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
-    monkeypatch.setattr(RunImpl, "execute_function_tool_calls", fake_execute_function_tool_calls)
-    monkeypatch.setattr(RunImpl, "execute_shell_calls", fake_execute_shell_calls)
-    monkeypatch.setattr(RunImpl, "execute_apply_patch_calls", fake_execute_apply_patch_calls)
+    monkeypatch.setattr(run_loop, "execute_function_tool_calls", fake_execute_function_tool_calls)
+    monkeypatch.setattr(run_loop, "execute_shell_calls", fake_execute_shell_calls)
+    monkeypatch.setattr(run_loop, "execute_apply_patch_calls", fake_execute_apply_patch_calls)
     monkeypatch.setattr(
-        RunImpl, "_check_for_final_output_from_tools", fake_check_for_final_output_from_tools
+        run_loop, "check_for_final_output_from_tools", fake_check_for_final_output_from_tools
     )
-    monkeypatch.setattr(RunImpl, "execute_final_output", fake_execute_final_output)
+    monkeypatch.setattr(run_loop, "execute_final_output", fake_execute_final_output)
 
     processed_response = ProcessedResponse(
         new_items=[],
@@ -75,7 +71,7 @@ async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) 
         interruptions=[],
     )
 
-    result = await RunImpl.resolve_interrupted_turn(
+    result = await run_loop.resolve_interrupted_turn(
         agent=agent,
         original_input="input",
         original_pre_step_items=[],

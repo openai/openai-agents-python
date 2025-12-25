@@ -31,8 +31,8 @@ from agents import (
     Usage,
     handoff,
 )
-from agents._run_impl import RunImpl, ToolRunHandoff
-from agents.run import AgentRunner
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import ToolRunHandoff, get_handoffs, get_output_schema
 
 from .test_responses import (
     get_final_output_message,
@@ -57,7 +57,7 @@ async def process_response(
 ) -> Any:
     """Process a model response using the agent's tools and optional handoffs."""
 
-    return RunImpl.process_model_response(
+    return run_loop.process_model_response(
         agent=agent,
         response=response,
         output_schema=output_schema,
@@ -74,7 +74,7 @@ def test_empty_response():
         response_id=None,
     )
 
-    result = RunImpl.process_model_response(
+    result = run_loop.process_model_response(
         agent=agent,
         response=response,
         output_schema=None,
@@ -92,7 +92,7 @@ def test_no_tool_calls():
         usage=Usage(),
         response_id=None,
     )
-    result = RunImpl.process_model_response(
+    result = run_loop.process_model_response(
         agent=agent, response=response, output_schema=None, handoffs=[], all_tools=[]
     )
     assert not result.handoffs
@@ -189,7 +189,7 @@ async def test_handoffs_parsed_correctly():
     result = await process_response(
         agent=agent_3,
         response=response,
-        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
+        handoffs=await get_handoffs(agent_3, _dummy_ctx()),
     )
     assert len(result.handoffs) == 1, "Should have a handoff here"
     handoff = result.handoffs[0]
@@ -228,9 +228,9 @@ async def test_handoff_can_disable_run_level_history_nesting(monkeypatch: pytest
         calls.append(handoff_input_data)
         return handoff_input_data
 
-    monkeypatch.setattr("agents._run_impl.nest_handoff_history", fake_nest)
+    monkeypatch.setattr("agents.run_internal.run_loop.nest_handoff_history", fake_nest)
 
-    result = await RunImpl.execute_handoffs(
+    result = await run_loop.execute_handoffs(
         agent=source_agent,
         original_input=list(original_input),
         pre_step_items=pre_step_items,
@@ -275,9 +275,9 @@ async def test_handoff_can_enable_history_nesting(monkeypatch: pytest.MonkeyPatc
             )
         )
 
-    monkeypatch.setattr("agents._run_impl.nest_handoff_history", fake_nest)
+    monkeypatch.setattr("agents.run_internal.run_loop.nest_handoff_history", fake_nest)
 
-    result = await RunImpl.execute_handoffs(
+    result = await run_loop.execute_handoffs(
         agent=source_agent,
         original_input=list(original_input),
         pre_step_items=pre_step_items,
@@ -311,7 +311,7 @@ async def test_missing_handoff_fails():
         await process_response(
             agent=agent_3,
             response=response,
-            handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
+            handoffs=await get_handoffs(agent_3, _dummy_ctx()),
         )
 
 
@@ -332,7 +332,7 @@ async def test_multiple_handoffs_doesnt_error():
     result = await process_response(
         agent=agent_3,
         response=response,
-        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
+        handoffs=await get_handoffs(agent_3, _dummy_ctx()),
     )
     assert len(result.handoffs) == 2, "Should have multiple handoffs here"
 
@@ -356,7 +356,7 @@ async def test_final_output_parsed_correctly():
     await process_response(
         agent=agent,
         response=response,
-        output_schema=AgentRunner._get_output_schema(agent),
+        output_schema=get_output_schema(agent),
     )
 
 
@@ -536,7 +536,7 @@ async def test_tool_and_handoff_parsed_correctly():
     result = await process_response(
         agent=agent_3,
         response=response,
-        handoffs=await AgentRunner._get_handoffs(agent_3, _dummy_ctx()),
+        handoffs=await get_handoffs(agent_3, _dummy_ctx()),
     )
     assert result.functions and len(result.functions) == 1
     assert len(result.handoffs) == 1, "Should have a handoff here"

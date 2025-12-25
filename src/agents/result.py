@@ -7,7 +7,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, cast
 
-from ._run_impl import NextStepInterruption, ProcessedResponse, QueueCompleteSentinel
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import (
@@ -26,6 +25,11 @@ from .items import (
 )
 from .logger import logger
 from .run_context import RunContextWrapper
+from .run_internal.run_steps import (
+    NextStepInterruption,
+    ProcessedResponse,
+    QueueCompleteSentinel,
+)
 from .run_state import RunState
 from .stream_events import StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
@@ -306,7 +310,7 @@ class RunResultStreaming(RunResultBase):
     )
 
     # Store the asyncio tasks that we're waiting on
-    _run_impl_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    run_loop_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
@@ -462,7 +466,7 @@ class RunResultStreaming(RunResultBase):
             else:
                 # Ensure main execution completes before cleanup to avoid race conditions
                 # with session operations
-                await self._await_task_safely(self._run_impl_task)
+                await self._await_task_safely(self.run_loop_task)
                 # Safely terminate all background tasks after main execution has finished
                 self._cleanup_tasks()
 
@@ -504,9 +508,9 @@ class RunResultStreaming(RunResultBase):
                 self._stored_exception = tripwire_exc
 
         # Check the tasks for any exceptions
-        if self._run_impl_task and self._run_impl_task.done():
-            if not self._run_impl_task.cancelled():
-                run_impl_exc = self._run_impl_task.exception()
+        if self.run_loop_task and self.run_loop_task.done():
+            if not self.run_loop_task.cancelled():
+                run_impl_exc = self.run_loop_task.exception()
                 if run_impl_exc and isinstance(run_impl_exc, Exception):
                     if isinstance(run_impl_exc, AgentsException) and run_impl_exc.run_data is None:
                         run_impl_exc.run_data = self._create_error_details()
@@ -532,8 +536,8 @@ class RunResultStreaming(RunResultBase):
                     self._stored_exception = out_guard_exc
 
     def _cleanup_tasks(self):
-        if self._run_impl_task and not self._run_impl_task.done():
-            self._run_impl_task.cancel()
+        if self.run_loop_task and not self.run_loop_task.done():
+            self.run_loop_task.cancel()
 
         if self._input_guardrails_task and not self._input_guardrails_task.done():
             self._input_guardrails_task.cancel()
