@@ -11,7 +11,7 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
+from ..tool import FunctionTool, Tool, ToolOutputImageDict, ToolOutputTextDict
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
@@ -181,7 +181,12 @@ class MCPUtil:
     @classmethod
     async def invoke_mcp_tool(
         cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
-    ) -> str:
+    ) -> Union[
+        str,
+        ToolOutputTextDict,
+        ToolOutputImageDict,
+        list[Union[ToolOutputTextDict, ToolOutputImageDict]],
+    ]:
         """Invoke an MCP tool and return the result as a string."""
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
@@ -211,25 +216,39 @@ class MCPUtil:
             logger.debug(f"MCP tool {tool.name} returned {result}")
 
         # If structured content is requested and available, use it exclusively
+        tool_output: Union[
+            str,
+            ToolOutputTextDict,
+            ToolOutputImageDict,
+            list[Union[ToolOutputTextDict, ToolOutputImageDict]],
+        ]
         if server.use_structured_content and result.structuredContent:
             tool_output = json.dumps(result.structuredContent)
         else:
-            # Fall back to regular text content processing
-            # The MCP tool result is a list of content items, whereas OpenAI tool
-            # outputs are a single string. We'll try to convert.
-            if len(result.content) == 1:
-                tool_output = result.content[0].model_dump_json()
-            elif len(result.content) > 1:
-                tool_results = [item.model_dump(mode="json") for item in result.content]
-                tool_output = json.dumps(tool_results)
+            tool_output_list: list[Union[ToolOutputTextDict, ToolOutputImageDict]] = []
+            for item in result.content:
+                if item.type == "text":
+                    tool_output_list.append(ToolOutputTextDict(type="text", text=item.text))
+                elif item.type == "image":
+                    tool_output_list.append(
+                        ToolOutputImageDict(
+                            type="image", image_url=f"data:{item.mimeType};base64,{item.data}"
+                        )
+                    )
+                else:
+                    # Fall back to regular text content
+                    tool_output_list.append(
+                        ToolOutputTextDict(type="text", text=str(item.model_dump(mode="json")))
+                    )
+            if len(tool_output_list) == 1:
+                tool_output = tool_output_list[0]
             else:
-                # Empty content is a valid result (e.g., "no results found")
-                tool_output = "[]"
+                tool_output = tool_output_list
 
         current_span = get_current_span()
         if current_span:
             if isinstance(current_span.span_data, FunctionSpanData):
-                current_span.span_data.output = tool_output
+                current_span.span_data.output = json.dumps(tool_output)
                 current_span.span_data.mcp_data = {
                     "server": server.name,
                 }
