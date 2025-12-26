@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 from inline_snapshot import snapshot
-from mcp.types import CallToolResult, TextContent, Tool as MCPTool
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
@@ -343,38 +343,44 @@ async def test_mcp_fastmcp_behavior_verification():
     ctx = RunContextWrapper(context=None)
     tool = MCPTool(name="test_tool", inputSchema={})
 
-    # Case 1: None -> "[]".
+    # Case 1: None -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"None should return '[]', got {result}"
+    assert result == [], f"None should return [], got {result}"
 
-    # Case 2: [] -> "[]".
+    # Case 2: [] -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"[] should return '[]', got {result}"
+    assert result == [], f"[] should return [], got {result}"
 
-    # Case 3: {} -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    # Case 3: {} -> {"type": "text", "text": "{}"}.
     server._custom_content = [TextContent(text="{}", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "{}"}
     assert result == expected, f"{{}} should return {expected}, got {result}"
 
-    # Case 4: [{}] -> {"type":"text","text":"{}","annotations":null,"meta":null}.
+    # Case 4: [{}] -> {"type": "text", "text": "{}"}.
     server._custom_content = [TextContent(text="{}", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"{}","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "{}"}
     assert result == expected, f"[{{}}] should return {expected}, got {result}"
 
-    # Case 5: [[]] -> "[]".
+    # Case 5: [[]] -> [].
     server._custom_content = []
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    assert result == "[]", f"[[]] should return '[]', got {result}"
+    assert result == [], f"[[]] should return [], got {result}"
 
     # Case 6: String values work normally.
     server._custom_content = [TextContent(text="hello", type="text")]
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
-    expected = '{"type":"text","text":"hello","annotations":null,"meta":null}'
+    expected = {"type": "text", "text": "hello"}
     assert result == expected, f"String should return {expected}, got {result}"
+
+    # Case 7: Image content works normally.
+    server._custom_content = [ImageContent(data="AAAA", mimeType="image/png", type="image")]
+    result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
+    expected = {"type": "image", "image_url": "data:image/png;base64,AAAA"}
+    assert result == expected, f"Image should return {expected}, got {result}"
 
 
 @pytest.mark.asyncio
@@ -482,7 +488,7 @@ class StructuredContentTestServer(FakeMCPServer):
             False,
             [TextContent(text="text content", type="text")],
             {"data": "structured_value", "type": "structured"},
-            '{"type":"text","text":"text content","annotations":null,"meta":null}',
+            {"type": "text", "text": "text content"},
         ),
         # Scenario 3: use_structured_content=True but no structured content
         # Should fall back to text content
@@ -490,7 +496,7 @@ class StructuredContentTestServer(FakeMCPServer):
             True,
             [TextContent(text="fallback text", type="text")],
             None,
-            '{"type":"text","text":"fallback text","annotations":null,"meta":null}',
+            {"type": "text", "text": "fallback text"},
         ),
         # Scenario 4: use_structured_content=True with empty structured content (falsy)
         # Should fall back to text content
@@ -498,7 +504,7 @@ class StructuredContentTestServer(FakeMCPServer):
             True,
             [TextContent(text="fallback text", type="text")],
             {},
-            '{"type":"text","text":"fallback text","annotations":null,"meta":null}',
+            {"type": "text", "text": "fallback text"},
         ),
         # Scenario 5: use_structured_content=True, structured content available, empty text content
         # Should return structured content
@@ -509,8 +515,7 @@ class StructuredContentTestServer(FakeMCPServer):
             False,
             [TextContent(text="first", type="text"), TextContent(text="second", type="text")],
             {"ignored": "structured"},
-            '[{"type": "text", "text": "first", "annotations": null, "meta": null}, '
-            '{"type": "text", "text": "second", "annotations": null, "meta": null}]',
+            [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
         ),
         # Scenario 7: use_structured_content=True, multiple text content, with structured content
         # Should return only structured content (text content ignored)
@@ -525,10 +530,10 @@ class StructuredContentTestServer(FakeMCPServer):
         ),
         # Scenario 8: use_structured_content=False, empty content
         # Should return empty array
-        (False, [], None, "[]"),
+        (False, [], None, []),
         # Scenario 9: use_structured_content=True, empty content, no structured content
         # Should return empty array
-        (True, [], None, "[]"),
+        (True, [], None, []),
     ],
 )
 @pytest.mark.asyncio
@@ -581,6 +586,7 @@ async def test_structured_content_priority_over_text():
     # Should return only structured content
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == structured_content
     assert "This should be ignored" not in result
@@ -607,11 +613,9 @@ async def test_structured_content_fallback_behavior():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should fall back to text content
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Fallback content"
-    assert parsed_result["type"] == "text"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Fallback content"
 
 
 @pytest.mark.asyncio
@@ -636,10 +640,9 @@ async def test_backwards_compatibility_unchanged():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should return only text content (structured content ignored)
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Traditional text output"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Traditional text output"
     assert "modern" not in result
 
 
@@ -665,11 +668,9 @@ async def test_empty_structured_content_fallback():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should fall back to text content because empty dict is falsy
-    import json
-
-    parsed_result = json.loads(result)
-    assert parsed_result["text"] == "Should use this text"
-    assert parsed_result["type"] == "text"
+    assert isinstance(result, dict)
+    assert result["type"] == "text"
+    assert result["text"] == "Should use this text"
 
 
 @pytest.mark.asyncio
@@ -699,6 +700,7 @@ async def test_complex_structured_content():
     # Should return the complex structured content as-is
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == complex_structured
     assert len(parsed_result["results"]) == 2
@@ -733,6 +735,7 @@ async def test_multiple_content_items_with_structured():
     # Should return only structured content, ignoring all text items
     import json
 
+    assert isinstance(result, str)
     parsed_result = json.loads(result)
     assert parsed_result == structured_content
     assert "First text item" not in result
@@ -757,10 +760,9 @@ async def test_multiple_content_items_without_structured():
     result = await MCPUtil.invoke_mcp_tool(server, tool, ctx, "{}")
 
     # Should return JSON array of text content items
-    import json
-
-    parsed_result = json.loads(result)
-    assert isinstance(parsed_result, list)
-    assert len(parsed_result) == 2
-    assert parsed_result[0]["text"] == "First"
-    assert parsed_result[1]["text"] == "Second"
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["type"] == "text"
+    assert result[0]["text"] == "First"
+    assert result[1]["type"] == "text"
+    assert result[1]["text"] == "Second"
