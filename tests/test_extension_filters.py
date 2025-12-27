@@ -632,6 +632,7 @@ def test_nest_handoff_history_no_duplicate_on_chained_handoffs() -> None:
 
     # Verify first handoff has 2 items: summary + preserved image.
     assert len(first_nested.input_history) == 2
+    assert not isinstance(first_nested.input_history, str)
     first_preserved = _as_message(first_nested.input_history[1])
     assert first_preserved["role"] == "user"
     first_content = first_preserved["content"]
@@ -652,6 +653,7 @@ def test_nest_handoff_history_no_duplicate_on_chained_handoffs() -> None:
     # The second handoff should still only have 2 items, not 3.
     # The preserved image from the first handoff should not be re-extracted.
     assert len(second_nested.input_history) == 2
+    assert not isinstance(second_nested.input_history, str)
 
     # Verify the image is still preserved (only once).
     second_preserved = _as_message(second_nested.input_history[1])
