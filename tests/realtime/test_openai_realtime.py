@@ -473,6 +473,39 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         types = [c[0][0].type for c in listener.on_event.call_args_list]
         assert types.count("item_updated") >= 2
 
+    @pytest.mark.asyncio
+    async def test_text_mode_output_item_content(self, model):
+        """output_text content is properly handled in message items."""
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        msg_added = {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "text_item_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "test data"},
+                ],
+            },
+        }
+        await model._handle_ws_event(msg_added)
+
+        # Verify the item was updated with content
+        assert listener.on_event.call_count >= 2
+        item_updated_calls = [
+            call for call in listener.on_event.call_args_list if call[0][0].type == "item_updated"
+        ]
+        assert len(item_updated_calls) >= 1
+
+        item = item_updated_calls[0][0][0].item
+        assert item.type == "message"
+        assert item.role == "assistant"
+        assert len(item.content) >= 1
+        assert item.content[0].type == "text"
+        assert item.content[0].text == "test data"
+
     # Note: response.created/done require full OpenAI response payload which is
     # out-of-scope for unit tests here; covered indirectly via other branches.
 
