@@ -571,7 +571,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                                 "transcript": part.get("transcript"),
                             }
                         )
-                    elif part.get("type") == "text":
+                    elif part.get("type") in ("text", "output_text"):
                         converted_content.append({"type": "text", "text": part.get("text")})
                 status = item.get("status")
                 if status not in ("in_progress", "completed", "incomplete"):
