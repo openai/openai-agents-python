@@ -467,3 +467,146 @@ def test_assistant_messages_in_history():
     assert messages[1]["content"] == "Hello?"
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "What was my Name?"
+
+
+def test_reasoning_message_extracts_reasoning_content_for_tool_calls():
+    """
+    Test that reasoning_content is extracted from the summary field of a
+    reasoning message and included in the following assistant message that
+    contains tool calls.
+
+    This is required for DeepSeek compatibility, where the API expects the
+    reasoning_content field in assistant messages for multi-turn conversations
+    with tool calls.
+
+    This is a regression test for issue #2155.
+    """
+    # User message followed by reasoning message followed by tool call
+    items: list[TResponseInputItem] = [
+        {
+            "role": "user",
+            "content": "What is the weather?",
+        },
+        {
+            "type": "reasoning",
+            "id": "reasoning-1",
+            "summary": [
+                {
+                    "type": "summary_text",
+                    "text": "I need to call the weather API to get the current weather.",
+                }
+            ],
+        },
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call_123",
+            "name": "get_weather",
+            "arguments": '{"location": "New York"}',
+        },
+    ]
+    messages = Converter.items_to_messages(items)
+
+    # Should return user message and assistant message with tool call
+    assert len(messages) == 2
+    user_msg = messages[0]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "What is the weather?"
+
+    assistant_msg = messages[1]
+    assert assistant_msg["role"] == "assistant"
+    # The reasoning_content from the summary should be included
+    assert "reasoning_content" in assistant_msg
+    assert (
+        assistant_msg["reasoning_content"]
+        == "I need to call the weather API to get the current weather."
+    )
+    # Tool calls should be present
+    tool_calls = list(assistant_msg.get("tool_calls", []))
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+
+
+def test_reasoning_message_without_summary_works():
+    """
+    Test that a reasoning message without a summary field does not cause errors
+    and that no reasoning_content is added to the assistant message.
+    """
+    items: list[TResponseInputItem] = [
+        {
+            "role": "user",
+            "content": "Hello",
+        },
+        {
+            "type": "reasoning",
+            "id": "reasoning-1",
+            # No summary field
+        },
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call_456",
+            "name": "greet",
+            "arguments": "{}",
+        },
+    ]
+    messages = Converter.items_to_messages(items)
+
+    assert len(messages) == 2
+    assistant_msg = messages[1]
+    assert assistant_msg["role"] == "assistant"
+    # No reasoning_content should be added
+    assert "reasoning_content" not in assistant_msg
+
+
+def test_reasoning_content_only_added_when_pending():
+    """
+    Test that reasoning_content is only added to the assistant message
+    that follows the reasoning message, not to subsequent messages.
+    """
+    items: list[TResponseInputItem] = [
+        {
+            "role": "user",
+            "content": "First question",
+        },
+        {
+            "type": "reasoning",
+            "id": "reasoning-1",
+            "summary": [
+                {
+                    "type": "summary_text",
+                    "text": "Reasoning for first response",
+                }
+            ],
+        },
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call_1",
+            "name": "tool1",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "result1",
+        },
+        {
+            "role": "assistant",
+            "content": "Here's the answer",
+        },
+    ]
+    messages = Converter.items_to_messages(items)
+
+    # Should return: user, assistant with tool call and reasoning_content, tool result, assistant
+    assert len(messages) == 4
+
+    # First assistant message should have reasoning_content
+    first_assistant = messages[1]
+    assert first_assistant["role"] == "assistant"
+    assert first_assistant.get("reasoning_content") == "Reasoning for first response"
+
+    # Second assistant message should NOT have reasoning_content
+    second_assistant = messages[3]
+    assert second_assistant["role"] == "assistant"
+    assert "reasoning_content" not in second_assistant

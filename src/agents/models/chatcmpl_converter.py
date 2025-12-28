@@ -379,13 +379,22 @@ class Converter:
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
+        # Track reasoning_content for DeepSeek reasoner models which require this
+        # field in assistant messages for multi-turn conversations with tool calls
+        pending_reasoning_content: str | None = None
 
         def flush_assistant_message() -> None:
-            nonlocal current_assistant_msg
+            nonlocal current_assistant_msg, pending_reasoning_content
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
                 if not current_assistant_msg.get("tool_calls"):
                     del current_assistant_msg["tool_calls"]
+                # Add reasoning_content if pending (for DeepSeek compatibility)
+                # This ensures the reasoning_content field is included in assistant
+                # messages that have tool calls, which is required by DeepSeek API
+                if pending_reasoning_content is not None:
+                    current_assistant_msg["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
+                    pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
 
@@ -568,6 +577,15 @@ class Converter:
 
             # 7) reasoning message => extract thinking blocks if present
             elif reasoning_item := cls.maybe_reasoning_message(item):
+                # Extract reasoning_content from summary field for DeepSeek compatibility
+                # The summary contains the reasoning text that DeepSeek API requires
+                # in assistant messages for multi-turn conversations with tool calls
+                summary_items = reasoning_item.get("summary", [])
+                for summary_item in summary_items:
+                    if isinstance(summary_item, dict) and summary_item.get("type") == "summary_text":
+                        pending_reasoning_content = summary_item.get("text", "")
+                        break
+
                 # Reconstruct thinking blocks from content (text) and encrypted_content (signature)
                 content_items = reasoning_item.get("content", [])
                 encrypted_content = reasoning_item.get("encrypted_content")
