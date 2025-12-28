@@ -493,7 +493,12 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
-            raise ModelBehaviorError(f"Tool {event.name} not found")
+            await self._put_event(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Tool {event.name} not found"},
+                )
+            )
 
     @classmethod
     def _get_new_history(
