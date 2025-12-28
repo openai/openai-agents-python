@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import sys
 from typing import cast
 
 import pytest
-from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 
-from agents import Agent, FunctionTool, Runner, RunContextWrapper, function_tool
+from agents import Agent, FunctionTool, RunContextWrapper, Runner, function_tool
 from agents.items import ToolCallItem, ToolCallItemTypes, ToolCallOutputItem
 from agents.tool import ToolOrigin, ToolOriginType
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool_call, get_text_message
-from .mcp.helpers import FakeMCPServer
+
+if sys.version_info >= (3, 10):
+    from .mcp.helpers import FakeMCPServer
 
 
 @pytest.mark.asyncio
@@ -53,6 +55,7 @@ async def test_function_tool_origin():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="MCP tests require Python 3.10+")
 async def test_mcp_tool_origin():
     """Test that MCP tools have MCP origin with server name."""
     model = FakeModel()
@@ -131,6 +134,7 @@ async def test_agent_as_tool_origin():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="MCP tests require Python 3.10+")
 async def test_multiple_tool_origins():
     """Test that multiple tools from different origins work together."""
     model = FakeModel()
@@ -184,14 +188,18 @@ async def test_multiple_tool_origins():
         item for item in tool_call_items if getattr(item.raw_item, "name", None) == "agent_tool"
     )
 
+    assert function_item.tool_origin is not None
     assert function_item.tool_origin.type == ToolOriginType.FUNCTION
+    assert mcp_item.tool_origin is not None
     assert mcp_item.tool_origin.type == ToolOriginType.MCP
     assert mcp_item.tool_origin.mcp_server_name == "mcp_server"
+    assert agent_item.tool_origin is not None
     assert agent_item.tool_origin.type == ToolOriginType.AGENT_AS_TOOL
     assert agent_item.tool_origin.agent_as_tool_name == "nested"
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="MCP tests require Python 3.10+")
 async def test_tool_origin_streaming():
     """Test that tool origin is populated correctly in streaming scenarios."""
     model = FakeModel()
