@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from rich.console import Console
 
-from agents import Runner, RunResult, custom_span, gen_trace_id, trace
+from agents import Runner, RunResult, RunResultStreaming, custom_span, gen_trace_id, trace
 
 from .agents.financials_agent import financials_agent
 from .agents.planner_agent import FinancialSearchItem, FinancialSearchPlan, planner_agent
@@ -17,7 +17,7 @@ from .agents.writer_agent import FinancialReportData, writer_agent
 from .printer import Printer
 
 
-async def _summary_extractor(run_result: RunResult) -> str:
+async def _summary_extractor(run_result: RunResult | RunResultStreaming) -> str:
     """Custom output extractor for sub‑agents that return an AnalysisSummary."""
     # The financial/risk analyst agents emit an AnalysisSummary with a `summary` field.
     # We want the tool call to return just that summary text so the writer can drop it inline.

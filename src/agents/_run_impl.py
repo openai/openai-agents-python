@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-from collections.abc import Awaitable
+import json
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from openai.types.responses import (
     ResponseComputerToolCall,
+    ResponseCustomToolCall,
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
@@ -28,6 +30,9 @@ from openai.types.responses.response_computer_tool_call import (
     ActionType,
     ActionWait,
 )
+from openai.types.responses.response_input_item_param import (
+    ComputerCallOutputAcknowledgedSafetyCheck,
+)
 from openai.types.responses.response_input_param import ComputerCallOutput, McpApprovalResponse
 from openai.types.responses.response_output_item import (
     ImageGenerationCall,
@@ -41,9 +46,16 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .agent import Agent, ToolsToFinalOutputResult
 from .agent_output import AgentOutputSchemaBase
 from .computer import AsyncComputer, Computer
-from .exceptions import AgentsException, ModelBehaviorError, UserError
+from .editor import ApplyPatchOperation, ApplyPatchResult
+from .exceptions import (
+    AgentsException,
+    ModelBehaviorError,
+    ToolInputGuardrailTripwireTriggered,
+    ToolOutputGuardrailTripwireTriggered,
+    UserError,
+)
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
-from .handoffs import Handoff, HandoffInputData
+from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -63,19 +75,35 @@ from .lifecycle import RunHooks
 from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import ModelTracing
-from .run_context import RunContextWrapper, TContext
+from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .stream_events import RunItemStreamEvent, StreamEvent
 from .tool import (
+    ApplyPatchTool,
     ComputerTool,
+    ComputerToolSafetyCheckData,
     FunctionTool,
     FunctionToolResult,
     HostedMCPTool,
     LocalShellCommandRequest,
     LocalShellTool,
     MCPToolApprovalRequest,
+    ShellActionRequest,
+    ShellCallData,
+    ShellCallOutcome,
+    ShellCommandOutput,
+    ShellCommandRequest,
+    ShellResult,
+    ShellTool,
     Tool,
+    resolve_computer,
 )
 from .tool_context import ToolContext
+from .tool_guardrails import (
+    ToolInputGuardrailData,
+    ToolInputGuardrailResult,
+    ToolOutputGuardrailData,
+    ToolOutputGuardrailResult,
+)
 from .tracing import (
     SpanError,
     Trace,
@@ -132,7 +160,7 @@ class ToolRunFunction:
 @dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
-    computer_tool: ComputerTool
+    computer_tool: ComputerTool[Any]
 
 
 @dataclass
@@ -148,12 +176,26 @@ class ToolRunLocalShellCall:
 
 
 @dataclass
+class ToolRunShellCall:
+    tool_call: Any
+    shell_tool: ShellTool
+
+
+@dataclass
+class ToolRunApplyPatchCall:
+    tool_call: Any
+    apply_patch_tool: ApplyPatchTool
+
+
+@dataclass
 class ProcessedResponse:
     new_items: list[RunItem]
     handoffs: list[ToolRunHandoff]
     functions: list[ToolRunFunction]
     computer_actions: list[ToolRunComputerAction]
     local_shell_calls: list[ToolRunLocalShellCall]
+    shell_calls: list[ToolRunShellCall]
+    apply_patch_calls: list[ToolRunApplyPatchCall]
     tools_used: list[str]  # Names of all tools used, including hosted tools
     mcp_approval_requests: list[ToolRunMCPApprovalRequest]  # Only requests with callbacks
 
@@ -166,6 +208,8 @@ class ProcessedResponse:
                 self.functions,
                 self.computer_actions,
                 self.local_shell_calls,
+                self.shell_calls,
+                self.apply_patch_calls,
                 self.mcp_approval_requests,
             ]
         )
@@ -203,6 +247,12 @@ class SingleStepResult:
 
     next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
     """The next step to take."""
+
+    tool_input_guardrail_results: list[ToolInputGuardrailResult]
+    """Tool input guardrail results from this step."""
+
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult]
+    """Tool output guardrail results from this step."""
 
     @property
     def generated_items(self) -> list[RunItem]:
@@ -245,8 +295,15 @@ class RunImpl:
         new_step_items: list[RunItem] = []
         new_step_items.extend(processed_response.new_items)
 
-        # First, lets run the tool calls - function tools and computer actions
-        function_results, computer_results = await asyncio.gather(
+        # First, run function tools, computer actions, shell calls, apply_patch calls,
+        # and legacy local shell calls.
+        (
+            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
+            computer_results,
+            shell_results,
+            apply_patch_results,
+            local_shell_results,
+        ) = await asyncio.gather(
             cls.execute_function_tool_calls(
                 agent=agent,
                 tool_runs=processed_response.functions,
@@ -261,9 +318,33 @@ class RunImpl:
                 context_wrapper=context_wrapper,
                 config=run_config,
             ),
+            cls.execute_shell_calls(
+                agent=agent,
+                calls=processed_response.shell_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            cls.execute_apply_patch_calls(
+                agent=agent,
+                calls=processed_response.apply_patch_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            cls.execute_local_shell_calls(
+                agent=agent,
+                calls=processed_response.local_shell_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
         )
         new_step_items.extend([result.run_item for result in function_results])
         new_step_items.extend(computer_results)
+        new_step_items.extend(shell_results)
+        new_step_items.extend(apply_patch_results)
+        new_step_items.extend(local_shell_results)
 
         # Next, run the MCP approval requests
         if processed_response.mcp_approval_requests:
@@ -316,6 +397,8 @@ class RunImpl:
                 final_output=check_tool_use.final_output,
                 hooks=hooks,
                 context_wrapper=context_wrapper,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
             )
 
         # Now we can check if the model also produced a final output
@@ -326,43 +409,46 @@ class RunImpl:
             ItemHelpers.extract_last_text(message_items[-1].raw_item) if message_items else None
         )
 
-        # There are two possibilities that lead to a final output:
-        # 1. Structured output schema => always leads to a final output
-        # 2. Plain text output schema => only leads to a final output if there are no tool calls
-        if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
-            final_output = output_schema.validate_json(potential_final_output_text)
-            return await cls.execute_final_output(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=final_output,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-            )
-        elif (
-            not output_schema or output_schema.is_plain_text()
-        ) and not processed_response.has_tools_or_approvals_to_run():
-            return await cls.execute_final_output(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=potential_final_output_text or "",
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-            )
-        else:
-            # If there's no final output, we can just run again
-            return SingleStepResult(
-                original_input=original_input,
-                model_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                next_step=NextStepRunAgain(),
-            )
+        # Generate final output only when there are no pending tool calls or approval requests.
+        if not processed_response.has_tools_or_approvals_to_run():
+            if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
+                final_output = output_schema.validate_json(potential_final_output_text)
+                return await cls.execute_final_output(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=final_output,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
+            elif not output_schema or output_schema.is_plain_text():
+                return await cls.execute_final_output(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=potential_final_output_text or "",
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
+
+        # If there's no final output, we can just run again
+        return SingleStepResult(
+            original_input=original_input,
+            model_response=new_response,
+            pre_step_items=pre_step_items,
+            new_step_items=new_step_items,
+            next_step=NextStepRunAgain(),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
 
     @classmethod
     def maybe_reset_tool_choice(
@@ -375,6 +461,22 @@ class RunImpl:
             return dataclasses.replace(model_settings, tool_choice=None)
 
         return model_settings
+
+    @classmethod
+    async def initialize_computer_tools(
+        cls,
+        *,
+        tools: list[Tool],
+        context_wrapper: RunContextWrapper[TContext],
+    ) -> None:
+        """Resolve computer tools ahead of model invocation so each run gets its own instance."""
+        computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
+        if not computer_tools:
+            return
+
+        await asyncio.gather(
+            *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
+        )
 
     @classmethod
     def process_model_response(
@@ -392,6 +494,8 @@ class RunImpl:
         functions = []
         computer_actions = []
         local_shell_calls = []
+        shell_calls = []
+        apply_patch_calls = []
         mcp_approval_requests = []
         tools_used: list[str] = []
         handoff_map = {handoff.tool_name: handoff for handoff in handoffs}
@@ -400,6 +504,10 @@ class RunImpl:
         local_shell_tool = next(
             (tool for tool in all_tools if isinstance(tool, LocalShellTool)), None
         )
+        shell_tool = next((tool for tool in all_tools if isinstance(tool, ShellTool)), None)
+        apply_patch_tool = next(
+            (tool for tool in all_tools if isinstance(tool, ApplyPatchTool)), None
+        )
         hosted_mcp_server_map = {
             tool.tool_config["server_label"]: tool
             for tool in all_tools
@@ -407,6 +515,56 @@ class RunImpl:
         }
 
         for output in response.output:
+            output_type = _get_mapping_or_attr(output, "type")
+            logger.debug(
+                "Processing output item type=%s class=%s",
+                output_type,
+                output.__class__.__name__ if hasattr(output, "__class__") else type(output),
+            )
+            if output_type == "shell_call":
+                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+                if not shell_tool:
+                    tools_used.append("shell")
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Shell tool not found",
+                            data={},
+                        )
+                    )
+                    raise ModelBehaviorError("Model produced shell call without a shell tool.")
+                tools_used.append(shell_tool.name)
+                call_identifier = _get_mapping_or_attr(output, "call_id") or _get_mapping_or_attr(
+                    output, "callId"
+                )
+                logger.debug("Queuing shell_call %s", call_identifier)
+                shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
+                continue
+            if output_type == "apply_patch_call":
+                items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+                if apply_patch_tool:
+                    tools_used.append(apply_patch_tool.name)
+                    call_identifier = _get_mapping_or_attr(output, "call_id")
+                    if not call_identifier:
+                        call_identifier = _get_mapping_or_attr(output, "callId")
+                    logger.debug("Queuing apply_patch_call %s", call_identifier)
+                    apply_patch_calls.append(
+                        ToolRunApplyPatchCall(
+                            tool_call=output,
+                            apply_patch_tool=apply_patch_tool,
+                        )
+                    )
+                else:
+                    tools_used.append("apply_patch")
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Apply patch tool not found",
+                            data={},
+                        )
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced apply_patch call without an apply_patch tool."
+                    )
+                continue
             if isinstance(output, ResponseOutputMessage):
                 items.append(MessageOutputItem(raw_item=output, agent=agent))
             elif isinstance(output, ResponseFileSearchToolCall):
@@ -469,20 +627,84 @@ class RunImpl:
                 tools_used.append("code_interpreter")
             elif isinstance(output, LocalShellCall):
                 items.append(ToolCallItem(raw_item=output, agent=agent))
-                tools_used.append("local_shell")
-                if not local_shell_tool:
+                if shell_tool:
+                    tools_used.append(shell_tool.name)
+                    shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
+                else:
+                    tools_used.append("local_shell")
+                    if not local_shell_tool:
+                        _error_tracing.attach_error_to_current_span(
+                            SpanError(
+                                message="Local shell tool not found",
+                                data={},
+                            )
+                        )
+                        raise ModelBehaviorError(
+                            "Model produced local shell call without a local shell tool."
+                        )
+                    local_shell_calls.append(
+                        ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
+                    )
+            elif isinstance(output, ResponseCustomToolCall) and _is_apply_patch_name(
+                output.name, apply_patch_tool
+            ):
+                parsed_operation = _parse_apply_patch_custom_input(output.input)
+                pseudo_call = {
+                    "type": "apply_patch_call",
+                    "call_id": output.call_id,
+                    "operation": parsed_operation,
+                }
+                items.append(ToolCallItem(raw_item=cast(Any, pseudo_call), agent=agent))
+                if apply_patch_tool:
+                    tools_used.append(apply_patch_tool.name)
+                    apply_patch_calls.append(
+                        ToolRunApplyPatchCall(
+                            tool_call=pseudo_call,
+                            apply_patch_tool=apply_patch_tool,
+                        )
+                    )
+                else:
+                    tools_used.append("apply_patch")
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
-                            message="Local shell tool not found",
+                            message="Apply patch tool not found",
                             data={},
                         )
                     )
                     raise ModelBehaviorError(
-                        "Model produced local shell call without a local shell tool."
+                        "Model produced apply_patch call without an apply_patch tool."
                     )
-                local_shell_calls.append(
-                    ToolRunLocalShellCall(tool_call=output, local_shell_tool=local_shell_tool)
-                )
+            elif (
+                isinstance(output, ResponseFunctionToolCall)
+                and _is_apply_patch_name(output.name, apply_patch_tool)
+                and output.name not in function_map
+            ):
+                parsed_operation = _parse_apply_patch_function_args(output.arguments)
+                pseudo_call = {
+                    "type": "apply_patch_call",
+                    "call_id": output.call_id,
+                    "operation": parsed_operation,
+                }
+                items.append(ToolCallItem(raw_item=cast(Any, pseudo_call), agent=agent))
+                if apply_patch_tool:
+                    tools_used.append(apply_patch_tool.name)
+                    apply_patch_calls.append(
+                        ToolRunApplyPatchCall(
+                            tool_call=pseudo_call, apply_patch_tool=apply_patch_tool
+                        )
+                    )
+                else:
+                    tools_used.append("apply_patch")
+                    _error_tracing.attach_error_to_current_span(
+                        SpanError(
+                            message="Apply patch tool not found",
+                            data={},
+                        )
+                    )
+                    raise ModelBehaviorError(
+                        "Model produced apply_patch call without an apply_patch tool."
+                    )
+                continue
 
             elif not isinstance(output, ResponseFunctionToolCall):
                 logger.warning(f"Unexpected output type, ignoring: {type(output)}")
@@ -505,13 +727,29 @@ class RunImpl:
             # Regular function tool call
             else:
                 if output.name not in function_map:
-                    _error_tracing.attach_error_to_current_span(
-                        SpanError(
-                            message="Tool not found",
-                            data={"tool_name": output.name},
+                    if output_schema is not None and output.name == "json_tool_call":
+                        # LiteLLM could generate non-existent tool calls for structured outputs
+                        items.append(ToolCallItem(raw_item=output, agent=agent))
+                        functions.append(
+                            ToolRunFunction(
+                                tool_call=output,
+                                # this tool does not exist in function_map, so generate ad-hoc one,
+                                # which just parses the input if it's a string, and returns the
+                                # value otherwise
+                                function_tool=_build_litellm_json_tool_call(output),
+                            )
                         )
-                    )
-                    raise ModelBehaviorError(f"Tool {output.name} not found in agent {agent.name}")
+                        continue
+                    else:
+                        _error_tracing.attach_error_to_current_span(
+                            SpanError(
+                                message="Tool not found",
+                                data={"tool_name": output.name},
+                            )
+                        )
+                        error = f"Tool {output.name} not found in agent {agent.name}"
+                        raise ModelBehaviorError(error)
+
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 functions.append(
                     ToolRunFunction(
@@ -526,9 +764,160 @@ class RunImpl:
             functions=functions,
             computer_actions=computer_actions,
             local_shell_calls=local_shell_calls,
+            shell_calls=shell_calls,
+            apply_patch_calls=apply_patch_calls,
             tools_used=tools_used,
             mcp_approval_requests=mcp_approval_requests,
         )
+
+    @classmethod
+    async def _execute_input_guardrails(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    ) -> str | None:
+        """Execute input guardrails for a tool.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            tool_input_guardrail_results: List to append guardrail results to.
+
+        Returns:
+            None if tool execution should proceed, or a message string if execution should be
+            skipped.
+
+        Raises:
+            ToolInputGuardrailTripwireTriggered: If a guardrail triggers an exception.
+        """
+        if not func_tool.tool_input_guardrails:
+            return None
+
+        for guardrail in func_tool.tool_input_guardrails:
+            gr_out = await guardrail.run(
+                ToolInputGuardrailData(
+                    context=tool_context,
+                    agent=agent,
+                )
+            )
+
+            # Store the guardrail result
+            tool_input_guardrail_results.append(
+                ToolInputGuardrailResult(
+                    guardrail=guardrail,
+                    output=gr_out,
+                )
+            )
+
+            # Handle different behavior types
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolInputGuardrailTripwireTriggered(guardrail=guardrail, output=gr_out)
+            elif gr_out.behavior["type"] == "reject_content":
+                # Set final_result to the message and skip tool execution
+                return gr_out.behavior["message"]
+            elif gr_out.behavior["type"] == "allow":
+                # Continue to next guardrail or tool execution
+                continue
+
+        return None
+
+    @classmethod
+    async def _execute_output_guardrails(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        real_result: Any,
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+    ) -> Any:
+        """Execute output guardrails for a tool.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            real_result: The actual result from the tool execution.
+            tool_output_guardrail_results: List to append guardrail results to.
+
+        Returns:
+            The final result after guardrail processing (may be modified).
+
+        Raises:
+            ToolOutputGuardrailTripwireTriggered: If a guardrail triggers an exception.
+        """
+        if not func_tool.tool_output_guardrails:
+            return real_result
+
+        final_result = real_result
+        for output_guardrail in func_tool.tool_output_guardrails:
+            gr_out = await output_guardrail.run(
+                ToolOutputGuardrailData(
+                    context=tool_context,
+                    agent=agent,
+                    output=real_result,
+                )
+            )
+
+            # Store the guardrail result
+            tool_output_guardrail_results.append(
+                ToolOutputGuardrailResult(
+                    guardrail=output_guardrail,
+                    output=gr_out,
+                )
+            )
+
+            # Handle different behavior types
+            if gr_out.behavior["type"] == "raise_exception":
+                raise ToolOutputGuardrailTripwireTriggered(
+                    guardrail=output_guardrail, output=gr_out
+                )
+            elif gr_out.behavior["type"] == "reject_content":
+                # Override the result with the guardrail message
+                final_result = gr_out.behavior["message"]
+                break
+            elif gr_out.behavior["type"] == "allow":
+                # Continue to next guardrail
+                continue
+
+        return final_result
+
+    @classmethod
+    async def _execute_tool_with_hooks(
+        cls,
+        *,
+        func_tool: FunctionTool,
+        tool_context: ToolContext[TContext],
+        agent: Agent[TContext],
+        hooks: RunHooks[TContext],
+        tool_call: ResponseFunctionToolCall,
+    ) -> Any:
+        """Execute the core tool function with before/after hooks.
+
+        Args:
+            func_tool: The function tool being executed.
+            tool_context: The tool execution context.
+            agent: The agent executing the tool.
+            hooks: The run hooks to execute.
+            tool_call: The tool call details.
+
+        Returns:
+            The result from the tool execution.
+        """
+        await asyncio.gather(
+            hooks.on_tool_start(tool_context, agent, func_tool),
+            (
+                agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        return await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
 
     @classmethod
     async def execute_function_tool_calls(
@@ -539,33 +928,67 @@ class RunImpl:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
-    ) -> list[FunctionToolResult]:
+    ) -> tuple[
+        list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
+    ]:
+        # Collect guardrail results
+        tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+
         async def run_single_tool(
             func_tool: FunctionTool, tool_call: ResponseFunctionToolCall
         ) -> Any:
             with function_span(func_tool.name) as span_fn:
-                tool_context = ToolContext.from_agent_context(context_wrapper, tool_call.call_id)
+                tool_context = ToolContext.from_agent_context(
+                    context_wrapper,
+                    tool_call.call_id,
+                    tool_call=tool_call,
+                )
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    _, _, result = await asyncio.gather(
-                        hooks.on_tool_start(tool_context, agent, func_tool),
-                        (
-                            agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                            if agent.hooks
-                            else _coro.noop_coroutine()
-                        ),
-                        func_tool.on_invoke_tool(tool_context, tool_call.arguments),
+                    # 1) Run input tool guardrails, if any
+                    rejected_message = await cls._execute_input_guardrails(
+                        func_tool=func_tool,
+                        tool_context=tool_context,
+                        agent=agent,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
                     )
 
-                    await asyncio.gather(
-                        hooks.on_tool_end(tool_context, agent, func_tool, result),
-                        (
-                            agent.hooks.on_tool_end(tool_context, agent, func_tool, result)
-                            if agent.hooks
-                            else _coro.noop_coroutine()
-                        ),
-                    )
+                    if rejected_message is not None:
+                        # Input guardrail rejected the tool call
+                        final_result = rejected_message
+                    else:
+                        # 2) Actually run the tool
+                        real_result = await cls._execute_tool_with_hooks(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            hooks=hooks,
+                            tool_call=tool_call,
+                        )
+
+                        # 3) Run output tool guardrails, if any
+                        final_result = await cls._execute_output_guardrails(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            real_result=real_result,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                        )
+
+                        # 4) Tool end hooks (with final result, which may have been overridden)
+                        await asyncio.gather(
+                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                            (
+                                agent.hooks.on_tool_end(
+                                    tool_context, agent, func_tool, final_result
+                                )
+                                if agent.hooks
+                                else _coro.noop_coroutine()
+                            ),
+                        )
+                    result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
@@ -588,18 +1011,20 @@ class RunImpl:
 
         results = await asyncio.gather(*tasks)
 
-        return [
+        function_tool_results = [
             FunctionToolResult(
                 tool=tool_run.function_tool,
                 output=result,
                 run_item=ToolCallOutputItem(
                     output=result,
-                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, str(result)),
+                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=agent,
                 ),
             )
             for tool_run, result in zip(tool_runs, results)
         ]
+
+        return function_tool_results, tool_input_guardrail_results, tool_output_guardrail_results
 
     @classmethod
     async def execute_local_shell_calls(
@@ -626,6 +1051,52 @@ class RunImpl:
         return results
 
     @classmethod
+    async def execute_shell_calls(
+        cls,
+        *,
+        agent: Agent[TContext],
+        calls: list[ToolRunShellCall],
+        context_wrapper: RunContextWrapper[TContext],
+        hooks: RunHooks[TContext],
+        config: RunConfig,
+    ) -> list[RunItem]:
+        results: list[RunItem] = []
+        for call in calls:
+            results.append(
+                await ShellAction.execute(
+                    agent=agent,
+                    call=call,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=config,
+                )
+            )
+        return results
+
+    @classmethod
+    async def execute_apply_patch_calls(
+        cls,
+        *,
+        agent: Agent[TContext],
+        calls: list[ToolRunApplyPatchCall],
+        context_wrapper: RunContextWrapper[TContext],
+        hooks: RunHooks[TContext],
+        config: RunConfig,
+    ) -> list[RunItem]:
+        results: list[RunItem] = []
+        for call in calls:
+            results.append(
+                await ApplyPatchAction.execute(
+                    agent=agent,
+                    call=call,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=config,
+                )
+            )
+        return results
+
+    @classmethod
     async def execute_computer_actions(
         cls,
         *,
@@ -638,6 +1109,29 @@ class RunImpl:
         results: list[RunItem] = []
         # Need to run these serially, because each action can affect the computer state
         for action in actions:
+            acknowledged: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None
+            if action.tool_call.pending_safety_checks and action.computer_tool.on_safety_check:
+                acknowledged = []
+                for check in action.tool_call.pending_safety_checks:
+                    data = ComputerToolSafetyCheckData(
+                        ctx_wrapper=context_wrapper,
+                        agent=agent,
+                        tool_call=action.tool_call,
+                        safety_check=check,
+                    )
+                    maybe = action.computer_tool.on_safety_check(data)
+                    ack = await maybe if inspect.isawaitable(maybe) else maybe
+                    if ack:
+                        acknowledged.append(
+                            ComputerCallOutputAcknowledgedSafetyCheck(
+                                id=check.id,
+                                code=check.code,
+                                message=check.message,
+                            )
+                        )
+                    else:
+                        raise UserError("Computer tool safety check was not acknowledged")
+
             results.append(
                 await ComputerAction.execute(
                     agent=agent,
@@ -645,6 +1139,7 @@ class RunImpl:
                     hooks=hooks,
                     context_wrapper=context_wrapper,
                     config=config,
+                    acknowledged_safety_checks=acknowledged,
                 )
             )
 
@@ -734,14 +1229,32 @@ class RunImpl:
             input_filter = handoff.input_filter or (
                 run_config.handoff_input_filter if run_config else None
             )
-            if input_filter:
-                logger.debug("Filtering inputs for handoff")
+            handoff_nest_setting = handoff.nest_handoff_history
+            should_nest_history = (
+                handoff_nest_setting
+                if handoff_nest_setting is not None
+                else run_config.nest_handoff_history
+            )
+            handoff_input_data: HandoffInputData | None = None
+            if input_filter or should_nest_history:
                 handoff_input_data = HandoffInputData(
                     input_history=tuple(original_input)
                     if isinstance(original_input, list)
                     else original_input,
                     pre_handoff_items=tuple(pre_step_items),
                     new_items=tuple(new_step_items),
+                    run_context=context_wrapper,
+                )
+
+            if input_filter and handoff_input_data is not None:
+                filter_name = getattr(input_filter, "__qualname__", repr(input_filter))
+                from_agent = getattr(agent, "name", agent.__class__.__name__)
+                to_agent = getattr(new_agent, "name", new_agent.__class__.__name__)
+                logger.debug(
+                    "Filtering handoff inputs with %s for %s -> %s",
+                    filter_name,
+                    from_agent,
+                    to_agent,
                 )
                 if not callable(input_filter):
                     _error_tracing.attach_error_to_span(
@@ -753,6 +1266,8 @@ class RunImpl:
                     )
                     raise UserError(f"Invalid input filter: {input_filter}")
                 filtered = input_filter(handoff_input_data)
+                if inspect.isawaitable(filtered):
+                    filtered = await filtered
                 if not isinstance(filtered, HandoffInputData):
                     _error_tracing.attach_error_to_span(
                         span_handoff,
@@ -770,6 +1285,18 @@ class RunImpl:
                 )
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
+            elif should_nest_history and handoff_input_data is not None:
+                nested = nest_handoff_history(
+                    handoff_input_data,
+                    history_mapper=run_config.handoff_history_mapper,
+                )
+                original_input = (
+                    nested.input_history
+                    if isinstance(nested.input_history, str)
+                    else list(nested.input_history)
+                )
+                pre_step_items = list(nested.pre_handoff_items)
+                new_step_items = list(nested.new_items)
 
         return SingleStepResult(
             original_input=original_input,
@@ -777,6 +1304,8 @@ class RunImpl:
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
             next_step=NextStepHandoff(new_agent),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
         )
 
     @classmethod
@@ -825,9 +1354,13 @@ class RunImpl:
         final_output: Any,
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
+        tool_input_guardrail_results: list[ToolInputGuardrailResult],
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     ) -> SingleStepResult:
         # Run the on_end hooks
-        await cls.run_final_output_hooks(agent, hooks, context_wrapper, final_output)
+        await cls.run_final_output_hooks(
+            agent, hooks, context_wrapper, original_input, final_output
+        )
 
         return SingleStepResult(
             original_input=original_input,
@@ -835,6 +1368,8 @@ class RunImpl:
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
             next_step=NextStepFinalOutput(final_output),
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
     @classmethod
@@ -843,11 +1378,17 @@ class RunImpl:
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
+        original_input: str | list[TResponseInputItem],
         final_output: Any,
     ):
+        agent_hook_context = AgentHookContext(
+            context=context_wrapper.context,
+            usage=context_wrapper.usage,
+            turn_input=ItemHelpers.input_to_new_input_list(original_input),
+        )
         await asyncio.gather(
-            hooks.on_agent_end(context_wrapper, agent, final_output),
-            agent.hooks.on_end(context_wrapper, agent, final_output)
+            hooks.on_agent_end(agent_hook_context, agent, final_output),
+            agent.hooks.on_end(agent_hook_context, agent, final_output)
             if agent.hooks
             else _coro.noop_coroutine(),
         )
@@ -879,12 +1420,12 @@ class RunImpl:
             return result
 
     @classmethod
-    def stream_step_result_to_queue(
+    def stream_step_items_to_queue(
         cls,
-        step_result: SingleStepResult,
+        new_step_items: list[RunItem],
         queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
     ):
-        for item in step_result.new_step_items:
+        for item in new_step_items:
             if isinstance(item, MessageOutputItem):
                 event = RunItemStreamEvent(item=item, name="message_output_created")
             elif isinstance(item, HandoffCallItem):
@@ -899,6 +1440,8 @@ class RunImpl:
                 event = RunItemStreamEvent(item=item, name="reasoning_item_created")
             elif isinstance(item, MCPApprovalRequestItem):
                 event = RunItemStreamEvent(item=item, name="mcp_approval_requested")
+            elif isinstance(item, MCPApprovalResponseItem):
+                event = RunItemStreamEvent(item=item, name="mcp_approval_response")
             elif isinstance(item, MCPListToolsItem):
                 event = RunItemStreamEvent(item=item, name="mcp_list_tools")
 
@@ -910,6 +1453,14 @@ class RunImpl:
                 queue.put_nowait(event)
 
     @classmethod
+    def stream_step_result_to_queue(
+        cls,
+        step_result: SingleStepResult,
+        queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel],
+    ):
+        cls.stream_step_items_to_queue(step_result.new_step_items, queue)
+
+    @classmethod
     async def _check_for_final_output_from_tools(
         cls,
         *,
@@ -918,7 +1469,10 @@ class RunImpl:
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
     ) -> ToolsToFinalOutputResult:
-        """Returns (i, final_output)."""
+        """Determine if tool results should produce a final output.
+        Returns:
+            ToolsToFinalOutputResult: Indicates whether final output is ready, and the output value.
+        """
         if not tool_results:
             return _NOT_FINAL_OUTPUT
 
@@ -998,11 +1552,13 @@ class ComputerAction:
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
         config: RunConfig,
+        acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
+        computer = await resolve_computer(tool=action.computer_tool, run_context=context_wrapper)
         output_func = (
-            cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
-            if isinstance(action.computer_tool.computer, AsyncComputer)
-            else cls._get_screenshot_sync(action.computer_tool.computer, action.tool_call)
+            cls._get_screenshot_async(computer, action.tool_call)
+            if isinstance(computer, AsyncComputer)
+            else cls._get_screenshot_sync(computer, action.tool_call)
         )
 
         _, _, output = await asyncio.gather(
@@ -1036,6 +1592,7 @@ class ComputerAction:
                     "image_url": image_url,
                 },
                 type="computer_call_output",
+                acknowledged_safety_checks=acknowledged_safety_checks,
             ),
         )
 
@@ -1135,13 +1692,512 @@ class LocalShellAction:
             ),
         )
 
+        raw_payload: dict[str, Any] = {
+            "type": "local_shell_call_output",
+            "call_id": call.tool_call.call_id,
+            "output": result,
+        }
         return ToolCallOutputItem(
             agent=agent,
-            output=output,
-            raw_item={
-                "type": "local_shell_call_output",
-                "id": call.tool_call.call_id,
-                "output": result,
-                # "id": "out" + call.tool_call.id,  # TODO remove this, it should be optional
-            },
+            output=result,
+            raw_item=raw_payload,
         )
+
+
+class ShellAction:
+    @classmethod
+    async def execute(
+        cls,
+        *,
+        agent: Agent[TContext],
+        call: ToolRunShellCall,
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        config: RunConfig,
+    ) -> RunItem:
+        await asyncio.gather(
+            hooks.on_tool_start(context_wrapper, agent, call.shell_tool),
+            (
+                agent.hooks.on_tool_start(context_wrapper, agent, call.shell_tool)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        shell_call = _coerce_shell_call(call.tool_call)
+        request = ShellCommandRequest(ctx_wrapper=context_wrapper, data=shell_call)
+        status: Literal["completed", "failed"] = "completed"
+        output_text = ""
+        shell_output_payload: list[dict[str, Any]] | None = None
+        provider_meta: dict[str, Any] | None = None
+        max_output_length: int | None = None
+
+        try:
+            executor_result = call.shell_tool.executor(request)
+            result = (
+                await executor_result if inspect.isawaitable(executor_result) else executor_result
+            )
+
+            if isinstance(result, ShellResult):
+                normalized = [_normalize_shell_output(entry) for entry in result.output]
+                output_text = _render_shell_outputs(normalized)
+                shell_output_payload = [_serialize_shell_output(entry) for entry in normalized]
+                provider_meta = dict(result.provider_data or {})
+                max_output_length = result.max_output_length
+            else:
+                output_text = str(result)
+        except Exception as exc:
+            status = "failed"
+            output_text = _format_shell_error(exc)
+            logger.error("Shell executor failed: %s", exc, exc_info=True)
+
+        await asyncio.gather(
+            hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+            (
+                agent.hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        raw_entries: list[dict[str, Any]] | None = None
+        if shell_output_payload:
+            raw_entries = shell_output_payload
+        elif output_text:
+            raw_entries = [
+                {
+                    "stdout": output_text,
+                    "stderr": "",
+                    "status": status,
+                    "outcome": "success" if status == "completed" else "failure",
+                }
+            ]
+
+        structured_output: list[dict[str, Any]] = []
+        if raw_entries:
+            for entry in raw_entries:
+                sanitized = dict(entry)
+                status_value = sanitized.pop("status", None)
+                sanitized.pop("provider_data", None)
+                raw_exit_code = sanitized.pop("exit_code", None)
+                sanitized.pop("command", None)
+                outcome_value = sanitized.get("outcome")
+                if isinstance(outcome_value, str):
+                    resolved_type = "exit"
+                    if status_value == "timeout":
+                        resolved_type = "timeout"
+                    outcome_payload: dict[str, Any] = {"type": resolved_type}
+                    if resolved_type == "exit":
+                        outcome_payload["exit_code"] = _resolve_exit_code(
+                            raw_exit_code, outcome_value
+                        )
+                    sanitized["outcome"] = outcome_payload
+                elif isinstance(outcome_value, Mapping):
+                    outcome_payload = dict(outcome_value)
+                    outcome_status = cast(Optional[str], outcome_payload.pop("status", None))
+                    outcome_type = outcome_payload.get("type")
+                    if outcome_type != "timeout":
+                        outcome_payload.setdefault(
+                            "exit_code",
+                            _resolve_exit_code(
+                                raw_exit_code,
+                                outcome_status if isinstance(outcome_status, str) else None,
+                            ),
+                        )
+                    sanitized["outcome"] = outcome_payload
+                structured_output.append(sanitized)
+
+        raw_item: dict[str, Any] = {
+            "type": "shell_call_output",
+            "call_id": shell_call.call_id,
+            "output": structured_output,
+            "status": status,
+        }
+        if max_output_length is not None:
+            raw_item["max_output_length"] = max_output_length
+        if raw_entries:
+            raw_item["shell_output"] = raw_entries
+        if provider_meta:
+            raw_item["provider_data"] = provider_meta
+
+        return ToolCallOutputItem(
+            agent=agent,
+            output=output_text,
+            raw_item=cast(Any, raw_item),
+        )
+
+
+class ApplyPatchAction:
+    @classmethod
+    async def execute(
+        cls,
+        *,
+        agent: Agent[TContext],
+        call: ToolRunApplyPatchCall,
+        hooks: RunHooks[TContext],
+        context_wrapper: RunContextWrapper[TContext],
+        config: RunConfig,
+    ) -> RunItem:
+        apply_patch_tool = call.apply_patch_tool
+        await asyncio.gather(
+            hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),
+            (
+                agent.hooks.on_tool_start(context_wrapper, agent, apply_patch_tool)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        status: Literal["completed", "failed"] = "completed"
+        output_text = ""
+
+        try:
+            operation = _coerce_apply_patch_operation(
+                call.tool_call,
+                context_wrapper=context_wrapper,
+            )
+            editor = apply_patch_tool.editor
+            if operation.type == "create_file":
+                result = editor.create_file(operation)
+            elif operation.type == "update_file":
+                result = editor.update_file(operation)
+            elif operation.type == "delete_file":
+                result = editor.delete_file(operation)
+            else:  # pragma: no cover - validated in _coerce_apply_patch_operation
+                raise ModelBehaviorError(f"Unsupported apply_patch operation: {operation.type}")
+
+            awaited = await result if inspect.isawaitable(result) else result
+            normalized = _normalize_apply_patch_result(awaited)
+            if normalized:
+                if normalized.status in {"completed", "failed"}:
+                    status = normalized.status
+                if normalized.output:
+                    output_text = normalized.output
+        except Exception as exc:
+            status = "failed"
+            output_text = _format_shell_error(exc)
+            logger.error("Apply patch editor failed: %s", exc, exc_info=True)
+
+        await asyncio.gather(
+            hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+            (
+                agent.hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
+                if agent.hooks
+                else _coro.noop_coroutine()
+            ),
+        )
+
+        raw_item: dict[str, Any] = {
+            "type": "apply_patch_call_output",
+            "call_id": _extract_apply_patch_call_id(call.tool_call),
+            "status": status,
+        }
+        if output_text:
+            raw_item["output"] = output_text
+
+        return ToolCallOutputItem(
+            agent=agent,
+            output=output_text,
+            raw_item=cast(Any, raw_item),
+        )
+
+
+def _normalize_shell_output(entry: ShellCommandOutput | Mapping[str, Any]) -> ShellCommandOutput:
+    if isinstance(entry, ShellCommandOutput):
+        return entry
+
+    stdout = str(entry.get("stdout", "") or "")
+    stderr = str(entry.get("stderr", "") or "")
+    command_value = entry.get("command")
+    provider_data_value = entry.get("provider_data")
+    outcome_value = entry.get("outcome")
+
+    outcome_type: Literal["exit", "timeout"] = "exit"
+    exit_code_value: Any | None = None
+
+    if isinstance(outcome_value, Mapping):
+        type_value = outcome_value.get("type")
+        if type_value == "timeout":
+            outcome_type = "timeout"
+        elif isinstance(type_value, str):
+            outcome_type = "exit"
+        exit_code_value = outcome_value.get("exit_code") or outcome_value.get("exitCode")
+    else:
+        status_str = str(entry.get("status", "completed") or "completed").lower()
+        if status_str == "timeout":
+            outcome_type = "timeout"
+        if isinstance(outcome_value, str):
+            if outcome_value == "failure":
+                exit_code_value = 1
+            elif outcome_value == "success":
+                exit_code_value = 0
+        exit_code_value = exit_code_value or entry.get("exit_code") or entry.get("exitCode")
+
+    outcome = ShellCallOutcome(
+        type=outcome_type,
+        exit_code=_normalize_exit_code(exit_code_value),
+    )
+
+    return ShellCommandOutput(
+        stdout=stdout,
+        stderr=stderr,
+        outcome=outcome,
+        command=str(command_value) if command_value is not None else None,
+        provider_data=cast(dict[str, Any], provider_data_value)
+        if isinstance(provider_data_value, Mapping)
+        else provider_data_value,
+    )
+
+
+def _serialize_shell_output(output: ShellCommandOutput) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+        "status": output.status,
+        "outcome": {"type": output.outcome.type},
+    }
+    if output.outcome.type == "exit":
+        payload["outcome"]["exit_code"] = output.outcome.exit_code
+        if output.outcome.exit_code is not None:
+            payload["exit_code"] = output.outcome.exit_code
+    if output.command is not None:
+        payload["command"] = output.command
+    if output.provider_data:
+        payload["provider_data"] = output.provider_data
+    return payload
+
+
+def _resolve_exit_code(raw_exit_code: Any, outcome_status: str | None) -> int:
+    normalized = _normalize_exit_code(raw_exit_code)
+    if normalized is not None:
+        return normalized
+
+    normalized_status = (outcome_status or "").lower()
+    if normalized_status == "success":
+        return 0
+    if normalized_status == "failure":
+        return 1
+    return 0
+
+
+def _normalize_exit_code(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _render_shell_outputs(outputs: Sequence[ShellCommandOutput]) -> str:
+    if not outputs:
+        return "(no output)"
+
+    rendered_chunks: list[str] = []
+    for result in outputs:
+        chunk_lines: list[str] = []
+        if result.command:
+            chunk_lines.append(f"$ {result.command}")
+
+        stdout = result.stdout.rstrip("\n")
+        stderr = result.stderr.rstrip("\n")
+
+        if stdout:
+            chunk_lines.append(stdout)
+        if stderr:
+            if stdout:
+                chunk_lines.append("")
+            chunk_lines.append("stderr:")
+            chunk_lines.append(stderr)
+
+        if result.exit_code not in (None, 0):
+            chunk_lines.append(f"exit code: {result.exit_code}")
+        if result.status == "timeout":
+            chunk_lines.append("status: timeout")
+
+        chunk = "\n".join(chunk_lines).strip()
+        rendered_chunks.append(chunk if chunk else "(no output)")
+
+    return "\n\n".join(rendered_chunks)
+
+
+def _format_shell_error(error: Exception | BaseException | Any) -> str:
+    if isinstance(error, Exception):
+        message = str(error)
+        return message or error.__class__.__name__
+    try:
+        return str(error)
+    except Exception:  # pragma: no cover - fallback only
+        return repr(error)
+
+
+def _get_mapping_or_attr(target: Any, key: str) -> Any:
+    if isinstance(target, Mapping):
+        return target.get(key)
+    return getattr(target, key, None)
+
+
+def _extract_shell_call_id(tool_call: Any) -> str:
+    value = _get_mapping_or_attr(tool_call, "call_id")
+    if not value:
+        value = _get_mapping_or_attr(tool_call, "callId")
+    if not value:
+        raise ModelBehaviorError("Shell call is missing call_id.")
+    return str(value)
+
+
+def _coerce_shell_call(tool_call: Any) -> ShellCallData:
+    call_id = _extract_shell_call_id(tool_call)
+    action_payload = _get_mapping_or_attr(tool_call, "action")
+    if action_payload is None:
+        raise ModelBehaviorError("Shell call is missing an action payload.")
+
+    commands_value = _get_mapping_or_attr(action_payload, "commands")
+    if not isinstance(commands_value, Sequence):
+        raise ModelBehaviorError("Shell call action is missing commands.")
+    commands: list[str] = []
+    for entry in commands_value:
+        if entry is None:
+            continue
+        commands.append(str(entry))
+    if not commands:
+        raise ModelBehaviorError("Shell call action must include at least one command.")
+
+    timeout_value = (
+        _get_mapping_or_attr(action_payload, "timeout_ms")
+        or _get_mapping_or_attr(action_payload, "timeoutMs")
+        or _get_mapping_or_attr(action_payload, "timeout")
+    )
+    timeout_ms = int(timeout_value) if isinstance(timeout_value, (int, float)) else None
+
+    max_length_value = _get_mapping_or_attr(
+        action_payload, "max_output_length"
+    ) or _get_mapping_or_attr(action_payload, "maxOutputLength")
+    max_output_length = (
+        int(max_length_value) if isinstance(max_length_value, (int, float)) else None
+    )
+
+    action = ShellActionRequest(
+        commands=commands,
+        timeout_ms=timeout_ms,
+        max_output_length=max_output_length,
+    )
+
+    status_value = _get_mapping_or_attr(tool_call, "status")
+    status_literal: Literal["in_progress", "completed"] | None = None
+    if isinstance(status_value, str):
+        lowered = status_value.lower()
+        if lowered in {"in_progress", "completed"}:
+            status_literal = cast(Literal["in_progress", "completed"], lowered)
+
+    return ShellCallData(call_id=call_id, action=action, status=status_literal, raw=tool_call)
+
+
+def _parse_apply_patch_custom_input(input_json: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(input_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise ModelBehaviorError(f"Invalid apply_patch input JSON: {exc}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ModelBehaviorError("Apply patch input must be a JSON object.")
+    return dict(parsed)
+
+
+def _parse_apply_patch_function_args(arguments: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(arguments or "{}")
+    except json.JSONDecodeError as exc:
+        raise ModelBehaviorError(f"Invalid apply_patch arguments JSON: {exc}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ModelBehaviorError("Apply patch arguments must be a JSON object.")
+    return dict(parsed)
+
+
+def _extract_apply_patch_call_id(tool_call: Any) -> str:
+    value = _get_mapping_or_attr(tool_call, "call_id")
+    if not value:
+        value = _get_mapping_or_attr(tool_call, "callId")
+    if not value:
+        raise ModelBehaviorError("Apply patch call is missing call_id.")
+    return str(value)
+
+
+def _coerce_apply_patch_operation(
+    tool_call: Any, *, context_wrapper: RunContextWrapper[Any]
+) -> ApplyPatchOperation:
+    raw_operation = _get_mapping_or_attr(tool_call, "operation")
+    if raw_operation is None:
+        raise ModelBehaviorError("Apply patch call is missing an operation payload.")
+
+    op_type_value = str(_get_mapping_or_attr(raw_operation, "type"))
+    if op_type_value not in {"create_file", "update_file", "delete_file"}:
+        raise ModelBehaviorError(f"Unknown apply_patch operation: {op_type_value}")
+    op_type_literal = cast(Literal["create_file", "update_file", "delete_file"], op_type_value)
+
+    path = _get_mapping_or_attr(raw_operation, "path")
+    if not isinstance(path, str) or not path:
+        raise ModelBehaviorError("Apply patch operation is missing a valid path.")
+
+    diff_value = _get_mapping_or_attr(raw_operation, "diff")
+    if op_type_literal in {"create_file", "update_file"}:
+        if not isinstance(diff_value, str) or not diff_value:
+            raise ModelBehaviorError(
+                f"Apply patch operation {op_type_literal} is missing the required diff payload."
+            )
+        diff: str | None = diff_value
+    else:
+        diff = None
+
+    return ApplyPatchOperation(
+        type=op_type_literal,
+        path=str(path),
+        diff=diff,
+        ctx_wrapper=context_wrapper,
+    )
+
+
+def _normalize_apply_patch_result(
+    result: ApplyPatchResult | Mapping[str, Any] | str | None,
+) -> ApplyPatchResult | None:
+    if result is None:
+        return None
+    if isinstance(result, ApplyPatchResult):
+        return result
+    if isinstance(result, Mapping):
+        status = result.get("status")
+        output = result.get("output")
+        normalized_status = status if status in {"completed", "failed"} else None
+        normalized_output = str(output) if output is not None else None
+        return ApplyPatchResult(status=normalized_status, output=normalized_output)
+    if isinstance(result, str):
+        return ApplyPatchResult(output=result)
+    return ApplyPatchResult(output=str(result))
+
+
+def _is_apply_patch_name(name: str | None, tool: ApplyPatchTool | None) -> bool:
+    if not name:
+        return False
+    candidate = name.strip().lower()
+    if candidate.startswith("apply_patch"):
+        return True
+    if tool and candidate == tool.name.strip().lower():
+        return True
+    return False
+
+
+def _build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:
+    async def on_invoke_tool(_ctx: ToolContext[Any], value: Any) -> Any:
+        if isinstance(value, str):
+            import json
+
+            return json.loads(value)
+        return value
+
+    return FunctionTool(
+        name=output.name,
+        description=output.name,
+        params_json_schema={},
+        on_invoke_tool=on_invoke_tool,
+        strict_json_schema=True,
+        is_enabled=True,
+    )

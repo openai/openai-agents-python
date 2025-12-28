@@ -95,6 +95,7 @@ async def test_extra_headers_passed_to_openai_client():
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
     )
     assert "extra_headers" in called_kwargs
     assert called_kwargs["extra_headers"]["X-Test-Header"] == "test-value"

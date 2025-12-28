@@ -71,6 +71,12 @@ def get_all_nodes(
             f"fillcolor=lightgreen, width=0.5, height=0.3];"
         )
 
+    for mcp_server in agent.mcp_servers:
+        parts.append(
+            f'"{mcp_server.name}" [label="{mcp_server.name}", shape=box, style=filled, '
+            f"fillcolor=lightgrey, width=1, height=0.5];"
+        )
+
     for handoff in agent.handoffs:
         if isinstance(handoff, Handoff):
             parts.append(
@@ -118,6 +124,11 @@ def get_all_edges(
         parts.append(f"""
         "{agent.name}" -> "{tool.name}" [style=dotted, penwidth=1.5];
         "{tool.name}" -> "{agent.name}" [style=dotted, penwidth=1.5];""")
+
+    for mcp_server in agent.mcp_servers:
+        parts.append(f"""
+        "{agent.name}" -> "{mcp_server.name}" [style=dashed, penwidth=1.5];
+        "{mcp_server.name}" -> "{agent.name}" [style=dashed, penwidth=1.5];""")
 
     for handoff in agent.handoffs:
         if isinstance(handoff, Handoff):

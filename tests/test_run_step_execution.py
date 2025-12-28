@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -303,15 +303,18 @@ def assert_item_is_function_tool_call(
     item: RunItem, name: str, arguments: str | None = None
 ) -> None:
     assert isinstance(item, ToolCallItem)
-    assert item.raw_item.type == "function_call"
-    assert item.raw_item.name == name
-    assert not arguments or item.raw_item.arguments == arguments
+    raw_item = getattr(item, "raw_item", None)
+    assert getattr(raw_item, "type", None) == "function_call"
+    assert getattr(raw_item, "name", None) == name
+    if arguments:
+        assert getattr(raw_item, "arguments", None) == arguments
 
 
 def assert_item_is_function_tool_call_output(item: RunItem, output: str) -> None:
     assert isinstance(item, ToolCallOutputItem)
-    assert item.raw_item["type"] == "function_call_output"
-    assert item.raw_item["output"] == output
+    raw_item = cast(dict[str, Any], item.raw_item)
+    assert raw_item["type"] == "function_call_output"
+    assert raw_item["output"] == output
 
 
 async def get_execute_result(

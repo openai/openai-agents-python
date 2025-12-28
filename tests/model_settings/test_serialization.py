@@ -2,8 +2,10 @@ import json
 from dataclasses import fields
 
 from openai.types.shared import Reasoning
+from pydantic import TypeAdapter
+from pydantic_core import to_json
 
-from agents.model_settings import ModelSettings
+from agents.model_settings import MCPToolChoice, ModelSettings
 
 
 def verify_serialization(model_settings: ModelSettings) -> None:
@@ -27,6 +29,17 @@ def test_basic_serialization() -> None:
     verify_serialization(model_settings)
 
 
+def test_mcp_tool_choice_serialization() -> None:
+    """Tests whether ModelSettings with MCPToolChoice can be serialized to a JSON string."""
+    # First, lets create a ModelSettings instance
+    model_settings = ModelSettings(
+        temperature=0.5,
+        tool_choice=MCPToolChoice(server_label="mcp", name="mcp_tool"),
+    )
+    # Now, lets serialize the ModelSettings instance to a JSON string
+    verify_serialization(model_settings)
+
+
 def test_all_fields_serialization() -> None:
     """Tests whether ModelSettings can be serialized to a JSON string."""
 
@@ -43,8 +56,11 @@ def test_all_fields_serialization() -> None:
         reasoning=Reasoning(),
         metadata={"foo": "bar"},
         store=False,
+        prompt_cache_retention="24h",
         include_usage=False,
         response_include=["reasoning.encrypted_content"],
+        top_logprobs=1,
+        verbosity="low",
         extra_query={"foo": "bar"},
         extra_body={"foo": "bar"},
         extra_headers={"foo": "bar"},
@@ -132,3 +148,33 @@ def test_extra_args_resolve_both_none() -> None:
     assert resolved.extra_args is None
     assert resolved.temperature == 0.5
     assert resolved.top_p == 0.9
+
+
+def test_pydantic_serialization() -> None:
+    """Tests whether ModelSettings can be serialized with Pydantic."""
+
+    # First, lets create a ModelSettings instance
+    model_settings = ModelSettings(
+        temperature=0.5,
+        top_p=0.9,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        truncation="auto",
+        max_tokens=100,
+        reasoning=Reasoning(),
+        metadata={"foo": "bar"},
+        store=False,
+        include_usage=False,
+        top_logprobs=1,
+        extra_query={"foo": "bar"},
+        extra_body={"foo": "bar"},
+        extra_headers={"foo": "bar"},
+        extra_args={"custom_param": "value", "another_param": 42},
+    )
+
+    json = to_json(model_settings)
+    deserialized = TypeAdapter(ModelSettings).validate_json(json)
+
+    assert model_settings == deserialized

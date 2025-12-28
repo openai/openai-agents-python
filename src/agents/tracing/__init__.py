@@ -1,7 +1,5 @@
 import atexit
 
-from agents.tracing.provider import DefaultTraceProvider, TraceProvider
-
 from .create import (
     agent_span,
     custom_span,
@@ -20,6 +18,7 @@ from .create import (
 )
 from .processor_interface import TracingProcessor
 from .processors import default_exporter, default_processor
+from .provider import DefaultTraceProvider, TraceProvider
 from .setup import get_trace_provider, set_trace_provider
 from .span_data import (
     AgentSpanData,

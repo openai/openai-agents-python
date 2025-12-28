@@ -5,13 +5,17 @@ from typing import Any
 
 import httpx
 import pytest
-from openai import NOT_GIVEN, AsyncOpenAI
-from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai import AsyncOpenAI, omit
+from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_tool_call import (
-    ChatCompletionMessageToolCall,
+from openai.types.chat.chat_completion_message_tool_call import (  # type: ignore[attr-defined]
+    ChatCompletionMessageFunctionToolCall,
     Function,
+)
+from openai.types.chat.chat_completion_token_logprob import (
+    ChatCompletionTokenLogprob,
+    TopLogprob,
 )
 from openai.types.completion_usage import (
     CompletionUsage,
@@ -31,9 +35,10 @@ from agents import (
     ModelTracing,
     OpenAIChatCompletionsModel,
     OpenAIProvider,
+    __version__,
     generation_span,
 )
-from agents.models.chatcmpl_helpers import ChatCmplHelpers
+from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE, ChatCmplHelpers
 from agents.models.fake_id import FAKE_RESPONSES_ID
 
 
@@ -77,6 +82,7 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Should have produced exactly one output message with one text part
@@ -94,6 +100,65 @@ async def test_get_response_with_text_message(monkeypatch) -> None:
     assert resp.usage.input_tokens_details.cached_tokens == 3
     assert resp.usage.output_tokens_details.reasoning_tokens == 0
     assert resp.response_id is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_attaches_logprobs(monkeypatch) -> None:
+    msg = ChatCompletionMessage(role="assistant", content="Hi!")
+    choice = Choice(
+        index=0,
+        finish_reason="stop",
+        message=msg,
+        logprobs=ChoiceLogprobs(
+            content=[
+                ChatCompletionTokenLogprob(
+                    token="Hi",
+                    logprob=-0.5,
+                    bytes=[1],
+                    top_logprobs=[TopLogprob(token="Hi", logprob=-0.5, bytes=[1])],
+                ),
+                ChatCompletionTokenLogprob(
+                    token="!",
+                    logprob=-0.1,
+                    bytes=[2],
+                    top_logprobs=[TopLogprob(token="!", logprob=-0.1, bytes=[2])],
+                ),
+            ]
+        ),
+    )
+    chat = ChatCompletion(
+        id="resp-id",
+        created=0,
+        model="fake",
+        object="chat.completion",
+        choices=[choice],
+        usage=None,
+    )
+
+    async def patched_fetch_response(self, *args, **kwargs):
+        return chat
+
+    monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
+    model = OpenAIProvider(use_responses=False).get_model("gpt-4")
+    resp: ModelResponse = await model.get_response(
+        system_instructions=None,
+        input="",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    )
+    assert len(resp.output) == 1
+    assert isinstance(resp.output[0], ResponseOutputMessage)
+    text_part = resp.output[0].content[0]
+    assert isinstance(text_part, ResponseOutputText)
+    assert text_part.logprobs is not None
+    assert [lp.token for lp in text_part.logprobs] == ["Hi", "!"]
 
 
 @pytest.mark.allow_call_model_methods
@@ -129,6 +194,7 @@ async def test_get_response_with_refusal(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert len(resp.output) == 1
@@ -152,7 +218,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
     should append corresponding `ResponseFunctionToolCall` items after the
     assistant message item with matching name/arguments.
     """
-    tool_call = ChatCompletionMessageToolCall(
+    tool_call = ChatCompletionMessageFunctionToolCall(
         id="call-id",
         type="function",
         function=Function(name="do_thing", arguments="{'x':1}"),
@@ -182,6 +248,7 @@ async def test_get_response_with_tool_call(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     # Expect a message item followed by a function tool call item.
@@ -224,6 +291,7 @@ async def test_get_response_with_no_message(monkeypatch) -> None:
         handoffs=[],
         tracing=ModelTracing.DISABLED,
         previous_response_id=None,
+        conversation_id=None,
         prompt=None,
     )
     assert resp.output == []
@@ -280,17 +348,17 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     assert result is chat
     # Ensure expected args were passed through to OpenAI client.
     kwargs = completions.kwargs
-    assert kwargs["stream"] is False
-    assert kwargs["store"] is NOT_GIVEN
+    assert kwargs["stream"] is omit
+    assert kwargs["store"] is omit
     assert kwargs["model"] == "gpt-4"
     assert kwargs["messages"][0]["role"] == "system"
     assert kwargs["messages"][0]["content"] == "sys"
     assert kwargs["messages"][1]["role"] == "user"
-    # Defaults for optional fields become the NOT_GIVEN sentinel
-    assert kwargs["tools"] is NOT_GIVEN
-    assert kwargs["tool_choice"] is NOT_GIVEN
-    assert kwargs["response_format"] is NOT_GIVEN
-    assert kwargs["stream_options"] is NOT_GIVEN
+    # Defaults for optional fields become the omit sentinel
+    assert kwargs["tools"] is omit
+    assert kwargs["tool_choice"] is omit
+    assert kwargs["response_format"] is omit
+    assert kwargs["stream_options"] is omit
 
 
 @pytest.mark.asyncio
@@ -335,8 +403,8 @@ async def test_fetch_response_stream(monkeypatch) -> None:
         )
     # Check OpenAI client was called for streaming
     assert completions.kwargs["stream"] is True
-    assert completions.kwargs["store"] is NOT_GIVEN
-    assert completions.kwargs["stream_options"] is NOT_GIVEN
+    assert completions.kwargs["store"] is omit
+    assert completions.kwargs["stream_options"] is omit
     # Response is a proper openai Response
     assert isinstance(response, Response)
     assert response.id == FAKE_RESPONSES_ID
@@ -365,6 +433,60 @@ def test_store_param():
     assert ChatCmplHelpers.get_store_param(client, model_settings) is True, (
         "Should respect explicitly set store=True"
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
+async def test_user_agent_header_chat_completions(override_ua):
+    called_kwargs: dict[str, Any] = {}
+    expected_ua = override_ua or f"Agents/Python {__version__}"
+
+    class DummyCompletions:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            msg = ChatCompletionMessage(role="assistant", content="Hello")
+            choice = Choice(index=0, finish_reason="stop", message=msg)
+            return ChatCompletion(
+                id="resp-id",
+                created=0,
+                model="fake",
+                object="chat.completion",
+                choices=[choice],
+                usage=None,
+            )
+
+    class DummyChatClient:
+        def __init__(self):
+            self.chat = type("_Chat", (), {"completions": DummyCompletions()})()
+            self.base_url = "https://api.openai.com"
+
+    model = OpenAIChatCompletionsModel(model="gpt-4", openai_client=DummyChatClient())  # type: ignore
+
+    if override_ua is not None:
+        token = HEADERS_OVERRIDE.set({"User-Agent": override_ua})
+    else:
+        token = None
+
+    try:
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+        )
+    finally:
+        if token is not None:
+            HEADERS_OVERRIDE.reset(token)
+
+    assert "extra_headers" in called_kwargs
+    assert called_kwargs["extra_headers"]["User-Agent"] == expected_ua
 
     client = AsyncOpenAI(base_url="http://www.notopenai.com")
     model_settings = ModelSettings()

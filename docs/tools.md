@@ -173,6 +173,14 @@ for tool in agent.tools:
     }
     ```
 
+### Returning images or files from function tools
+
+In addition to returning text outputs, you can return one or many images or files as the output of a function tool. To do so, you can return any of:
+
+-   Images: [`ToolOutputImage`][agents.tool.ToolOutputImage] (or the TypedDict version, [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
+-   Files: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (or the TypedDict version, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
+-   Text: either a string or stringable objects, or [`ToolOutputText`][agents.tool.ToolOutputText] (or the TypedDict version, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
+
 ### Custom function tools
 
 Sometimes, you don't want to use a Python function as a tool. You can directly create a [`FunctionTool`][agents.tool.FunctionTool] if you prefer. You'll need to provide:
@@ -180,7 +188,7 @@ Sometimes, you don't want to use a Python function as a tool. You can directly c
 -   `name`
 -   `description`
 -   `params_json_schema`, which is the JSON schema for the arguments
--   `on_invoke_tool`, which is an async function that receives the context and the arguments as a JSON string, and must return the tool output as a string.
+-   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
 
 ```python
 from typing import Any
@@ -288,9 +296,9 @@ async def run_my_agent() -> str:
 
 In certain cases, you might want to modify the output of the tool-agents before returning it to the central agent. This may be useful if you want to:
 
-- Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
-- Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
-- Validate the output or provide a fallback value when the agent’s response is missing or malformed.
+-   Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
+-   Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
+-   Validate the output or provide a fallback value when the agent’s response is missing or malformed.
 
 You can do this by supplying the `custom_output_extractor` argument to the `as_tool` method:
 
@@ -311,6 +319,104 @@ json_tool = data_agent.as_tool(
 )
 ```
 
+### Streaming nested agent runs
+
+Pass an `on_stream` callback to `as_tool` to listen to streaming events emitted by the nested agent while still returning its final output once the stream completes.
+
+```python
+from agents import AgentToolStreamEvent
+
+
+async def handle_stream(event: AgentToolStreamEvent) -> None:
+    # Inspect the underlying StreamEvent along with agent metadata.
+    print(f"[stream] {event['agent']['name']} :: {event['event'].type}")
+
+
+billing_agent_tool = billing_agent.as_tool(
+    tool_name="billing_helper",
+    tool_description="Answer billing questions.",
+    on_stream=handle_stream,  # Can be sync or async.
+)
+```
+
+What to expect:
+
+- Event types mirror `StreamEvent["type"]`: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`.
+- Providing `on_stream` automatically runs the nested agent in streaming mode and drains the stream before returning the final output.
+- The handler may be synchronous or asynchronous; each event is delivered in order as it arrives.
+- `tool_call_id` is present when the tool is invoked via a model tool call; direct calls may leave it `None`.
+- See `examples/agent_patterns/agents_as_tools_streaming.py` for a complete runnable sample.
+
+### Conditional tool enabling
+
+You can conditionally enable or disable agent tools at runtime using the `is_enabled` parameter. This allows you to dynamically filter which tools are available to the LLM based on context, user preferences, or runtime conditions.
+
+```python
+import asyncio
+from agents import Agent, AgentBase, Runner, RunContextWrapper
+from pydantic import BaseModel
+
+class LanguageContext(BaseModel):
+    language_preference: str = "french_spanish"
+
+def french_enabled(ctx: RunContextWrapper[LanguageContext], agent: AgentBase) -> bool:
+    """Enable French for French+Spanish preference."""
+    return ctx.context.language_preference == "french_spanish"
+
+# Create specialized agents
+spanish_agent = Agent(
+    name="spanish_agent",
+    instructions="You respond in Spanish. Always reply to the user's question in Spanish.",
+)
+
+french_agent = Agent(
+    name="french_agent",
+    instructions="You respond in French. Always reply to the user's question in French.",
+)
+
+# Create orchestrator with conditional tools
+orchestrator = Agent(
+    name="orchestrator",
+    instructions=(
+        "You are a multilingual assistant. You use the tools given to you to respond to users. "
+        "You must call ALL available tools to provide responses in different languages. "
+        "You never respond in languages yourself, you always use the provided tools."
+    ),
+    tools=[
+        spanish_agent.as_tool(
+            tool_name="respond_spanish",
+            tool_description="Respond to the user's question in Spanish",
+            is_enabled=True,  # Always enabled
+        ),
+        french_agent.as_tool(
+            tool_name="respond_french",
+            tool_description="Respond to the user's question in French",
+            is_enabled=french_enabled,
+        ),
+    ],
+)
+
+async def main():
+    context = RunContextWrapper(LanguageContext(language_preference="french_spanish"))
+    result = await Runner.run(orchestrator, "How are you?", context=context.context)
+    print(result.final_output)
+
+asyncio.run(main())
+```
+
+The `is_enabled` parameter accepts:
+
+-   **Boolean values**: `True` (always enabled) or `False` (always disabled)
+-   **Callable functions**: Functions that take `(context, agent)` and return a boolean
+-   **Async functions**: Async functions for complex conditional logic
+
+Disabled tools are completely hidden from the LLM at runtime, making this useful for:
+
+-   Feature gating based on user permissions
+-   Environment-specific tool availability (dev vs prod)
+-   A/B testing different tool configurations
+-   Dynamic tool filtering based on runtime state
+
 ## Handling errors in function tools
 
 When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
@@ -318,5 +424,26 @@ When you create a function tool via `@function_tool`, you can pass a `failure_er
 -   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
 -   If you pass your own error function, it runs that instead, and sends the response to the LLM.
 -   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+
+```python
+from agents import function_tool, RunContextWrapper
+from typing import Any
+
+def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
+
+@function_tool(failure_error_function=my_custom_error_function)
+def get_user_profile(user_id: str) -> str:
+    """Fetches a user profile from a mock API.
+     This function demonstrates a 'flaky' or failing API call.
+    """
+    if user_id == "user_123":
+        return "User profile for user_123 successfully retrieved."
+    else:
+        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
+
+```
 
 If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.

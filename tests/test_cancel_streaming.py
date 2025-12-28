@@ -114,3 +114,20 @@ async def test_cancel_cleans_up_resources():
     assert result._input_guardrail_queue.empty(), (
         "Input guardrail queue should be empty after cancel."
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_immediate_mode_explicit():
+    """Test explicit immediate mode behaves same as default."""
+    model = FakeModel()
+    agent = Agent(name="Joker", model=model)
+
+    result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
+
+    async for _ in result.stream_events():
+        result.cancel(mode="immediate")
+        break
+
+    assert result.is_complete
+    assert result._event_queue.empty()
+    assert result._cancel_mode == "immediate"
