@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import inspect
 import json
 import weakref
@@ -179,6 +180,42 @@ ComputerConfig = Union[
 ]
 
 
+class ToolOriginType(str, enum.Enum):
+    """The type of tool origin."""
+
+    FUNCTION = "function"
+    """Regular Python function tool created via @function_tool decorator."""
+
+    MCP = "mcp"
+    """MCP server tool converted via MCPUtil.to_function_tool()."""
+
+    AGENT_AS_TOOL = "agent_as_tool"
+    """Agent converted to tool via agent.as_tool()."""
+
+
+@dataclass
+class ToolOrigin:
+    """Information about the origin/source of a function tool."""
+
+    type: ToolOriginType
+    """The type of tool origin."""
+
+    mcp_server_name: str | None = None
+    """The name of the MCP server. Only set when type is MCP."""
+
+    agent_as_tool_name: str | None = None
+    """The name of the agent. Only set when type is AGENT_AS_TOOL."""
+
+    def __repr__(self) -> str:
+        """Custom repr that only includes relevant fields."""
+        parts = [f"type={self.type.value!r}"]
+        if self.mcp_server_name is not None:
+            parts.append(f"mcp_server_name={self.mcp_server_name!r}")
+        if self.agent_as_tool_name is not None:
+            parts.append(f"agent_as_tool_name={self.agent_as_tool_name!r}")
+        return f"ToolOrigin({', '.join(parts)})"
+
+
 @dataclass
 class FunctionToolResult:
     tool: FunctionTool
@@ -234,6 +271,9 @@ class FunctionTool:
 
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
     """Optional list of output guardrails to run after invoking this tool."""
+
+    _tool_origin: ToolOrigin | None = field(default=None, init=False, repr=False)
+    """Private field tracking tool origin. Set by SDK when creating tools."""
 
     def __post_init__(self):
         if self.strict_json_schema:
