@@ -283,10 +283,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
             if "connect_timeout" in transport_config:
                 connect_kwargs["open_timeout"] = transport_config["connect_timeout"]
-            if "socket_factory" in transport_config:
-                socket_factory = transport_config["socket_factory"]
-                sock = await socket_factory()
-                connect_kwargs["sock"] = sock
 
         return await websockets.connect(url, **connect_kwargs)
 

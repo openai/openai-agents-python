@@ -106,11 +106,6 @@ class RealtimeModelListener(abc.ABC):
         pass
 
 
-SocketFactory = Callable[[], Awaitable[socket.socket]]
-"""An async function that returns a configured `socket.socket`.
-Used for setting low-level TCP Keepalive options or proxy configurations."""
-
-
 class TransportConfig(TypedDict):
     """Low-level network transport configuration."""
 
@@ -124,10 +119,6 @@ class TransportConfig(TypedDict):
 
     connect_timeout: NotRequired[float]
     """Time in seconds to wait for the connection handshake to complete."""
-
-    socket_factory: NotRequired[SocketFactory]
-    """An async function that returns a configured `socket.socket`.
-    Used for setting low-level TCP Keepalive options or proxy configurations."""
 
 
 class RealtimeModelConfig(TypedDict):
