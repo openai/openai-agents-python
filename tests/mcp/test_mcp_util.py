@@ -6,9 +6,10 @@ from inline_snapshot import snapshot
 from mcp.types import CallToolResult, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
-from agents import Agent, FunctionTool, RunContextWrapper
+from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
 from agents.exceptions import AgentsException, ModelBehaviorError
 from agents.mcp import MCPServer, MCPUtil
+from agents.tool_context import ToolContext
 
 from .helpers import FakeMCPServer
 
@@ -128,6 +129,91 @@ async def test_mcp_invocation_crash_causes_error(caplog: pytest.LogCaptureFixtur
         await MCPUtil.invoke_mcp_tool(server, tool, ctx, "")
 
     assert "Error invoking MCP tool test_tool_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture):
+    """Test that MCP tool errors are handled gracefully when invoked via FunctionTool.
+
+    When an MCP tool is created via to_function_tool and then invoked, errors should be
+    caught and converted to error messages instead of raising exceptions. This allows
+    the agent to continue running after tool failures.
+    """
+    caplog.set_level(logging.DEBUG)
+
+    # Create a server that will crash when calling a tool
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    # Convert MCP tool to FunctionTool (this wraps invoke_mcp_tool with error handling)
+    mcp_tool = MCPTool(name="crashing_tool", inputSchema={})
+    function_tool = MCPUtil.to_function_tool(mcp_tool, server, convert_schemas_to_strict=False)
+
+    # Create tool context
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_1",
+        tool_arguments="{}",
+    )
+
+    # Invoke the tool - should NOT raise an exception, but return an error message
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    # Verify that the result is an error message (not an exception)
+    assert isinstance(result, str)
+    assert "error" in result.lower() or "occurred" in result.lower()
+
+    # Verify that the error message matches what default_tool_error_function would return
+    # The error gets wrapped in AgentsException by invoke_mcp_tool, so we check for that format
+    wrapped_error = AgentsException("Error invoking MCP tool crashing_tool: Crash!")
+    expected_error_msg = default_tool_error_function(tool_context, wrapped_error)
+    assert result == expected_error_msg
+
+    # Verify that the error was logged
+    assert (
+        "MCP tool crashing_tool failed" in caplog.text or "Error invoking MCP tool" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_timeout_handling():
+    """Test that MCP tool timeouts are handled gracefully.
+
+    This simulates a timeout scenario where the MCP server call_tool raises a timeout error.
+    The error should be caught and converted to an error message instead of halting the agent.
+    """
+
+    class TimeoutFakeMCPServer(FakeMCPServer):
+        async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+            # Simulate a timeout error - this would normally be wrapped in AgentsException
+            # by invoke_mcp_tool
+            raise Exception(
+                "Timed out while waiting for response to ClientRequest. Waited 1.0 seconds."
+            )
+
+    server = TimeoutFakeMCPServer()
+    server.add_tool("timeout_tool", {})
+
+    # Convert MCP tool to FunctionTool
+    mcp_tool = MCPTool(name="timeout_tool", inputSchema={})
+    function_tool = MCPUtil.to_function_tool(mcp_tool, server, convert_schemas_to_strict=False)
+
+    # Create tool context
+    tool_context = ToolContext(
+        context=None,
+        tool_name="timeout_tool",
+        tool_call_id="test_call_2",
+        tool_arguments="{}",
+    )
+
+    # Invoke the tool - should NOT raise an exception
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    # Verify that the result is an error message
+    assert isinstance(result, str)
+    assert "error" in result.lower() or "occurred" in result.lower()
+    assert "Timed out" in result
 
 
 @pytest.mark.asyncio
