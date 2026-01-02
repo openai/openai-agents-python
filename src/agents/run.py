@@ -1740,10 +1740,15 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
         )
+        # Use session_step_items (unfiltered) if available for streaming observability,
+        # otherwise fall back to new_step_items.
+        streaming_items = (
+            single_step_result.session_step_items
+            if single_step_result.session_step_items is not None
+            else single_step_result.new_step_items
+        )
         new_step_items = [
-            item
-            for item in single_step_result.new_step_items
-            if item not in new_items_processed_response
+            item for item in streaming_items if item not in new_items_processed_response
         ]
         RunImpl.stream_step_items_to_queue(new_step_items, event_queue)
 

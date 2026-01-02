@@ -62,6 +62,13 @@ class HandoffInputData:
     later on, it is optional for backwards compatibility.
     """
 
+    input_items: tuple[RunItem, ...] | None = None
+    """
+    Items to include in the next agent's input. When set, these items are used instead of
+    new_items for building the input to the next agent. This allows filtering duplicates
+    from agent input while preserving all items in new_items for session history.
+    """
+
     def clone(self, **kwargs: Any) -> HandoffInputData:
         """
         Make a copy of the handoff input data, with the given arguments changed. For example, you
