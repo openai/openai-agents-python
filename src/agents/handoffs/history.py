@@ -26,6 +26,13 @@ _DEFAULT_CONVERSATION_HISTORY_END = "</CONVERSATION HISTORY>"
 _conversation_history_start = _DEFAULT_CONVERSATION_HISTORY_START
 _conversation_history_end = _DEFAULT_CONVERSATION_HISTORY_END
 
+# Item types that are summarized in the conversation history.
+# They should not be forwarded verbatim to the next agent to avoid duplication.
+_SUMMARY_ONLY_INPUT_TYPES = {
+    "function_call",
+    "function_call_output",
+}
+
 
 def set_conversation_history_wrappers(
     *,
@@ -67,23 +74,34 @@ def nest_handoff_history(
 
     normalized_history = _normalize_input_history(handoff_input_data.input_history)
     flattened_history = _flatten_nested_history_messages(normalized_history)
-    pre_items_as_inputs = [
-        _run_item_to_plain_input(item) for item in handoff_input_data.pre_handoff_items
-    ]
-    new_items_as_inputs = [_run_item_to_plain_input(item) for item in handoff_input_data.new_items]
+
+    # Convert items to plain inputs for the transcript summary.
+    pre_items_as_inputs: list[TResponseInputItem] = []
+    filtered_pre_items: list[RunItem] = []
+    for run_item in handoff_input_data.pre_handoff_items:
+        plain_input = _run_item_to_plain_input(run_item)
+        pre_items_as_inputs.append(plain_input)
+        if _should_forward_pre_item(plain_input):
+            filtered_pre_items.append(run_item)
+
+    new_items_as_inputs: list[TResponseInputItem] = []
+    filtered_input_items: list[RunItem] = []
+    for run_item in handoff_input_data.new_items:
+        plain_input = _run_item_to_plain_input(run_item)
+        new_items_as_inputs.append(plain_input)
+        if _should_forward_new_item(plain_input):
+            filtered_input_items.append(run_item)
+
     transcript = flattened_history + pre_items_as_inputs + new_items_as_inputs
 
     mapper = history_mapper or default_handoff_history_mapper
     history_items = mapper(transcript)
-    filtered_pre_items = tuple(
-        item
-        for item in handoff_input_data.pre_handoff_items
-        if _get_run_item_role(item) != "assistant"
-    )
 
     return handoff_input_data.clone(
         input_history=tuple(deepcopy(item) for item in history_items),
-        pre_handoff_items=filtered_pre_items,
+        pre_handoff_items=tuple(filtered_pre_items),
+        # new_items stays unchanged for session history.
+        input_items=tuple(filtered_input_items),
     )
 
 
@@ -231,6 +249,20 @@ def _split_role_and_name(role_text: str) -> tuple[str, str | None]:
     return (role_text or "developer", None)
 
 
-def _get_run_item_role(run_item: RunItem) -> str | None:
-    role_candidate = run_item.to_input_item().get("role")
-    return role_candidate if isinstance(role_candidate, str) else None
+def _should_forward_pre_item(input_item: TResponseInputItem) -> bool:
+    """Return False when the previous transcript item is represented in the summary."""
+    role_candidate = input_item.get("role")
+    if isinstance(role_candidate, str) and role_candidate == "assistant":
+        return False
+    type_candidate = input_item.get("type")
+    return not (isinstance(type_candidate, str) and type_candidate in _SUMMARY_ONLY_INPUT_TYPES)
+
+
+def _should_forward_new_item(input_item: TResponseInputItem) -> bool:
+    """Return False for tool or side-effect items that the summary already covers."""
+    # Items with a role should always be forwarded.
+    role_candidate = input_item.get("role")
+    if isinstance(role_candidate, str) and role_candidate:
+        return True
+    type_candidate = input_item.get("type")
+    return not (isinstance(type_candidate, str) and type_candidate in _SUMMARY_ONLY_INPUT_TYPES)
