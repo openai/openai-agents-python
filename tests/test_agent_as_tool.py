@@ -949,3 +949,98 @@ async def test_agent_as_tool_streaming_sets_tool_call_from_context(
 
     assert output == "ok"
     assert captured[0]["tool_call"] is tool_call
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_failure_error_function_none_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If failure_error_function=None, exceptions should propagate to the caller."""
+    agent = Agent(name="failing_agent")
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert starting_agent is agent
+        assert input == "hello"
+        raise RuntimeError("test failure")
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = agent.as_tool(
+        tool_name="failing_agent_tool",
+        tool_description="Agent tool that raises",
+        is_enabled=True,
+        failure_error_function=None,
+    )
+
+    assert isinstance(tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="failing_agent_tool",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    with pytest.raises(RuntimeError, match="test failure"):
+        await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_failure_error_function_custom_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom failure_error_function should be used to convert exceptions into tool output."""
+    agent = Agent(name="failing_agent")
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert starting_agent is agent
+        assert input == "hello"
+        raise ValueError("test failure")
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    def custom_failure_handler(ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"handled:{type(error).__name__}:{error}"
+
+    tool = agent.as_tool(
+        tool_name="failing_agent_tool",
+        tool_description="Agent tool that raises",
+        is_enabled=True,
+        failure_error_function=custom_failure_handler,
+    )
+
+    assert isinstance(tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="failing_agent_tool",
+        tool_call_id="call_1",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    result = await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+    assert result == "handled:ValueError:test failure"

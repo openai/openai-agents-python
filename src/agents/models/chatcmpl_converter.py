@@ -340,6 +340,7 @@ class Converter:
         cls,
         items: str | Iterable[TResponseInputItem],
         preserve_thinking_blocks: bool = False,
+        preserve_tool_output_all_content: bool = False,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -350,6 +351,12 @@ class Converter:
                 for reasoning models like Claude 4 Sonnet/Opus which support interleaved
                 thinking. When True, thinking blocks are reconstructed and included in
                 assistant messages with tool calls.
+            preserve_tool_output_all_content: Whether to preserve non-text content (like images)
+                in tool outputs. When False (default), only text content is extracted.
+                OpenAI Chat Completions API doesn't support non-text content in tool results.
+                When True, all content types including images are preserved. This is useful
+                for model providers (e.g. Anthropic via LiteLLM) that support processing
+                non-text content in tool results.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -386,6 +393,7 @@ class Converter:
             nonlocal current_assistant_msg, pending_thinking_blocks
             if current_assistant_msg is None:
                 current_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant")
+                current_assistant_msg["content"] = None
                 current_assistant_msg["tool_calls"] = []
 
             return current_assistant_msg
@@ -541,10 +549,14 @@ class Converter:
                 output_content = cast(
                     Union[str, Iterable[ResponseInputContentWithAudioParam]], func_output["output"]
                 )
+                if preserve_tool_output_all_content:
+                    tool_result_content = cls.extract_all_content(output_content)
+                else:
+                    tool_result_content = cls.extract_text_content(output_content)  # type: ignore[assignment]
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
                     "tool_call_id": func_output["call_id"],
-                    "content": cls.extract_text_content(output_content),
+                    "content": tool_result_content,  # type: ignore[typeddict-item]
                 }
                 result.append(msg)
 
@@ -598,6 +610,7 @@ class Converter:
                     "name": tool.name,
                     "description": tool.description or "",
                     "parameters": tool.params_json_schema,
+                    "strict": tool.strict_json_schema,
                 },
             }
 
@@ -614,5 +627,6 @@ class Converter:
                 "name": handoff.tool_name,
                 "description": handoff.tool_description,
                 "parameters": handoff.input_json_schema,
+                "strict": handoff.strict_json_schema,
             },
         }

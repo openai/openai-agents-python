@@ -4,15 +4,15 @@ search:
 ---
 # 高级 SQLite 会话
 
-`AdvancedSQLiteSession` 是基础 `SQLiteSession` 的增强版本，提供高级的对话管理功能，包括对话分支、详细的使用分析以及结构化的对话查询。
+`AdvancedSQLiteSession` 是基础 `SQLiteSession` 的增强版本，提供高级对话管理能力，包括对话分支、详细的使用分析，以及结构化的对话查询。
 
 ## 功能
 
-- **对话分支**: 可从任意用户消息创建替代对话路径
-- **使用情况追踪**: 每轮详细的 token 使用分析，并提供完整的 JSON 分解
-- **结构化查询**: 按轮次获取对话、工具使用统计等
+- **对话分支**: 从任意用户消息创建替代对话路径
+- **使用跟踪**: 按回合的详细 token 使用分析，并提供完整的 JSON 明细
+- **结构化查询**: 按回合获取对话、工具使用统计等
 - **分支管理**: 独立的分支切换与管理
-- **消息结构元数据**: 追踪消息类型、工具使用和对话流程
+- **消息结构元数据**: 跟踪消息类型、工具使用和对话流程
 
 ## 快速开始
 
@@ -85,13 +85,13 @@ session = AdvancedSQLiteSession(
 ### 参数
 
 - `session_id` (str): 对话会话的唯一标识符
-- `db_path` (str | Path): SQLite 数据库文件路径。默认为 `:memory:`（内存存储）
-- `create_tables` (bool): 是否自动创建高级表。默认为 `False`
-- `logger` (logging.Logger | None): 会话的自定义 logger。默认为模块 logger
+- `db_path` (str | Path): SQLite 数据库文件路径。默认使用 `:memory:` 进行内存存储
+- `create_tables` (bool): 是否自动创建高级表。默认值为 `False`
+- `logger` (logging.Logger | None): 会话的自定义日志记录器。默认使用模块日志记录器
 
-## 使用情况追踪
+## 使用跟踪
 
-AdvancedSQLiteSession 通过按对话轮次存储 token 使用数据来提供详细的使用分析。**这完全依赖于在每次智能体运行后调用 `store_run_usage` 方法。**
+AdvancedSQLiteSession 通过按对话回合存储 token 使用数据来提供详细的使用分析。**这完全依赖于在每次智能体运行后调用 `store_run_usage` 方法。**
 
 ### 存储使用数据
 
@@ -245,11 +245,11 @@ for turn in matching_turns:
 
 ### 消息结构
 
-会话会自动追踪消息结构，包括：
+会话会自动跟踪消息结构，包括：
 
 - 消息类型（user、assistant、tool_call 等）
-- 工具调用所用的工具名称
-- 轮次编号与序列号
+- 工具调用的工具名称
+- 回合编号与序号
 - 分支关联
 - 时间戳
 
@@ -298,7 +298,7 @@ CREATE TABLE turn_usage (
 
 ## 完整示例
 
-查看[完整示例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)，了解所有功能的全面演示。
+查看[完整示例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)，以全面演示所有功能。
 
 
 ## API 参考
