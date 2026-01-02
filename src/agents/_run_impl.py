@@ -245,7 +245,8 @@ class SingleStepResult:
     """Items generated before the current step."""
 
     new_step_items: list[RunItem]
-    """Items generated during this current step."""
+    """Items generated during this current step. May be filtered during handoffs to avoid
+    duplication in model input."""
 
     next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
     """The next step to take."""
@@ -256,11 +257,18 @@ class SingleStepResult:
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from this step."""
 
+    session_step_items: list[RunItem] | None = None
+    """Full unfiltered items for session history. When set, these are used instead of
+    new_step_items for session saving and generated_items property."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
-        `original_input`)."""
-        return self.pre_step_items + self.new_step_items
+        `original_input`). Uses session_step_items when available for full observability."""
+        items = (
+            self.session_step_items if self.session_step_items is not None else self.new_step_items
+        )
+        return self.pre_step_items + items
 
 
 def get_model_tracing_impl(
@@ -1290,6 +1298,12 @@ class RunImpl:
                 )
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
+                # For custom input filters, use input_items if available, otherwise new_items
+                if filtered.input_items is not None:
+                    session_step_items = list(filtered.new_items)
+                    new_step_items = list(filtered.input_items)
+                else:
+                    session_step_items = None
             elif should_nest_history and handoff_input_data is not None:
                 nested = nest_handoff_history(
                     handoff_input_data,
@@ -1301,7 +1315,16 @@ class RunImpl:
                     else list(nested.input_history)
                 )
                 pre_step_items = list(nested.pre_handoff_items)
-                new_step_items = list(nested.new_items)
+                # Keep full new_items for session history.
+                session_step_items = list(nested.new_items)
+                # Use input_items (filtered) for model input if available.
+                if nested.input_items is not None:
+                    new_step_items = list(nested.input_items)
+                else:
+                    new_step_items = session_step_items
+            else:
+                # No filtering or nesting - session_step_items not needed
+                session_step_items = None
 
         return SingleStepResult(
             original_input=original_input,
@@ -1311,6 +1334,7 @@ class RunImpl:
             next_step=NextStepHandoff(new_agent),
             tool_input_guardrail_results=[],
             tool_output_guardrail_results=[],
+            session_step_items=session_step_items,
         )
 
     @classmethod
