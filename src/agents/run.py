@@ -736,7 +736,11 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                 )
 
                             return result
@@ -748,7 +752,11 @@ class AgentRunner:
                                     for guardrail_result in input_guardrail_results
                                 ):
                                     await self._save_result_to_session(
-                                        session, [], turn_result.new_step_items
+                                        session,
+                                        [],
+                                        turn_result.session_step_items
+                                        if turn_result.session_step_items is not None
+                                        else turn_result.new_step_items,
                                     )
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             current_span.finish(reset_current=True)
@@ -760,7 +768,11 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                 )
                         else:
                             raise AgentsException(
@@ -1229,7 +1241,11 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                 )
 
                         current_agent = turn_result.next_step.new_agent
@@ -1275,7 +1291,11 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1288,7 +1308,11 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                 )
 
                         # Check for soft cancel after turn completion
