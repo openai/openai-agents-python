@@ -182,11 +182,12 @@ class NoOpSpan(Span[TSpanData]):
         span_data: The operation-specific data for this span.
     """
 
-    __slots__ = ("_span_data", "_prev_span_token")
+    __slots__ = ("_span_data", "_prev_span_token", "_prev_span")
 
     def __init__(self, span_data: TSpanData):
         self._span_data = span_data
         self._prev_span_token: contextvars.Token[Span[TSpanData] | None] | None = None
+        self._prev_span: Span[Any] | None = None
 
     @property
     def trace_id(self) -> str:
@@ -206,12 +207,14 @@ class NoOpSpan(Span[TSpanData]):
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
+            self._prev_span = Scope.get_current_span()
             self._prev_span_token = Scope.set_current_span(self)
 
     def finish(self, reset_current: bool = False) -> None:
         if reset_current and self._prev_span_token is not None:
-            Scope.reset_current_span(self._prev_span_token)
+            Scope.reset_current_span(self._prev_span_token, self._prev_span)
             self._prev_span_token = None
+            self._prev_span = None
 
     def __enter__(self) -> Span[TSpanData]:
         self.start(mark_as_current=True)
@@ -253,6 +256,7 @@ class SpanImpl(Span[TSpanData]):
         "_ended_at",
         "_error",
         "_prev_span_token",
+        "_prev_span",
         "_processor",
         "_span_data",
     )
@@ -273,6 +277,7 @@ class SpanImpl(Span[TSpanData]):
         self._processor = processor
         self._error: SpanError | None = None
         self._prev_span_token: contextvars.Token[Span[TSpanData] | None] | None = None
+        self._prev_span: Span[Any] | None = None
         self._span_data = span_data
 
     @property
@@ -299,6 +304,7 @@ class SpanImpl(Span[TSpanData]):
         self._started_at = util.time_iso()
         self._processor.on_span_start(self)
         if mark_as_current:
+            self._prev_span = Scope.get_current_span()
             self._prev_span_token = Scope.set_current_span(self)
 
     def finish(self, reset_current: bool = False) -> None:
@@ -309,8 +315,9 @@ class SpanImpl(Span[TSpanData]):
         self._ended_at = util.time_iso()
         self._processor.on_span_end(self)
         if reset_current and self._prev_span_token is not None:
-            Scope.reset_current_span(self._prev_span_token)
+            Scope.reset_current_span(self._prev_span_token, self._prev_span)
             self._prev_span_token = None
+            self._prev_span = None
 
     def __enter__(self) -> Span[TSpanData]:
         self.start(mark_as_current=True)

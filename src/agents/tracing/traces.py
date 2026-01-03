@@ -143,6 +143,7 @@ class NoOpTrace(Trace):
     def __init__(self):
         self._started = False
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
+        self._prev_trace: Trace | None = None
 
     def __enter__(self) -> Trace:
         if self._started:
@@ -160,12 +161,14 @@ class NoOpTrace(Trace):
 
     def start(self, mark_as_current: bool = False):
         if mark_as_current:
+            self._prev_trace = Scope.get_current_trace()
             self._prev_context_token = Scope.set_current_trace(self)
 
     def finish(self, reset_current: bool = False):
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            Scope.reset_current_trace(self._prev_context_token, self._prev_trace)
             self._prev_context_token = None
+            self._prev_trace = None
 
     @property
     def trace_id(self) -> str:
@@ -208,6 +211,7 @@ class TraceImpl(Trace):
         "group_id",
         "metadata",
         "_prev_context_token",
+        "_prev_trace",
         "_processor",
         "_started",
     )
@@ -225,6 +229,7 @@ class TraceImpl(Trace):
         self.group_id = group_id
         self.metadata = metadata
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
+        self._prev_trace: Trace | None = None
         self._processor = processor
         self._started = False
 
@@ -244,6 +249,7 @@ class TraceImpl(Trace):
         self._processor.on_trace_start(self)
 
         if mark_as_current:
+            self._prev_trace = Scope.get_current_trace()
             self._prev_context_token = Scope.set_current_trace(self)
 
     def finish(self, reset_current: bool = False):
@@ -253,8 +259,9 @@ class TraceImpl(Trace):
         self._processor.on_trace_end(self)
 
         if reset_current and self._prev_context_token is not None:
-            Scope.reset_current_trace(self._prev_context_token)
+            Scope.reset_current_trace(self._prev_context_token, self._prev_trace)
             self._prev_context_token = None
+            self._prev_trace = None
 
     def __enter__(self) -> Trace:
         if self._started:
