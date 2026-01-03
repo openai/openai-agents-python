@@ -175,9 +175,9 @@ async def test_handoffs():
 
     assert result.final_output == "done"
     assert len(result.raw_responses) == 3, "should have three model responses"
-    assert len(result.to_input_list()) == 5, (
-        "should have 5 session items: summary message (contains pre_handoff tool call/result), "
-        "message, handoff call, handoff output, and done message"
+    assert len(result.to_input_list()) == 7, (
+        "should have 7 inputs: summary message, tool call, tool result, message, handoff, "
+        "handoff result, and done message"
     )
     assert result.last_agent == agent_1, "should have handed off to agent_1"
 
@@ -231,7 +231,10 @@ async def test_structured_output():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 8, "should have 8 inputs including summary"
+    assert len(result.to_input_list()) == 10, (
+        "should have input: conversation summary, function call, function call result, message, "
+        "handoff, handoff output, preamble message, tool call, tool call result, final output"
+    )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"
     assert result.final_output == Foo(bar="baz"), "should have structured output"
@@ -714,9 +717,9 @@ async def test_streaming_events():
 
     assert result.final_output == Foo(bar="baz")
     assert len(result.raw_responses) == 4, "should have four model responses"
-    assert len(result.to_input_list()) == 7, (
-        "should have input: conversation summary (contains pre-handoff tool calls), "
-        "message, handoff, handoff output, tool call, tool call result, final output"
+    assert len(result.to_input_list()) == 9, (
+        "should have input: conversation summary, function call, function call result, message, "
+        "handoff, handoff output, tool call, tool call result, final output"
     )
 
     assert result.last_agent == agent_1, "should have handed off to agent_1"

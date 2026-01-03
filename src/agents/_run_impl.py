@@ -262,7 +262,7 @@ class SingleStepResult:
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
-        `original_input`)."""
+        `original_input`). Uses session_step_items when available for full observability."""
         items = (
             self.session_step_items if self.session_step_items is not None else self.new_step_items
         )
