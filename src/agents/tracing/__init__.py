@@ -16,6 +16,7 @@ from .create import (
     trace,
     transcription_span,
 )
+from .config import TracingConfig
 from .processor_interface import TracingProcessor
 from .processors import default_exporter, default_processor
 from .provider import DefaultTraceProvider, TraceProvider
@@ -53,6 +54,7 @@ __all__ = [
     "set_trace_processors",
     "set_trace_provider",
     "set_tracing_disabled",
+    "TracingConfig",
     "trace",
     "Trace",
     "SpanError",

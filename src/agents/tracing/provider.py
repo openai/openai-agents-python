@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..logger import logger
+from .config import TracingConfig
 from .processor_interface import TracingProcessor
 from .scope import Scope
 from .spans import NoOpSpan, Span, SpanImpl, TSpanData
@@ -147,6 +148,7 @@ class TraceProvider(ABC):
         group_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         disabled: bool = False,
+        tracing: TracingConfig | None = None,
     ) -> Trace:
         """Create a new trace."""
 
@@ -226,6 +228,7 @@ class DefaultTraceProvider(TraceProvider):
         group_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         disabled: bool = False,
+        tracing: TracingConfig | None = None,
     ) -> Trace:
         """
         Create a new trace.
@@ -244,6 +247,7 @@ class DefaultTraceProvider(TraceProvider):
             group_id=group_id,
             metadata=metadata,
             processor=self._multi_processor,
+            tracing_api_key=tracing.get("api_key") if tracing else None,
         )
 
     def create_span(
@@ -256,6 +260,7 @@ class DefaultTraceProvider(TraceProvider):
         """
         Create a new span.
         """
+        tracing_api_key: str | None = None
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating span {span_data}")
             return NoOpSpan(span_data)
@@ -277,6 +282,7 @@ class DefaultTraceProvider(TraceProvider):
 
             parent_id = current_span.span_id if current_span else None
             trace_id = current_trace.trace_id
+            tracing_api_key = getattr(current_trace, "tracing_api_key", None)
 
         elif isinstance(parent, Trace):
             if isinstance(parent, NoOpTrace):
@@ -284,12 +290,14 @@ class DefaultTraceProvider(TraceProvider):
                 return NoOpSpan(span_data)
             trace_id = parent.trace_id
             parent_id = None
+            tracing_api_key = getattr(parent, "tracing_api_key", None)
         elif isinstance(parent, Span):
             if isinstance(parent, NoOpSpan):
                 logger.debug(f"Parent {parent} is no-op, returning NoOpSpan")
                 return NoOpSpan(span_data)
             parent_id = parent.span_id
             trace_id = parent.trace_id
+            tracing_api_key = getattr(parent, "tracing_api_key", None)
 
         logger.debug(f"Creating span {span_data} with id {span_id}")
 
@@ -299,6 +307,7 @@ class DefaultTraceProvider(TraceProvider):
             parent_id=parent_id,
             processor=self._multi_processor,
             span_data=span_data,
+            tracing_api_key=tracing_api_key,
         )
 
     def shutdown(self) -> None:

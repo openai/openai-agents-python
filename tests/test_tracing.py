@@ -401,3 +401,10 @@ async def test_noop_parent_is_noop_child():
     span_2.finish()
 
     assert span_2.export() is None
+
+
+def test_trace_and_spans_use_tracing_config_key():
+    with trace(workflow_name="test", tracing={"api_key": "tracing-key"}) as tr:
+        assert tr.tracing_api_key == "tracing-key"
+        with custom_span(name="span_with_key") as span:
+            assert span.tracing_api_key == "tracing-key"
