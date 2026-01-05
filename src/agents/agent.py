@@ -537,10 +537,10 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
-        # Set origin tracking on the FunctionTool created by @function_tool
+        # Set origin tracking on run_agent (the FunctionTool returned by @function_tool)
         run_agent._tool_origin = ToolOrigin(
             type=ToolOriginType.AGENT_AS_TOOL,
-            agent_as_tool_name=self.name,
+            agent_as_tool=self,
         )
         return run_agent
 

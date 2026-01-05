@@ -48,6 +48,7 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from .agent import Agent, AgentBase
     from .items import RunItem
+    from .mcp.server import MCPServer
 
 
 ToolParams = ParamSpec("ToolParams")
@@ -200,19 +201,19 @@ class ToolOrigin:
     type: ToolOriginType
     """The type of tool origin."""
 
-    mcp_server_name: str | None = None
-    """The name of the MCP server. Only set when type is MCP."""
+    mcp_server: MCPServer | None = None
+    """The MCP server object. Only set when type is MCP."""
 
-    agent_as_tool_name: str | None = None
-    """The name of the agent. Only set when type is AGENT_AS_TOOL."""
+    agent_as_tool: Agent[Any] | None = None
+    """The agent object. Only set when type is AGENT_AS_TOOL."""
 
     def __repr__(self) -> str:
         """Custom repr that only includes relevant fields."""
         parts = [f"type={self.type.value!r}"]
-        if self.mcp_server_name is not None:
-            parts.append(f"mcp_server_name={self.mcp_server_name!r}")
-        if self.agent_as_tool_name is not None:
-            parts.append(f"agent_as_tool_name={self.agent_as_tool_name!r}")
+        if self.mcp_server is not None:
+            parts.append(f"mcp_server_name={self.mcp_server.name!r}")
+        if self.agent_as_tool is not None:
+            parts.append(f"agent_as_tool_name={self.agent_as_tool.name!r}")
         return f"ToolOrigin({', '.join(parts)})"
 
 

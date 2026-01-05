@@ -179,7 +179,7 @@ class MCPUtil:
         )
         function_tool._tool_origin = ToolOrigin(
             type=ToolOriginType.MCP,
-            mcp_server_name=server.name,
+            mcp_server=server,
         )
         return function_tool
 
