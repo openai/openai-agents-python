@@ -349,6 +349,9 @@ class OpenAIResponsesModel(Model):
         """
         Remove or transform input items that are incompatible with the OpenAI Responses API.
 
+        This data transformation does not always guarantee that items from other provider
+        interactions are accepted by the OpenAI Responses API.
+
         Only items with truthy provider_data are processed.
         This function handles the following incompatibilities:
         - provider_data: Removes fields specific to other providers (e.g., Gemini, Claude).
