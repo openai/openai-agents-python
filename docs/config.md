@@ -38,6 +38,18 @@ from agents import set_tracing_export_api_key
 set_tracing_export_api_key("sk-...")
 ```
 
+You can also set a tracing API key per run without changing the global exporter.
+
+```python
+from agents import Runner, RunConfig
+
+await Runner.run(
+    agent,
+    input="Hello",
+    run_config=RunConfig(tracing={"api_key": "sk-tracing-123"}),
+)
+```
+
 You can also disable tracing entirely by using the [`set_tracing_disabled()`][agents.set_tracing_disabled] function.
 
 ```python
