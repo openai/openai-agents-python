@@ -4,11 +4,11 @@ search:
 ---
 # SQLAlchemy 세션
 
-`SQLAlchemySession`은 SQLAlchemy를 사용해 프로덕션 수준의 세션 구현을 제공하며, 세션 저장소로 SQLAlchemy가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 사용할 수 있습니다.
+`SQLAlchemySession`은 SQLAlchemy를 사용해 프로덕션 수준의 세션 구현을 제공합니다. 이를 통해 SQLAlchemy가 지원하는 모든 데이터베이스( PostgreSQL, MySQL, SQLite 등)를 세션 저장소로 사용할 수 있습니다.
 
 ## 설치
 
-SQLAlchemy 세션에는 `sqlalchemy` extra가 필요합니다:
+SQLAlchemy 세션은 `sqlalchemy` extra가 필요합니다:
 
 ```bash
 pip install openai-agents[sqlalchemy]
@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
 ### 기존 엔진 사용
 
-기존 SQLAlchemy 엔진이 있는 애플리케이션의 경우:
+기존 SQLAlchemy 엔진을 사용하는 애플리케이션의 경우:
 
 ```python
 import asyncio
