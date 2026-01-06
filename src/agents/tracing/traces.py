@@ -124,6 +124,12 @@ class Trace(abc.ABC):
         """
         pass
 
+    @property
+    @abc.abstractmethod
+    def tracing_api_key(self) -> str | None:
+        """The API key to use when exporting this trace and its spans."""
+        pass
+
 
 class NoOpTrace(Trace):
     """A no-op implementation of Trace that doesn't record any data.
@@ -193,6 +199,10 @@ class NoOpTrace(Trace):
         """
         return None
 
+    @property
+    def tracing_api_key(self) -> str | None:
+        return None
+
 
 NO_OP_TRACE = NoOpTrace()
 
@@ -205,6 +215,7 @@ class TraceImpl(Trace):
     __slots__ = (
         "_name",
         "_trace_id",
+        "_tracing_api_key",
         "group_id",
         "metadata",
         "_prev_context_token",
@@ -219,9 +230,11 @@ class TraceImpl(Trace):
         group_id: str | None,
         metadata: dict[str, Any] | None,
         processor: TracingProcessor,
+        tracing_api_key: str | None,
     ):
         self._name = name
         self._trace_id = trace_id or util.gen_trace_id()
+        self._tracing_api_key = tracing_api_key
         self.group_id = group_id
         self.metadata = metadata
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
@@ -235,6 +248,10 @@ class TraceImpl(Trace):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self._tracing_api_key
 
     def start(self, mark_as_current: bool = False):
         if self._started:

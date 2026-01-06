@@ -8,7 +8,7 @@ search:
 
 ## 설치
 
-SQLAlchemy 세션에는 `sqlalchemy` extra가 필요합니다:
+SQLAlchemy 세션을 사용하려면 `sqlalchemy` extra가 필요합니다:
 
 ```bash
 pip install openai-agents[sqlalchemy]
@@ -74,7 +74,7 @@ if __name__ == "__main__":
 ```
 
 
-## API 참조
+## API 레퍼런스
 
 - [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - 메인 클래스
 - [`Session`][agents.memory.session.Session] - 기본 세션 프로토콜

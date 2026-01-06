@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Literal,
-    Union,
-)
+from collections.abc import Mapping
+from typing import Any, Literal, Union
 
 from openai.types.realtime.realtime_audio_formats import (
     RealtimeAudioFormats as OpenAIRealtimeAudioFormats,
@@ -28,13 +25,20 @@ RealtimeModelName: TypeAlias = Union[
         "gpt-4o-realtime-preview-2024-12-17",
         "gpt-4o-realtime-preview-2024-10-01",
         "gpt-4o-mini-realtime-preview-2024-12-17",
+        "gpt-realtime-mini",
+        "gpt-realtime-mini-2025-10-06",
     ],
     str,
 ]
 """The name of a realtime model."""
 
 
-RealtimeAudioFormat: TypeAlias = Union[Literal["pcm16", "g711_ulaw", "g711_alaw"], str]
+RealtimeAudioFormat: TypeAlias = Union[
+    Literal["pcm16", "g711_ulaw", "g711_alaw"],
+    str,
+    Mapping[str, Any],
+    OpenAIRealtimeAudioFormats,
+]
 """The audio format for realtime audio streams."""
 
 
@@ -96,6 +100,30 @@ class RealtimeTurnDetectionConfig(TypedDict):
     """Threshold for server-vad to trigger a response if the user is idle for this duration."""
 
 
+class RealtimeAudioInputConfig(TypedDict, total=False):
+    """Configuration for audio input in realtime sessions."""
+
+    format: RealtimeAudioFormat | OpenAIRealtimeAudioFormats
+    noise_reduction: RealtimeInputAudioNoiseReductionConfig | None
+    transcription: RealtimeInputAudioTranscriptionConfig
+    turn_detection: RealtimeTurnDetectionConfig
+
+
+class RealtimeAudioOutputConfig(TypedDict, total=False):
+    """Configuration for audio output in realtime sessions."""
+
+    format: RealtimeAudioFormat | OpenAIRealtimeAudioFormats
+    voice: str
+    speed: float
+
+
+class RealtimeAudioConfig(TypedDict, total=False):
+    """Audio configuration for realtime sessions."""
+
+    input: RealtimeAudioInputConfig
+    output: RealtimeAudioOutputConfig
+
+
 class RealtimeSessionModelSettings(TypedDict):
     """Model settings for a realtime model session."""
 
@@ -110,6 +138,12 @@ class RealtimeSessionModelSettings(TypedDict):
 
     modalities: NotRequired[list[Literal["text", "audio"]]]
     """The modalities the model should support."""
+
+    output_modalities: NotRequired[list[Literal["text", "audio"]]]
+    """The output modalities the model should support."""
+
+    audio: NotRequired[RealtimeAudioConfig]
+    """The audio configuration for the session."""
 
     voice: NotRequired[str]
     """The voice to use for audio output."""

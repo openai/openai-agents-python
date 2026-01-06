@@ -121,6 +121,18 @@ agent = Agent(
 )
 ```
 
+If you only need a different tracing key for a single run, pass it via `RunConfig` instead of changing the global exporter.
+
+```python
+from agents import Runner, RunConfig
+
+await Runner.run(
+    agent,
+    input="Hello",
+    run_config=RunConfig(tracing={"api_key": "sk-tracing-123"}),
+)
+```
+
 ## Notes
 - View free traces at Openai Traces dashboard.
 
@@ -147,4 +159,3 @@ agent = Agent(
 -   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
 -   [LangDB AI](https://docs.langdb.ai/getting-started/working-with-agent-frameworks/working-with-openai-agents-sdk)
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
-
