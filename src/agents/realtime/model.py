@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import abc
-import socket
-from collections.abc import Awaitable
 from typing import Callable
 
 from typing_extensions import NotRequired, TypedDict
