@@ -20,6 +20,7 @@ def get_span(processor: TracingProcessor) -> SpanImpl[AgentSpanData]:
         parent_id=None,
         processor=processor,
         span_data=AgentSpanData(name="test_agent"),
+        tracing_api_key=None,
     )
 
 
@@ -31,6 +32,7 @@ def get_trace(processor: TracingProcessor) -> TraceImpl:
         group_id="test_session_id",
         metadata={},
         processor=processor,
+        tracing_api_key=None,
     )
 
 

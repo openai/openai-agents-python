@@ -107,6 +107,7 @@ from .tool_guardrails import (
 from .tracing import (
     SpanError,
     Trace,
+    TracingConfig,
     function_span,
     get_current_trace,
     guardrail_span,
@@ -1539,6 +1540,7 @@ class TraceCtxManager:
         group_id: str | None,
         metadata: dict[str, Any] | None,
         disabled: bool,
+        tracing: TracingConfig | None = None,
     ):
         self.trace: Trace | None = None
         self.workflow_name = workflow_name
@@ -1546,6 +1548,7 @@ class TraceCtxManager:
         self.group_id = group_id
         self.metadata = metadata
         self.disabled = disabled
+        self.tracing = tracing
 
     def __enter__(self) -> TraceCtxManager:
         current_trace = get_current_trace()
@@ -1555,6 +1558,7 @@ class TraceCtxManager:
                 trace_id=self.trace_id,
                 group_id=self.group_id,
                 metadata=self.metadata,
+                tracing=self.tracing,
                 disabled=self.disabled,
             )
             self.trace.start(mark_as_current=True)

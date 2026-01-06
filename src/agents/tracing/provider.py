@@ -8,10 +8,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..logger import logger
+from .config import TracingConfig
 from .processor_interface import TracingProcessor
 from .scope import Scope
 from .spans import NoOpSpan, Span, SpanImpl, TSpanData
 from .traces import NoOpTrace, Trace, TraceImpl
+
+
+def _safe_debug(message: str) -> None:
+    """Best-effort debug logging that tolerates closed streams during shutdown."""
+    try:
+        logger.debug(message)
+    except Exception:
+        # Avoid noisy shutdown errors when the underlying stream is already closed.
+        return
 
 
 class SynchronousMultiTracingProcessor(TracingProcessor):
@@ -83,7 +93,7 @@ class SynchronousMultiTracingProcessor(TracingProcessor):
         Called when the application stops.
         """
         for processor in self._processors:
-            logger.debug(f"Shutting down trace processor {processor}")
+            _safe_debug(f"Shutting down trace processor {processor}")
             try:
                 processor.shutdown()
             except Exception as e:
@@ -147,6 +157,7 @@ class TraceProvider(ABC):
         group_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         disabled: bool = False,
+        tracing: TracingConfig | None = None,
     ) -> Trace:
         """Create a new trace."""
 
@@ -226,6 +237,7 @@ class DefaultTraceProvider(TraceProvider):
         group_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         disabled: bool = False,
+        tracing: TracingConfig | None = None,
     ) -> Trace:
         """
         Create a new trace.
@@ -244,6 +256,7 @@ class DefaultTraceProvider(TraceProvider):
             group_id=group_id,
             metadata=metadata,
             processor=self._multi_processor,
+            tracing_api_key=tracing.get("api_key") if tracing else None,
         )
 
     def create_span(
@@ -256,6 +269,7 @@ class DefaultTraceProvider(TraceProvider):
         """
         Create a new span.
         """
+        tracing_api_key: str | None = None
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating span {span_data}")
             return NoOpSpan(span_data)
@@ -277,6 +291,7 @@ class DefaultTraceProvider(TraceProvider):
 
             parent_id = current_span.span_id if current_span else None
             trace_id = current_trace.trace_id
+            tracing_api_key = current_trace.tracing_api_key
 
         elif isinstance(parent, Trace):
             if isinstance(parent, NoOpTrace):
@@ -284,12 +299,14 @@ class DefaultTraceProvider(TraceProvider):
                 return NoOpSpan(span_data)
             trace_id = parent.trace_id
             parent_id = None
+            tracing_api_key = parent.tracing_api_key
         elif isinstance(parent, Span):
             if isinstance(parent, NoOpSpan):
                 logger.debug(f"Parent {parent} is no-op, returning NoOpSpan")
                 return NoOpSpan(span_data)
             parent_id = parent.span_id
             trace_id = parent.trace_id
+            tracing_api_key = parent.tracing_api_key
 
         logger.debug(f"Creating span {span_data} with id {span_id}")
 
@@ -299,6 +316,7 @@ class DefaultTraceProvider(TraceProvider):
             parent_id=parent_id,
             processor=self._multi_processor,
             span_data=span_data,
+            tracing_api_key=tracing_api_key,
         )
 
     def shutdown(self) -> None:
@@ -306,7 +324,7 @@ class DefaultTraceProvider(TraceProvider):
             return
 
         try:
-            logger.debug("Shutting down trace provider")
+            _safe_debug("Shutting down trace provider")
             self._multi_processor.shutdown()
         except Exception as e:
             logger.error(f"Error shutting down trace provider: {e}")

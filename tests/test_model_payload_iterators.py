@@ -60,7 +60,7 @@ async def test_chat_completions_materializes_iterator_payload(
     monkeypatch.setattr(
         chat_converter,
         "items_to_messages",
-        classmethod(lambda _cls, _input: [{"role": "user", "content": message_iter}]),
+        classmethod(lambda _cls, _input, **kwargs: [{"role": "user", "content": message_iter}]),
     )
     monkeypatch.setattr(
         chat_converter,
