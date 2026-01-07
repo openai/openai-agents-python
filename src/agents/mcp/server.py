@@ -3,11 +3,16 @@ from __future__ import annotations
 import abc
 import asyncio
 import inspect
+import sys
 from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
+
 
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import ClientSession, StdioServerParameters, Tool as MCPTool, stdio_client
@@ -27,6 +32,33 @@ T = TypeVar("T")
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
+
+
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Extract the most meaningful exception from a BaseExceptionGroup.
+
+    When using anyio task groups (as the MCP client library does), HTTP errors
+    and other exceptions get wrapped in BaseExceptionGroup. This function
+    extracts the most meaningful exception for clearer error reporting.
+
+    Args:
+        exc: The exception to unwrap, which may be a BaseExceptionGroup.
+
+    Returns:
+        The unwrapped exception, or the original exception if not a group.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        # Filter out GeneratorExit and CancelledError as these are cleanup side effects.
+        meaningful = [
+            e for e in exc.exceptions if not isinstance(e, (GeneratorExit, asyncio.CancelledError))
+        ]
+        if meaningful:
+            # Recursively unwrap in case of nested groups.
+            return _unwrap_exception_group(meaningful[0])
+        # If only cleanup exceptions remain, return the first one.
+        if exc.exceptions:
+            return _unwrap_exception_group(exc.exceptions[0])
+    return exc
 
 
 class MCPServer(abc.ABC):
@@ -146,6 +178,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self._tools_list: list[MCPTool] | None = None
 
         self.tool_filter = tool_filter
+
+        self._cleanup_error: BaseException | None = None
 
     async def _apply_tool_filter(
         self,
@@ -285,9 +319,25 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             server_result = await session.initialize()
             self.server_initialize_result = server_result
             self.session = session
-        except Exception as e:
-            logger.error(f"Error initializing MCP server: {e}")
+        except BaseException as e:
+            # Unwrap exception groups from anyio task groups to get the meaningful error.
+            # The MCP client library uses anyio task groups which wrap exceptions in
+            # BaseExceptionGroup when errors occur in background tasks (e.g., HTTP errors).
+            unwrapped = _unwrap_exception_group(e)
+
+            # Check if cleanup found a more meaningful error than what we caught.
+            # This happens when the real error (e.g., HTTPStatusError) is in a background
+            # task and we only caught CancelledError from the main task being cancelled.
             await self.cleanup()
+            if self._cleanup_error is not None:
+                error_to_raise = self._cleanup_error
+                self._cleanup_error = None
+                logger.error(f"Error initializing MCP server {self.name}: {error_to_raise}")
+                raise error_to_raise from e
+
+            logger.error(f"Error initializing MCP server {self.name}: {unwrapped}")
+            if unwrapped is not e:
+                raise unwrapped from e
             raise
 
     async def list_tools(
@@ -349,8 +399,21 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         async with self._cleanup_lock:
             try:
                 await self.exit_stack.aclose()
-            except Exception as e:
-                logger.error(f"Error cleaning up server: {e}")
+                self._cleanup_error = None
+            except BaseException as e:
+                # During cleanup, exception groups can occur from anyio task group cancellation.
+                # Unwrap to get the meaningful error for logging and potential re-raising.
+                unwrapped = _unwrap_exception_group(e)
+                # CancelledError during cleanup is expected when we're cancelling tasks,
+                # so log at debug level. Other errors are logged at error level and saved
+                # so connect() can re-raise them instead of a generic CancelledError.
+                if isinstance(unwrapped, asyncio.CancelledError):
+                    logger.debug(f"MCP server {self.name} cleanup cancelled (expected)")
+                    self._cleanup_error = None
+                else:
+                    logger.error(f"Error cleaning up MCP server {self.name}: {unwrapped}")
+                    # Save the meaningful error so it can be re-raised by connect().
+                    self._cleanup_error = unwrapped
             finally:
                 self.session = None
 
