@@ -40,6 +40,11 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
+from agents.items import (
+    ToolCallOutputItem,
+    ensure_function_call_output_format,
+    normalize_function_call_output_payload,
+)
 
 
 def make_message(
@@ -396,3 +401,62 @@ def test_input_to_new_input_list_copies_the_ones_produced_by_pydantic() -> None:
     assert new_list[0]["role"] == original["role"]  # type: ignore
     assert new_list[0]["status"] == original["status"]  # type: ignore
     assert new_list[0]["type"] == original["type"]
+
+
+def test_normalize_function_call_output_payload_handles_lists() -> None:
+    payload = {
+        "type": "function_call_output",
+        "output": [{"type": "text", "text": "value"}],
+    }
+    normalized = normalize_function_call_output_payload(payload)
+    assert normalized["output"] == payload["output"]
+
+    payload["output"] = ["not a dict"]
+    normalized = normalize_function_call_output_payload(payload)
+    assert isinstance(normalized["output"], str)
+    assert "not a dict" in normalized["output"]
+
+
+def test_normalize_function_call_output_wraps_single_allowed_output() -> None:
+    payload = {
+        "type": "function_call_output",
+        "output": {"type": "input_text", "text": "hello"},
+    }
+    normalized = normalize_function_call_output_payload(payload)
+    assert isinstance(normalized["output"], list)
+    assert normalized["output"][0]["text"] == "hello"
+
+
+def test_ensure_function_call_result_converts_and_strips_metadata() -> None:
+    payload = {
+        "type": "function_call_result",
+        "call_id": "call-1",
+        "name": "tool",
+        "status": "completed",
+        "output": {"foo": "bar"},
+    }
+    normalized = ensure_function_call_output_format(payload)
+    assert normalized["type"] == "function_call_output"
+    assert "name" not in normalized
+    assert "status" not in normalized
+    assert isinstance(normalized["output"], str)
+    assert "foo" in normalized["output"]
+
+
+def test_tool_call_output_item_converts_result_payload_to_api_format() -> None:
+    raw_item = {
+        "type": "function_call_result",
+        "call_id": "call-123",
+        "name": "my_tool",
+        "status": "completed",
+        "output": {"key": "value"},
+    }
+    agent = Agent(name="owner")
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="value")
+
+    converted = item.to_input_item()
+    assert converted["type"] == "function_call_output"
+    assert converted["call_id"] == "call-123"
+    assert "name" not in converted
+    assert "status" not in converted
+    assert isinstance(converted["output"], str)

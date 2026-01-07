@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import json
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
@@ -56,6 +57,61 @@ from .tool import (
 )
 from .usage import Usage
 
+
+def normalize_function_call_output_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ensure function_call_output payloads conform to Responses API expectations."""
+
+    payload_type = payload.get("type")
+    if payload_type not in {"function_call_output", "function_call_result"}:
+        return payload
+
+    output_value = payload.get("output")
+
+    # The model can emit arbitrary shapes; normalize to the canonical API contract so downstream
+    # persistence and turn input construction do not fail.
+    if output_value is None:
+        payload["output"] = ""
+        return payload
+
+    if isinstance(output_value, list):
+        if all(
+            isinstance(entry, dict) and entry.get("type") in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES
+            for entry in output_value
+        ):
+            return payload
+        payload["output"] = json.dumps(output_value)
+        return payload
+
+    if isinstance(output_value, dict):
+        entry_type = output_value.get("type")
+        if entry_type in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES:
+            payload["output"] = [output_value]
+        else:
+            payload["output"] = json.dumps(output_value)
+        return payload
+
+    if isinstance(output_value, str):
+        return payload
+
+    payload["output"] = json.dumps(output_value)
+    return payload
+
+
+def ensure_function_call_output_format(payload: Any) -> Any:
+    """Convert function_call_result payloads into API-compatible function_call_output."""
+    if not isinstance(payload, dict):
+        return payload
+
+    normalized: dict[str, Any] = dict(payload)
+    if normalized.get("type") == "function_call_result":
+        normalized["type"] = "function_call_output"
+    if normalized.get("type") == "function_call_output":
+        normalized.pop("name", None)
+        normalized.pop("status", None)
+        normalized = normalize_function_call_output_payload(normalized)
+    return normalized
+
+
 if TYPE_CHECKING:
     from .agent import Agent
 
@@ -75,6 +131,15 @@ T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
+_ALLOWED_FUNCTION_CALL_OUTPUT_TYPES: set[str] = {
+    "input_text",
+    "input_image",
+    "output_text",
+    "refusal",
+    "input_file",
+    "computer_screenshot",
+    "summary_text",
+}
 
 
 @dataclass
@@ -220,6 +285,15 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
             # Preserve dataclass fields for repr/asdict while dropping strong refs.
             self.__dict__["target_agent"] = None
 
+    def to_input_item(self) -> TResponseInputItem:
+        """Convert handoff output into the API format expected by the model."""
+
+        if isinstance(self.raw_item, dict):
+            payload = ensure_function_call_output_format(self.raw_item)
+            return cast(TResponseInputItem, payload)
+
+        return super().to_input_item()
+
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
@@ -273,15 +347,37 @@ class ToolCallOutputItem(RunItemBase[Any]):
         Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
         book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
         payload we send back to the model while keeping the original raw item intact.
+
+        Also converts function_call_result payloads to function_call_output for API compatibility.
         """
 
         if isinstance(self.raw_item, dict):
-            payload = dict(self.raw_item)
+            payload = ensure_function_call_output_format(self.raw_item)
             payload_type = payload.get("type")
             if payload_type == "shell_call_output":
+                payload = dict(payload)
                 payload.pop("status", None)
                 payload.pop("shell_output", None)
                 payload.pop("provider_data", None)
+                outputs = payload.get("output")
+                if isinstance(outputs, list):
+                    for entry in outputs:
+                        if not isinstance(entry, dict):
+                            continue
+                        outcome = entry.get("outcome")
+                        if isinstance(outcome, dict):
+                            if outcome.get("type") == "exit":
+                                # Providers may return None/exitCode; normalize to an int exit_code.
+                                exit_code = (
+                                    outcome["exit_code"]
+                                    if "exit_code" in outcome
+                                    else outcome.get("exitCode")
+                                )
+                                outcome["exit_code"] = 1 if exit_code is None else exit_code
+                                outcome.pop("exitCode", None)
+                                entry["outcome"] = outcome
+            if payload.get("type") == "function_call_output":
+                payload = normalize_function_call_output_payload(payload)
             return cast(TResponseInputItem, payload)
 
         return super().to_input_item()

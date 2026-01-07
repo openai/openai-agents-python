@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -9,6 +10,7 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
@@ -77,6 +79,29 @@ class FakeModel(Model):
             return []
         return self.turn_outputs.pop(0)
 
+    def _convert_apply_patch_calls(
+        self, output: list[TResponseOutputItem]
+    ) -> list[TResponseOutputItem]:
+        """Convert apply_patch_call dicts to ResponseCustomToolCall to avoid validation errors."""
+
+        converted_output: list[TResponseOutputItem] = []
+        for item in output:
+            if isinstance(item, dict) and item.get("type") == "apply_patch_call":
+                operation = item.get("operation", {})
+                converted_output.append(
+                    ResponseCustomToolCall(
+                        type="custom_tool_call",
+                        name="apply_patch",
+                        call_id=item.get("call_id") or item.get("callId", ""),
+                        input=json.dumps(operation)
+                        if isinstance(operation, dict)
+                        else str(operation),
+                    )
+                )
+            else:
+                converted_output.append(item)
+        return converted_output
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -120,9 +145,11 @@ class FakeModel(Model):
                     )
                 )
                 raise output
+            assert isinstance(output, list)
+            converted_output = self._convert_apply_patch_calls(output)
 
             return ModelResponse(
-                output=output,
+                output=converted_output,
                 usage=self.hardcoded_usage or Usage(),
                 response_id="resp-789",
             )
@@ -168,8 +195,10 @@ class FakeModel(Model):
                     )
                 )
                 raise output
+            assert isinstance(output, list)
+            converted_output = self._convert_apply_patch_calls(output)
 
-            response = get_response_obj(output, usage=self.hardcoded_usage)
+            response = get_response_obj(converted_output, usage=self.hardcoded_usage)
             sequence_number = 0
 
             yield ResponseCreatedEvent(
@@ -186,7 +215,7 @@ class FakeModel(Model):
             )
             sequence_number += 1
 
-            for output_index, output_item in enumerate(output):
+            for output_index, output_item in enumerate(converted_output):
                 yield ResponseOutputItemAddedEvent(
                     type="response.output_item.added",
                     item=output_item,
