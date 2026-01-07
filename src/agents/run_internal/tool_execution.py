@@ -155,13 +155,9 @@ def get_mapping_or_attr(target: Any, key: str) -> Any:
 def extract_tool_call_id(raw: Any) -> str | None:
     """Return a call ID from tool call payloads or approval items."""
     if isinstance(raw, Mapping):
-        candidate = raw.get("callId") or raw.get("call_id") or raw.get("id")
+        candidate = raw.get("call_id") or raw.get("id")
         return candidate if isinstance(candidate, str) else None
-    candidate = (
-        get_mapping_or_attr(raw, "call_id")
-        or get_mapping_or_attr(raw, "callId")
-        or get_mapping_or_attr(raw, "id")
-    )
+    candidate = get_mapping_or_attr(raw, "call_id") or get_mapping_or_attr(raw, "id")
     return candidate if isinstance(candidate, str) else None
 
 
@@ -326,8 +322,6 @@ def normalize_shell_output(entry: ShellCommandOutput | Mapping[str, Any]) -> She
     stderr = str(entry.get("stderr", "") or "")
     command_value = entry.get("command")
     provider_data_value = entry.get("provider_data")
-    if provider_data_value is None:
-        provider_data_value = entry.get("providerData")
     outcome_value = entry.get("outcome")
 
     outcome_type: Literal["exit", "timeout"] = "exit"
@@ -1178,7 +1172,7 @@ def _is_hosted_mcp_approval_request(raw_item: Any) -> bool:
         return True
     if not isinstance(raw_item, dict):
         return False
-    provider_data = raw_item.get("providerData", {}) or raw_item.get("provider_data", {})
+    provider_data = raw_item.get("provider_data", {})
     return (
         raw_item.get("type") == "hosted_tool_call"
         and provider_data.get("type") == "mcp_approval_request"

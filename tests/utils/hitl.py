@@ -110,9 +110,9 @@ async def assert_tool_output_roundtrip(
 
     json_data = state.to_json()
 
-    generated_items_json = json_data.get("generatedItems", [])
+    generated_items_json = json_data.get("generated_items", [])
     assert len(generated_items_json) == 1, f"{expected_type} item should be serialized"
-    serialized_type = generated_items_json[0].get("rawItem", {}).get("type")
+    serialized_type = generated_items_json[0].get("raw_item", {}).get("type")
 
     assert serialized_type == expected_type, (
         f"Expected {expected_type} in serialized JSON, but got {serialized_type}. "
@@ -405,7 +405,7 @@ def make_mcp_raw_item(
             raw_item["call_id"] = call_id
         else:
             raw_item["id"] = call_id
-        raw_item["providerData"] = provider_data or {
+        raw_item["provider_data"] = provider_data or {
             "type": "mcp_approval_request",
             "id": "req-1",
             "server_label": "test_server",

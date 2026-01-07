@@ -1265,7 +1265,7 @@ class AgentRunner:
                 if hasattr(item, "raw_item") and isinstance(item.raw_item, dict):
                     raw_type = item.raw_item.get("type")
                     name = item.raw_item.get("name")
-                    call_id = item.raw_item.get("call_id") or item.raw_item.get("callId")
+                    call_id = item.raw_item.get("call_id")
                     item_info["raw_type"] = raw_type  # type: ignore[assignment]
                     item_info["name"] = name  # type: ignore[assignment]
                     item_info["call_id"] = call_id  # type: ignore[assignment]

@@ -136,7 +136,7 @@ class FakeModel(Model):
                     converted_item = ResponseCustomToolCall(
                         type="custom_tool_call",
                         name="apply_patch",
-                        call_id=item.get("call_id") or item.get("callId", ""),
+                        call_id=item.get("call_id") or "",
                         input=operation_json,
                     )
                     converted_output.append(converted_item)

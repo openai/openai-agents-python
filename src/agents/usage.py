@@ -12,32 +12,35 @@ from pydantic.dataclasses import dataclass
 
 def deserialize_usage(usage_data: Mapping[str, Any]) -> Usage:
     """Rebuild a Usage object from serialized JSON data."""
+    input_tokens_details_raw = usage_data.get("input_tokens_details")
+    output_tokens_details_raw = usage_data.get("output_tokens_details")
     input_details = _coerce_token_details(
         TypeAdapter(InputTokensDetails),
-        usage_data.get("inputTokensDetails") or {"cached_tokens": 0},
+        input_tokens_details_raw or {"cached_tokens": 0},
         InputTokensDetails(cached_tokens=0),
     )
     output_details = _coerce_token_details(
         TypeAdapter(OutputTokensDetails),
-        usage_data.get("outputTokensDetails") or {"reasoning_tokens": 0},
+        output_tokens_details_raw or {"reasoning_tokens": 0},
         OutputTokensDetails(reasoning_tokens=0),
     )
 
     request_entries: list[RequestUsage] = []
-    for entry in usage_data.get("requestUsageEntries", []):
+    request_entries_raw = usage_data.get("request_usage_entries") or []
+    for entry in request_entries_raw:
         request_entries.append(
             RequestUsage(
-                input_tokens=entry.get("inputTokens", 0),
-                output_tokens=entry.get("outputTokens", 0),
-                total_tokens=entry.get("totalTokens", 0),
+                input_tokens=entry.get("input_tokens", 0),
+                output_tokens=entry.get("output_tokens", 0),
+                total_tokens=entry.get("total_tokens", 0),
                 input_tokens_details=_coerce_token_details(
                     TypeAdapter(InputTokensDetails),
-                    entry.get("inputTokensDetails") or {"cached_tokens": 0},
+                    entry.get("input_tokens_details") or {"cached_tokens": 0},
                     InputTokensDetails(cached_tokens=0),
                 ),
                 output_tokens_details=_coerce_token_details(
                     TypeAdapter(OutputTokensDetails),
-                    entry.get("outputTokensDetails") or {"reasoning_tokens": 0},
+                    entry.get("output_tokens_details") or {"reasoning_tokens": 0},
                     OutputTokensDetails(reasoning_tokens=0),
                 ),
             )
@@ -45,9 +48,9 @@ def deserialize_usage(usage_data: Mapping[str, Any]) -> Usage:
 
     return Usage(
         requests=usage_data.get("requests", 0),
-        input_tokens=usage_data.get("inputTokens", 0),
-        output_tokens=usage_data.get("outputTokens", 0),
-        total_tokens=usage_data.get("totalTokens", 0),
+        input_tokens=usage_data.get("input_tokens", 0),
+        output_tokens=usage_data.get("output_tokens", 0),
+        total_tokens=usage_data.get("total_tokens", 0),
         input_tokens_details=input_details,
         output_tokens_details=output_details,
         request_usage_entries=request_entries,
@@ -231,25 +234,25 @@ def serialize_usage(usage: Usage) -> dict[str, Any]:
 
     def _serialize_request_entry(entry: RequestUsage) -> dict[str, Any]:
         return {
-            "inputTokens": entry.input_tokens,
-            "outputTokens": entry.output_tokens,
-            "totalTokens": entry.total_tokens,
-            "inputTokensDetails": _serialize_usage_details(
+            "input_tokens": entry.input_tokens,
+            "output_tokens": entry.output_tokens,
+            "total_tokens": entry.total_tokens,
+            "input_tokens_details": _serialize_usage_details(
                 entry.input_tokens_details, {"cached_tokens": 0}
             ),
-            "outputTokensDetails": _serialize_usage_details(
+            "output_tokens_details": _serialize_usage_details(
                 entry.output_tokens_details, {"reasoning_tokens": 0}
             ),
         }
 
     return {
         "requests": usage.requests,
-        "inputTokens": usage.input_tokens,
-        "inputTokensDetails": [input_details],
-        "outputTokens": usage.output_tokens,
-        "outputTokensDetails": [output_details],
-        "totalTokens": usage.total_tokens,
-        "requestUsageEntries": [
+        "input_tokens": usage.input_tokens,
+        "input_tokens_details": [input_details],
+        "output_tokens": usage.output_tokens,
+        "output_tokens_details": [output_details],
+        "total_tokens": usage.total_tokens,
+        "request_usage_entries": [
             _serialize_request_entry(entry) for entry in usage.request_usage_entries
         ],
     }
