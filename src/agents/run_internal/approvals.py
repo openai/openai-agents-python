@@ -97,7 +97,7 @@ def _build_function_tool_call_for_approval_error(
 def _extract_approval_identity(raw_item: Any) -> tuple[str | None, str | None]:
     """Return the call identifier and type used for approval deduplication."""
     if isinstance(raw_item, dict):
-        call_id = raw_item.get("callId") or raw_item.get("call_id") or raw_item.get("id")
+        call_id = raw_item.get("call_id") or raw_item.get("id")
         raw_type = raw_item.get("type") or "unknown"
         return call_id, raw_type
     if isinstance(raw_item, ResponseFunctionToolCall):

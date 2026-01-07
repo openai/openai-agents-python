@@ -109,7 +109,7 @@ class OpenAIServerConversationTracker:
                 if isinstance(item_id, str):
                     self.server_item_ids.add(item_id)
                 call_id = (
-                    item.get("call_id") or item.get("callId")
+                    item.get("call_id")
                     if isinstance(item, dict)
                     else getattr(item, "call_id", None)
                 )
@@ -131,7 +131,7 @@ class OpenAIServerConversationTracker:
 
             if isinstance(raw_item, dict):
                 item_id = raw_item.get("id")
-                call_id = raw_item.get("call_id") or raw_item.get("callId")
+                call_id = raw_item.get("call_id")
                 has_output_payload = "output" in raw_item
                 has_output_payload = has_output_payload or hasattr(raw_item, "output")
                 should_mark = isinstance(item_id, str) or (

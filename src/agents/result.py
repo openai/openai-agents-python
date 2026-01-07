@@ -158,7 +158,11 @@ class RunResultBase(abc.ABC):
     def to_input_list(self) -> list[TResponseInputItem]:
         """Creates a new input list, merging the original input with all the new items generated."""
         original_items: list[TResponseInputItem] = ItemHelpers.input_to_new_input_list(self.input)
-        new_items = [item.to_input_item() for item in self.new_items]
+        new_items: list[TResponseInputItem] = []
+        for item in self.new_items:
+            if isinstance(item, ToolApprovalItem):
+                continue
+            new_items.append(item.to_input_item())
 
         return original_items + new_items
 

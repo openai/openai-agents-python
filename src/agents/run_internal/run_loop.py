@@ -363,7 +363,7 @@ async def execute_tools_and_side_effects(
         name = None
         args = None
         if isinstance(raw, dict):
-            call_id = raw.get("call_id") or raw.get("callId")
+            call_id = raw.get("call_id")
             name = raw.get("name")
             args = raw.get("arguments")
         elif hasattr(raw, "call_id"):
@@ -682,12 +682,10 @@ async def resolve_interrupted_turn(
             raw_call_id = None
             if isinstance(raw_item, Mapping):
                 raw_type = raw_item.get("type")
-                raw_call_id = raw_item.get("call_id") or raw_item.get("callId")
+                raw_call_id = raw_item.get("call_id")
             else:
                 raw_type = getattr(raw_item, "type", None)
-                raw_call_id = getattr(raw_item, "call_id", None) or getattr(
-                    raw_item, "callId", None
-                )
+                raw_call_id = getattr(raw_item, "call_id", None)
             if raw_type == expected_type and raw_call_id == call_id:
                 return True
         return False
@@ -1177,9 +1175,7 @@ def process_model_response(
                 )
                 raise ModelBehaviorError("Model produced shell call without a shell tool.")
             tools_used.append(shell_tool.name)
-            call_identifier = get_mapping_or_attr(output, "call_id") or get_mapping_or_attr(
-                output, "callId"
-            )
+            call_identifier = get_mapping_or_attr(output, "call_id")
             logger.debug("Queuing shell_call %s", call_identifier)
             shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
             continue
@@ -1188,8 +1184,6 @@ def process_model_response(
             if apply_patch_tool:
                 tools_used.append(apply_patch_tool.name)
                 call_identifier = get_mapping_or_attr(output, "call_id")
-                if not call_identifier:
-                    call_identifier = get_mapping_or_attr(output, "callId")
                 logger.debug("Queuing apply_patch_call %s", call_identifier)
                 apply_patch_calls.append(
                     ToolRunApplyPatchCall(

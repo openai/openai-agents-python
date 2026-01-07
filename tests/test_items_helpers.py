@@ -41,7 +41,7 @@ from agents import (
     TResponseInputItem,
     Usage,
 )
-from agents.items import normalize_function_call_output_payload
+from agents.items import ToolCallOutputItem
 
 
 def make_message(
@@ -215,10 +215,8 @@ def test_handoff_output_item_converts_protocol_payload() -> None:
     raw_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_result",
+            "type": "function_call_output",
             "call_id": "call-123",
-            "name": "transfer_to_weather",
-            "status": "completed",
             "output": "ok",
         },
     )
@@ -235,18 +233,15 @@ def test_handoff_output_item_converts_protocol_payload() -> None:
     converted = item.to_input_item()
     assert converted["type"] == "function_call_output"
     assert converted["call_id"] == "call-123"
-    assert "status" not in converted
-    assert "name" not in converted
+    assert converted["output"] == "ok"
 
 
 def test_handoff_output_item_stringifies_object_output() -> None:
     raw_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_result",
+            "type": "function_call_output",
             "call_id": "call-obj",
-            "name": "transfer_to_weather",
-            "status": "completed",
             "output": {"assistant": "Weather Assistant"},
         },
     )
@@ -262,18 +257,24 @@ def test_handoff_output_item_stringifies_object_output() -> None:
 
     converted = item.to_input_item()
     assert converted["type"] == "function_call_output"
-    assert isinstance(converted["output"], str)
-    assert "Weather Assistant" in converted["output"]
+    assert converted["call_id"] == "call-obj"
+    assert isinstance(converted["output"], dict)
+    assert converted["output"] == {"assistant": "Weather Assistant"}
 
 
-def test_normalize_function_call_output_payload_handles_lists() -> None:
-    payload = {
+def test_tool_call_output_item_preserves_function_output_structure() -> None:
+    agent = Agent(name="tester")
+    raw_item = {
         "type": "function_call_output",
-        "output": [{"type": "text", "text": "value"}],
+        "call_id": "call-keep",
+        "output": [{"type": "output_text", "text": "value"}],
     }
-    normalized = normalize_function_call_output_payload(payload)
-    assert isinstance(normalized["output"], str)
-    assert "value" in normalized["output"]
+    item = ToolCallOutputItem(agent=agent, raw_item=raw_item, output="value")
+
+    payload = item.to_input_item()
+    assert isinstance(payload, dict)
+    assert payload["type"] == "function_call_output"
+    assert payload["output"] == raw_item["output"]
 
 
 def test_tool_call_output_item_constructs_function_call_output_dict():

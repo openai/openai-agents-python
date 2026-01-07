@@ -52,7 +52,6 @@ from .items import (
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
-    ensure_function_call_output_format,
 )
 from .logger import logger
 from .run_context import RunContextWrapper
@@ -81,14 +80,6 @@ ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
 
 # Schema version for serialization compatibility
 CURRENT_SCHEMA_VERSION = "1.0"
-
-_SNAKE_TO_CAMEL_FIELD_MAP = {
-    "call_id": "callId",
-    "response_id": "responseId",
-    "provider_data": "providerData",
-}
-
-_CAMEL_TO_SNAKE_FIELD_MAP = {camel: snake for snake, camel in _SNAKE_TO_CAMEL_FIELD_MAP.items()}
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -204,20 +195,18 @@ class RunState(Generic[TContext, TAgent]):
         return approvals_dict
 
     def _serialize_model_responses(self) -> list[dict[str, Any]]:
-        """Serialize model responses with camelCase output."""
+        """Serialize model responses."""
         return [
             {
                 "usage": serialize_usage(resp.usage),
-                "output": [
-                    _camelize_field_names(_serialize_raw_item_value(item)) for item in resp.output
-                ],
-                "responseId": resp.response_id,
+                "output": [_serialize_raw_item_value(item) for item in resp.output],
+                "response_id": resp.response_id,
             }
             for resp in self._model_responses
         ]
 
     def _serialize_original_input(self) -> str | list[Any]:
-        """Normalize original input for protocol/camelCase expectations."""
+        """Normalize original input into the shape expected by Responses API."""
         if not isinstance(self._original_input, list):
             return self._original_input
 
@@ -225,14 +214,6 @@ class RunState(Generic[TContext, TAgent]):
         for item in self._original_input:
             if isinstance(item, dict):
                 normalized_item = dict(item)
-                item_type = normalized_item.get("type")
-                call_id = normalized_item.get("call_id") or normalized_item.get("callId")
-                if item_type == "function_call_output":
-                    normalized_item["type"] = "function_call_result"
-                    if "status" not in normalized_item:
-                        normalized_item["status"] = "completed"
-                    if "name" not in normalized_item and call_id:
-                        normalized_item["name"] = self._lookup_function_name(call_id)
                 role = normalized_item.get("role")
                 if role == "assistant":
                     content = normalized_item.get("content")
@@ -240,7 +221,7 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["content"] = [{"type": "output_text", "text": content}]
                     if "status" not in normalized_item:
                         normalized_item["status"] = "completed"
-                normalized_items.append(_camelize_field_names(normalized_item))
+                normalized_items.append(normalized_item)
             else:
                 normalized_items.append(item)
         return normalized_items
@@ -277,7 +258,7 @@ class RunState(Generic[TContext, TAgent]):
                 if isinstance(raw, dict):
                     item_id = raw.get("id")
                     item_type = raw.get("type")
-                    call_id = raw.get("call_id") or raw.get("callId")
+                    call_id = raw.get("call_id")
                 else:
                     item_id = _get_attr(raw, "id")
                     item_type = _get_attr(raw, "type")
@@ -332,34 +313,34 @@ class RunState(Generic[TContext, TAgent]):
 
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "currentTurn": self._current_turn,
-            "currentAgent": {
-                "name": self._current_agent.name,
-            },
-            "originalInput": original_input_serialized,
-            "modelResponses": model_responses,
+            "current_turn": self._current_turn,
+            "current_agent": {"name": self._current_agent.name},
+            "original_input": original_input_serialized,
+            "model_responses": model_responses,
             "context": {
                 "usage": serialize_usage(self._context.usage),
                 "approvals": approvals_dict,
                 "context": context_payload,
             },
-            "toolUseTracker": copy.deepcopy(self._tool_use_tracker_snapshot),
-            "maxTurns": self._max_turns,
-            "noActiveAgentRun": True,
-            "inputGuardrailResults": _serialize_guardrail_results(self._input_guardrail_results),
-            "outputGuardrailResults": _serialize_guardrail_results(self._output_guardrail_results),
+            "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
+            "max_turns": self._max_turns,
+            "no_active_agent_run": True,
+            "input_guardrail_results": _serialize_guardrail_results(self._input_guardrail_results),
+            "output_guardrail_results": _serialize_guardrail_results(
+                self._output_guardrail_results
+            ),
         }
 
         generated_items = self._merge_generated_items_with_processed()
-        result["generatedItems"] = [self._serialize_item(item) for item in generated_items]
-        result["currentStep"] = self._serialize_current_step()
-        result["lastModelResponse"] = _serialize_last_model_response(model_responses)
-        result["lastProcessedResponse"] = (
+        result["generated_items"] = [self._serialize_item(item) for item in generated_items]
+        result["current_step"] = self._serialize_current_step()
+        result["last_model_response"] = _serialize_last_model_response(model_responses)
+        result["last_processed_response"] = (
             self._serialize_processed_response(self._last_processed_response)
             if self._last_processed_response
             else None
         )
-        result["currentTurnPersistedItemCount"] = self._current_turn_persisted_item_count
+        result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
         result["trace"] = None
 
         return result
@@ -385,8 +366,8 @@ class RunState(Generic[TContext, TAgent]):
         ]
 
         return {
-            "newItems": [self._serialize_item(item) for item in processed_response.new_items],
-            "toolsUsed": processed_response.tools_used,
+            "new_items": [self._serialize_item(item) for item in processed_response.new_items],
+            "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
         }
@@ -418,18 +399,9 @@ class RunState(Generic[TContext, TAgent]):
         """Serialize a run item to JSON-compatible dict."""
         raw_item_dict: Any = _serialize_raw_item_value(item.raw_item)
 
-        # Convert tool output-like items into protocol format for cross-SDK compatibility.
-        if item.type in {"tool_call_output_item", "handoff_output_item"} and isinstance(
-            raw_item_dict, dict
-        ):
-            raw_item_dict = self._convert_output_item_to_protocol(raw_item_dict)
-
-        # Convert snake_case to camelCase for JSON serialization
-        raw_item_dict = _camelize_field_names(raw_item_dict)
-
         result: dict[str, Any] = {
             "type": item.type,
-            "rawItem": raw_item_dict,
+            "raw_item": raw_item_dict,
             "agent": {"name": item.agent.name},
         }
 
@@ -448,37 +420,13 @@ class RunState(Generic[TContext, TAgent]):
                 serialized_output = str(item.output)
             result["output"] = serialized_output
         if hasattr(item, "source_agent"):
-            result["sourceAgent"] = {"name": item.source_agent.name}
+            result["source_agent"] = {"name": item.source_agent.name}
         if hasattr(item, "target_agent"):
-            result["targetAgent"] = {"name": item.target_agent.name}
+            result["target_agent"] = {"name": item.target_agent.name}
         if hasattr(item, "tool_name") and item.tool_name is not None:
-            result["toolName"] = item.tool_name
+            result["tool_name"] = item.tool_name
 
         return result
-
-    def _convert_output_item_to_protocol(self, raw_item_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert API-format tool output items to protocol format.
-
-        Only converts function_call_output to function_call_result (protocol format).
-        Preserves computer_call_output and local_shell_call_output types as-is.
-        """
-        converted = dict(raw_item_dict)
-
-        if converted.get("type") == "function_call_output":
-            converted["type"] = "function_call_result"
-            call_id = cast(Optional[str], converted.get("call_id") or converted.get("callId"))
-
-            if not converted.get("name"):
-                resolved_name = self._lookup_function_name(call_id or "")
-                if resolved_name:
-                    converted["name"] = resolved_name
-
-            if not converted.get("status"):
-                converted["status"] = "completed"
-        # For computer_call_output and local_shell_call_output, preserve the type
-        # No conversion needed - they should remain as-is
-
-        return converted
 
     def _lookup_function_name(self, call_id: str) -> str:
         """Attempt to find the function name for the provided call_id."""
@@ -487,15 +435,12 @@ class RunState(Generic[TContext, TAgent]):
 
         def _extract_name(raw: Any) -> str | None:
             if isinstance(raw, dict):
-                candidate_call_id = cast(Optional[str], raw.get("call_id") or raw.get("callId"))
+                candidate_call_id = cast(Optional[str], raw.get("call_id"))
                 if candidate_call_id == call_id:
                     name_value = raw.get("name", "")
                     return str(name_value) if name_value else ""
             else:
-                candidate_call_id = cast(
-                    Optional[str],
-                    _get_attr(raw, "call_id") or _get_attr(raw, "callId"),
-                )
+                candidate_call_id = cast(Optional[str], _get_attr(raw, "call_id"))
                 if candidate_call_id == call_id:
                     name_value = _get_attr(raw, "name", "")
                     return str(name_value) if name_value else ""
@@ -525,9 +470,7 @@ class RunState(Generic[TContext, TAgent]):
                     continue
                 if input_item.get("type") != "function_call":
                     continue
-                item_call_id = cast(
-                    Optional[str], input_item.get("call_id") or input_item.get("callId")
-                )
+                item_call_id = cast(Optional[str], input_item.get("call_id"))
                 if item_call_id == call_id:
                     name_value = input_item.get("name", "")
                     return str(name_value) if name_value else ""
@@ -661,11 +604,6 @@ def _transform_field_names(
     return data
 
 
-def _camelize_field_names(data: dict[str, Any] | list[Any] | Any) -> Any:
-    """Convert snake_case field names to camelCase for JSON serialization."""
-    return _transform_field_names(data, _SNAKE_TO_CAMEL_FIELD_MAP)
-
-
 def _serialize_raw_item_value(raw_item: Any) -> Any:
     """Return a serializable representation of a raw item."""
     if hasattr(raw_item, "model_dump"):
@@ -676,9 +614,8 @@ def _serialize_raw_item_value(raw_item: Any) -> Any:
 
 
 def _serialize_tool_call_data(tool_call: Any) -> Any:
-    """Convert a tool call to a camelCase-friendly dictionary."""
-    serialized_call = _serialize_raw_item_value(tool_call)
-    return _camelize_field_names(serialized_call)
+    """Convert a tool call to a serializable dictionary."""
+    return _serialize_raw_item_value(tool_call)
 
 
 def _serialize_tool_metadata(
@@ -715,7 +652,7 @@ def _serialize_tool_actions(
         )
         serialized_actions.append(
             {
-                "toolCall": _serialize_tool_call_data(action.tool_call),
+                "tool_call": _serialize_tool_call_data(action.tool_call),
                 wrapper_key: tool_dict,
             }
         )
@@ -730,8 +667,8 @@ def _serialize_handoffs(handoffs: Sequence[Any]) -> list[dict[str, Any]]:
         handoff_name = _get_attr(handoff_target, "tool_name") or _get_attr(handoff_target, "name")
         serialized_handoffs.append(
             {
-                "toolCall": _serialize_tool_call_data(handoff.tool_call),
-                "handoff": {"toolName": handoff_name},
+                "tool_call": _serialize_tool_call_data(handoff.tool_call),
+                "handoff": {"tool_name": handoff_name},
             }
         )
     return serialized_handoffs
@@ -744,10 +681,8 @@ def _serialize_mcp_approval_requests(requests: Sequence[Any]) -> list[dict[str, 
         request_item_dict = _serialize_raw_item_value(request.request_item)
         serialized_requests.append(
             {
-                "requestItem": {
-                    "rawItem": _camelize_field_names(request_item_dict),
-                },
-                "mcpTool": request.mcp_tool.to_json()
+                "request_item": {"raw_item": request_item_dict},
+                "mcp_tool": request.mcp_tool.to_json()
                 if hasattr(request.mcp_tool, "to_json")
                 else request.mcp_tool,
             }
@@ -761,11 +696,11 @@ def _serialize_tool_approval_interruption(
     """Serialize a ToolApprovalItem interruption."""
     interruption_dict: dict[str, Any] = {
         "type": "tool_approval_item",
-        "rawItem": _camelize_field_names(_serialize_raw_item_value(interruption.raw_item)),
+        "raw_item": _serialize_raw_item_value(interruption.raw_item),
         "agent": {"name": interruption.agent.name},
     }
     if include_tool_name and interruption.tool_name is not None:
-        interruption_dict["toolName"] = interruption.tool_name
+        interruption_dict["tool_name"] = interruption.tool_name
     return interruption_dict
 
 
@@ -785,7 +720,7 @@ def _serialize_tool_action_groups(
             True,
         ),
         (
-            "computerActions",
+            "computer_actions",
             processed_response.computer_actions,
             "computer_tool",
             "computer",
@@ -793,15 +728,15 @@ def _serialize_tool_action_groups(
             False,
         ),
         (
-            "localShellActions",
+            "local_shell_actions",
             processed_response.local_shell_calls,
             "local_shell_tool",
-            "localShell",
+            "local_shell",
             True,
             False,
         ),
         (
-            "shellActions",
+            "shell_actions",
             processed_response.shell_calls,
             "shell_tool",
             "shell",
@@ -809,10 +744,10 @@ def _serialize_tool_action_groups(
             False,
         ),
         (
-            "applyPatchActions",
+            "apply_patch_actions",
             processed_response.apply_patch_calls,
             "apply_patch_tool",
-            "applyPatch",
+            "apply_patch",
             True,
             False,
         ),
@@ -836,7 +771,7 @@ def _serialize_tool_action_groups(
         ) in action_specs
     }
     serialized["handoffs"] = _serialize_handoffs(processed_response.handoffs)
-    serialized["mcpApprovalRequests"] = _serialize_mcp_approval_requests(
+    serialized["mcp_approval_requests"] = _serialize_mcp_approval_requests(
         processed_response.mcp_approval_requests
     )
     return serialized
@@ -911,7 +846,7 @@ async def _deserialize_processed_response(
     Returns:
         A reconstructed ProcessedResponse instance.
     """
-    new_items = _deserialize_items(processed_response_data.get("newItems", []), agent_map)
+    new_items = _deserialize_items(processed_response_data.get("new_items", []), agent_map)
 
     if hasattr(current_agent, "get_all_tools"):
         all_tools = await current_agent.get_all_tools(context)
@@ -961,7 +896,10 @@ async def _deserialize_processed_response(
             if not tool:
                 continue
 
-            tool_call_data = _normalize_field_names(entry.get("toolCall", {}))
+            tool_call_data_raw = entry.get("tool_call", {}) if isinstance(entry, Mapping) else {}
+            tool_call_data = (
+                dict(tool_call_data_raw) if isinstance(tool_call_data_raw, Mapping) else {}
+            )
             try:
                 tool_call = call_parser(tool_call_data)
             except Exception:
@@ -998,8 +936,7 @@ async def _deserialize_processed_response(
                 handoffs_map,
                 lambda data: ResponseFunctionToolCall(**data),
                 lambda tool_call, handoff: ToolRunHandoff(tool_call=tool_call, handoff=handoff),
-                lambda data: data.get("handoff", {}).get("toolName")
-                or data.get("handoff", {}).get("tool_name"),
+                lambda data: data.get("handoff", {}).get("tool_name"),
             ),
             (
                 "functions",
@@ -1012,7 +949,7 @@ async def _deserialize_processed_response(
                 None,
             ),
             (
-                "computerActions",
+                "computer_actions",
                 "computer",
                 computer_tools_map,
                 lambda data: ResponseComputerToolCall(**data),
@@ -1022,8 +959,8 @@ async def _deserialize_processed_response(
                 None,
             ),
             (
-                "localShellActions",
-                "localShell",
+                "local_shell_actions",
+                "local_shell",
                 local_shell_tools_map,
                 lambda data: _parse_with_adapter(_LOCAL_SHELL_CALL_ADAPTER, data),
                 lambda tool_call, local_shell_tool: ToolRunLocalShellCall(
@@ -1032,7 +969,7 @@ async def _deserialize_processed_response(
                 None,
             ),
             (
-                "shellActions",
+                "shell_actions",
                 "shell",
                 shell_tools_map,
                 lambda data: _parse_with_adapter(_LOCAL_SHELL_CALL_ADAPTER, data),
@@ -1042,8 +979,8 @@ async def _deserialize_processed_response(
                 None,
             ),
             (
-                "applyPatchActions",
-                "applyPatch",
+                "apply_patch_actions",
+                "apply_patch",
                 apply_patch_tools_map,
                 _parse_apply_patch_call,
                 lambda tool_call, apply_patch_tool: ToolRunApplyPatchCall(
@@ -1075,19 +1012,21 @@ async def _deserialize_processed_response(
     action_groups = _deserialize_action_groups()
     handoffs = action_groups["handoffs"]
     functions = action_groups["functions"]
-    computer_actions = action_groups["computerActions"]
-    local_shell_actions = action_groups["localShellActions"]
-    shell_actions = action_groups["shellActions"]
-    apply_patch_actions = action_groups["applyPatchActions"]
+    computer_actions = action_groups["computer_actions"]
+    local_shell_actions = action_groups["local_shell_actions"]
+    shell_actions = action_groups["shell_actions"]
+    apply_patch_actions = action_groups["apply_patch_actions"]
 
-    mcp_approval_requests = []
-    for request_data in processed_response_data.get("mcpApprovalRequests", []):
-        request_item_data = request_data.get("requestItem", {})
-        raw_item_data = _normalize_field_names(request_item_data.get("rawItem", {}))
+    mcp_approval_requests: list[ToolRunMCPApprovalRequest] = []
+    for request_data in processed_response_data.get("mcp_approval_requests", []):
+        request_item_data = request_data.get("request_item", {})
+        raw_item_data = (
+            request_item_data.get("raw_item", {}) if isinstance(request_item_data, Mapping) else {}
+        )
         request_item_adapter: TypeAdapter[McpApprovalRequest] = TypeAdapter(McpApprovalRequest)
         request_item = request_item_adapter.validate_python(raw_item_data)
 
-        mcp_tool_data = request_data.get("mcpTool", {})
+        mcp_tool_data = request_data.get("mcp_tool", {})
         if not mcp_tool_data:
             continue
 
@@ -1120,7 +1059,7 @@ async def _deserialize_processed_response(
         local_shell_calls=local_shell_actions,
         shell_calls=shell_actions,
         apply_patch_calls=apply_patch_actions,
-        tools_used=processed_response_data.get("toolsUsed", []),
+        tools_used=processed_response_data.get("tools_used", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
     )
@@ -1146,22 +1085,6 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
         return ResponseFunctionToolCall(**normalized_raw_item)
     except Exception:
         return normalized_raw_item
-
-
-def _normalize_field_names(data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize field names from camelCase (JSON) to snake_case (Python).
-
-    This function converts common field names from JSON's camelCase convention
-    to Python's snake_case convention using a shared field map.
-
-    Args:
-        data: Dictionary with potentially camelCase field names.
-
-    Returns:
-        Dictionary with normalized snake_case field names.
-    """
-    transformed = _transform_field_names(data, _CAMEL_TO_SNAKE_FIELD_MAP)
-    return cast(dict[str, Any], transformed)
 
 
 def _resolve_agent_from_data(
@@ -1203,11 +1126,11 @@ def _deserialize_tool_approval_item(
 
     raw_item_data: Any = pre_normalized_raw_item
     if raw_item_data is None:
-        raw_item_data = item_data.get("rawItem") or item_data.get("raw_item") or {}
+        raw_item_data = item_data.get("raw_item") or item_data.get("rawItem") or {}
         if isinstance(raw_item_data, Mapping):
-            raw_item_data = _normalize_field_names(dict(raw_item_data))
+            raw_item_data = dict(raw_item_data)
 
-    tool_name = item_data.get("toolName") or item_data.get("tool_name")
+    tool_name = item_data.get("tool_name")
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
     return ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
 
@@ -1222,7 +1145,7 @@ def _deserialize_tool_call_output_raw_item(
             raw_item,
         )
 
-    normalized_raw_item = cast(dict[str, Any], ensure_function_call_output_format(dict(raw_item)))
+    normalized_raw_item = dict(raw_item)
     output_type = normalized_raw_item.get("type")
 
     if output_type == "function_call_output":
@@ -1344,7 +1267,7 @@ async def _build_run_state_from_json(
 
     agent_map = _build_agent_map(initial_agent)
 
-    current_agent_name = state_json["currentAgent"]["name"]
+    current_agent_name = state_json["current_agent"]["name"]
     current_agent = agent_map.get(current_agent_name)
     if not current_agent:
         raise UserError(f"Agent {current_agent_name} not found in agent map")
@@ -1366,7 +1289,7 @@ async def _build_run_state_from_json(
     context.usage = usage
     context._rebuild_approvals(context_data.get("approvals", {}))
 
-    original_input_raw = state_json["originalInput"]
+    original_input_raw = state_json["original_input"]
     if isinstance(original_input_raw, list):
         normalized_original_input = []
         for item in original_input_raw:
@@ -1374,11 +1297,7 @@ async def _build_run_state_from_json(
                 normalized_original_input.append(item)
                 continue
             item_dict = dict(item)
-            item_dict.pop("providerData", None)
-            item_dict.pop("provider_data", None)
-            normalized_item = _normalize_field_names(item_dict)
-            normalized_item = ensure_function_call_output_format(normalized_item)
-            normalized_original_input.append(normalized_item)
+            normalized_original_input.append(item_dict)
     else:
         normalized_original_input = original_input_raw
 
@@ -1386,14 +1305,14 @@ async def _build_run_state_from_json(
         context=context,
         original_input=normalized_original_input,
         starting_agent=current_agent,
-        max_turns=state_json["maxTurns"],
+        max_turns=state_json["max_turns"],
     )
 
-    state._current_turn = state_json["currentTurn"]
-    state._model_responses = _deserialize_model_responses(state_json.get("modelResponses", []))
-    state._generated_items = _deserialize_items(state_json.get("generatedItems", []), agent_map)
+    state._current_turn = state_json["current_turn"]
+    state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
+    state._generated_items = _deserialize_items(state_json.get("generated_items", []), agent_map)
 
-    last_processed_response_data = state_json.get("lastProcessedResponse")
+    last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
         state._last_processed_response = await _deserialize_processed_response(
             last_processed_response_data, current_agent, state._context, agent_map
@@ -1402,15 +1321,15 @@ async def _build_run_state_from_json(
         state._last_processed_response = None
 
     state._input_guardrail_results = _deserialize_input_guardrail_results(
-        state_json.get("inputGuardrailResults", [])
+        state_json.get("input_guardrail_results", [])
     )
     state._output_guardrail_results = _deserialize_output_guardrail_results(
-        state_json.get("outputGuardrailResults", []),
+        state_json.get("output_guardrail_results", []),
         agent_map=agent_map,
         fallback_agent=current_agent,
     )
 
-    current_step_data = state_json.get("currentStep")
+    current_step_data = state_json.get("current_step")
     if current_step_data and current_step_data.get("type") == "next_step_interruption":
         interruptions: list[ToolApprovalItem] = []
         interruptions_data = current_step_data.get("data", {}).get(
@@ -1427,8 +1346,10 @@ async def _build_run_state_from_json(
             interruptions=[item for item in interruptions if isinstance(item, ToolApprovalItem)]
         )
 
-    state._current_turn_persisted_item_count = state_json.get("currentTurnPersistedItemCount", 0)
-    state.set_tool_use_tracker_snapshot(state_json.get("toolUseTracker", {}))
+    state._current_turn_persisted_item_count = state_json.get(
+        "current_turn_persisted_item_count", 0
+    )
+    state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
 
     return state
 
@@ -1475,17 +1396,14 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
     for resp_data in responses_data:
         usage = deserialize_usage(resp_data.get("usage", {}))
 
-        # Normalize output items from JSON format (camelCase) to Python format (snake_case)
         normalized_output = [
-            _normalize_field_names(item) if isinstance(item, dict) else item
-            for item in resp_data["output"]
+            dict(item) if isinstance(item, Mapping) else item for item in resp_data["output"]
         ]
 
         output_adapter: TypeAdapter[Any] = TypeAdapter(list[Any])
         output = output_adapter.validate_python(normalized_output)
 
-        # Handle both responseId (JSON) and response_id (Python) formats
-        response_id = resp_data.get("responseId") or resp_data.get("response_id")
+        response_id = resp_data.get("response_id")
 
         result.append(
             ModelResponse(
@@ -1516,11 +1434,11 @@ def _deserialize_items(
     def _resolve_agent_info(
         item_data: Mapping[str, Any], item_type: str
     ) -> tuple[Agent[Any] | None, str | None]:
-        """Resolve agent from multiple candidate fields for backward compatibility."""
+        """Resolve agent from serialized data."""
         candidate_name: str | None = None
-        fields = ["agent", "agentName"]
+        fields = ["agent"]
         if item_type == "handoff_output_item":
-            fields.extend(["sourceAgent", "targetAgent"])
+            fields.extend(["source_agent", "target_agent"])
 
         for agent_field in fields:
             raw_agent = item_data.get(agent_field)
@@ -1549,10 +1467,10 @@ def _deserialize_items(
                 logger.warning(f"Item missing agent field, skipping: {item_type}")
             continue
 
-        raw_item_data = item_data["rawItem"]
-
-        # Normalize field names from JSON format (camelCase) to Python format (snake_case)
-        normalized_raw_item = _normalize_field_names(raw_item_data)
+        raw_item_data = item_data["raw_item"]
+        normalized_raw_item = (
+            dict(raw_item_data) if isinstance(raw_item_data, Mapping) else raw_item_data
+        )
 
         try:
             if item_type == "message_output_item":
@@ -1588,13 +1506,13 @@ def _deserialize_items(
                 result.append(HandoffCallItem(agent=agent, raw_item=raw_item_handoff))
 
             elif item_type == "handoff_output_item":
-                source_agent = _resolve_agent_from_data(item_data.get("sourceAgent"), agent_map)
-                target_agent = _resolve_agent_from_data(item_data.get("targetAgent"), agent_map)
+                source_agent = _resolve_agent_from_data(item_data.get("source_agent"), agent_map)
+                target_agent = _resolve_agent_from_data(item_data.get("target_agent"), agent_map)
 
                 # If we cannot resolve both agents, skip this item gracefully
                 if not source_agent or not target_agent:
-                    source_name = item_data.get("sourceAgent")
-                    target_name = item_data.get("targetAgent")
+                    source_name = item_data.get("source_agent")
+                    target_name = item_data.get("target_agent")
                     logger.warning(
                         "Skipping handoff_output_item: could not resolve agents "
                         "(source=%s, target=%s).",
@@ -1608,7 +1526,7 @@ def _deserialize_items(
                 # If validation fails, use the raw dict as-is (for test compatibility)
                 try:
                     raw_item_handoff_output = _HANDOFF_OUTPUT_ADAPTER.validate_python(
-                        ensure_function_call_output_format(normalized_raw_item)
+                        normalized_raw_item
                     )
                 except ValidationError:
                     # If validation fails, use the raw dict as-is

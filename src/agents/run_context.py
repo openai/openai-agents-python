@@ -75,7 +75,7 @@ class RunContextWrapper(Generic[TContext]):
     def _resolve_call_id(approval_item: ToolApprovalItem) -> str | None:
         raw = approval_item.raw_item
         if isinstance(raw, dict):
-            candidate = raw.get("callId") or raw.get("call_id") or raw.get("id")
+            candidate = raw.get("call_id") or raw.get("id")
         else:
             candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
         return RunContextWrapper._to_str_or_none(candidate)
