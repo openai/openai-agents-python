@@ -55,10 +55,8 @@ from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
     RunState,
     _build_agent_map,
-    _camelize_field_names,
     _deserialize_items,
     _deserialize_processed_response,
-    _normalize_field_names,
     _serialize_guardrail_results,
     _serialize_tool_action_groups,
 )
@@ -207,12 +205,12 @@ class TestRunState:
 
         json_data = state.to_json()
         assert json_data["$schemaVersion"] == CURRENT_SCHEMA_VERSION
-        assert json_data["currentTurn"] == 0
-        assert json_data["currentAgent"] == {"name": "Agent1"}
-        assert json_data["originalInput"] == "input1"
-        assert json_data["maxTurns"] == 2
-        assert json_data["generatedItems"] == []
-        assert json_data["modelResponses"] == []
+        assert json_data["current_turn"] == 0
+        assert json_data["current_agent"] == {"name": "Agent1"}
+        assert json_data["original_input"] == "input1"
+        assert json_data["max_turns"] == 2
+        assert json_data["generated_items"] == []
+        assert json_data["model_responses"] == []
 
         str_data = state.to_string()
         assert isinstance(str_data, str)
@@ -415,7 +413,7 @@ class TestRunState:
 
     @pytest.mark.asyncio
     async def test_generated_items_not_duplicated_by_last_processed_response(self):
-        """Ensure to_json doesn't duplicate tool calls from lastProcessedResponse (parity with JS)."""  # noqa: E501
+        """Ensure to_json doesn't duplicate tool calls from last_processed_response (parity with JS)."""  # noqa: E501
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="AgentDedup")
         state = make_state(agent, context=context, original_input="input", max_turns=2)
@@ -428,18 +426,18 @@ class TestRunState:
         state._last_processed_response = make_processed_response(new_items=[tool_call_item])
 
         json_data = state.to_json()
-        generated_items_json = json_data["generatedItems"]
+        generated_items_json = json_data["generated_items"]
 
-        # Only the original generated_items should be present (no duplicate from lastProcessedResponse)  # noqa: E501
+        # Only the original generated_items should be present (no duplicate from last_processed_response)  # noqa: E501
         assert len(generated_items_json) == 1
-        assert generated_items_json[0]["rawItem"]["callId"] == "call_1"
+        assert generated_items_json[0]["raw_item"]["call_id"] == "call_1"
 
         # Deserialization should also retain a single instance
         restored = await RunState.from_json(agent, json_data)
         assert len(restored._generated_items) == 1
         raw_item = restored._generated_items[0].raw_item
         if isinstance(raw_item, dict):
-            call_id = raw_item.get("call_id") or raw_item.get("callId")
+            call_id = raw_item.get("call_id")
         else:
             call_id = getattr(raw_item, "call_id", None)
         assert call_id == "call_1"
@@ -476,7 +474,7 @@ class TestRunState:
         )
 
         json_data = state.to_json()
-        generated_items_json = json_data["generatedItems"]
+        generated_items_json = json_data["generated_items"]
 
         # Should have 2 items: item1 and item3 (item2 should be deduplicated)
         assert len(generated_items_json) == 2
@@ -657,8 +655,8 @@ class TestSerializationRoundTrip:
 
         # Serialize
         json_data = state.to_json()
-        assert len(json_data["generatedItems"]) == 1
-        assert json_data["generatedItems"][0]["type"] == "message_output_item"
+        assert len(json_data["generated_items"]) == 1
+        assert json_data["generated_items"][0]["type"] == "message_output_item"
 
     async def test_serializes_current_step_interruption(self):
         """Test that current step interruption is serialized correctly."""
@@ -674,9 +672,9 @@ class TestSerializationRoundTrip:
         state = make_state_with_interruptions(agent, [approval_item], original_input="test")
 
         json_data = state.to_json()
-        assert json_data["currentStep"] is not None
-        assert json_data["currentStep"]["type"] == "next_step_interruption"
-        assert len(json_data["currentStep"]["data"]["interruptions"]) == 1
+        assert json_data["current_step"] is not None
+        assert json_data["current_step"]["type"] == "next_step_interruption"
+        assert len(json_data["current_step"]["data"]["interruptions"]) == 1
 
         # Deserialize and verify
         new_state = await RunState.from_json(agent, json_data)
@@ -734,11 +732,11 @@ class TestSerializationRoundTrip:
         assert isinstance(new_state._generated_items[2], ToolCallOutputItem)
 
     async def test_serializes_original_input_with_function_call_output(self):
-        """Test that originalInput with function_call_output items is converted to protocol."""
+        """Test that original_input with function_call_output items is preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
 
-        # Create originalInput with function_call_output (API format)
+        # Create original_input with function_call_output (API format)
         # This simulates items from session that are in API format
         original_input = [
             {
@@ -756,24 +754,23 @@ class TestSerializationRoundTrip:
 
         state = make_state(agent, context=context, original_input=original_input, max_turns=5)
 
-        # Serialize - should convert function_call_output to function_call_result
         json_data = state.to_json()
 
-        # Verify originalInput was converted to protocol format
-        assert isinstance(json_data["originalInput"], list)
-        assert len(json_data["originalInput"]) == 2
+        # Verify original_input was kept in API format
+        assert isinstance(json_data["original_input"], list)
+        assert len(json_data["original_input"]) == 2
 
-        # First item should remain function_call (with camelCase)
-        assert json_data["originalInput"][0]["type"] == "function_call"
-        assert json_data["originalInput"][0]["callId"] == "call_123"
-        assert json_data["originalInput"][0]["name"] == "test_tool"
+        # First item should remain function_call (snake_case)
+        assert json_data["original_input"][0]["type"] == "function_call"
+        assert json_data["original_input"][0]["call_id"] == "call_123"
+        assert json_data["original_input"][0]["name"] == "test_tool"
 
-        # Second item should be converted to function_call_result (protocol format)
-        assert json_data["originalInput"][1]["type"] == "function_call_result"
-        assert json_data["originalInput"][1]["callId"] == "call_123"
-        assert json_data["originalInput"][1]["name"] == "test_tool"  # Looked up from function_call
-        assert json_data["originalInput"][1]["status"] == "completed"  # Added default
-        assert json_data["originalInput"][1]["output"] == "result"
+        # Second item should remain function_call_output without protocol conversion
+        assert json_data["original_input"][1]["type"] == "function_call_output"
+        assert json_data["original_input"][1]["call_id"] == "call_123"
+        assert "name" not in json_data["original_input"][1]
+        assert "status" not in json_data["original_input"][1]
+        assert json_data["original_input"][1]["output"] == "result"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -813,10 +810,10 @@ class TestSerializationRoundTrip:
         state = make_state(agent, context=context, original_input=original_input, max_turns=5)
 
         json_data = state.to_json()
-        assert isinstance(json_data["originalInput"], list)
-        assert len(json_data["originalInput"]) == 1
+        assert isinstance(json_data["original_input"], list)
+        assert len(json_data["original_input"]) == 1
 
-        assistant_msg = json_data["originalInput"][0]
+        assistant_msg = json_data["original_input"][0]
         assert assistant_msg["role"] == "assistant"
         assert assistant_msg["status"] == expected_status
         assert isinstance(assistant_msg["content"], list)
@@ -826,52 +823,49 @@ class TestSerializationRoundTrip:
     async def test_from_string_normalizes_original_input_dict_items(self):
         """Test that from_string normalizes original input dict items.
 
-        Removes providerData and converts protocol format to API format.
+        Ensures field names are normalized without mutating unrelated fields.
         """
         agent = Agent(name="TestAgent")
 
-        # Create state JSON with originalInput containing dict items with providerData
-        # and protocol format (function_call_result) that needs conversion to API format
+        # Create state JSON with original_input containing dict items that should be normalized.
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "currentTurn": 0,
-            "currentAgent": {"name": "TestAgent"},
-            "originalInput": [
+            "current_turn": 0,
+            "current_agent": {"name": "TestAgent"},
+            "original_input": [
                 {
-                    "type": "function_call_result",  # Protocol format
-                    "callId": "call123",
+                    "type": "function_call_output",
+                    "call_id": "call123",
                     "name": "test_tool",
                     "status": "completed",
                     "output": "result",
-                    "providerData": {"foo": "bar"},  # Should be removed
-                    "provider_data": {"baz": "qux"},  # Should be removed
                 },
                 "simple_string",  # Non-dict item should pass through
             ],
-            "modelResponses": [],
+            "model_responses": [],
             "context": {
                 "usage": {
                     "requests": 0,
-                    "inputTokens": 0,
-                    "inputTokensDetails": [],
-                    "outputTokens": 0,
-                    "outputTokensDetails": [],
-                    "totalTokens": 0,
-                    "requestUsageEntries": [],
+                    "input_tokens": 0,
+                    "input_tokens_details": [],
+                    "output_tokens": 0,
+                    "output_tokens_details": [],
+                    "total_tokens": 0,
+                    "request_usage_entries": [],
                 },
                 "approvals": {},
                 "context": {},
             },
-            "toolUseTracker": {},
-            "maxTurns": 10,
+            "tool_use_tracker": {},
+            "max_turns": 10,
             "noActiveAgentRun": True,
-            "inputGuardrailResults": [],
-            "outputGuardrailResults": [],
-            "generatedItems": [],
-            "currentStep": None,
-            "lastModelResponse": None,
-            "lastProcessedResponse": None,
-            "currentTurnPersistedItemCount": 0,
+            "input_guardrail_results": [],
+            "output_guardrail_results": [],
+            "generated_items": [],
+            "current_step": None,
+            "last_model_response": None,
+            "last_processed_response": None,
+            "current_turn_persisted_item_count": 0,
             "trace": None,
         }
 
@@ -883,23 +877,21 @@ class TestSerializationRoundTrip:
         assert len(state._original_input) == 2
         assert state._original_input[1] == "simple_string"
 
-        # First item should be converted to API format and have providerData removed
+        # First item should remain API format and have provider data removed
         first_item = state._original_input[0]
         assert isinstance(first_item, dict)
-        assert first_item["type"] == "function_call_output"  # Converted from function_call_result
-        assert "name" not in first_item  # Protocol-only field removed
-        assert "status" not in first_item  # Protocol-only field removed
-        assert "providerData" not in first_item  # Removed
-        assert "provider_data" not in first_item  # Removed
-        assert first_item["call_id"] == "call123"  # Normalized from callId
+        assert first_item["type"] == "function_call_output"
+        assert first_item["name"] == "test_tool"
+        assert first_item["status"] == "completed"
+        assert first_item["call_id"] == "call123"
 
     async def test_serializes_original_input_with_non_dict_items(self):
-        """Test that non-dict items in originalInput are preserved."""
+        """Test that non-dict items in original_input are preserved."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
 
         # Mix of dict and non-dict items
-        # (though in practice originalInput is usually dicts or string)
+        # (though in practice original_input is usually dicts or string)
         original_input = [
             {"role": "user", "content": "Hello"},
             "string_item",  # Non-dict item
@@ -908,28 +900,28 @@ class TestSerializationRoundTrip:
         state = make_state(agent, context=context, original_input=original_input, max_turns=5)
 
         json_data = state.to_json()
-        assert isinstance(json_data["originalInput"], list)
-        assert len(json_data["originalInput"]) == 2
-        assert json_data["originalInput"][0]["role"] == "user"
-        assert json_data["originalInput"][1] == "string_item"
+        assert isinstance(json_data["original_input"], list)
+        assert len(json_data["original_input"]) == 2
+        assert json_data["original_input"][0]["role"] == "user"
+        assert json_data["original_input"][1] == "string_item"
 
-    async def test_from_json_converts_protocol_original_input_to_api_format(self):
-        """Protocol formatted originalInput should be normalized back to API format when loading."""
+    async def test_from_json_preserves_function_output_original_input(self):
+        """API formatted original_input should be preserved when loading."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
         state = make_state(agent, context=context, original_input="placeholder", max_turns=5)
 
         state_json = state.to_json()
-        state_json["originalInput"] = [
+        state_json["original_input"] = [
             {
                 "type": "function_call",
-                "callId": "call_abc",
+                "call_id": "call_abc",
                 "name": "demo_tool",
                 "arguments": '{"x":1}',
             },
             {
-                "type": "function_call_result",
-                "callId": "call_abc",
+                "type": "function_call_output",
+                "call_id": "call_abc",
                 "name": "demo_tool",
                 "status": "completed",
                 "output": "demo-output",
@@ -948,8 +940,8 @@ class TestSerializationRoundTrip:
         assert second_item["type"] == "function_call_output"
         assert second_item["call_id"] == "call_abc"
         assert second_item["output"] == "demo-output"
-        assert "name" not in second_item
-        assert "status" not in second_item
+        assert second_item["name"] == "demo_tool"
+        assert second_item["status"] == "completed"
 
     def test_serialize_tool_call_output_looks_up_name(self):
         """ToolCallOutputItem serialization should infer name from generated tool calls."""
@@ -974,10 +966,11 @@ class TestSerializationRoundTrip:
         )
 
         serialized = state._serialize_item(output_item)
-        raw_item = serialized["rawItem"]
-        assert raw_item["type"] == "function_call_result"
-        assert raw_item["name"] == "lookup_tool"
-        assert raw_item["status"] == "completed"
+        raw_item = serialized["raw_item"]
+        assert raw_item["type"] == "function_call_output"
+        assert raw_item["call_id"] == "call_lookup"
+        assert "name" not in raw_item
+        assert "status" not in raw_item
 
     @pytest.mark.parametrize(
         ("setup_state", "call_id", "expected_name"),
@@ -1007,7 +1000,7 @@ class TestSerializationRoundTrip:
                 lambda state, _agent: state._original_input.append(
                     {
                         "type": "function_call",
-                        "callId": "call_camel",
+                        "call_id": "call_camel",
                         "name": "camel_tool",
                         "arguments": "{}",
                     }
@@ -1140,7 +1133,7 @@ class TestSerializationRoundTrip:
         json_data = state.to_json()
 
         # Modify the agent name to an unknown one
-        json_data["generatedItems"][0]["agent"]["name"] = "UnknownAgent"
+        json_data["generated_items"][0]["agent"]["name"] = "UnknownAgent"
 
         # Deserialize - should skip the item with unknown agent
         new_state = await RunState.from_json(agent, json_data)
@@ -1158,11 +1151,11 @@ class TestSerializationRoundTrip:
         json_data = state.to_json()
 
         # Add a malformed item
-        json_data["generatedItems"] = [
+        json_data["generated_items"] = [
             {
                 "type": "message_output_item",
                 "agent": {"name": "TestAgent"},
-                "rawItem": {
+                "raw_item": {
                     # Missing required fields - will cause deserialization error
                     "type": "message",
                 },
@@ -1267,12 +1260,12 @@ class TestDeserializeHelpers:
         state._generated_items.append(handoff_item)
 
         json_data = state.to_json()
-        assert len(json_data["generatedItems"]) == 1
-        item_data = json_data["generatedItems"][0]
-        assert "sourceAgent" in item_data
-        assert "targetAgent" in item_data
-        assert item_data["sourceAgent"]["name"] == "AgentA"
-        assert item_data["targetAgent"]["name"] == "AgentB"
+        assert len(json_data["generated_items"]) == 1
+        item_data = json_data["generated_items"][0]
+        assert "source_agent" in item_data
+        assert "target_agent" in item_data
+        assert item_data["source_agent"]["name"] == "AgentA"
+        assert item_data["target_agent"]["name"] == "AgentB"
 
         # Test round-trip deserialization
         restored = await RunState.from_string(agent_a, state.to_string())
@@ -1565,7 +1558,7 @@ class TestRunStateSerializationEdgeCases:
 
     @pytest.mark.asyncio
     async def test_to_json_includes_tool_call_items_from_last_processed_response(self):
-        """Test that to_json includes tool_call_items from lastProcessedResponse.newItems."""
+        """Test that to_json includes tool_call_items from last_processed_response.new_items."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
         state = make_state(agent, context=context)
@@ -1589,11 +1582,11 @@ class TestRunStateSerializationEdgeCases:
         # Serialize
         json_data = state.to_json()
 
-        # Verify that the tool_call_item is in generatedItems
-        generated_items = json_data.get("generatedItems", [])
+        # Verify that the tool_call_item is in generated_items
+        generated_items = json_data.get("generated_items", [])
         assert len(generated_items) == 1
         assert generated_items[0]["type"] == "tool_call_item"
-        assert generated_items[0]["rawItem"]["name"] == "test_tool"
+        assert generated_items[0]["raw_item"]["name"] == "test_tool"
 
     @pytest.mark.asyncio
     async def test_to_json_camelizes_nested_dicts_and_lists(self):
@@ -1623,15 +1616,15 @@ class TestRunStateSerializationEdgeCases:
         json_data = state.to_json()
 
         # Verify that nested structures are camelized
-        generated_items = json_data.get("generatedItems", [])
+        generated_items = json_data.get("generated_items", [])
         assert len(generated_items) == 1
-        raw_item = generated_items[0]["rawItem"]
+        raw_item = generated_items[0]["raw_item"]
         # Check that snake_case fields are camelized
-        assert "responseId" in raw_item or "id" in raw_item
+        assert "response_id" in raw_item or "id" in raw_item
 
     @pytest.mark.asyncio
     async def test_from_json_with_last_processed_response(self):
-        """Test that from_json correctly deserializes lastProcessedResponse."""
+        """Test that from_json correctly deserializes last_processed_response."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
         state = make_state(agent, context=context)
@@ -1689,9 +1682,9 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
-        assert "localShellActions" in last_processed
-        assert last_processed["localShellActions"][0]["localShell"]["name"] == "local_shell"
+        last_processed = json_data.get("last_processed_response", {})
+        assert "local_shell_actions" in last_processed
+        assert last_processed["local_shell_actions"][0]["local_shell"]["name"] == "local_shell"
 
         new_state = await RunState.from_json(agent, json_data, context_override={})
         assert new_state._last_processed_response is not None
@@ -1702,38 +1695,6 @@ class TestRunStateSerializationEdgeCases:
         if call_id is None and isinstance(restored.tool_call, dict):
             call_id = restored.tool_call.get("call_id")
         assert call_id == "call_local"
-
-    def test_camelize_field_names_with_nested_dicts_and_lists(self):
-        """Test that _camelize_field_names handles nested dictionaries and lists."""
-        # Test with nested dict - _camelize_field_names converts
-        # specific fields (call_id, response_id)
-        data = {
-            "call_id": "call123",
-            "nested_dict": {
-                "response_id": "resp123",
-                "nested_list": [{"call_id": "call456"}],
-            },
-        }
-        result = _camelize_field_names(data)
-        # The method converts call_id to callId and response_id to responseId
-        assert "callId" in result
-        assert result["callId"] == "call123"
-        # nested_dict is not converted (not in field_mapping), but nested fields are
-        assert "nested_dict" in result
-        assert "responseId" in result["nested_dict"]
-        assert "nested_list" in result["nested_dict"]
-        assert result["nested_dict"]["nested_list"][0]["callId"] == "call456"
-
-        # Test with list
-        data_list = [{"call_id": "call1"}, {"response_id": "resp1"}]
-        result_list = _camelize_field_names(data_list)
-        assert len(result_list) == 2
-        assert "callId" in result_list[0]
-        assert "responseId" in result_list[1]
-
-        # Test with non-dict/list (should return as-is)
-        result_scalar = _camelize_field_names("string")
-        assert result_scalar == "string"
 
     def test_serialize_tool_action_groups(self):
         """Ensure tool action groups serialize with expected wrapper keys and call IDs."""
@@ -1794,17 +1755,17 @@ class TestRunStateSerializationEdgeCases:
         serialized = _serialize_tool_action_groups(processed_response)
         assert set(serialized.keys()) == {
             "functions",
-            "computerActions",
-            "localShellActions",
-            "shellActions",
-            "applyPatchActions",
+            "computer_actions",
+            "local_shell_actions",
+            "shell_actions",
+            "apply_patch_actions",
             "handoffs",
-            "mcpApprovalRequests",
+            "mcp_approval_requests",
         }
         assert serialized["functions"][0]["tool"]["name"] == "func_tool"
-        assert serialized["functions"][0]["toolCall"]["callId"] == "func-call"
-        assert serialized["handoffs"][0]["handoff"]["toolName"] == "handoff_tool"
-        assert serialized["mcpApprovalRequests"][0]["mcpTool"]["name"] == "mcp_tool"
+        assert serialized["functions"][0]["tool_call"]["call_id"] == "func-call"
+        assert serialized["handoffs"][0]["handoff"]["tool_name"] == "handoff_tool"
+        assert serialized["mcp_approval_requests"][0]["mcp_tool"]["name"] == "mcp_tool"
 
     def test_serialize_guardrail_results(self):
         """Serialize both input and output guardrail results with agent data."""
@@ -1860,14 +1821,14 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
+        last_processed = json_data.get("last_processed_response", {})
         handoffs = last_processed.get("handoffs", [])
         assert len(handoffs) == 1
-        # The handoff should have a handoff field with toolName inside
+        # The handoff should have a handoff field with tool_name inside
         assert "handoff" in handoffs[0]
         handoff_dict = handoffs[0]["handoff"]
-        assert "toolName" in handoff_dict
-        assert handoff_dict["toolName"] == "handoff_tool"
+        assert "tool_name" in handoff_dict
+        assert handoff_dict["tool_name"] == "handoff_tool"
 
     async def test_serialize_function_with_description_and_schema(self):
         """Test serialization of function with description and params_json_schema."""
@@ -1900,7 +1861,7 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
+        last_processed = json_data.get("last_processed_response", {})
         functions = last_processed.get("functions", [])
         assert len(functions) == 1
         assert functions[0]["tool"]["description"] == "Test tool description"
@@ -1968,8 +1929,8 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
-        computer_actions = last_processed.get("computerActions", [])
+        last_processed = json_data.get("last_processed_response", {})
+        computer_actions = last_processed.get("computer_actions", [])
         assert len(computer_actions) == 1
         # The computer action should have a computer field with description
         assert "computer" in computer_actions[0]
@@ -2006,8 +1967,8 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
-        shell_actions = last_processed.get("shellActions", [])
+        last_processed = json_data.get("last_processed_response", {})
+        shell_actions = last_processed.get("shell_actions", [])
         assert len(shell_actions) == 1
         # The shell action should have a shell field with description
         assert "shell" in shell_actions[0]
@@ -2052,12 +2013,12 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
-        apply_patch_actions = last_processed.get("applyPatchActions", [])
+        last_processed = json_data.get("last_processed_response", {})
+        apply_patch_actions = last_processed.get("apply_patch_actions", [])
         assert len(apply_patch_actions) == 1
-        # The apply patch action should have an applyPatch field with description
-        assert "applyPatch" in apply_patch_actions[0]
-        apply_patch_dict = apply_patch_actions[0]["applyPatch"]
+        # The apply patch action should have an apply_patch field with description
+        assert "apply_patch" in apply_patch_actions[0]
+        apply_patch_dict = apply_patch_actions[0]["apply_patch"]
         assert "description" in apply_patch_dict
         assert apply_patch_dict["description"] == "Apply patch tool description"
 
@@ -2090,10 +2051,10 @@ class TestRunStateSerializationEdgeCases:
         state._last_processed_response = processed_response
 
         json_data = state.to_json()
-        last_processed = json_data.get("lastProcessedResponse", {})
-        mcp_requests = last_processed.get("mcpApprovalRequests", [])
+        last_processed = json_data.get("last_processed_response", {})
+        mcp_requests = last_processed.get("mcp_approval_requests", [])
         assert len(mcp_requests) == 1
-        assert "requestItem" in mcp_requests[0]
+        assert "request_item" in mcp_requests[0]
 
     async def test_serialize_item_with_non_dict_raw_item(self):
         """Test serialization of item with non-dict raw_item."""
@@ -2117,22 +2078,9 @@ class TestRunStateSerializationEdgeCases:
         state._generated_items.append(item)
 
         json_data = state.to_json()
-        generated_items = json_data.get("generatedItems", [])
+        generated_items = json_data.get("generated_items", [])
         assert len(generated_items) == 1
         assert generated_items[0]["type"] == "message_output_item"
-
-    async def test_normalize_field_names_preserves_provider_data(self):
-        """Test that _normalize_field_names retains providerData metadata."""
-        data = {
-            "providerData": {"key": "value"},
-            "provider_data": {"key": "value"},
-            "normalField": "value",
-        }
-
-        result = _normalize_field_names(data)
-        assert "providerData" not in result
-        assert result["provider_data"] == {"key": "value"}
-        assert "normalField" in result
 
     async def test_deserialize_tool_call_output_item_different_types(self):
         """Test deserialization of tool_call_output_item with different output types."""
@@ -2142,7 +2090,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_function = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "function_call_output",
                 "call_id": "call123",
                 "output": "result",
@@ -2157,7 +2105,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_computer = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "computer_call_output",
                 "call_id": "call123",
                 "output": {"type": "computer_screenshot", "screenshot": "screenshot"},
@@ -2171,7 +2119,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_shell = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "local_shell_call_output",
                 "id": "shell123",
                 "call_id": "call123",
@@ -2189,7 +2137,7 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "reasoning_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "reasoning",
                 "id": "reasoning123",
                 "summary": [],
@@ -2208,7 +2156,7 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "handoff_call_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "function_call",
                 "name": "handoff_tool",
                 "call_id": "call123",
@@ -2222,7 +2170,7 @@ class TestRunStateSerializationEdgeCases:
         assert result[0].type == "handoff_call_item"
 
     async def test_deserialize_handoff_output_item_without_agent(self):
-        """handoff_output_item should fall back to sourceAgent when agent is missing."""
+        """handoff_output_item should fall back to source_agent when agent is missing."""
         source_agent = Agent(name="SourceAgent")
         target_agent = Agent(name="TargetAgent")
         agent_map = {"SourceAgent": source_agent, "TargetAgent": target_agent}
@@ -2230,11 +2178,11 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "handoff_output_item",
             # No agent field present.
-            "sourceAgent": {"name": "SourceAgent"},
-            "targetAgent": {"name": "TargetAgent"},
-            "rawItem": {
-                "type": "function_call_result",
-                "callId": "call123",
+            "source_agent": {"name": "SourceAgent"},
+            "target_agent": {"name": "TargetAgent"},
+            "raw_item": {
+                "type": "function_call_output",
+                "call_id": "call123",
                 "name": "transfer_to_weather",
                 "status": "completed",
                 "output": "payload",
@@ -2255,7 +2203,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_list = {
             "type": "mcp_list_tools_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "mcp_list_tools",
                 "id": "list123",
                 "server_label": "test_server",
@@ -2271,7 +2219,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_request = {
             "type": "mcp_approval_request_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "mcp_approval_request",
                 "id": "req123",
                 "name": "mcp_tool",
@@ -2288,7 +2236,7 @@ class TestRunStateSerializationEdgeCases:
         item_data_response = {
             "type": "mcp_approval_response_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "mcp_approval_response",
                 "approval_request_id": "req123",
                 "approve": True,
@@ -2306,7 +2254,7 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "tool_approval_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "function_call",
                 "name": "test_tool",
                 "call_id": "call123",
@@ -2338,7 +2286,7 @@ class TestRunStateSerializationEdgeCases:
 
         # This should trigger the else branch in _serialize_item (line 481)
         json_data = state.to_json()
-        generated_items = json_data.get("generatedItems", [])
+        generated_items = json_data.get("generated_items", [])
         assert len(generated_items) == 1
 
     async def test_deserialize_processed_response_without_get_all_tools(self):
@@ -2352,13 +2300,13 @@ class TestRunStateSerializationEdgeCases:
         agent_no_tools = AgentWithoutGetAllTools(name="TestAgent")
 
         processed_response_data: dict[str, Any] = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "localShellCalls": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2379,24 +2327,24 @@ class TestRunStateSerializationEdgeCases:
         agent_a.handoffs = [handoff_obj]
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [
                 {
-                    "toolCall": {
+                    "tool_call": {
                         "type": "function_call",
                         "name": "handoff_tool",
-                        "callId": "call123",
+                        "call_id": "call123",
                         "status": "completed",
                         "arguments": "{}",
                     },
-                    "handoff": {"toolName": "handoff_tool"},
+                    "handoff": {"tool_name": "handoff_tool"},
                 }
             ],
             "functions": [],
-            "computerActions": [],
-            "localShellCalls": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2424,24 +2372,24 @@ class TestRunStateSerializationEdgeCases:
         agent.tools = [tool]
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [
                 {
-                    "toolCall": {
+                    "tool_call": {
                         "type": "function_call",
                         "name": "test_tool",
-                        "callId": "call123",
+                        "call_id": "call123",
                         "status": "completed",
                         "arguments": "{}",
                     },
                     "tool": {"name": "test_tool"},
                 }
             ],
-            "computerActions": [],
-            "localShellCalls": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2499,15 +2447,15 @@ class TestRunStateSerializationEdgeCases:
         agent.tools = [computer_tool]
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [
+            "computer_actions": [
                 {
-                    "toolCall": {
+                    "tool_call": {
                         "type": "computer_call",
                         "id": "1",
-                        "callId": "call123",
+                        "call_id": "call123",
                         "status": "completed",
                         "action": {"type": "screenshot"},
                         "pendingSafetyChecks": [],
@@ -2516,9 +2464,9 @@ class TestRunStateSerializationEdgeCases:
                     "computer": {"name": computer_tool.name},
                 }
             ],
-            "localShellCalls": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2543,23 +2491,23 @@ class TestRunStateSerializationEdgeCases:
         # Create invalid tool_call_data that will cause ValidationError
         # LocalShellCall requires specific fields, so we'll create invalid data
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "localShellCalls": [],
-            "shellActions": [
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "shell_actions": [
                 {
-                    "toolCall": {
+                    "tool_call": {
                         # Invalid data that will cause ValidationError
                         "invalid_field": "invalid_value",
                     },
                     "shell": {"name": "shell"},
                 }
             ],
-            "applyPatchActions": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "apply_patch_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2594,25 +2542,25 @@ class TestRunStateSerializationEdgeCases:
         # Create invalid tool_call_data that will cause Exception when creating
         # ResponseFunctionToolCall
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "localShellCalls": [],
-            "shellActions": [],
-            "applyPatchActions": [
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "shell_actions": [],
+            "apply_patch_actions": [
                 {
-                    "toolCall": {
+                    "tool_call": {
                         # Invalid data that will cause Exception
                         "type": "function_call",
                         # Missing required fields like name, call_id, status, arguments
                         "invalid_field": "invalid_value",
                     },
-                    "applyPatch": {"name": "apply_patch"},
+                    "apply_patch": {"name": "apply_patch"},
                 }
             ],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2642,20 +2590,20 @@ class TestRunStateSerializationEdgeCases:
         }
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "localShellActions": [
+            "computer_actions": [],
+            "local_shell_actions": [
                 {
-                    "toolCall": local_shell_call_dict,
-                    "localShell": {"name": local_shell_tool.name},
+                    "tool_call": local_shell_call_dict,
+                    "local_shell": {"name": local_shell_tool.name},
                 }
             ],
-            "shellActions": [],
-            "applyPatchActions": [],
-            "mcpApprovalRequests": [],
-            "toolsUsed": [],
+            "shell_actions": [],
+            "apply_patch_actions": [],
+            "mcp_approval_requests": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2685,15 +2633,15 @@ class TestRunStateSerializationEdgeCases:
         agent.tools = [mcp_tool]  # type: ignore[list-item]
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "localShellCalls": [],
-            "mcpApprovalRequests": [
+            "computer_actions": [],
+            "local_shell_actions": [],
+            "mcp_approval_requests": [
                 {
-                    "requestItem": {
-                        "rawItem": {
+                    "request_item": {
+                        "raw_item": {
                             "type": "mcp_approval_request",
                             "id": "req123",
                             "name": "mcp_tool",
@@ -2701,10 +2649,10 @@ class TestRunStateSerializationEdgeCases:
                             "arguments": "{}",
                         }
                     },
-                    "mcpTool": {"name": "mcp_tool"},
+                    "mcp_tool": {"name": "mcp_tool"},
                 }
             ],
-            "toolsUsed": [],
+            "tools_used": [],
             "interruptions": [],
         }
 
@@ -2725,7 +2673,7 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "function_call_output",  # This should match FunctionCallOutput
                 "call_id": "call123",
                 "output": "result",
@@ -2741,17 +2689,17 @@ class TestRunStateSerializationEdgeCases:
         """Test that from_json raises error when schema version is missing."""
         agent = Agent(name="TestAgent")
         state_json = {
-            "originalInput": "test",
-            "currentAgent": {"name": "TestAgent"},
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
             "context": {
                 "context": {},
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
             },
-            "maxTurns": 3,
-            "currentTurn": 0,
-            "modelResponses": [],
-            "generatedItems": [],
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
         }
 
         with pytest.raises(UserError, match="Run state is missing schema version"):
@@ -2763,17 +2711,17 @@ class TestRunStateSerializationEdgeCases:
         agent = Agent(name="TestAgent")
         state_json = {
             "$schemaVersion": "2.0",
-            "originalInput": "test",
-            "currentAgent": {"name": "TestAgent"},
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
             "context": {
                 "context": {},
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
             },
-            "maxTurns": 3,
-            "currentTurn": 0,
-            "modelResponses": [],
-            "generatedItems": [],
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
         }
 
         with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
@@ -2785,17 +2733,17 @@ class TestRunStateSerializationEdgeCases:
         agent = Agent(name="TestAgent")
         state_json = {
             "$schemaVersion": "1.0",
-            "originalInput": "test",
-            "currentAgent": {"name": "NonExistentAgent"},
+            "original_input": "test",
+            "current_agent": {"name": "NonExistentAgent"},
             "context": {
                 "context": {},
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
             },
-            "maxTurns": 3,
-            "currentTurn": 0,
-            "modelResponses": [],
-            "generatedItems": [],
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
         }
 
         with pytest.raises(UserError, match="Agent NonExistentAgent not found in agent map"):
@@ -2803,7 +2751,7 @@ class TestRunStateSerializationEdgeCases:
 
     @pytest.mark.asyncio
     async def test_deserialize_processed_response_with_last_processed_response(self):
-        """Test deserializing RunState with lastProcessedResponse."""
+        """Test deserializing RunState with last_processed_response."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
 
@@ -2833,7 +2781,7 @@ class TestRunStateSerializationEdgeCases:
 
     @pytest.mark.asyncio
     async def test_from_string_with_last_processed_response(self):
-        """Test deserializing RunState with lastProcessedResponse using from_string."""
+        """Test deserializing RunState with last_processed_response using from_string."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
 
@@ -2965,12 +2913,12 @@ class TestRunStateSerializationEdgeCases:
         agent = AgentWithoutGetAllTools()
 
         processed_response_data: dict[str, Any] = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "toolsUsed": [],
-            "mcpApprovalRequests": [],
+            "computer_actions": [],
+            "tools_used": [],
+            "mcp_approval_requests": [],
         }
 
         # This should not raise an error, just return empty tools
@@ -2989,15 +2937,15 @@ class TestRunStateSerializationEdgeCases:
         agent = Agent(name="TestAgent")
 
         processed_response_data = {
-            "newItems": [],
+            "new_items": [],
             "handoffs": [],
             "functions": [],
-            "computerActions": [],
-            "toolsUsed": [],
-            "mcpApprovalRequests": [
+            "computer_actions": [],
+            "tools_used": [],
+            "mcp_approval_requests": [
                 {
-                    "requestItem": {
-                        "rawItem": {
+                    "request_item": {
+                        "raw_item": {
                             "type": "mcp_approval_request",
                             "id": "req1",
                             "server_label": "test_server",
@@ -3005,7 +2953,7 @@ class TestRunStateSerializationEdgeCases:
                             "arguments": "{}",
                         }
                     },
-                    "mcpTool": {},  # Empty mcp_tool_data should be skipped
+                    "mcp_tool": {},  # Empty mcp_tool_data should be skipped
                 }
             ],
         }
@@ -3013,21 +2961,6 @@ class TestRunStateSerializationEdgeCases:
         result = await _deserialize_processed_response(processed_response_data, agent, context, {})
         # Should skip the empty mcp_tool_data and not add it to mcp_approval_requests
         assert len(result.mcp_approval_requests) == 0
-
-    @pytest.mark.asyncio
-    async def test_normalize_field_names_with_non_dict(self):
-        """Test _normalize_field_names with non-dict input."""
-        # Should return non-dict as-is (function checks isinstance(data, dict))
-        # For non-dict inputs, it returns the input unchanged
-        # The function signature requires dict[str, Any], but it handles non-dicts at runtime
-        result_str = _normalize_field_names("string")  # type: ignore[arg-type]
-        assert result_str == "string"  # type: ignore[comparison-overlap]
-        result_int = _normalize_field_names(123)  # type: ignore[arg-type]
-        assert result_int == 123  # type: ignore[comparison-overlap]
-        result_list = _normalize_field_names([1, 2, 3])  # type: ignore[arg-type]
-        assert result_list == [1, 2, 3]  # type: ignore[comparison-overlap]
-        result_none = _normalize_field_names(None)  # type: ignore[arg-type]
-        assert result_none is None
 
     @pytest.mark.asyncio
     async def test_deserialize_items_union_adapter_fallback(self):
@@ -3041,7 +2974,7 @@ class TestRunStateSerializationEdgeCases:
         item_data = {
             "type": "tool_call_output_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 # No "type" field - this will trigger the else branch and union adapter fallback
                 # The union adapter will attempt validation but may fail
                 "call_id": "call123",
@@ -3104,7 +3037,7 @@ class TestToolApprovalItem:
         raw_item = {
             "type": "function_call",
             "name": "dict_tool_name",
-            "callId": "call456",
+            "call_id": "call456",
             "status": "completed",
             "arguments": "{}",
         }
@@ -3135,7 +3068,7 @@ class TestToolApprovalItem:
         """Test that approve_tool extracts call_id from dict raw_item."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
-        # Dict with callId (camelCase) - simulating hosted tool
+        # Dict with hosted tool identifiers (id instead of call_id)
         raw_item = {
             "type": "hosted_tool_call",
             "name": "hosted_tool",
@@ -3165,7 +3098,7 @@ class TestToolApprovalItem:
         assert context.is_tool_approved(tool_name="explicit_name", call_id="call789") is False
 
     async def test_serialize_tool_approval_item_with_tool_name(self):
-        """Test that ToolApprovalItem serializes toolName field."""
+        """Test that ToolApprovalItem serializes tool_name field."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
         state = make_state(agent, context=context, original_input="test")
@@ -3181,22 +3114,22 @@ class TestToolApprovalItem:
         state._generated_items.append(approval_item)
 
         json_data = state.to_json()
-        generated_items = json_data.get("generatedItems", [])
+        generated_items = json_data.get("generated_items", [])
         assert len(generated_items) == 1
 
         approval_item_data = generated_items[0]
         assert approval_item_data["type"] == "tool_approval_item"
-        assert approval_item_data["toolName"] == "explicit_name"
+        assert approval_item_data["tool_name"] == "explicit_name"
 
     async def test_deserialize_tool_approval_item_with_tool_name(self):
-        """Test that ToolApprovalItem deserializes toolName field."""
+        """Test that ToolApprovalItem deserializes tool_name field."""
         agent = Agent(name="TestAgent")
 
         item_data = {
             "type": "tool_approval_item",
             "agent": {"name": "TestAgent"},
-            "toolName": "explicit_tool_name",
-            "rawItem": {
+            "tool_name": "explicit_tool_name",
+            "raw_item": {
                 "type": "function_call",
                 "name": "raw_tool_name",
                 "call_id": "call123",
@@ -3213,7 +3146,7 @@ class TestToolApprovalItem:
         assert result[0].name == "explicit_tool_name"
 
     async def test_round_trip_serialization_with_tool_name(self):
-        """Test round-trip serialization preserves toolName."""
+        """Test round-trip serialization preserves tool_name."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="TestAgent")
         state = make_state(agent, context=context, original_input="test")
@@ -3257,7 +3190,7 @@ class TestToolApprovalItem:
         raw_item2 = {
             "type": "function_call",
             "name": "tool2",
-            "callId": "call2",
+            "call_id": "call2",
             "status": "completed",
             "arguments": '{"key": "value"}',
         }
@@ -3268,7 +3201,7 @@ class TestToolApprovalItem:
         raw_item3 = {
             "type": "function_call",
             "name": "tool3",
-            "callId": "call3",
+            "call_id": "call3",
             "status": "completed",
         }
         approval_item3 = ToolApprovalItem(agent=agent, raw_item=raw_item3)
@@ -3287,7 +3220,7 @@ class TestToolApprovalItem:
         # Item with missing agent field
         item_data = {
             "type": "message_output_item",
-            "rawItem": {
+            "raw_item": {
                 "type": "message",
                 "id": "msg1",
                 "role": "assistant",
@@ -3308,7 +3241,7 @@ class TestToolApprovalItem:
         item_data = {
             "type": "message_output_item",
             "agent": "TestAgent",  # String instead of dict
-            "rawItem": {
+            "raw_item": {
                 "type": "message",
                 "id": "msg1",
                 "role": "assistant",
@@ -3321,15 +3254,15 @@ class TestToolApprovalItem:
         assert len(result) == 1
         assert result[0].type == "message_output_item"
 
-    async def test_deserialize_items_handles_agent_name_field(self):
-        """Test that _deserialize_items handles alternative agentName field."""
+    async def test_deserialize_items_handles_agent_field(self):
+        """Test that _deserialize_items handles agent field."""
         agent = Agent(name="TestAgent")
         agent_map = {"TestAgent": agent}
 
         item_data = {
             "type": "message_output_item",
-            "agentName": "TestAgent",  # Alternative field name
-            "rawItem": {
+            "agent": {"name": "TestAgent"},
+            "raw_item": {
                 "type": "message",
                 "id": "msg1",
                 "role": "assistant",
@@ -3343,7 +3276,7 @@ class TestToolApprovalItem:
         assert result[0].type == "message_output_item"
 
     async def test_deserialize_items_handles_handoff_output_source_agent_string(self):
-        """Test that _deserialize_items handles string sourceAgent for handoff_output_item."""
+        """Test that _deserialize_items handles string source_agent for handoff_output_item."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
@@ -3351,41 +3284,41 @@ class TestToolApprovalItem:
         item_data = {
             "type": "handoff_output_item",
             # String instead of dict - will be handled in agent_name extraction
-            "sourceAgent": "Agent1",
-            "targetAgent": {"name": "Agent2"},
-            "rawItem": {
+            "source_agent": "Agent1",
+            "target_agent": {"name": "Agent2"},
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # The code accesses sourceAgent["name"] which fails for string, but agent_name
-        # extraction should handle string sourceAgent, so this should work
-        # Actually, looking at the code, it tries item_data["sourceAgent"]["name"] which fails
-        # But the agent_name extraction logic should catch string sourceAgent first
-        # Let's test the actual behavior - it should extract agent_name from string sourceAgent
+        # The code accesses source_agent["name"] which fails for string, but agent_name
+        # extraction should handle string source_agent, so this should work
+        # Actually, looking at the code, it tries item_data["source_agent"]["name"] which fails
+        # But the agent_name extraction logic should catch string source_agent first
+        # Let's test the actual behavior - it should extract agent_name from string source_agent
         assert len(result) >= 0  # May fail due to validation, but tests the string handling path
 
     async def test_deserialize_items_handles_handoff_output_target_agent_string(self):
-        """Test that _deserialize_items handles string targetAgent for handoff_output_item."""
+        """Test that _deserialize_items handles string target_agent for handoff_output_item."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
         item_data = {
             "type": "handoff_output_item",
-            "sourceAgent": {"name": "Agent1"},
-            "targetAgent": "Agent2",  # String instead of dict
-            "rawItem": {
+            "source_agent": {"name": "Agent1"},
+            "target_agent": "Agent2",  # String instead of dict
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # The code accesses targetAgent["name"] which fails for string
-        # This tests the error handling path when targetAgent is a string
+        # The code accesses target_agent["name"] which fails for string
+        # This tests the error handling path when target_agent is a string
         assert len(result) >= 0  # May fail due to validation, but tests the string handling path
 
     async def test_deserialize_items_handles_tool_approval_item_exception(self):
@@ -3397,7 +3330,7 @@ class TestToolApprovalItem:
         item_data = {
             "type": "tool_approval_item",
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "invalid",
                 # Missing required fields for ResponseFunctionToolCall
             },
@@ -3413,48 +3346,48 @@ class TestDeserializeItemsEdgeCases:
     """Test edge cases in _deserialize_items."""
 
     async def test_deserialize_items_handles_handoff_output_with_string_source_agent(self):
-        """Test that _deserialize_items handles handoff_output_item with string sourceAgent."""
+        """Test that _deserialize_items handles handoff_output_item with string source_agent."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
-        # Test the path where sourceAgent is a string (line 1229-1230)
+        # Test the path where source_agent is a string (line 1229-1230)
         item_data = {
             "type": "handoff_output_item",
-            # No agent field, so it will look for sourceAgent
-            "sourceAgent": "Agent1",  # String - tests line 1229
-            "targetAgent": {"name": "Agent2"},
-            "rawItem": {
+            # No agent field, so it will look for source_agent
+            "source_agent": "Agent1",  # String - tests line 1229
+            "target_agent": {"name": "Agent2"},
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # The code will extract agent_name from string sourceAgent (line 1229-1230)
-        # Then try to access sourceAgent["name"] which will fail, but that's OK
+        # The code will extract agent_name from string source_agent (line 1229-1230)
+        # Then try to access source_agent["name"] which will fail, but that's OK
         # The important thing is we test the string handling path
         assert len(result) >= 0
 
     async def test_deserialize_items_handles_handoff_output_with_string_target_agent(self):
-        """Test that _deserialize_items handles handoff_output_item with string targetAgent."""
+        """Test that _deserialize_items handles handoff_output_item with string target_agent."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
-        # Test the path where targetAgent is a string (line 1235-1236)
+        # Test the path where target_agent is a string (line 1235-1236)
         item_data = {
             "type": "handoff_output_item",
-            "sourceAgent": {"name": "Agent1"},
-            "targetAgent": "Agent2",  # String - tests line 1235
-            "rawItem": {
+            "source_agent": {"name": "Agent1"},
+            "target_agent": "Agent2",  # String - tests line 1235
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # Tests the string targetAgent handling path
+        # Tests the string target_agent handling path
         assert len(result) >= 0
 
     async def test_deserialize_items_handles_handoff_output_no_source_no_target(self):
@@ -3462,11 +3395,11 @@ class TestDeserializeItemsEdgeCases:
         agent = Agent(name="TestAgent")
         agent_map = {"TestAgent": agent}
 
-        # Test the path where handoff_output_item has no agent, sourceAgent, or targetAgent
+        # Test the path where handoff_output_item has no agent, source_agent, or target_agent
         item_data = {
             "type": "handoff_output_item",
-            # No agent, sourceAgent, or targetAgent fields
-            "rawItem": {
+            # No agent, source_agent, or target_agent fields
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
@@ -3482,49 +3415,49 @@ class TestDeserializeItemsEdgeCases:
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "currentTurn": 0,
-            "currentAgent": {"name": "TestAgent"},
-            "originalInput": [
+            "current_turn": 0,
+            "current_agent": {"name": "TestAgent"},
+            "original_input": [
                 "string_item",  # Non-dict item - tests line 759
                 {"type": "function_call", "call_id": "call1", "name": "tool1", "arguments": "{}"},
             ],
-            "maxTurns": 5,
+            "max_turns": 5,
             "context": {
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
                 "context": {},
             },
-            "generatedItems": [],
-            "modelResponses": [],
+            "generated_items": [],
+            "model_responses": [],
         }
 
         state = await RunState.from_json(agent, state_json)
-        # Should handle non-dict items in originalInput (line 759)
+        # Should handle non-dict items in original_input (line 759)
         assert isinstance(state._original_input, list)
         assert len(state._original_input) == 2
         assert state._original_input[0] == "string_item"
 
     async def test_from_json_handles_string_original_input(self):
-        """Test that from_json handles string originalInput."""
+        """Test that from_json handles string original_input."""
         agent = Agent(name="TestAgent")
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "currentTurn": 0,
-            "currentAgent": {"name": "TestAgent"},
-            "originalInput": "string_input",  # String - tests line 762-763
-            "maxTurns": 5,
+            "current_turn": 0,
+            "current_agent": {"name": "TestAgent"},
+            "original_input": "string_input",  # String - tests line 762-763
+            "max_turns": 5,
             "context": {
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
                 "context": {},
             },
-            "generatedItems": [],
-            "modelResponses": [],
+            "generated_items": [],
+            "model_responses": [],
         }
 
         state = await RunState.from_json(agent, state_json)
-        # Should handle string originalInput (line 762-763)
+        # Should handle string original_input (line 762-763)
         assert state._original_input == "string_input"
 
     async def test_from_string_handles_non_dict_items_in_original_input(self):
@@ -3536,7 +3469,7 @@ class TestDeserializeItemsEdgeCases:
         state_string = state.to_string()
 
         new_state = await RunState.from_string(agent, state_string)
-        # Should handle non-dict items in originalInput (line 759)
+        # Should handle non-dict items in original_input (line 759)
         assert isinstance(new_state._original_input, list)
         assert new_state._original_input[0] == "string_item"
 
@@ -3588,42 +3521,42 @@ class TestDeserializeItemsEdgeCases:
         assert state._lookup_function_name("call2") == "tool2"
         assert state._lookup_function_name("missing") == ""
 
-    async def test_from_json_handles_function_call_result_conversion(self):
-        """Test from_json converts function_call_result to function_call_output."""
+    async def test_from_json_preserves_function_call_output_items(self):
+        """Test from_json keeps function_call_output items without protocol conversion."""
         agent = Agent(name="TestAgent")
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
-            "currentTurn": 0,
-            "currentAgent": {"name": "TestAgent"},
-            "originalInput": [
+            "current_turn": 0,
+            "current_agent": {"name": "TestAgent"},
+            "original_input": [
                 {
-                    "type": "function_call_result",  # Protocol format
-                    "callId": "call123",
+                    "type": "function_call_output",
+                    "call_id": "call123",
                     "name": "test_tool",
                     "status": "completed",
                     "output": "result",
                 }
             ],
-            "maxTurns": 5,
+            "max_turns": 5,
             "context": {
-                "usage": {"requests": 0, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                 "approvals": {},
                 "context": {},
             },
-            "generatedItems": [],
-            "modelResponses": [],
+            "generated_items": [],
+            "model_responses": [],
         }
 
         state = await RunState.from_json(agent, state_json)
-        # Should convert function_call_result to function_call_output (line 884-890)
+        # Should preserve function_call_output entries
         assert isinstance(state._original_input, list)
         assert len(state._original_input) == 1
         item = state._original_input[0]
         assert isinstance(item, dict)
-        assert item["type"] == "function_call_output"  # Converted back to API format
-        assert "name" not in item  # Protocol-only field removed
-        assert "status" not in item  # Protocol-only field removed
+        assert item["type"] == "function_call_output"
+        assert item["name"] == "test_tool"
+        assert item["status"] == "completed"
 
     async def test_deserialize_items_handles_missing_type_field(self):
         """Test that _deserialize_items handles items with missing type field (line 1208-1210)."""
@@ -3633,7 +3566,7 @@ class TestDeserializeItemsEdgeCases:
         # Item with missing type field
         item_data = {
             "agent": {"name": "TestAgent"},
-            "rawItem": {
+            "raw_item": {
                 "type": "message",
                 "id": "msg1",
                 "role": "assistant",
@@ -3647,68 +3580,68 @@ class TestDeserializeItemsEdgeCases:
         assert len(result) == 0
 
     async def test_deserialize_items_handles_dict_target_agent(self):
-        """Test _deserialize_items handles dict targetAgent for handoff_output_item."""
+        """Test _deserialize_items handles dict target_agent for handoff_output_item."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
         item_data = {
             "type": "handoff_output_item",
-            # No agent field, so it will look for sourceAgent
-            "sourceAgent": {"name": "Agent1"},
-            "targetAgent": {"name": "Agent2"},  # Dict - tests line 1233-1234
-            "rawItem": {
+            # No agent field, so it will look for source_agent
+            "source_agent": {"name": "Agent1"},
+            "target_agent": {"name": "Agent2"},  # Dict - tests line 1233-1234
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # Should handle dict targetAgent
+        # Should handle dict target_agent
         assert len(result) == 1
         assert result[0].type == "handoff_output_item"
 
     async def test_deserialize_items_handles_handoff_output_dict_target_agent(self):
-        """Test that _deserialize_items handles dict targetAgent (line 1233-1234)."""
+        """Test that _deserialize_items handles dict target_agent (line 1233-1234)."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
-        # Test case where sourceAgent is missing but targetAgent is dict
+        # Test case where source_agent is missing but target_agent is dict
         item_data = {
             "type": "handoff_output_item",
-            # No agent field, sourceAgent missing, but targetAgent is dict
-            "targetAgent": {"name": "Agent2"},  # Dict - tests line 1233-1234
-            "rawItem": {
+            # No agent field, source_agent missing, but target_agent is dict
+            "target_agent": {"name": "Agent2"},  # Dict - tests line 1233-1234
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # Should extract agent_name from dict targetAgent (line 1233-1234)
-        # Then try to access sourceAgent["name"] which will fail, but that's OK
+        # Should extract agent_name from dict target_agent (line 1233-1234)
+        # Then try to access source_agent["name"] which will fail, but that's OK
         assert len(result) >= 0
 
     async def test_deserialize_items_handles_handoff_output_string_target_agent_fallback(self):
-        """Test that _deserialize_items handles string targetAgent as fallback (line 1235-1236)."""
+        """Test that _deserialize_items handles string target_agent as fallback (line 1235-1236)."""
         agent1 = Agent(name="Agent1")
         agent2 = Agent(name="Agent2")
         agent_map = {"Agent1": agent1, "Agent2": agent2}
 
-        # Test case where sourceAgent is missing and targetAgent is string
+        # Test case where source_agent is missing and target_agent is string
         item_data = {
             "type": "handoff_output_item",
-            # No agent field, sourceAgent missing, targetAgent is string
-            "targetAgent": "Agent2",  # String - tests line 1235-1236
-            "rawItem": {
+            # No agent field, source_agent missing, target_agent is string
+            "target_agent": "Agent2",  # String - tests line 1235-1236
+            "raw_item": {
                 "role": "assistant",
                 "content": "Handoff message",
             },
         }
 
         result = _deserialize_items([item_data], agent_map)
-        # Should extract agent_name from string targetAgent (line 1235-1236)
+        # Should extract agent_name from string target_agent (line 1235-1236)
         assert len(result) >= 0
 
 

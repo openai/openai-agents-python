@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import json
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
@@ -57,59 +56,6 @@ from .tool import (
 )
 from .usage import Usage
 
-
-def normalize_function_call_output_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Ensure function_call_output payloads conform to Responses API expectations."""
-
-    payload_type = payload.get("type")
-    if payload_type not in {"function_call_output", "function_call_result"}:
-        return payload
-
-    output_value = payload.get("output")
-
-    if output_value is None:
-        payload["output"] = ""
-        return payload
-
-    if isinstance(output_value, list):
-        if all(
-            isinstance(entry, dict) and entry.get("type") in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES
-            for entry in output_value
-        ):
-            return payload
-        payload["output"] = json.dumps(output_value)
-        return payload
-
-    if isinstance(output_value, dict):
-        entry_type = output_value.get("type")
-        if entry_type in _ALLOWED_FUNCTION_CALL_OUTPUT_TYPES:
-            payload["output"] = [output_value]
-        else:
-            payload["output"] = json.dumps(output_value)
-        return payload
-
-    if isinstance(output_value, str):
-        return payload
-
-    payload["output"] = json.dumps(output_value)
-    return payload
-
-
-def ensure_function_call_output_format(payload: Any) -> Any:
-    """Convert protocol-format function results into API-compatible outputs."""
-    if not isinstance(payload, dict):
-        return payload
-
-    normalized: dict[str, Any] = dict(payload)
-    if normalized.get("type") == "function_call_result":
-        normalized["type"] = "function_call_output"
-    if normalized.get("type") == "function_call_output":
-        normalized.pop("name", None)
-        normalized.pop("status", None)
-        normalized = normalize_function_call_output_payload(normalized)
-    return normalized
-
-
 if TYPE_CHECKING:
     from .agent import Agent
 
@@ -129,15 +75,6 @@ T = TypeVar("T", bound=Union[TResponseOutputItem, TResponseInputItem])
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
-_ALLOWED_FUNCTION_CALL_OUTPUT_TYPES: set[str] = {
-    "input_text",
-    "input_image",
-    "output_text",
-    "refusal",
-    "input_file",
-    "computer_screenshot",
-    "summary_text",
-}
 
 
 @dataclass
@@ -283,15 +220,6 @@ class HandoffOutputItem(RunItemBase[TResponseInputItem]):
             # Preserve dataclass fields for repr/asdict while dropping strong refs.
             self.__dict__["target_agent"] = None
 
-    def to_input_item(self) -> TResponseInputItem:
-        """Convert handoff output into the API format expected by the model."""
-
-        if isinstance(self.raw_item, dict):
-            payload = ensure_function_call_output_format(self.raw_item)
-            return cast(TResponseInputItem, payload)
-
-        return super().to_input_item()
-
 
 ToolCallItemTypes: TypeAlias = Union[
     ResponseFunctionToolCall,
@@ -345,12 +273,10 @@ class ToolCallOutputItem(RunItemBase[Any]):
         Hosted tool outputs (e.g. shell/apply_patch) carry a `status` field for the SDK's
         book-keeping, but the Responses API does not yet accept that parameter. Strip it from the
         payload we send back to the model while keeping the original raw item intact.
-
-        Also converts protocol format (function_call_result) to API format (function_call_output).
         """
 
         if isinstance(self.raw_item, dict):
-            payload = ensure_function_call_output_format(self.raw_item)
+            payload = dict(self.raw_item)
             payload_type = payload.get("type")
             if payload_type == "shell_call_output":
                 payload = dict(payload)
@@ -373,8 +299,6 @@ class ToolCallOutputItem(RunItemBase[Any]):
                                 outcome["exit_code"] = 1 if exit_code is None else exit_code
                                 outcome.pop("exitCode", None)
                                 entry["outcome"] = outcome
-            if payload.get("type") == "function_call_output":
-                payload = normalize_function_call_output_payload(payload)
             return cast(TResponseInputItem, payload)
 
         return super().to_input_item()
@@ -502,13 +426,9 @@ class ToolApprovalItem(RunItemBase[Any]):
         return None
 
     def _extract_call_id(self) -> str | None:
-        """Return call identifier supporting both camelCase and snake_case fields."""
+        """Return call identifier from the raw item."""
         if isinstance(self.raw_item, dict):
-            return (
-                self.raw_item.get("callId")
-                or self.raw_item.get("call_id")
-                or self.raw_item.get("id")
-            )
+            return self.raw_item.get("call_id") or self.raw_item.get("id")
         return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
 
     def to_input_item(self) -> TResponseInputItem:
@@ -529,6 +449,7 @@ RunItem: TypeAlias = Union[
     MCPListToolsItem,
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
+    ToolApprovalItem,
 ]
 """An item generated by an agent."""
 

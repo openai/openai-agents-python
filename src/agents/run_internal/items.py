@@ -9,13 +9,7 @@ import json
 from collections.abc import Sequence
 from typing import Any, cast
 
-from ..items import (
-    ItemHelpers,
-    ToolCallOutputItem,
-    TResponseInputItem,
-    ensure_function_call_output_format,
-)
-from ..run_state import _normalize_field_names
+from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 
 REJECTION_MESSAGE = "Tool execution was not approved."
 
@@ -56,24 +50,23 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
         if entry.get("type") != "function_call":
             filtered.append(entry)
             continue
-        call_id = entry.get("call_id") or entry.get("callId")
+        call_id = entry.get("call_id")
         if call_id and call_id in completed_call_ids:
             filtered.append(entry)
     return filtered
 
 
 def ensure_input_item_format(item: TResponseInputItem) -> TResponseInputItem:
-    """Ensure a single item is normalized for model input (function_call_output, snake_case)."""
+    """Ensure a single item is normalized for model input."""
     coerced = _coerce_to_dict(item)
     if coerced is None:
         return item
 
-    normalized = ensure_function_call_output_format(dict(coerced))
-    return cast(TResponseInputItem, normalized)
+    return cast(TResponseInputItem, coerced)
 
 
 def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
-    """Normalize input items for API submission and strip provider data for downstream services."""
+    """Normalize input items for API submission."""
 
     normalized: list[TResponseInputItem] = []
     for item in items:
@@ -83,10 +76,6 @@ def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResp
             continue
 
         normalized_item = dict(coerced)
-        normalized_item.pop("providerData", None)
-        normalized_item.pop("provider_data", None)
-        normalized_item = ensure_function_call_output_format(normalized_item)
-        normalized_item = _normalize_field_names(normalized_item)
         normalized.append(cast(TResponseInputItem, normalized_item))
     return normalized
 
@@ -199,9 +188,9 @@ def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
         if not isinstance(entry, dict):
             continue
         item_type = entry.get("type")
-        if item_type not in ("function_call_output", "function_call_result"):
+        if item_type != "function_call_output":
             continue
-        call_id = entry.get("call_id") or entry.get("callId")
+        call_id = entry.get("call_id")
         if call_id and isinstance(call_id, str):
             completed.add(call_id)
     return completed

@@ -173,16 +173,16 @@ def testdrop_orphan_function_calls_removes_orphans():
             assert entry.get("call_id") != "call_orphan"
 
 
-def testnormalize_input_items_for_api_strips_provider_data():
+def testnormalize_input_items_for_api_preserves_provider_data():
     items: list[TResponseInputItem] = [
         cast(
             TResponseInputItem,
             {
-                "type": "function_call_result",
-                "callId": "call_norm",
+                "type": "function_call_output",
+                "call_id": "call_norm",
                 "status": "completed",
                 "output": "out",
-                "providerData": {"trace": "keep"},
+                "provider_data": {"trace": "keep"},
             },
         ),
         cast(
@@ -191,7 +191,7 @@ def testnormalize_input_items_for_api_strips_provider_data():
                 "type": "message",
                 "role": "user",
                 "content": "hi",
-                "providerData": {"trace": "remove"},
+                "provider_data": {"trace": "remove"},
             },
         ),
     ]
@@ -201,9 +201,10 @@ def testnormalize_input_items_for_api_strips_provider_data():
     second = cast(dict[str, Any], normalized[1])
 
     assert first["type"] == "function_call_output"
-    assert "providerData" not in first
+    assert first["call_id"] == "call_norm"
+    assert first["provider_data"] == {"trace": "keep"}
     assert second["role"] == "user"
-    assert "providerData" not in second
+    assert second["provider_data"] == {"trace": "remove"}
 
 
 def test_server_conversation_tracker_tracks_previous_response_id():
@@ -854,14 +855,12 @@ async def test_input_guardrail_tripwire_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
-async def test_prepare_input_with_session_converts_protocol_history():
+async def test_prepare_input_with_session_keeps_function_call_outputs():
     history_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_result",
+            "type": "function_call_output",
             "call_id": "call_prepare",
-            "name": "tool_prepare",
-            "status": "completed",
             "output": "ok",
         },
     )
@@ -875,8 +874,6 @@ async def test_prepare_input_with_session_converts_protocol_history():
     first_item = cast(dict[str, Any], prepared_input[0])
     last_item = cast(dict[str, Any], prepared_input[-1])
     assert first_item["type"] == "function_call_output"
-    assert "name" not in first_item
-    assert "status" not in first_item
     assert last_item["role"] == "user"
     assert last_item["content"] == "hello"
 
@@ -885,26 +882,22 @@ def test_ensure_api_input_item_handles_model_dump_objects():
     class _ModelDumpItem:
         def model_dump(self, exclude_unset: bool = True) -> dict[str, Any]:
             return {
-                "type": "function_call_result",
+                "type": "function_call_output",
                 "call_id": "call_model_dump",
-                "name": "dump_tool",
-                "status": "completed",
                 "output": "dumped",
             }
 
     dummy_item: Any = _ModelDumpItem()
     converted = ensure_input_item_format(dummy_item)
     assert converted["type"] == "function_call_output"
-    assert "name" not in converted
-    assert "status" not in converted
     assert converted["output"] == "dumped"
 
 
-def test_ensure_api_input_item_stringifies_object_output():
+def test_ensure_api_input_item_preserves_object_output():
     payload = cast(
         TResponseInputItem,
         {
-            "type": "function_call_result",
+            "type": "function_call_output",
             "call_id": "call_object",
             "output": {"complex": "value"},
         },
@@ -912,8 +905,8 @@ def test_ensure_api_input_item_stringifies_object_output():
 
     converted = ensure_input_item_format(payload)
     assert converted["type"] == "function_call_output"
-    assert isinstance(converted["output"], str)
-    assert "complex" in converted["output"]
+    assert isinstance(converted["output"], dict)
+    assert converted["output"] == {"complex": "value"}
 
 
 @pytest.mark.asyncio
@@ -1003,23 +996,19 @@ async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_result_to_session_strips_protocol_fields():
+async def test_save_result_to_session_preserves_function_outputs():
     session = SimpleListSession()
     original_item = cast(
         TResponseInputItem,
         {
-            "type": "function_call_result",
+            "type": "function_call_output",
             "call_id": "call_original",
-            "name": "original_tool",
-            "status": "completed",
             "output": "1",
         },
     )
     run_item_payload = {
-        "type": "function_call_result",
+        "type": "function_call_output",
         "call_id": "call_result",
-        "name": "result_tool",
-        "status": "completed",
         "output": "2",
     }
     dummy_run_item = _DummyRunItem(run_item_payload)
@@ -1034,8 +1023,7 @@ async def test_save_result_to_session_strips_protocol_fields():
     for saved in session.saved_items:
         saved_dict = cast(dict[str, Any], saved)
         assert saved_dict["type"] == "function_call_output"
-        assert "name" not in saved_dict
-        assert "status" not in saved_dict
+        assert "output" in saved_dict
 
 
 @pytest.mark.asyncio
