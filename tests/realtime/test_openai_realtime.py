@@ -300,6 +300,99 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model._websocket_task is None
 
     @pytest.mark.asyncio
+    async def test_connect_with_transport_config(self, model, mock_websocket):
+        """Test that transport configuration is properly passed to the WebSocket connection."""
+        config = {
+            "api_key": "test-key",
+            "transport": {
+                "ping_interval": 30.0,
+                "ping_timeout": 10.0,
+                "connect_timeout": 5.0,
+            },
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                # Verify WebSocket connection called with correct transport params
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args.kwargs
+                assert kwargs["ping_interval"] == 30.0
+                assert kwargs["ping_timeout"] == 10.0
+                assert kwargs["open_timeout"] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_connect_with_transport_config_disable_ping(self, model, mock_websocket):
+        """Test disabling ping in transport configuration."""
+        config = {
+            "api_key": "test-key",
+            "transport": {
+                "ping_interval": None,
+            },
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                # Verify WebSocket connection called with correct transport params
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args.kwargs
+                assert kwargs["ping_interval"] is None
+
+    @pytest.mark.asyncio
+    async def test_connect_with_empty_transport_config(self, model, mock_websocket):
+        """Test that empty transport configuration works without error."""
+        config = {
+            "api_key": "test-key",
+            "transport": {},
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args.kwargs
+                assert "ping_interval" not in kwargs
+                assert "ping_timeout" not in kwargs
+                assert "open_timeout" not in kwargs
+
+    @pytest.mark.asyncio
     async def test_connect_already_connected_assertion(self, model, mock_websocket):
         """Test that connecting when already connected raises assertion error."""
         model._websocket = mock_websocket  # Simulate already connected
