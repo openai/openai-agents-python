@@ -164,6 +164,7 @@ async def test_deterministic_story_flow_stops_when_checker_blocks() -> None:
         ]
     )
     story_model = FakeModel()
+    story_model.set_next_output(RuntimeError("story should not run"))
 
     outline_agent = Agent(name="outline", model=outline_model)
     checker_agent = Agent(
@@ -171,6 +172,7 @@ async def test_deterministic_story_flow_stops_when_checker_blocks() -> None:
         model=checker_model,
         output_type=OutlineCheckerOutput,
     )
+    story_agent = Agent(name="story", model=story_model)
 
     inputs: list[TResponseInputItem] = [get_text_input_item("Sci-fi please")]
     outline_result = await Runner.run(outline_agent, inputs)
@@ -182,6 +184,8 @@ async def test_deterministic_story_flow_stops_when_checker_blocks() -> None:
     assert isinstance(decision, OutlineCheckerOutput)
     assert decision.good_quality is False
     assert decision.is_scifi is True
+    if decision.good_quality and decision.is_scifi:
+        await Runner.run(story_agent, outline_result.final_output)
     assert story_model.first_turn_args is None, "story agent should never be invoked when gated"
 
 
