@@ -248,7 +248,7 @@ class MCPUtil:
         current_span = get_current_span()
         if current_span:
             if isinstance(current_span.span_data, FunctionSpanData):
-                current_span.span_data.output = json.dumps(tool_output)
+                current_span.span_data.output = tool_output
                 current_span.span_data.mcp_data = {
                     "server": server.name,
                 }
