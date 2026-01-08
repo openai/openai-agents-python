@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings as warnings_module
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -227,7 +227,7 @@ class TestOpenAIResponsesCompactionSession:
             def __init__(self) -> None:
                 self.received_warnings_arg: bool | None = None
 
-            def model_dump(self, *, exclude_unset: bool, warnings: bool | None = None) -> dict:
+            def model_dump(self, *, exclude_unset: bool, warnings: bool | None = None) -> dict[str, Any]:
                 self.received_warnings_arg = warnings
                 if warnings:
                     warnings_module.warn("unexpected warning", stacklevel=2)
