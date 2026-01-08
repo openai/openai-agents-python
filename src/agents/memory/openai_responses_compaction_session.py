@@ -29,12 +29,19 @@ def select_compaction_candidate_items(
 
     Excludes user messages and compaction items.
     """
+
+    def _is_user_message(item: TResponseInputItem) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if item.get("type") == "message":
+            return item.get("role") == "user"
+        return item.get("role") == "user" and "content" in item
+
     return [
         item
         for item in items
         if not (
-            (item.get("type") == "message" and item.get("role") == "user")
-            or item.get("type") == "compaction"
+            _is_user_message(item) or (isinstance(item, dict) and item.get("type") == "compaction")
         )
     ]
 
@@ -110,7 +117,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             should_trigger_compaction or default_should_trigger_compaction
         )
 
-        # Cache for incremental candidate tracking
+        # cache for incremental candidate tracking
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
@@ -160,7 +167,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 if isinstance(item, dict):
                     output_items.append(item)
                 else:
-                    output_items.append(item.model_dump(exclude_unset=True))  # type: ignore
+                    # Suppress Pydantic literal warnings: responses.compact can return
+                    # user-style input_text content inside ResponseOutputMessage.
+                    output_items.append(
+                        item.model_dump(exclude_unset=True, warnings=False)  # type: ignore
+                    )
 
         if output_items:
             await self.underlying_session.add_items(output_items)

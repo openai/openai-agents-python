@@ -50,7 +50,8 @@ async def main():
     print("=== Final Session State ===")
     print(f"Total items: {len(items)}")
     for item in items:
-        item_type = item.get("type", "unknown")
+        # Some inputs are stored as easy messages (only `role` and `content`).
+        item_type = item.get("type") or ("message" if "role" in item else "unknown")
         if item_type == "compaction":
             print("  - compaction (encrypted content)")
         elif item_type == "message":

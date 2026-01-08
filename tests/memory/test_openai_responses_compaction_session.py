@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings as warnings_module
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -61,6 +62,15 @@ class TestSelectCompactionCandidateItems:
         result = select_compaction_candidate_items(items)
         assert len(result) == 1
         assert result[0].get("type") == "message"
+
+    def test_excludes_easy_user_messages_without_type(self) -> None:
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"content": "hi", "role": "user"}),
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "hello"}),
+        ]
+        result = select_compaction_candidate_items(items)
+        assert len(result) == 1
+        assert result[0].get("role") == "assistant"
 
 
 class TestOpenAIResponsesCompactionSession:
@@ -204,6 +214,43 @@ class TestOpenAIResponsesCompactionSession:
         await session.run_compaction({"response_id": "resp-123", "force": True})
 
         mock_client.responses.compact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_suppresses_model_dump_warnings(self) -> None:
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = [
+            cast(TResponseInputItem, {"type": "message", "role": "assistant", "content": "hi"})
+            for _ in range(DEFAULT_COMPACTION_THRESHOLD)
+        ]
+
+        class WarningModel:
+            def __init__(self) -> None:
+                self.received_warnings_arg: bool | None = None
+
+            def model_dump(self, *, exclude_unset: bool, warnings: bool | None = None) -> dict:
+                self.received_warnings_arg = warnings
+                if warnings:
+                    warnings_module.warn("unexpected warning", stacklevel=2)
+                return {"type": "message", "role": "assistant", "content": "ok"}
+
+        warning_model = WarningModel()
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [warning_model]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+        )
+
+        with warnings_module.catch_warnings():
+            warnings_module.simplefilter("error")
+            await session.run_compaction({"response_id": "resp-123"})
+
+        assert warning_model.received_warnings_arg is False
 
 
 class TestTypeGuard:
