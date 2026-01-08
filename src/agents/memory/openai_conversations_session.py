@@ -6,7 +6,7 @@ from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
 from .session import SessionABC
-from .session_settings import SessionSettings
+from .session_settings import SessionSettings, resolve_session_limit
 
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
@@ -71,7 +71,7 @@ class OpenAIConversationsSession(SessionABC):
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
-        session_limit = SessionSettings.get_limit(limit, self.session_settings)
+        session_limit = resolve_session_limit(limit, self.session_settings)
 
         all_items = []
         if session_limit is None:

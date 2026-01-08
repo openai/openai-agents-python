@@ -36,7 +36,7 @@ except ImportError as e:
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings
+from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class RedisSession(SessionABC):
@@ -148,7 +148,7 @@ class RedisSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        session_limit = SessionSettings.get_limit(limit, self.session_settings)
+        session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._lock:
             if session_limit is None:

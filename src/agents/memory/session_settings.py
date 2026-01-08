@@ -10,6 +10,18 @@ from pydantic import BaseModel
 from pydantic.dataclasses import dataclass
 
 
+def resolve_session_limit(
+    explicit_limit: int | None,
+    settings: SessionSettings | None,
+) -> int | None:
+    """Safely resolve the effective limit for session operations."""
+    if explicit_limit is not None:
+        return explicit_limit
+    if settings is not None:
+        return settings.limit
+    return None
+
+
 @dataclass
 class SessionSettings:
     """Settings for session operations.
@@ -20,18 +32,6 @@ class SessionSettings:
 
     limit: int | None = None
     """Maximum number of items to retrieve. If None, retrieves all items."""
-
-    @staticmethod
-    def get_limit(
-        explicit_limit: int | None,
-        settings: SessionSettings | None,
-    ) -> int | None:
-        """Safely resolve the effective limit for session operations."""
-        if explicit_limit is not None:
-            return explicit_limit
-        if settings is not None:
-            return settings.limit
-        return None
 
     def resolve(self, override: SessionSettings | None) -> SessionSettings:
         """Produce a new SessionSettings by overlaying any non-None values from the

@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings
+from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class SQLAlchemySession(SessionABC):
@@ -198,7 +198,7 @@ class SQLAlchemySession(SessionABC):
         """
         await self._ensure_tables()
 
-        session_limit = SessionSettings.get_limit(limit, self.session_settings)
+        session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._session_factory() as sess:
             if session_limit is None:

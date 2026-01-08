@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..items import TResponseInputItem
 from .session import SessionABC
-from .session_settings import SessionSettings
+from .session_settings import SessionSettings, resolve_session_limit
 
 
 class SQLiteSession(SessionABC):
@@ -122,7 +122,7 @@ class SQLiteSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        session_limit = SessionSettings.get_limit(limit, self.session_settings)
+        session_limit = resolve_session_limit(limit, self.session_settings)
 
         def _get_items_sync():
             conn = self._get_connection()

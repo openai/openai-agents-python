@@ -40,7 +40,7 @@ except ImportError as e:
 from ...items import TResponseInputItem
 from ...logger import logger
 from ...memory.session import SessionABC
-from ...memory.session_settings import SessionSettings
+from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 # Type alias for consistency levels
 ConsistencyLevel = Literal["eventual", "strong"]
@@ -240,7 +240,7 @@ class DaprSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        session_limit = SessionSettings.get_limit(limit, self.session_settings)
+        session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._lock:
             # Get messages from state store with consistency level
