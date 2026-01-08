@@ -1,11 +1,29 @@
+import asyncio
 import json
+import time
 
 import pytest
+from openai.types.responses import ResponseCompletedEvent
 
 from agents import Agent, Runner
+from agents.stream_events import RawResponsesStreamEvent
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+
+
+class SlowCompleteFakeModel(FakeModel):
+    """A FakeModel that delays before emitting the completed event in streaming."""
+
+    def __init__(self, delay_seconds: float):
+        super().__init__()
+        self._delay_seconds = delay_seconds
+
+    async def stream_response(self, *args, **kwargs):
+        async for ev in super().stream_response(*args, **kwargs):
+            if isinstance(ev, ResponseCompletedEvent) and self._delay_seconds > 0:
+                await asyncio.sleep(self._delay_seconds)
+            yield ev
 
 
 @pytest.mark.asyncio
@@ -131,3 +149,30 @@ async def test_cancel_immediate_mode_explicit():
     assert result.is_complete
     assert result._event_queue.empty()
     assert result._cancel_mode == "immediate"
+
+
+@pytest.mark.asyncio
+async def test_stream_events_respects_asyncio_timeout_cancellation():
+    model = SlowCompleteFakeModel(delay_seconds=0.5)
+    model.set_next_output([get_text_message("Final response")])
+    agent = Agent(name="TimeoutTester", model=model)
+
+    result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
+    event_iter = result.stream_events().__aiter__()
+
+    # Consume events until the output item is done so the next event is delayed.
+    while True:
+        event = await asyncio.wait_for(event_iter.__anext__(), timeout=1.0)
+        if (
+            isinstance(event, RawResponsesStreamEvent)
+            and event.data.type == "response.output_item.done"
+        ):
+            break
+
+    start = time.perf_counter()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(event_iter.__anext__(), timeout=0.1)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.3, "Cancellation should propagate promptly when waiting for events."
+    result.cancel()

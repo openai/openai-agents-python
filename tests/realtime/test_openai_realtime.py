@@ -702,6 +702,48 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is None
 
+    def test_session_config_respects_audio_block_and_output_modalities(self, model):
+        settings = {
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "modalities": ["audio"],
+            "output_modalities": ["text"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "createResponse": True,
+                        "silenceDurationMs": 450,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcma"},
+                    "voice": "synth-1",
+                    "speed": 1.5,
+                },
+            },
+        }
+        cfg = model._get_session_config(settings)
+
+        assert cfg.output_modalities == ["text"]
+        assert cfg.audio is not None
+        assert cfg.audio.input.format is not None
+        assert cfg.audio.input.format.type == "audio/pcmu"
+        assert cfg.audio.output.format is not None
+        assert cfg.audio.output.format.type == "audio/pcma"
+        assert cfg.audio.output.voice == "synth-1"
+        assert cfg.audio.output.speed == 1.5
+        assert cfg.audio.input.transcription is not None
+
+        turn_detection = cfg.audio.input.turn_detection
+        turn_detection_mapping = (
+            turn_detection if isinstance(turn_detection, dict) else turn_detection.model_dump()
+        )
+        assert turn_detection_mapping["create_response"] is True
+        assert turn_detection_mapping["silence_duration_ms"] == 450
+        assert "silenceDurationMs" not in turn_detection_mapping
+
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
         """Test successful handling of error events."""

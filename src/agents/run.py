@@ -73,7 +73,7 @@ from .stream_events import (
 )
 from .tool import Tool, dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, trace
+from .tracing import Span, SpanError, TracingConfig, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
@@ -230,6 +230,9 @@ class RunConfig:
     tracing_disabled: bool = False
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
     """
+
+    tracing: TracingConfig | None = None
+    """Tracing configuration for this run."""
 
     trace_include_sensitive_data: bool = field(
         default_factory=_default_trace_include_sensitive_data
@@ -582,6 +585,7 @@ class AgentRunner:
             trace_id=run_config.trace_id,
             group_id=run_config.group_id,
             metadata=run_config.trace_metadata,
+            tracing=run_config.tracing,
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
@@ -909,6 +913,7 @@ class AgentRunner:
                 trace_id=run_config.trace_id,
                 group_id=run_config.group_id,
                 metadata=run_config.trace_metadata,
+                tracing=run_config.tracing,
                 disabled=run_config.tracing_disabled,
             )
         )
