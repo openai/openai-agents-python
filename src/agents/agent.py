@@ -387,6 +387,60 @@ class Agent(AgentBase, Generic[TContext]):
                 f"got {type(self.reset_tool_choice).__name__}"
             )
 
+    @property
+    def has_tools(self) -> bool:
+        """Check if this agent has any tools configured.
+
+        Note: This only checks the static tools list, not MCP server tools.
+        Use `get_all_tools()` to get all tools including MCP tools at runtime.
+
+        Returns:
+            True if the agent has at least one tool, False otherwise.
+        """
+        return len(self.tools) > 0
+
+    @property
+    def has_handoffs(self) -> bool:
+        """Check if this agent has any handoffs configured.
+
+        Returns:
+            True if the agent has at least one handoff, False otherwise.
+        """
+        return len(self.handoffs) > 0
+
+    @property
+    def tool_names(self) -> list[str]:
+        """Get the names of all static tools.
+
+        Note: This only returns names of static tools, not MCP server tools.
+        Use `get_all_tools()` to get all tools including MCP tools at runtime.
+
+        Returns:
+            List of tool names.
+        """
+        return [tool.name for tool in self.tools]
+
+    @property
+    def handoff_names(self) -> list[str]:
+        """Get the names of all handoff targets.
+
+        Returns:
+            List of handoff target agent names.
+        """
+        return [
+            h.agent_name if isinstance(h, Handoff) else h.name
+            for h in self.handoffs
+        ]
+
+    @property
+    def has_guardrails(self) -> bool:
+        """Check if this agent has any guardrails configured.
+
+        Returns:
+            True if the agent has any input or output guardrails, False otherwise.
+        """
+        return len(self.input_guardrails) > 0 or len(self.output_guardrails) > 0
+
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed.
         Notes:
