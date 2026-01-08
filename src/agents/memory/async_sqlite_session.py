@@ -1,7 +1,7 @@
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import json
 from pathlib import Path
 from typing import cast
 
@@ -42,7 +42,7 @@ class AsyncSQLiteSession(SessionABC):
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
-    
+
     async def _init_db_for_connection(self, conn: aiosqlite.Connection) -> None:
         """Initialize the database schema for a specific connection."""
         await conn.execute(
