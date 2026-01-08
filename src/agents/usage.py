@@ -163,3 +163,62 @@ class Usage:
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
             self.request_usage_entries.extend(other.request_usage_entries)
+
+    @property
+    def is_empty(self) -> bool:
+        """Check if this Usage object has no recorded usage.
+
+        Returns:
+            True if no tokens have been used, False otherwise.
+        """
+        return self.total_tokens == 0 and self.requests == 0
+
+    def __bool__(self) -> bool:
+        """Allow Usage to be used in boolean context.
+
+        Returns:
+            True if any usage has been recorded, False otherwise.
+
+        Example:
+            >>> if result.usage:
+            ...     print(f"Used {result.usage.total_tokens} tokens")
+        """
+        return not self.is_empty
+
+    @property
+    def cached_tokens(self) -> int:
+        """Convenience property to get cached input tokens.
+
+        Returns:
+            Number of cached input tokens, or 0 if not available.
+        """
+        if self.input_tokens_details and self.input_tokens_details.cached_tokens:
+            return self.input_tokens_details.cached_tokens
+        return 0
+
+    @property
+    def reasoning_tokens(self) -> int:
+        """Convenience property to get reasoning output tokens.
+
+        Returns:
+            Number of reasoning tokens, or 0 if not available.
+        """
+        if self.output_tokens_details and self.output_tokens_details.reasoning_tokens:
+            return self.output_tokens_details.reasoning_tokens
+        return 0
+
+    def to_dict(self) -> dict:
+        """Convert Usage to a dictionary for serialization.
+
+        Returns:
+            Dictionary representation of the usage data.
+        """
+        return {
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+        }
+
