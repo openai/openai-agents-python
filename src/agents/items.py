@@ -520,3 +520,79 @@ class ItemHelpers:
         else:
             assert_never(output)
             raise ValueError(f"Unexpected tool output type: {output}")
+
+    @classmethod
+    def filter_by_type(
+        cls, items: list[RunItem], item_type: type[RunItem] | tuple[type[RunItem], ...]
+    ) -> list[RunItem]:
+        """Filter run items by their type.
+
+        Args:
+            items: List of run items to filter.
+            item_type: A single type or tuple of types to filter by.
+
+        Returns:
+            A list containing only items matching the specified type(s).
+
+        Example:
+            >>> messages = ItemHelpers.filter_by_type(result.new_items, MessageOutputItem)
+            >>> tool_items = ItemHelpers.filter_by_type(items, (ToolCallItem, ToolCallOutputItem))
+        """
+        return [item for item in items if isinstance(item, item_type)]
+
+    @classmethod
+    def count_by_type(cls, items: list[RunItem]) -> dict[str, int]:
+        """Count run items grouped by their type.
+
+        Args:
+            items: List of run items to count.
+
+        Returns:
+            A dictionary mapping item type names to their counts.
+
+        Example:
+            >>> counts = ItemHelpers.count_by_type(result.new_items)
+            >>> print(counts)  # {'message_output_item': 2, 'tool_call_item': 3, ...}
+        """
+        counts: dict[str, int] = {}
+        for item in items:
+            type_name = getattr(item, "type", item.__class__.__name__)
+            counts[type_name] = counts.get(type_name, 0) + 1
+        return counts
+
+    @classmethod
+    def has_handoffs(cls, items: list[RunItem]) -> bool:
+        """Check if any run items represent handoffs.
+
+        Args:
+            items: List of run items to check.
+
+        Returns:
+            True if any item is a handoff-related item, False otherwise.
+        """
+        return any(isinstance(item, (HandoffCallItem, HandoffOutputItem)) for item in items)
+
+    @classmethod
+    def get_tool_calls(cls, items: list[RunItem]) -> list[ToolCallItem]:
+        """Extract all tool call items from a list of run items.
+
+        Args:
+            items: List of run items to extract from.
+
+        Returns:
+            A list of ToolCallItem instances.
+        """
+        return [item for item in items if isinstance(item, ToolCallItem)]
+
+    @classmethod
+    def get_messages(cls, items: list[RunItem]) -> list[MessageOutputItem]:
+        """Extract all message output items from a list of run items.
+
+        Args:
+            items: List of run items to extract from.
+
+        Returns:
+            A list of MessageOutputItem instances.
+        """
+        return [item for item in items if isinstance(item, MessageOutputItem)]
+
