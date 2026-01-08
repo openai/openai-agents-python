@@ -145,7 +145,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         Returns:
             List of conversation items from the specified branch.
         """
-        session_limit = self._get_session_limit(limit)
+        session_limit = SessionSettings.get_limit(limit, self.session_settings)
 
         if branch_id is None:
             branch_id = self._current_branch_id

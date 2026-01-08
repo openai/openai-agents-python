@@ -240,7 +240,7 @@ class DaprSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        session_limit = self._get_session_limit(limit)
+        session_limit = SessionSettings.get_limit(limit, self.session_settings)
 
         async with self._lock:
             # Get messages from state store with consistency level
