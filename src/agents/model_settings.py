@@ -189,3 +189,36 @@ class ModelSettings:
                 json_dict[field_name] = value
 
         return json_dict
+
+    @property
+    def is_default(self) -> bool:
+        """Check if this ModelSettings has all default (None) values.
+
+        Returns:
+            True if all fields are None, False otherwise.
+        """
+        return all(getattr(self, f.name) is None for f in fields(self))
+
+    def __repr__(self) -> str:
+        """Return a concise representation showing only non-None values."""
+        non_none = {
+            f.name: getattr(self, f.name)
+            for f in fields(self)
+            if getattr(self, f.name) is not None
+        }
+        if not non_none:
+            return "ModelSettings()"
+        parts = ", ".join(f"{k}={v!r}" for k, v in non_none.items())
+        return f"ModelSettings({parts})"
+
+    def copy(self, **overrides: Any) -> "ModelSettings":
+        """Create a copy of this ModelSettings with optional field overrides.
+
+        Args:
+            **overrides: Field values to override in the copy.
+
+        Returns:
+            A new ModelSettings with the specified overrides applied.
+        """
+        return replace(self, **overrides)
+
