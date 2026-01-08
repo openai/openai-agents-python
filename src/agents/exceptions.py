@@ -129,3 +129,45 @@ class ToolOutputGuardrailTripwireTriggered(AgentsException):
         self.guardrail = guardrail
         self.output = output
         super().__init__(f"Tool output guardrail {guardrail.__class__.__name__} triggered tripwire")
+
+
+class SessionError(AgentsException):
+    """Exception raised when a session operation fails.
+
+    This is the base class for all session-related exceptions, providing
+    consistent error handling for session storage, retrieval, and manipulation.
+    """
+
+    session_id: str | None
+    """The ID of the session that caused the error, if available."""
+
+    def __init__(self, message: str, session_id: str | None = None):
+        self.session_id = session_id
+        self.message = message
+        if session_id:
+            super().__init__(f"Session '{session_id}': {message}")
+        else:
+            super().__init__(message)
+
+
+class SessionNotFoundError(SessionError):
+    """Exception raised when a session cannot be found.
+
+    This exception is raised when attempting to retrieve or manipulate
+    a session that does not exist in the storage backend.
+    """
+
+    def __init__(self, session_id: str):
+        super().__init__(f"Session not found", session_id=session_id)
+
+
+class SessionSerializationError(SessionError):
+    """Exception raised when session data cannot be serialized or deserialized.
+
+    This exception is raised when session items contain data that cannot
+    be properly converted to/from the storage format.
+    """
+
+    def __init__(self, message: str, session_id: str | None = None):
+        super().__init__(f"Serialization error: {message}", session_id=session_id)
+
