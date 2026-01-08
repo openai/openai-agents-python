@@ -62,6 +62,7 @@ from .items import (
 )
 from .lifecycle import AgentHooks, RunHooks
 from .memory import (
+    AsyncSQLiteSession,
     OpenAIConversationsSession,
     Session,
     SessionABC,
@@ -289,6 +290,7 @@ __all__ = [
     "AgentHooks",
     "Session",
     "SessionABC",
+    "AsyncSQLiteSession",
     "SQLiteSession",
     "OpenAIConversationsSession",
     "AgentHookContext",
