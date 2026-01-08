@@ -467,3 +467,51 @@ def test_assistant_messages_in_history():
     assert messages[1]["content"] == "Hello?"
     assert messages[2]["role"] == "user"
     assert messages[2]["content"] == "What was my Name?"
+
+
+def test_items_to_messages_handles_invalid_json_arguments():
+    """
+    Invalid JSON in tool call arguments should be replaced with empty object
+    to prevent session corruption with Anthropic models (issue #2061).
+    """
+    # Construct a function call with invalid JSON (missing closing brace)
+    function_call: ResponseFunctionToolCallParam = {
+        "id": "fc_invalid",
+        "call_id": "call_invalid_json",
+        "name": "get_server_time",
+        "arguments": '{"format":"%Y-%m-%d"',  # Invalid JSON - missing closing brace
+        "type": "function_call",
+    }
+
+    messages = Converter.items_to_messages([function_call])
+    assert len(messages) == 1
+    tool_msg = messages[0]
+    assert tool_msg["role"] == "assistant"
+
+    tool_calls = list(tool_msg.get("tool_calls", []))
+    assert len(tool_calls) == 1
+
+    tool_call = tool_calls[0]
+    # Invalid JSON should be replaced with empty object
+    assert tool_call["function"]["arguments"] == "{}"
+
+
+def test_items_to_messages_preserves_valid_json_arguments():
+    """
+    Valid JSON in tool call arguments should be preserved unchanged.
+    """
+    valid_json = '{"format": "%Y-%m-%d %H:%M:%S", "timezone": "UTC"}'
+    function_call: ResponseFunctionToolCallParam = {
+        "id": "fc_valid",
+        "call_id": "call_valid_json",
+        "name": "get_server_time",
+        "arguments": valid_json,
+        "type": "function_call",
+    }
+
+    messages = Converter.items_to_messages([function_call])
+    tool_calls = list(messages[0].get("tool_calls", []))
+    
+    # Valid JSON should be preserved
+    assert tool_calls[0]["function"]["arguments"] == valid_json
+

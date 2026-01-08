@@ -581,7 +581,26 @@ class Converter:
                     pending_thinking_blocks = None  # Clear after using
 
                 tool_calls = list(asst.get("tool_calls", []))
-                arguments = func_call["arguments"] if func_call["arguments"] else "{}"
+                raw_args = func_call["arguments"]
+                # Validate JSON arguments to prevent downstream parsing failures
+                # Invalid JSON can break sessions with Anthropic models (issue #2061)
+                if raw_args:
+                    try:
+                        json.loads(raw_args)  # Validate JSON is parseable
+                        arguments = raw_args
+                    except json.JSONDecodeError:
+                        # Invalid JSON - use empty object to prevent session corruption
+                        from ..logger import logger
+                        logger.warning(
+                            f"Invalid JSON in tool call arguments for '{func_call['name']}', "
+                            f"replacing with empty object. Original: {raw_args[:100]}..."
+                            if len(raw_args) > 100 else
+                            f"Invalid JSON in tool call arguments for '{func_call['name']}', "
+                            f"replacing with empty object. Original: {raw_args}"
+                        )
+                        arguments = "{}"
+                else:
+                    arguments = "{}"
                 new_tool_call = ChatCompletionMessageFunctionToolCallParam(
                     id=func_call["call_id"],
                     type="function",
