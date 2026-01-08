@@ -1,4 +1,6 @@
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from typing import cast
@@ -40,18 +42,7 @@ class AsyncSQLiteSession(SessionABC):
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
-
-    async def _ensure_connection(self) -> aiosqlite.Connection:
-        """Ensure a database connection is initialized."""
-        if self._connection is None:
-            async with self._init_lock:
-                if self._connection is None:
-                    self._connection = await aiosqlite.connect(str(self.db_path))
-                    await self._connection.execute("PRAGMA journal_mode=WAL")
-                    await self._init_db_for_connection(self._connection)
-        assert self._connection is not None
-        return self._connection
-
+    
     async def _init_db_for_connection(self, conn: aiosqlite.Connection) -> None:
         """Initialize the database schema for a specific connection."""
         await conn.execute(
@@ -86,6 +77,26 @@ class AsyncSQLiteSession(SessionABC):
 
         await conn.commit()
 
+    async def _get_connection(self) -> aiosqlite.Connection:
+        """Get or create a database connection."""
+        if self._connection is not None:
+            return self._connection
+
+        async with self._init_lock:
+            if self._connection is None:
+                self._connection = await aiosqlite.connect(str(self.db_path))
+                await self._connection.execute("PRAGMA journal_mode=WAL")
+                await self._init_db_for_connection(self._connection)
+
+        return self._connection
+
+    @asynccontextmanager
+    async def _locked_connection(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Provide a connection under the session lock."""
+        async with self._lock:
+            conn = await self._get_connection()
+            yield conn
+
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
@@ -96,9 +107,8 @@ class AsyncSQLiteSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        conn = await self._ensure_connection()
 
-        async with self._lock:
+        async with self._locked_connection() as conn:
             if limit is None:
                 cursor = await conn.execute(
                     f"""
@@ -120,6 +130,7 @@ class AsyncSQLiteSession(SessionABC):
                 )
 
             rows = list(await cursor.fetchall())
+            await cursor.close()
 
         if limit is not None:
             rows = rows[::-1]
@@ -143,9 +154,7 @@ class AsyncSQLiteSession(SessionABC):
         if not items:
             return
 
-        conn = await self._ensure_connection()
-
-        async with self._lock:
+        async with self._locked_connection() as conn:
             await conn.execute(
                 f"""
                 INSERT OR IGNORE INTO {self.sessions_table} (session_id) VALUES (?)
@@ -178,9 +187,7 @@ class AsyncSQLiteSession(SessionABC):
         Returns:
             The most recent item if it exists, None if the session is empty
         """
-        conn = await self._ensure_connection()
-
-        async with self._lock:
+        async with self._locked_connection() as conn:
             cursor = await conn.execute(
                 f"""
                 DELETE FROM {self.messages_table}
@@ -196,6 +203,7 @@ class AsyncSQLiteSession(SessionABC):
             )
 
             result = await cursor.fetchone()
+            await cursor.close()
             await conn.commit()
 
         if result:
@@ -209,9 +217,7 @@ class AsyncSQLiteSession(SessionABC):
 
     async def clear_session(self) -> None:
         """Clear all items for this session."""
-        conn = await self._ensure_connection()
-
-        async with self._lock:
+        async with self._locked_connection() as conn:
             await conn.execute(
                 f"DELETE FROM {self.messages_table} WHERE session_id = ?",
                 (self.session_id,),
