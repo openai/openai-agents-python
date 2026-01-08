@@ -273,6 +273,53 @@ class RunConfig:
     For example, you can use this to add a system prompt to the input.
     """
 
+    def __repr__(self) -> str:
+        """Return a concise representation of the RunConfig for debugging.
+
+        Only shows non-default values to keep output readable.
+        """
+        parts = ["RunConfig("]
+        if self.model is not None:
+            model_name = self.model if isinstance(self.model, str) else type(self.model).__name__
+            parts.append(f"model={model_name!r}")
+        if self.workflow_name != "Agent workflow":
+            parts.append(f"workflow_name={self.workflow_name!r}")
+        if self.tracing_disabled:
+            parts.append("tracing_disabled=True")
+        if self.nest_handoff_history is False:
+            parts.append("nest_handoff_history=False")
+        if self.input_guardrails:
+            parts.append(f"input_guardrails=[{len(self.input_guardrails)} items]")
+        if self.output_guardrails:
+            parts.append(f"output_guardrails=[{len(self.output_guardrails)} items]")
+        if self.trace_id:
+            parts.append(f"trace_id={self.trace_id!r}")
+        if self.group_id:
+            parts.append(f"group_id={self.group_id!r}")
+
+        if len(parts) == 1:
+            return "RunConfig()"
+        return ", ".join(parts) + ")"
+
+    def copy(self, **overrides: Any) -> "RunConfig":
+        """Create a copy of this RunConfig with optional field overrides.
+
+        Args:
+            **overrides: Field values to override in the copy.
+
+        Returns:
+            A new RunConfig with the specified overrides applied.
+
+        Example:
+            >>> config = RunConfig(workflow_name="Base", tracing_disabled=True)
+            >>> new_config = config.copy(workflow_name="Derived")
+        """
+        from dataclasses import fields
+
+        current_values = {f.name: getattr(self, f.name) for f in fields(self)}
+        current_values.update(overrides)
+        return RunConfig(**current_values)
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
