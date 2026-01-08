@@ -16,16 +16,23 @@ if (-not $repoRoot) {
 
 Set-Location $repoRoot
 
-Write-Host "Running make format..."
-& make format
+function Invoke-MakeStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$Step
+    )
 
-Write-Host "Running make lint..."
-& make lint
+    Write-Host "Running make $Step..."
+    & make $Step
 
-Write-Host "Running make mypy..."
-& make mypy
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "verify-changes: make $Step failed with exit code $LASTEXITCODE."
+        exit $LASTEXITCODE
+    }
+}
 
-Write-Host "Running make tests..."
-& make tests
+Invoke-MakeStep -Step "format"
+Invoke-MakeStep -Step "lint"
+Invoke-MakeStep -Step "mypy"
+Invoke-MakeStep -Step "tests"
 
 Write-Host "verify-changes: all commands passed."
