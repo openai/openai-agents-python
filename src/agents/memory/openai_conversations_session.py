@@ -71,9 +71,8 @@ class OpenAIConversationsSession(SessionABC):
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         session_id = await self._get_session_id()
 
-        settings_limit = self.session_settings.limit if self.session_settings else None
-        session_limit = limit if limit is not None else settings_limit
-        
+        session_limit = self._get_session_limit(limit)
+
         all_items = []
         if session_limit is None:
             async for item in self._openai_client.conversations.items.list(

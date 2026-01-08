@@ -3,9 +3,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from .session_settings import SessionSettings
+
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
-    from .session_settings import SessionSettings
 
 
 @runtime_checkable
@@ -100,3 +101,8 @@ class SessionABC(ABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         ...
+
+    def _get_session_limit(self, explicit_limit: int | None) -> int | None:
+        """Get the limit for session operations."""
+        settings = getattr(self, "session_settings", None)
+        return SessionSettings.get_limit(explicit_limit, settings)

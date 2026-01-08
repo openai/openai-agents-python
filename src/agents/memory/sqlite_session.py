@@ -122,8 +122,7 @@ class SQLiteSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        settings_limit = self.session_settings.limit if self.session_settings else None
-        session_limit = limit if limit is not None else settings_limit
+        session_limit = self._get_session_limit(limit)
 
         def _get_items_sync():
             conn = self._get_connection()

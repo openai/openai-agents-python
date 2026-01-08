@@ -198,8 +198,7 @@ class SQLAlchemySession(SessionABC):
         """
         await self._ensure_tables()
 
-        settings_limit = self.session_settings.limit if self.session_settings else None
-        session_limit = limit if limit is not None else settings_limit
+        session_limit = self._get_session_limit(limit)
 
         async with self._session_factory() as sess:
             if session_limit is None:
