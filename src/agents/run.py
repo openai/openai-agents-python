@@ -1976,16 +1976,6 @@ class AgentRunner:
         if session is None:
             return input
 
-        # If the user doesn't specify an input callback and pass a list as input
-        if isinstance(input, list) and not session_input_callback:
-            raise UserError(
-                "When using session memory, list inputs require a "
-                "`RunConfig.session_input_callback` to define how they should be merged "
-                "with the conversation history. If you don't want to use a callback, "
-                "provide your input as a string instead, or disable session memory "
-                "(session=None) and pass a list to manage the history manually."
-            )
-
         # Get previous conversation history
         history = await session.get_items()
 
@@ -1993,6 +1983,8 @@ class AgentRunner:
         new_input_list = ItemHelpers.input_to_new_input_list(input)
 
         if session_input_callback is None:
+            # Historically we rejected list inputs without an explicit callback to avoid
+            # ambiguous merges; the default now appends new items to history for ergonomics.
             return history + new_input_list
         elif callable(session_input_callback):
             res = session_input_callback(history, new_input_list)
