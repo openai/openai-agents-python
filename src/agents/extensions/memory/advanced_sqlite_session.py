@@ -13,6 +13,7 @@ from agents.usage import Usage
 
 from ...items import TResponseInputItem
 from ...memory import SQLiteSession
+from ...memory.session_settings import SessionSettings, resolve_session_limit
 
 
 class AdvancedSQLiteSession(SQLiteSession):
@@ -25,6 +26,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         db_path: str | Path = ":memory:",
         create_tables: bool = False,
         logger: logging.Logger | None = None,
+        session_settings: SessionSettings | None = None,
         **kwargs,
     ):
         """Initialize the AdvancedSQLiteSession.
@@ -36,7 +38,12 @@ class AdvancedSQLiteSession(SQLiteSession):
             logger: The logger to use. Defaults to the module logger
             **kwargs: Additional keyword arguments to pass to the superclass
         """  # noqa: E501
-        super().__init__(session_id, db_path, **kwargs)
+        super().__init__(
+            session_id=session_id,
+            db_path=db_path,
+            session_settings=session_settings,
+            **kwargs,
+        )
         if create_tables:
             self._init_structure_tables()
         self._current_branch_id = "main"
@@ -132,12 +139,14 @@ class AdvancedSQLiteSession(SQLiteSession):
         """Get items from current or specified branch.
 
         Args:
-            limit: Maximum number of items to return. If None, returns all items.
+            limit: Maximum number of items to return. If None, uses session_settings.limit.
             branch_id: Branch to get items from. If None, uses current branch.
 
         Returns:
             List of conversation items from the specified branch.
         """
+        session_limit = resolve_session_limit(limit, self.session_settings)
+
         if branch_id is None:
             branch_id = self._current_branch_id
 
@@ -148,7 +157,7 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # TODO: Refactor SQLiteSession to use asyncio.Lock instead of threading.Lock and update this code  # noqa: E501
                 with self._lock if self._is_memory_db else threading.Lock():
                     with closing(conn.cursor()) as cursor:
-                        if limit is None:
+                        if session_limit is None:
                             cursor.execute(
                                 """
                                 SELECT m.message_data
@@ -169,11 +178,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                                 ORDER BY s.sequence_number DESC
                                 LIMIT ?
                             """,
-                                (self.session_id, branch_id, limit),
+                                (self.session_id, branch_id, session_limit),
                             )
 
                         rows = cursor.fetchall()
-                        if limit is not None:
+                        if session_limit is not None:
                             rows = list(reversed(rows))
 
                     items = []
@@ -194,7 +203,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             with self._lock if self._is_memory_db else threading.Lock():
                 with closing(conn.cursor()) as cursor:
                     # Get message IDs in correct order for this branch
-                    if limit is None:
+                    if session_limit is None:
                         cursor.execute(
                             """
                             SELECT m.message_data
@@ -215,11 +224,11 @@ class AdvancedSQLiteSession(SQLiteSession):
                             ORDER BY s.sequence_number DESC
                             LIMIT ?
                         """,
-                            (self.session_id, branch_id, limit),
+                            (self.session_id, branch_id, session_limit),
                         )
 
                     rows = cursor.fetchall()
-                    if limit is not None:
+                    if session_limit is not None:
                         rows = list(reversed(rows))
 
                 items = []

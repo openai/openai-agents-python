@@ -38,6 +38,7 @@ from typing_extensions import Literal, TypedDict, TypeGuard
 
 from ...items import TResponseInputItem
 from ...memory.session import SessionABC
+from ...memory.session_settings import SessionSettings
 
 
 class EncryptedEnvelope(TypedDict):
@@ -134,6 +135,16 @@ class EncryptedSession(SessionABC):
 
     def __getattr__(self, name):
         return getattr(self.underlying_session, name)
+
+    @property
+    def session_settings(self) -> SessionSettings | None:
+        """Get session settings from the underlying session."""
+        return self.underlying_session.session_settings
+
+    @session_settings.setter
+    def session_settings(self, value: SessionSettings | None) -> None:
+        """Set session settings on the underlying session."""
+        self.underlying_session.session_settings = value
 
     def _wrap(self, item: TResponseInputItem) -> EncryptedEnvelope:
         if isinstance(item, dict):

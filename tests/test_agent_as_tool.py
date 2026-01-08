@@ -19,6 +19,7 @@ from agents import (
     RunHooks,
     Runner,
     Session,
+    SessionSettings,
     TResponseInputItem,
 )
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
@@ -300,6 +301,7 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
     class DummySession(Session):
         session_id = "sess_123"
+        session_settings = SessionSettings()
 
         async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
             return []

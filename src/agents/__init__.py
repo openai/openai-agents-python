@@ -65,6 +65,7 @@ from .memory import (
     OpenAIConversationsSession,
     Session,
     SessionABC,
+    SessionSettings,
     SQLiteSession,
 )
 from .model_settings import ModelSettings
@@ -289,6 +290,7 @@ __all__ = [
     "AgentHooks",
     "Session",
     "SessionABC",
+    "SessionSettings",
     "SQLiteSession",
     "OpenAIConversationsSession",
     "AgentHookContext",
