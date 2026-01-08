@@ -3,7 +3,8 @@ from __future__ import annotations
 import io
 import logging
 
-from agents.tracing.provider import _safe_debug, logger
+from agents.logger import logger
+from agents.tracing.provider import _safe_debug
 
 
 class _CapturingHandler(logging.Handler):
