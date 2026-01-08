@@ -148,8 +148,8 @@ class RedisSession(SessionABC):
         Returns:
             List of input items representing the conversation history
         """
-        # Use session settings limit if no explicit limit provided
-        session_limit = limit if limit is not None else self.session_settings.limit
+        settings_limit = self.session_settings.limit if self.session_settings else None
+        session_limit = limit if limit is not None else settings_limit
 
         async with self._lock:
             if session_limit is None:

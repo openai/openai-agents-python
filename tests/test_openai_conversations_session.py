@@ -471,4 +471,5 @@ class TestOpenAIConversationsSessionSettings:
             openai_client=mock_openai_client, session_settings=SessionSettings(limit=5)
         )
 
+        assert session.session_settings is not None
         assert session.session_settings.limit == 5

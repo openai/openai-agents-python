@@ -832,6 +832,7 @@ async def test_session_settings_constructor():
         )
 
     try:
+        assert session.session_settings is not None
         assert session.session_settings.limit == 5
     finally:
         await session.close()
@@ -851,6 +852,7 @@ async def test_session_settings_from_url():
     try:
         if not await session.ping():
             pytest.skip("Redis server not available")
+        assert session.session_settings is not None
         assert session.session_settings.limit == 10
     finally:
         await session.close()

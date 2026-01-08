@@ -137,12 +137,12 @@ class EncryptedSession(SessionABC):
         return getattr(self.underlying_session, name)
 
     @property
-    def session_settings(self) -> SessionSettings:
+    def session_settings(self) -> SessionSettings | None:
         """Get session settings from the underlying session."""
         return self.underlying_session.session_settings
 
     @session_settings.setter
-    def session_settings(self, value: SessionSettings) -> None:
+    def session_settings(self, value: SessionSettings | None) -> None:
         """Set session settings on the underlying session."""
         self.underlying_session.session_settings = value
 

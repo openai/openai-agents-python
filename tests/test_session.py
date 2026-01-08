@@ -592,6 +592,7 @@ async def test_session_settings_constructor():
 
     session = SQLiteSession("constructor_settings_test", session_settings=SessionSettings(limit=5))
 
+    assert session.session_settings is not None
     assert session.session_settings.limit == 5
 
     session.close()

@@ -863,6 +863,7 @@ async def test_session_settings_constructor(fake_dapr_client: FakeDaprClient):
     )
 
     try:
+        assert session.session_settings is not None
         assert session.session_settings.limit == 5
     finally:
         await session.close()

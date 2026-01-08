@@ -353,6 +353,7 @@ async def test_session_settings_delegated_to_underlying(encryption_key: str):
     )
 
     # session_settings should be accessible through EncryptedSession
+    assert session.session_settings is not None
     assert session.session_settings.limit == 5
 
     underlying.close()
