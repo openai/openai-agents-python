@@ -33,7 +33,7 @@ The Agents SDK delivers a focused set of Python primitives—agents, tools, guar
 - [Voice quickstart](https://openai.github.io/openai-agents-python/voice/quickstart/): Build an end-to-end voice assistant with streaming transcription, text-to-speech, and event-driven responses.
 - [Voice pipeline](https://openai.github.io/openai-agents-python/voice/pipeline/): Customize audio capture, buffering, model invocation, and playback in voice-first experiences.
 - [Voice tracing](https://openai.github.io/openai-agents-python/voice/tracing/): Inspect voice session traces, latency breakdowns, and audio event timelines.
-- [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/): Launch realtime agents over WebRTC or websockets, subscribe to events, and manage low-latency execution.
+- [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/): Launch realtime agents over websockets (WebRTC is not available in the Python SDK), subscribe to events, and manage low-latency execution.
 - [Realtime guide](https://openai.github.io/openai-agents-python/realtime/guide/): Deep dive into realtime session lifecycle, event schemas, concurrency, and backpressure handling.
 
 ## Models and Provider Integrations

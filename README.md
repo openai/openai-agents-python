@@ -35,7 +35,7 @@ For Redis session support, install with the optional `redis` group: `pip install
 
 ### uv
 
-If you're familiar with [uv](https://docs.astral.sh/uv/), using the tool would be even similar:
+If you're familiar with [uv](https://docs.astral.sh/uv/), installing the package would be even easier:
 
 ```bash
 uv init

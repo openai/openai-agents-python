@@ -11,7 +11,12 @@ from agents import (
     FunctionTool,
     ModelBehaviorError,
     RunContextWrapper,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    ToolOutputGuardrailData,
     function_tool,
+    tool_input_guardrail,
+    tool_output_guardrail,
 )
 from agents.tool import default_tool_error_function
 from agents.tool_context import ToolContext
@@ -94,6 +99,21 @@ class Bar(TypedDict):
 
 def complex_args_function(foo: Foo, bar: Bar, baz: str = "hello"):
     return f"{foo.a + foo.b} {bar['x']}{bar['y']} {baz}"
+
+
+@tool_input_guardrail
+def reject_args_guardrail(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+    """Reject tool calls for test purposes."""
+    return ToolGuardrailFunctionOutput.reject_content(
+        message="blocked",
+        output_info={"tool": data.context.tool_name},
+    )
+
+
+@tool_output_guardrail
+def allow_output_guardrail(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+    """Allow tool outputs for test purposes."""
+    return ToolGuardrailFunctionOutput.allow(output_info={"echo": data.output})
 
 
 @pytest.mark.asyncio
@@ -359,3 +379,26 @@ async def test_async_failure_error_function_is_awaited() -> None:
     ctx = ToolContext(None, tool_name=boom.name, tool_call_id="boom", tool_arguments="{}")
     result = await boom.on_invoke_tool(ctx, "{}")
     assert result.startswith("handled:")
+
+
+def test_function_tool_accepts_guardrail_arguments():
+    tool = function_tool(
+        simple_function,
+        tool_input_guardrails=[reject_args_guardrail],
+        tool_output_guardrails=[allow_output_guardrail],
+    )
+
+    assert tool.tool_input_guardrails == [reject_args_guardrail]
+    assert tool.tool_output_guardrails == [allow_output_guardrail]
+
+
+def test_function_tool_decorator_accepts_guardrail_arguments():
+    @function_tool(
+        tool_input_guardrails=[reject_args_guardrail],
+        tool_output_guardrails=[allow_output_guardrail],
+    )
+    def guarded(a: int) -> int:
+        return a
+
+    assert guarded.tool_input_guardrails == [reject_args_guardrail]
+    assert guarded.tool_output_guardrails == [allow_output_guardrail]

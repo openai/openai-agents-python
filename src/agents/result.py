@@ -306,6 +306,7 @@ class RunResultStreaming(RunResultBase):
         - A MaxTurnsExceeded exception if the agent exceeds the max_turns limit.
         - A GuardrailTripwireTriggered exception if a guardrail is tripped.
         """
+        cancelled = False
         try:
             while True:
                 self._check_errors()
@@ -320,7 +321,9 @@ class RunResultStreaming(RunResultBase):
                 try:
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
-                    break
+                    cancelled = True
+                    self.cancel()
+                    raise
 
                 if isinstance(item, QueueCompleteSentinel):
                     # Await input guardrails if they are still running, so late
@@ -337,11 +340,16 @@ class RunResultStreaming(RunResultBase):
                 yield item
                 self._event_queue.task_done()
         finally:
-            # Ensure main execution completes before cleanup to avoid race conditions
-            # with session operations
-            await self._await_task_safely(self._run_impl_task)
-            # Safely terminate all background tasks after main execution has finished
-            self._cleanup_tasks()
+            if cancelled:
+                # Cancellation should return promptly, so avoid waiting on long-running tasks.
+                # Tasks have already been cancelled above.
+                self._cleanup_tasks()
+            else:
+                # Ensure main execution completes before cleanup to avoid race conditions
+                # with session operations
+                await self._await_task_safely(self._run_impl_task)
+                # Safely terminate all background tasks after main execution has finished
+                self._cleanup_tasks()
 
         if self._stored_exception:
             raise self._stored_exception

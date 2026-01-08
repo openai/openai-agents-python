@@ -75,7 +75,7 @@ from .lifecycle import RunHooks
 from .logger import logger
 from .model_settings import ModelSettings
 from .models.interface import ModelTracing
-from .run_context import RunContextWrapper, TContext
+from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .stream_events import RunItemStreamEvent, StreamEvent
 from .tool import (
     ApplyPatchTool,
@@ -95,6 +95,7 @@ from .tool import (
     ShellResult,
     ShellTool,
     Tool,
+    resolve_computer,
 )
 from .tool_context import ToolContext
 from .tool_guardrails import (
@@ -106,6 +107,7 @@ from .tool_guardrails import (
 from .tracing import (
     SpanError,
     Trace,
+    TracingConfig,
     function_span,
     get_current_trace,
     guardrail_span,
@@ -159,7 +161,7 @@ class ToolRunFunction:
 @dataclass
 class ToolRunComputerAction:
     tool_call: ResponseComputerToolCall
-    computer_tool: ComputerTool
+    computer_tool: ComputerTool[Any]
 
 
 @dataclass
@@ -460,6 +462,22 @@ class RunImpl:
             return dataclasses.replace(model_settings, tool_choice=None)
 
         return model_settings
+
+    @classmethod
+    async def initialize_computer_tools(
+        cls,
+        *,
+        tools: list[Tool],
+        context_wrapper: RunContextWrapper[TContext],
+    ) -> None:
+        """Resolve computer tools ahead of model invocation so each run gets its own instance."""
+        computer_tools = [tool for tool in tools if isinstance(tool, ComputerTool)]
+        if not computer_tools:
+            return
+
+        await asyncio.gather(
+            *(resolve_computer(tool=tool, run_context=context_wrapper) for tool in computer_tools)
+        )
 
     @classmethod
     def process_model_response(
@@ -1341,7 +1359,9 @@ class RunImpl:
         tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     ) -> SingleStepResult:
         # Run the on_end hooks
-        await cls.run_final_output_hooks(agent, hooks, context_wrapper, final_output)
+        await cls.run_final_output_hooks(
+            agent, hooks, context_wrapper, original_input, final_output
+        )
 
         return SingleStepResult(
             original_input=original_input,
@@ -1359,11 +1379,17 @@ class RunImpl:
         agent: Agent[TContext],
         hooks: RunHooks[TContext],
         context_wrapper: RunContextWrapper[TContext],
+        original_input: str | list[TResponseInputItem],
         final_output: Any,
     ):
+        agent_hook_context = AgentHookContext(
+            context=context_wrapper.context,
+            usage=context_wrapper.usage,
+            turn_input=ItemHelpers.input_to_new_input_list(original_input),
+        )
         await asyncio.gather(
-            hooks.on_agent_end(context_wrapper, agent, final_output),
-            agent.hooks.on_end(context_wrapper, agent, final_output)
+            hooks.on_agent_end(agent_hook_context, agent, final_output),
+            agent.hooks.on_end(agent_hook_context, agent, final_output)
             if agent.hooks
             else _coro.noop_coroutine(),
         )
@@ -1490,6 +1516,7 @@ class TraceCtxManager:
         group_id: str | None,
         metadata: dict[str, Any] | None,
         disabled: bool,
+        tracing: TracingConfig | None = None,
     ):
         self.trace: Trace | None = None
         self.workflow_name = workflow_name
@@ -1497,6 +1524,7 @@ class TraceCtxManager:
         self.group_id = group_id
         self.metadata = metadata
         self.disabled = disabled
+        self.tracing = tracing
 
     def __enter__(self) -> TraceCtxManager:
         current_trace = get_current_trace()
@@ -1506,6 +1534,7 @@ class TraceCtxManager:
                 trace_id=self.trace_id,
                 group_id=self.group_id,
                 metadata=self.metadata,
+                tracing=self.tracing,
                 disabled=self.disabled,
             )
             self.trace.start(mark_as_current=True)
@@ -1529,10 +1558,11 @@ class ComputerAction:
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
     ) -> RunItem:
+        computer = await resolve_computer(tool=action.computer_tool, run_context=context_wrapper)
         output_func = (
-            cls._get_screenshot_async(action.computer_tool.computer, action.tool_call)
-            if isinstance(action.computer_tool.computer, AsyncComputer)
-            else cls._get_screenshot_sync(action.computer_tool.computer, action.tool_call)
+            cls._get_screenshot_async(computer, action.tool_call)
+            if isinstance(computer, AsyncComputer)
+            else cls._get_screenshot_sync(computer, action.tool_call)
         )
 
         _, _, output = await asyncio.gather(

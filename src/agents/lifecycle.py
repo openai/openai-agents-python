@@ -4,7 +4,7 @@ from typing_extensions import TypeVar
 
 from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
-from .run_context import RunContextWrapper, TContext
+from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import Tool
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
@@ -34,17 +34,28 @@ class RunHooksBase(Generic[TContext, TAgent]):
         """Called immediately after the LLM call returns for this agent."""
         pass
 
-    async def on_agent_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
-        """Called before the agent is invoked. Called each time the current agent changes."""
+    async def on_agent_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
+        """Called before the agent is invoked. Called each time the current agent changes.
+
+        Args:
+            context: The agent hook context.
+            agent: The agent that is about to be invoked.
+        """
         pass
 
     async def on_agent_end(
         self,
-        context: RunContextWrapper[TContext],
+        context: AgentHookContext[TContext],
         agent: TAgent,
         output: Any,
     ) -> None:
-        """Called when the agent produces a final output."""
+        """Called when the agent produces a final output.
+
+        Args:
+            context: The agent hook context.
+            agent: The agent that produced the output.
+            output: The final output produced by the agent.
+        """
         pass
 
     async def on_handoff(
@@ -83,18 +94,29 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     Subclass and override the methods you need.
     """
 
-    async def on_start(self, context: RunContextWrapper[TContext], agent: TAgent) -> None:
+    async def on_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this
-        agent."""
+        agent.
+
+        Args:
+            context: The agent hook context.
+            agent: This agent instance.
+        """
         pass
 
     async def on_end(
         self,
-        context: RunContextWrapper[TContext],
+        context: AgentHookContext[TContext],
         agent: TAgent,
         output: Any,
     ) -> None:
-        """Called when the agent produces a final output."""
+        """Called when the agent produces a final output.
+
+        Args:
+            context: The agent hook context.
+            agent: This agent instance.
+            output: The final output produced by the agent.
+        """
         pass
 
     async def on_handoff(

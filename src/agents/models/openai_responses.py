@@ -21,6 +21,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 
 from .. import _debug
 from ..agent_output import AgentOutputSchemaBase
+from ..computer import AsyncComputer, Computer
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
@@ -43,6 +44,7 @@ from ..tracing import SpanError, response_span
 from ..usage import Usage
 from ..util._json import _to_dump_compatible
 from ..version import __version__
+from .fake_id import FAKE_RESPONSES_ID
 from .interface import Model, ModelTracing
 
 if TYPE_CHECKING:
@@ -253,6 +255,7 @@ class OpenAIResponsesModel(Model):
     ) -> Response | AsyncStream[ResponseStreamEvent]:
         list_input = ItemHelpers.input_to_new_input_list(input)
         list_input = _to_dump_compatible(list_input)
+        list_input = self._remove_openai_responses_api_incompatible_fields(list_input)
 
         if model_settings.parallel_tool_calls and tools:
             parallel_tool_calls: bool | Omit = True
@@ -341,6 +344,52 @@ class OpenAIResponsesModel(Model):
             **extra_args,
         )
         return cast(Union[Response, AsyncStream[ResponseStreamEvent]], response)
+
+    def _remove_openai_responses_api_incompatible_fields(self, list_input: list[Any]) -> list[Any]:
+        """
+        Remove or transform input items that are incompatible with the OpenAI Responses API.
+
+        This data transformation does not always guarantee that items from other provider
+        interactions are accepted by the OpenAI Responses API.
+
+        Only items with truthy provider_data are processed.
+        This function handles the following incompatibilities:
+        - provider_data: Removes fields specific to other providers (e.g., Gemini, Claude).
+        - Fake IDs: Removes temporary IDs (FAKE_RESPONSES_ID) that should not be sent to OpenAI.
+        - Reasoning items: Filters out provider-specific reasoning items entirely.
+        """
+        # Early return optimization: if no item has provider_data, return unchanged.
+        has_provider_data = any(
+            isinstance(item, dict) and item.get("provider_data") for item in list_input
+        )
+        if not has_provider_data:
+            return list_input
+
+        result = []
+        for item in list_input:
+            cleaned = self._clean_item_for_openai(item)
+            if cleaned is not None:
+                result.append(cleaned)
+        return result
+
+    def _clean_item_for_openai(self, item: Any) -> Any | None:
+        # Only process dict items
+        if not isinstance(item, dict):
+            return item
+
+        # Filter out reasoning items with provider_data (provider-specific reasoning).
+        if item.get("type") == "reasoning" and item.get("provider_data"):
+            return None
+
+        # Remove fake response ID.
+        if item.get("id") == FAKE_RESPONSES_ID:
+            del item["id"]
+
+        # Remove provider_data field.
+        if "provider_data" in item:
+            del item["provider_data"]
+
+        return item
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -491,11 +540,18 @@ class Converter:
 
             includes = "file_search_call.results" if tool.include_search_results else None
         elif isinstance(tool, ComputerTool):
+            computer = tool.computer
+            if not isinstance(computer, (Computer, AsyncComputer)):
+                raise UserError(
+                    "Computer tool is not initialized for serialization. Call "
+                    "resolve_computer({ tool, run_context }) with a run context first "
+                    "when building payloads manually."
+                )
             converted_tool = {
                 "type": "computer_use_preview",
-                "environment": tool.computer.environment,
-                "display_width": tool.computer.dimensions[0],
-                "display_height": tool.computer.dimensions[1],
+                "environment": computer.environment,
+                "display_width": computer.dimensions[0],
+                "display_height": computer.dimensions[1],
             }
             includes = None
         elif isinstance(tool, HostedMCPTool):

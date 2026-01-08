@@ -91,6 +91,7 @@ class VoicePipeline:
             trace_id=None,  # Automatically generated
             group_id=self.config.group_id,
             metadata=self.config.trace_metadata,
+            tracing=self.config.tracing,
             disabled=self.config.tracing_disabled,
         ):
             input_text = await self._process_audio_input(audio_input)
@@ -119,6 +120,7 @@ class VoicePipeline:
             trace_id=None,
             group_id=self.config.group_id,
             metadata=self.config.trace_metadata,
+            tracing=self.config.tracing,
             disabled=self.config.tracing_disabled,
         ):
             output = StreamedAudioResult(
