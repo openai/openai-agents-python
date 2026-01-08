@@ -8,7 +8,7 @@ from typing import Any, cast
 from typing_extensions import assert_never
 
 from ..agent import Agent
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
@@ -493,7 +493,12 @@ class RealtimeSession(RealtimeModelListener):
                 )
             )
         else:
-            raise ModelBehaviorError(f"Tool {event.name} not found")
+            await self._put_event(
+                RealtimeError(
+                    info=self._event_info,
+                    error={"message": f"Tool {event.name} not found"},
+                )
+            )
 
     @classmethod
     def _get_new_history(

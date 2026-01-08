@@ -123,7 +123,16 @@ class OpenAIChatCompletionsModel(Model):
                 "output_tokens": usage.output_tokens,
             }
 
-            items = Converter.message_to_output_items(message) if message is not None else []
+            # Build provider_data for provider_specific_fields
+            provider_data = {"model": self.model}
+            if message is not None and hasattr(response, "id"):
+                provider_data["response_id"] = response.id
+
+            items = (
+                Converter.message_to_output_items(message, provider_data=provider_data)
+                if message is not None
+                else []
+            )
 
             logprob_models = None
             if first_choice and first_choice.logprobs and first_choice.logprobs.content:
@@ -187,7 +196,9 @@ class OpenAIChatCompletionsModel(Model):
             )
 
             final_response: Response | None = None
-            async for chunk in ChatCmplStreamHandler.handle_stream(response, stream):
+            async for chunk in ChatCmplStreamHandler.handle_stream(
+                response, stream, model=self.model
+            ):
                 yield chunk
 
                 if chunk.type == "response.completed":
@@ -245,7 +256,7 @@ class OpenAIChatCompletionsModel(Model):
         stream: bool = False,
         prompt: ResponsePromptParam | None = None,
     ) -> ChatCompletion | tuple[Response, AsyncStream[ChatCompletionChunk]]:
-        converted_messages = Converter.items_to_messages(input)
+        converted_messages = Converter.items_to_messages(input, model=self.model)
 
         if system_instructions:
             converted_messages.insert(
