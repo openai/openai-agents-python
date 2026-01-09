@@ -701,7 +701,10 @@ class AgentRunner:
                                         else []
                                     )
                                     await save_result_to_session(
-                                        session, input_items_for_save_1, generated_items, run_state
+                                        session,
+                                        input_items_for_save_1,
+                                        turn_result.new_step_items,
+                                        run_state,
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return result
@@ -1034,7 +1037,7 @@ class AgentRunner:
                                     await save_result_to_session(
                                         session,
                                         input_items_for_save_interruption,
-                                        generated_items,
+                                        turn_result.new_step_items,
                                         run_state,
                                     )
                             if not model_responses or (

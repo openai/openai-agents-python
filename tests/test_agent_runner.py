@@ -50,6 +50,7 @@ from agents.run_internal.items import (
 )
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
+from agents.run_internal.run_steps import NextStepFinalOutput, SingleStepResult
 from agents.run_internal.session_persistence import (
     prepare_input_with_session,
     rewind_session_items,
@@ -1063,6 +1064,85 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
 
     assert run_state._current_turn_persisted_item_count == 0
     assert session.saved_items == []
+
+
+@pytest.mark.asyncio
+async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure only per-turn new_step_items are persisted to the session."""
+
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+
+    pre_item = _DummyRunItem(
+        {"type": "message", "role": "assistant", "content": "old"}, "message_output_item"
+    )
+    new_item = _DummyRunItem(
+        {"type": "message", "role": "assistant", "content": "new"}, "message_output_item"
+    )
+    new_response = ModelResponse(output=[], usage=Usage(), response_id="resp-1")
+    turn_result = SingleStepResult(
+        original_input="hello",
+        model_response=new_response,
+        pre_step_items=[cast(RunItem, pre_item)],
+        new_step_items=[cast(RunItem, new_item)],
+        next_step=NextStepFinalOutput(output="done"),
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+    )
+
+    calls: list[list[RunItem]] = []
+
+    from agents.run_internal import session_persistence as sp
+
+    real_save_result = sp.save_result_to_session
+
+    async def save_wrapper(
+        sess: Any, original_input: Any, new_items: list[RunItem], run_state: RunState | None = None
+    ) -> None:
+        calls.append(list(new_items))
+        await real_save_result(sess, original_input, new_items, run_state)
+
+    async def fake_run_single_turn(**_: Any) -> SingleStepResult:
+        return turn_result
+
+    async def fake_run_output_guardrails(*_: Any, **__: Any) -> list[Any]:
+        return []
+
+    async def noop_initialize_computer_tools(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr("agents.run.save_result_to_session", save_wrapper)
+    monkeypatch.setattr(
+        "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
+    )
+    monkeypatch.setattr("agents.run.run_single_turn", fake_run_single_turn)
+    monkeypatch.setattr("agents.run_internal.run_loop.run_single_turn", fake_run_single_turn)
+    monkeypatch.setattr("agents.run.run_output_guardrails", fake_run_output_guardrails)
+    monkeypatch.setattr(
+        "agents.run_internal.run_loop.run_output_guardrails", fake_run_output_guardrails
+    )
+
+    async def fake_get_all_tools(*_: Any, **__: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr("agents.run.get_all_tools", fake_get_all_tools)
+    monkeypatch.setattr("agents.run_internal.run_loop.get_all_tools", fake_get_all_tools)
+    monkeypatch.setattr("agents.run.initialize_computer_tools", noop_initialize_computer_tools)
+    monkeypatch.setattr(
+        "agents.run_internal.run_loop.initialize_computer_tools", noop_initialize_computer_tools
+    )
+
+    result = await Runner.run(agent, input="hello", session=session)
+
+    assert result.final_output == "done"
+    # First save writes the user input; second save should contain only the new_step_items.
+    assert len(calls) >= 2
+    assert calls[-1] == [cast(RunItem, new_item)]
+
+    items = await session.get_items()
+    assert len(items) == 2
+    assert any("new" in cast(dict[str, Any], item).get("content", "") for item in items)
+    assert not any("old" in cast(dict[str, Any], item).get("content", "") for item in items)
 
 
 @pytest.mark.asyncio
