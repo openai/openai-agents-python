@@ -9,8 +9,8 @@ from typing import cast
 
 import aiosqlite
 
-from ..items import TResponseInputItem
-from .session import SessionABC
+from ...items import TResponseInputItem
+from ...memory import SessionABC
 
 
 class AsyncSQLiteSession(SessionABC):

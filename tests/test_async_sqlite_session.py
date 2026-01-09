@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from agents import AsyncSQLiteSession, TResponseInputItem
+pytest.importorskip("aiosqlite")  # Skip tests if aiosqlite is not installed
+from agents import TResponseInputItem
+from agents.extensions.memory import AsyncSQLiteSession
 
 
 @pytest.mark.asyncio
