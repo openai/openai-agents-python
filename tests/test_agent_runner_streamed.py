@@ -23,7 +23,8 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents.items import RunItem, ToolApprovalItem
+from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
+from agents.memory.openai_conversations_session import OpenAIConversationsSession
 from agents.run import RunConfig
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
@@ -564,6 +565,113 @@ async def test_input_guardrail_streamed_does_not_save_assistant_message_to_sessi
     first_item = cast(dict[str, Any], items[0])
     assert "role" in first_item
     assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_stream_input_persistence_strips_ids_for_openai_conversation_session():
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved: list[list[TResponseInputItem]] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            for item in items:
+                if isinstance(item, dict):
+                    assert "id" not in item, "IDs should be stripped before saving"
+            self.saved.append(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("ok")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+    )
+
+    run_config = RunConfig(session_input_callback=lambda existing, new: existing + new)
+
+    input_items = [
+        cast(
+            TResponseInputItem,
+            {"id": "message-1", "type": "message", "role": "user", "content": "hello"},
+        )
+    ]
+
+    result = Runner.run_streamed(agent, input=input_items, session=session, run_config=run_config)
+    async for _ in result.stream_events():
+        pass
+
+    assert session.saved, "input items should be persisted via save_result_to_session"
+    assert len(session.saved[0]) == 1
+    saved_item = session.saved[0][0]
+    assert isinstance(saved_item, dict)
+    assert "id" not in saved_item, "saved input items should not include IDs"
+
+
+@pytest.mark.asyncio
+async def test_stream_input_persistence_saves_only_new_turn_input(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleListSession()
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("first")],
+            [get_text_message("second")],
+        ]
+    )
+    agent = Agent(name="test", model=model)
+
+    from agents.run_internal import session_persistence as sp
+
+    real_save_result = sp.save_result_to_session
+    input_saves: list[list[TResponseInputItem]] = []
+
+    async def save_wrapper(
+        sess: Any, original_input: Any, new_items: list[RunItem], run_state: Any = None
+    ) -> None:
+        if isinstance(original_input, list) and original_input:
+            input_saves.append(list(original_input))
+        await real_save_result(sess, original_input, new_items, run_state)
+
+    monkeypatch.setattr(
+        "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
+    )
+    monkeypatch.setattr("agents.run_internal.run_loop.save_result_to_session", save_wrapper)
+
+    run_config = RunConfig(session_input_callback=lambda existing, new: existing + new)
+
+    first = Runner.run_streamed(
+        agent, input=[get_text_input_item("hello")], session=session, run_config=run_config
+    )
+    async for _ in first.stream_events():
+        pass
+
+    second = Runner.run_streamed(
+        agent, input=[get_text_input_item("next")], session=session, run_config=run_config
+    )
+    async for _ in second.stream_events():
+        pass
+
+    assert len(input_saves) == 2, "each turn should persist only the turn input once"
+    assert all(len(saved) == 1 for saved in input_saves), (
+        "each persisted input should contain only the new turn items"
+    )
+    first_saved = input_saves[0][0]
+    second_saved = input_saves[1][0]
+    assert isinstance(first_saved, dict) and first_saved.get("content") == "hello"
+    assert isinstance(second_saved, dict) and second_saved.get("content") == "next"
 
 
 @pytest.mark.asyncio
