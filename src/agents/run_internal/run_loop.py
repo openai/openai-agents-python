@@ -1885,6 +1885,7 @@ async def start_streaming(
         hydrate_tool_use_tracker(tool_use_tracker, run_state, starting_agent)
 
     pending_server_items: list[RunItem] | None = None
+    session_input_items_for_persistence: list[TResponseInputItem] | None = None
 
     if is_resumed_state and server_conversation_tracker is not None and run_state is not None:
         session_items: list[TResponseInputItem] | None = None
@@ -1929,6 +1930,7 @@ async def start_streaming(
             streamed_result._original_input_for_persistence = []
             streamed_result._stream_input_persisted = True
         else:
+            session_input_items_for_persistence = session_items_snapshot
             streamed_result._original_input_for_persistence = session_items_snapshot
 
     try:
@@ -2173,14 +2175,16 @@ async def start_streaming(
                     current_turn,
                     current_agent.name,
                 )
-                if session is not None and server_conversation_tracker is None:
-                    try:
-                        streamed_result._original_input_for_persistence = (
-                            ItemHelpers.input_to_new_input_list(streamed_result.input)
-                        )
-                    except Exception:
-                        streamed_result._original_input_for_persistence = []
-                    streamed_result._stream_input_persisted = False
+                if (
+                    session is not None
+                    and server_conversation_tracker is None
+                    and not streamed_result._stream_input_persisted
+                ):
+                    streamed_result._original_input_for_persistence = (
+                        session_input_items_for_persistence
+                        if session_input_items_for_persistence is not None
+                        else []
+                    )
                 turn_result = await run_single_turn_streamed(
                     streamed_result,
                     current_agent,
@@ -2558,7 +2562,7 @@ async def run_single_turn_streamed(
             )
         ]
         if input_items_to_save:
-            await session.add_items(input_items_to_save)
+            await save_result_to_session(session, input_items_to_save, [], streamed_result._state)
 
     previous_response_id = (
         server_conversation_tracker.previous_response_id
