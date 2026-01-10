@@ -589,7 +589,11 @@ class AgentRunner:
                                     else 0
                                 )
                                 await save_result_to_session(
-                                    session, [], turn_result.new_step_items, None
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    None,
+                                    response_id=turn_result.model_response.response_id,
                                 )
                                 if run_state is not None:
                                     run_state._current_turn_persisted_item_count = (
@@ -705,6 +709,7 @@ class AgentRunner:
                                         input_items_for_save_1,
                                         turn_result.new_step_items,
                                         run_state,
+                                        response_id=turn_result.model_response.response_id,
                                     )
                                 result._original_input = copy_input_items(original_input)
                                 return result
@@ -970,14 +975,22 @@ class AgentRunner:
                                 )
                                 if is_resumed_state and run_state is not None:
                                     await save_result_to_session(
-                                        session, [], items_to_save_turn, None
+                                        session,
+                                        [],
+                                        items_to_save_turn,
+                                        None,
+                                        response_id=turn_result.model_response.response_id,
                                     )
                                     run_state._current_turn_persisted_item_count += len(
                                         items_to_save_turn
                                     )
                                 else:
                                     await save_result_to_session(
-                                        session, [], items_to_save_turn, run_state
+                                        session,
+                                        [],
+                                        items_to_save_turn,
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
                                     )
 
                     # After the first resumed turn, treat subsequent turns as fresh
@@ -1039,6 +1052,7 @@ class AgentRunner:
                                         input_items_for_save_interruption,
                                         turn_result.new_step_items,
                                         run_state,
+                                        response_id=turn_result.model_response.response_id,
                                     )
                             if not model_responses or (
                                 model_responses[-1] is not turn_result.model_response

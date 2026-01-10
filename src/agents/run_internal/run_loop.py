@@ -2002,6 +2002,7 @@ async def start_streaming(
                                     [],
                                     turn_result.new_step_items,
                                     streamed_result._state,
+                                    response_id=turn_result.model_response.response_id,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
                                     streamed_result._state._current_turn_persisted_item_count
@@ -2058,6 +2059,7 @@ async def start_streaming(
                                     [],
                                     turn_result.new_step_items,
                                     streamed_result._state,
+                                    response_id=turn_result.model_response.response_id,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
                                     streamed_result._state._current_turn_persisted_item_count
@@ -2255,7 +2257,11 @@ async def start_streaming(
                         )
                         if should_skip_session_save is False:
                             await save_result_to_session(
-                                session, [], turn_result.new_step_items, streamed_result._state
+                                session,
+                                [],
+                                turn_result.new_step_items,
+                                streamed_result._state,
+                                response_id=turn_result.model_response.response_id,
                             )
                             streamed_result._current_turn_persisted_item_count = (
                                 streamed_result._state._current_turn_persisted_item_count
@@ -2270,7 +2276,11 @@ async def start_streaming(
                         )
                         if should_skip_session_save is False:
                             await save_result_to_session(
-                                session, [], turn_result.new_step_items, streamed_result._state
+                                session,
+                                [],
+                                turn_result.new_step_items,
+                                streamed_result._state,
+                                response_id=turn_result.model_response.response_id,
                             )
                             streamed_result._current_turn_persisted_item_count = (
                                 streamed_result._state._current_turn_persisted_item_count
