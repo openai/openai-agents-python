@@ -1250,7 +1250,7 @@ def _parse_tool_guardrail_entry(
     behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior
     if isinstance(behavior_data, dict) and "type" in behavior_data:
         behavior = cast(
-            RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior,
+            Union[RejectContentBehavior, RaiseExceptionBehavior, AllowBehavior],
             behavior_data,
         )
     else:
