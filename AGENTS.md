@@ -151,9 +151,9 @@ make tests
    ```bash
    make build-docs
    ```
-6. When `$code-change-verification` applies, run it to execute the full verification stack before handoff.
+6. When `$code-change-verification` applies, run it to execute the full verification stack before marking work complete.
 7. Commit with concise, imperative messages; keep commits small and focused, then open a pull request.
-8. When reporting code changes as complete, include what you changed plus a draft pull request title and description for your local changes; start the description with prose such as “This pull request resolves/updates/adds …” using a verb that matches the change (you can use bullets later), explain the change background (for bugs, clearly describe the bug, symptoms, or repro; for features, what is needed and why), any behavior changes or considerations to be aware of, and you do not need to mention tests you ran.
+8. When reporting code changes as complete (after substantial code work), invoke `$pr-draft-summary` to generate the required PR summary block with change summary, PR title, and draft description.
 
 ## Pull Request & Commit Guidelines
 
