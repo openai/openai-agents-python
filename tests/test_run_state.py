@@ -70,6 +70,14 @@ from agents.tool import (
     function_tool,
 )
 from agents.tool_context import ToolContext
+from agents.tool_guardrails import (
+    AllowBehavior,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolInputGuardrailResult,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailResult,
+)
 from agents.usage import Usage
 
 from .fake_model import FakeModel
@@ -346,6 +354,61 @@ class TestRunState:
         assert restored_output.output.output_info == {"output": "info"}
         assert restored_output.agent_output == "final"
         assert restored_output.agent.name == agent.name
+
+    @pytest.mark.asyncio
+    async def test_tool_guardrail_results_round_trip(self):
+        """Tool guardrail results survive RunState round-trip."""
+        context: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+        agent = Agent(name="ToolGuardrailAgent")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        tool_input_guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+            guardrail_function=lambda data: ToolGuardrailFunctionOutput(
+                output_info={"input": "info"},
+                behavior=AllowBehavior(type="allow"),
+            ),
+            name="tool_input_guardrail",
+        )
+        tool_output_guardrail: ToolOutputGuardrail[Any] = ToolOutputGuardrail(
+            guardrail_function=lambda data: ToolGuardrailFunctionOutput(
+                output_info={"output": "info"},
+                behavior=AllowBehavior(type="allow"),
+            ),
+            name="tool_output_guardrail",
+        )
+
+        state._tool_input_guardrail_results = [
+            ToolInputGuardrailResult(
+                guardrail=tool_input_guardrail,
+                output=ToolGuardrailFunctionOutput(
+                    output_info={"input": "info"},
+                    behavior=AllowBehavior(type="allow"),
+                ),
+            )
+        ]
+        state._tool_output_guardrail_results = [
+            ToolOutputGuardrailResult(
+                guardrail=tool_output_guardrail,
+                output=ToolGuardrailFunctionOutput(
+                    output_info={"output": "info"},
+                    behavior=AllowBehavior(type="allow"),
+                ),
+            )
+        ]
+
+        restored = await roundtrip_state(agent, state)
+
+        assert len(restored._tool_input_guardrail_results) == 1
+        restored_tool_input = restored._tool_input_guardrail_results[0]
+        assert restored_tool_input.guardrail.get_name() == "tool_input_guardrail"
+        assert restored_tool_input.output.behavior["type"] == "allow"
+        assert restored_tool_input.output.output_info == {"input": "info"}
+
+        assert len(restored._tool_output_guardrail_results) == 1
+        restored_tool_output = restored._tool_output_guardrail_results[0]
+        assert restored_tool_output.guardrail.get_name() == "tool_output_guardrail"
+        assert restored_tool_output.output.behavior["type"] == "allow"
+        assert restored_tool_output.output.output_info == {"output": "info"}
 
     def test_reject_permanently_when_always_reject_option_is_passed(self):
         """Test that reject with always_reject=True sets permanent rejection."""
