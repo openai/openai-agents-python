@@ -225,6 +225,7 @@ async def test_structured_output():
             get_text_input_item("user_message"),
             get_text_input_item("another_message"),
         ],
+        run_config=RunConfig(nest_handoff_history=True),
     )
     async for _ in result.stream_events():
         pass
@@ -707,6 +708,7 @@ async def test_streaming_events():
             get_text_input_item("user_message"),
             get_text_input_item("another_message"),
         ],
+        run_config=RunConfig(nest_handoff_history=True),
     )
     async for event in result.stream_events():
         event_counts[event.type] = event_counts.get(event.type, 0) + 1
