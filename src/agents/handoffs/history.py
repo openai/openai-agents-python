@@ -181,7 +181,7 @@ def _format_transcript_item(item: TResponseInputItem) -> str:
         return f"{prefix}: {content_str}" if content_str else prefix
 
     item_type = item.get("type", "item")
-    rest = {k: v for k, v in item.items() if k != "type"}
+    rest = {k: v for k, v in item.items() if k not in ("type", "provider_data")}
     try:
         serialized = json.dumps(rest, ensure_ascii=False, default=str)
     except TypeError:

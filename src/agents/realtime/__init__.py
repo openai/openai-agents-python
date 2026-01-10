@@ -84,6 +84,7 @@ from .model_inputs import (
 )
 from .openai_realtime import (
     DEFAULT_MODEL_SETTINGS,
+    OpenAIRealtimeSIPModel,
     OpenAIRealtimeWebSocketModel,
     get_api_key,
 )
@@ -176,6 +177,7 @@ __all__ = [
     "RealtimeModelUserInputMessage",
     # OpenAI Realtime
     "DEFAULT_MODEL_SETTINGS",
+    "OpenAIRealtimeSIPModel",
     "OpenAIRealtimeWebSocketModel",
     "get_api_key",
     # Session

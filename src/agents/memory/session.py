@@ -3,6 +3,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from typing_extensions import TypedDict, TypeGuard
+
 if TYPE_CHECKING:
     from ..items import TResponseInputItem
 
@@ -97,3 +99,29 @@ class SessionABC(ABC):
     async def clear_session(self) -> None:
         """Clear all items for this session."""
         ...
+
+
+class OpenAIResponsesCompactionArgs(TypedDict, total=False):
+    """Arguments for the run_compaction method."""
+
+    response_id: str
+    """The ID of the last response to use for compaction."""
+
+    force: bool
+    """Whether to force compaction even if the threshold is not met."""
+
+
+@runtime_checkable
+class OpenAIResponsesCompactionAwareSession(Session, Protocol):
+    """Protocol for session implementations that support responses compaction."""
+
+    async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
+        """Run the compaction process for the session."""
+        ...
+
+
+def is_openai_responses_compaction_aware_session(
+    session: Session | None,
+) -> TypeGuard[OpenAIResponsesCompactionAwareSession]:
+    """Check if a session supports responses compaction."""
+    return isinstance(session, OpenAIResponsesCompactionAwareSession)

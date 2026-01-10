@@ -1,7 +1,47 @@
+from __future__ import annotations
+
+import pytest
 from openai.types.completion_usage import CompletionTokensDetails, PromptTokensDetails
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
+from agents import Agent, Runner
 from agents.usage import RequestUsage, Usage
+from tests.fake_model import FakeModel
+from tests.test_responses import get_text_message
+
+
+@pytest.mark.asyncio
+async def test_runner_run_carries_request_usage_entries() -> None:
+    """Ensure usage produced by the model propagates to RunResult context."""
+    usage = Usage(
+        requests=1,
+        input_tokens=10,
+        output_tokens=5,
+        total_tokens=15,
+        request_usage_entries=[
+            RequestUsage(
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+                input_tokens_details=InputTokensDetails(cached_tokens=0),
+                output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+            )
+        ],
+    )
+    model = FakeModel(initial_output=[get_text_message("done")])
+    model.set_hardcoded_usage(usage)
+    agent = Agent(name="usage-agent", model=model)
+
+    result = await Runner.run(agent, input="hi")
+
+    propagated = result.context_wrapper.usage
+    assert propagated.requests == 1
+    assert propagated.total_tokens == 15
+    assert len(propagated.request_usage_entries) == 1
+    entry = propagated.request_usage_entries[0]
+    assert entry.input_tokens == 10
+    assert entry.output_tokens == 5
+    assert entry.total_tokens == 15
 
 
 def test_usage_add_aggregates_all_fields():

@@ -183,7 +183,11 @@ def test_anthropic_thinking_blocks_with_tool_calls():
         else:
             items_as_dicts.append(cast(dict[str, Any], item))
 
-    messages = Converter.items_to_messages(items_as_dicts, preserve_thinking_blocks=True)  # type: ignore[arg-type]
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
 
     # Find the assistant message with tool calls
     assistant_messages = [
