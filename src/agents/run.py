@@ -384,6 +384,13 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
+            conversation_id = conversation_id or run_state._conversation_id
+            previous_response_id = previous_response_id or run_state._previous_response_id
+            if auto_previous_response_id is False and run_state._auto_previous_response_id:
+                auto_previous_response_id = True
+            run_state._conversation_id = conversation_id
+            run_state._previous_response_id = previous_response_id
+            run_state._auto_previous_response_id = auto_previous_response_id
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
             if isinstance(original_user_input, list):
@@ -442,6 +449,23 @@ class AgentRunner:
             server_conversation_tracker = None
         session_persistence_enabled = session is not None and server_conversation_tracker is None
 
+        def _finalize_conversation_tracking(result: RunResult) -> RunResult:
+            if server_conversation_tracker is not None:
+                result._conversation_id = server_conversation_tracker.conversation_id
+                result._previous_response_id = server_conversation_tracker.previous_response_id
+                result._auto_previous_response_id = (
+                    server_conversation_tracker.auto_previous_response_id
+                )
+                if run_state is not None:
+                    run_state._conversation_id = server_conversation_tracker.conversation_id
+                    run_state._previous_response_id = (
+                        server_conversation_tracker.previous_response_id
+                    )
+                    run_state._auto_previous_response_id = (
+                        server_conversation_tracker.auto_previous_response_id
+                    )
+            return result
+
         if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
             session_items: list[TResponseInputItem] | None = None
             if session is not None:
@@ -499,6 +523,9 @@ class AgentRunner:
                     original_input=original_input,
                     starting_agent=starting_agent,
                     max_turns=max_turns,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
                 )
 
             pending_server_items: list[RunItem] | None = None
@@ -680,7 +707,7 @@ class AgentRunner:
                                         run_state._current_turn_persisted_item_count
                                     )
                                 result._original_input = copy_input_items(original_input)
-                                return result
+                                return _finalize_conversation_tracking(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
                                 continue
@@ -748,7 +775,7 @@ class AgentRunner:
                                         store=store_setting,
                                     )
                                 result._original_input = copy_input_items(original_input)
-                                return result
+                                return _finalize_conversation_tracking(result)
                             elif isinstance(turn_result.next_step, NextStepHandoff):
                                 current_agent = cast(
                                     Agent[TContext], turn_result.next_step.new_agent
@@ -1105,7 +1132,7 @@ class AgentRunner:
                                     store=store_setting,
                                 )
                             result._original_input = copy_input_items(original_input)
-                            return result
+                            return _finalize_conversation_tracking(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
                             if session_persistence_enabled:
                                 if not any(
@@ -1174,7 +1201,7 @@ class AgentRunner:
                                     run_state._current_turn_persisted_item_count
                                 )
                             result._original_input = copy_input_items(original_input)
-                            return result
+                            return _finalize_conversation_tracking(result)
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             # Next agent starts with the nested/filtered input.
@@ -1355,6 +1382,13 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
+            conversation_id = conversation_id or run_state._conversation_id
+            previous_response_id = previous_response_id or run_state._previous_response_id
+            if auto_previous_response_id is False and run_state._auto_previous_response_id:
+                auto_previous_response_id = True
+            run_state._conversation_id = conversation_id
+            run_state._previous_response_id = previous_response_id
+            run_state._auto_previous_response_id = auto_previous_response_id
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             starting_input = run_state._original_input
@@ -1434,6 +1468,9 @@ class AgentRunner:
                 original_input=copy_input_items(input_for_state),
                 starting_agent=starting_agent,
                 max_turns=max_turns,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
             )
 
         schema_agent = (
@@ -1490,6 +1527,9 @@ class AgentRunner:
         )
         # Store run_state in streamed_result._state so it's accessible throughout streaming
         # Now that we create run_state for both fresh and resumed runs, always set it
+        streamed_result._conversation_id = conversation_id
+        streamed_result._previous_response_id = previous_response_id
+        streamed_result._auto_previous_response_id = auto_previous_response_id
         streamed_result._state = run_state
         if run_state is not None:
             streamed_result._tool_use_tracker_snapshot = run_state.get_tool_use_tracker_snapshot()

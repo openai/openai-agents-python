@@ -127,6 +127,15 @@ class RunState(Generic[TContext, TAgent]):
     _max_turns: int = 10
     """Maximum allowed turns before forcing termination."""
 
+    _conversation_id: str | None = None
+    """Conversation identifier for server-managed conversation tracking."""
+
+    _previous_response_id: str | None = None
+    """Response identifier of the last server-managed response."""
+
+    _auto_previous_response_id: bool = False
+    """Whether the previous response id should be automatically tracked."""
+
     _input_guardrail_results: list[InputGuardrailResult] = field(default_factory=list)
     """Results from input guardrails applied to the run."""
 
@@ -157,12 +166,19 @@ class RunState(Generic[TContext, TAgent]):
         original_input: str | list[Any],
         starting_agent: TAgent,
         max_turns: int = 10,
+        *,
+        conversation_id: str | None = None,
+        previous_response_id: str | None = None,
+        auto_previous_response_id: bool = False,
     ):
         """Initialize a new RunState."""
         self._context = context
         self._original_input = _clone_original_input(original_input)
         self._current_agent = starting_agent
         self._max_turns = max_turns
+        self._conversation_id = conversation_id
+        self._previous_response_id = previous_response_id
+        self._auto_previous_response_id = auto_previous_response_id
         self._model_responses = []
         self._generated_items = []
         self._input_guardrail_results = []
@@ -353,6 +369,9 @@ class RunState(Generic[TContext, TAgent]):
             "tool_output_guardrail_results": _serialize_tool_guardrail_results(
                 self._tool_output_guardrail_results, type_label="tool_output"
             ),
+            "conversation_id": self._conversation_id,
+            "previous_response_id": self._previous_response_id,
+            "auto_previous_response_id": self._auto_previous_response_id,
         }
 
         generated_items = self._merge_generated_items_with_processed()
@@ -1434,6 +1453,9 @@ async def _build_run_state_from_json(
         original_input=normalized_original_input,
         starting_agent=current_agent,
         max_turns=state_json["max_turns"],
+        conversation_id=state_json.get("conversation_id"),
+        previous_response_id=state_json.get("previous_response_id"),
+        auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
     )
 
     state._current_turn = state_json["current_turn"]
