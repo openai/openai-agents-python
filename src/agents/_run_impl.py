@@ -542,7 +542,7 @@ class RunImpl:
                 shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
                 continue
             if output_type == "compaction":
-                items.append(CompactionItem(raw_item=cast(dict[str, Any], output), agent=agent))
+                items.append(CompactionItem(raw_item=cast(TResponseInputItem, output), agent=agent))
                 continue
             if output_type == "apply_patch_call":
                 items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))

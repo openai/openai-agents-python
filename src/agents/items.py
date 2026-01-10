@@ -328,20 +328,14 @@ class MCPApprovalResponseItem(RunItemBase[McpApprovalResponse]):
 
 
 @dataclass
-class CompactionItem:
+class CompactionItem(RunItemBase[TResponseInputItem]):
     """Represents a compaction item from responses.compact."""
-
-    agent: Agent[Any]
-    """The agent whose run caused this item to be generated."""
-
-    raw_item: dict[str, Any]
-    """The raw compaction item containing encrypted_content."""
 
     type: Literal["compaction_item"] = "compaction_item"
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
-        return cast(TResponseInputItem, self.raw_item)
+        return self.raw_item
 
 
 RunItem: TypeAlias = Union[
