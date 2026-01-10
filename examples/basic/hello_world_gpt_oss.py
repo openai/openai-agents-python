@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
 
 set_tracing_disabled(True)
-logging.basicConfig(level=logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)
 
 # This is an example of how to use gpt-oss with Ollama.
 # Refer to https://cookbook.openai.com/articles/gpt-oss/run-locally-ollama for more details.
