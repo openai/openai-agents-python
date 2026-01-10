@@ -146,7 +146,14 @@ def _run_item_to_plain_input(run_item: RunItem) -> TResponseInputItem:
 
 
 def _build_summary_message(transcript: list[TResponseInputItem]) -> TResponseInputItem:
-    transcript_copy = [deepcopy(item) for item in transcript]
+    # Filter out preserved multimodal messages to avoid exposing internal markers in the summary
+    # and to prevent duplicate lines in chained handoffs.
+    filtered_transcript = [
+        item
+        for item in transcript
+        if not (item.get("role") == "user" and item.get("name") == _PRESERVED_MULTIMODAL_MARKER)
+    ]
+    transcript_copy = [deepcopy(item) for item in filtered_transcript]
     if transcript_copy:
         summary_lines = [
             f"{idx + 1}. {_format_transcript_item(item)}"
@@ -217,7 +224,7 @@ def _stringify_content_list(content_list: list[Any]) -> str:
     for part in content_list:
         if isinstance(part, dict):
             part_type = part.get("type")
-            if part_type == "input_text":
+            if part_type in ("input_text", "output_text"):
                 text = part.get("text", "")
                 if text:
                     parts.append(text)
@@ -392,6 +399,8 @@ def _collect_preserved_multimodal_content(
         if isinstance(content, list):
             for part in content:
                 if isinstance(part, dict):
-                    preserved_parts.append(deepcopy(part))
+                    part_type = part.get("type")
+                    if part_type in _MULTIMODAL_CONTENT_TYPES:
+                        preserved_parts.append(deepcopy(part))
 
     return preserved_parts
