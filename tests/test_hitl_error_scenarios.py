@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, cast
 
 import pytest
+from openai.types.responses import ResponseComputerToolCall
+from openai.types.responses.response_computer_tool_call import ActionScreenshot
 from openai.types.responses.response_input_param import (
     ComputerCallOutput,
     LocalShellCallOutput,
@@ -14,6 +16,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from agents import (
     Agent,
     ApplyPatchTool,
+    ComputerTool,
     LocalShellTool,
     Runner,
     RunResult,
@@ -22,6 +25,7 @@ from agents import (
     ToolApprovalItem,
     function_tool,
 )
+from agents.computer import Computer, Environment
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.items import (
     MCPApprovalResponseItem,
@@ -38,6 +42,7 @@ from agents.run_internal.run_loop import (
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
+    ToolRunComputerAction,
     ToolRunFunction,
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
@@ -74,6 +79,49 @@ from .utils.hitl import (
     resume_after_first_approval,
     run_and_resume_after_approval,
 )
+
+
+class TrackingComputer(Computer):
+    """Minimal computer implementation that records method calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    @property
+    def environment(self) -> Environment:
+        return "mac"
+
+    @property
+    def dimensions(self) -> tuple[int, int]:
+        return (1, 1)
+
+    def screenshot(self) -> str:
+        self.calls.append("screenshot")
+        return "img"
+
+    def click(self, _x: int, _y: int, _button: str) -> None:
+        self.calls.append("click")
+
+    def double_click(self, _x: int, _y: int) -> None:
+        self.calls.append("double_click")
+
+    def scroll(self, _x: int, _y: int, _scroll_x: int, _scroll_y: int) -> None:
+        self.calls.append("scroll")
+
+    def type(self, _text: str) -> None:
+        self.calls.append("type")
+
+    def wait(self) -> None:
+        self.calls.append("wait")
+
+    def move(self, _x: int, _y: int) -> None:
+        self.calls.append("move")
+
+    def keypress(self, _keys: list[str]) -> None:
+        self.calls.append("keypress")
+
+    def drag(self, _path: list[tuple[int, int]]) -> None:
+        self.calls.append("drag")
 
 
 def _shell_approval_setup() -> ApprovalScenario:
@@ -890,6 +938,123 @@ async def test_resume_skips_shell_calls_with_existing_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_executes_pending_computer_actions() -> None:
+    """Pending computer actions should execute when resuming an interrupted turn."""
+
+    computer = TrackingComputer()
+    computer_tool = ComputerTool(computer=computer)
+    model, agent = make_model_and_agent(tools=[computer_tool])
+
+    computer_call = ResponseComputerToolCall(
+        type="computer_call",
+        id="comp_pending",
+        call_id="comp_pending",
+        status="in_progress",
+        action=ActionScreenshot(type="screenshot"),
+        pending_safety_checks=[],
+    )
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[
+            ToolRunComputerAction(tool_call=computer_call, computer_tool=computer_tool)
+        ],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[computer_tool.name],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume computer",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and isinstance(item.raw_item, dict)
+        and item.raw_item.get("type") == "computer_call_output"
+    ]
+    assert outputs, "Computer action should run when resuming without prior output"
+    assert computer.calls, "Computer should have been invoked"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_computer_actions_with_existing_output() -> None:
+    """Computer actions with persisted output should not execute again when resuming."""
+
+    computer = TrackingComputer()
+    computer_tool = ComputerTool(computer=computer)
+    model, agent = make_model_and_agent(tools=[computer_tool])
+
+    computer_call = ResponseComputerToolCall(
+        type="computer_call",
+        id="comp_skip",
+        call_id="comp_skip",
+        status="completed",
+        action=ActionScreenshot(type="screenshot"),
+        pending_safety_checks=[],
+    )
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[
+            ToolRunComputerAction(tool_call=computer_call, computer_tool=computer_tool)
+        ],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[computer_tool.name],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    original_pre_step_items = [
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item={
+                "type": "computer_call_output",
+                "call_id": "comp_skip",
+                "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,ok"},
+            },
+            output="image_url",
+        )
+    ]
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume computer existing",
+        original_pre_step_items=cast(list[RunItem], original_pre_step_items),
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    assert not computer.calls, "Computer action should not run when output already exists"
+    assert not result.new_step_items, "No new items should be emitted when output exists"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
     """Rebuilt function runs should surface pending approvals and emit rejections."""
 
@@ -1014,6 +1179,86 @@ async def test_rejected_shell_calls_emit_rejection_output() -> None:
         if first_entry.get("stderr") == HITL_REJECTION_MSG:
             rejection_outputs.append(item)
     assert rejection_outputs, "Rejected shell call should yield rejection output"
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_rejected_shell_calls_with_existing_output_are_not_duplicated() -> None:
+    """Rejected shell calls with persisted output should not emit duplicate rejections."""
+
+    shell_tool = ShellTool(executor=lambda _req: "should_not_run", needs_approval=True)
+    _model, agent = make_model_and_agent(tools=[shell_tool])
+    context_wrapper = make_context_wrapper()
+
+    shell_call = make_shell_call(
+        "call_reject_shell_dup",
+        id_value="shell_reject_dup",
+        commands=["echo test"],
+        status="in_progress",
+    )
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item=cast(dict[str, Any], shell_call),
+        tool_name=shell_tool.name,
+    )
+    context_wrapper.reject_tool(approval_item)
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool)],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    original_pre_step_items = [
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item=cast(
+                dict[str, Any],
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_reject_shell_dup",
+                    "output": [
+                        {
+                            "stdout": "",
+                            "stderr": HITL_REJECTION_MSG,
+                            "outcome": {"type": "exit", "exit_code": 1},
+                        }
+                    ],
+                },
+            ),
+            output=HITL_REJECTION_MSG,
+        )
+    ]
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume shell rejection existing",
+        original_pre_step_items=cast(list[RunItem], original_pre_step_items),
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    duplicate_rejections = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and isinstance(item.raw_item, dict)
+        and item.raw_item.get("type") == "shell_call_output"
+        and HITL_REJECTION_MSG in str(item.output)
+    ]
+
+    assert not duplicate_rejections, "No duplicate rejection outputs should be emitted"
     assert isinstance(result.next_step, NextStepRunAgain)
 
 
