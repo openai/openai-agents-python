@@ -56,6 +56,8 @@ def _populate_state_from_result(
     state._model_responses = result.raw_responses
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
+    state._tool_input_guardrail_results = result.tool_input_guardrail_results
+    state._tool_output_guardrail_results = result.tool_output_guardrail_results
     state._last_processed_response = last_processed_response
     state._current_turn = current_turn
     state._current_turn_persisted_item_count = current_turn_persisted_item_count

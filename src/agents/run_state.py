@@ -63,6 +63,16 @@ from .tool import (
     LocalShellTool,
     ShellTool,
 )
+from .tool_guardrails import (
+    AllowBehavior,
+    RaiseExceptionBehavior,
+    RejectContentBehavior,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
+    ToolInputGuardrailResult,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailResult,
+)
 from .usage import deserialize_usage, serialize_usage
 
 if TYPE_CHECKING:
@@ -123,6 +133,12 @@ class RunState(Generic[TContext, TAgent]):
     _output_guardrail_results: list[OutputGuardrailResult] = field(default_factory=list)
     """Results from output guardrails applied to the run."""
 
+    _tool_input_guardrail_results: list[ToolInputGuardrailResult] = field(default_factory=list)
+    """Results from tool input guardrails applied during the run."""
+
+    _tool_output_guardrail_results: list[ToolOutputGuardrailResult] = field(default_factory=list)
+    """Results from tool output guardrails applied during the run."""
+
     _current_step: NextStepInterruption | None = None
     """Current step if the run is interrupted (e.g., for tool approval)."""
 
@@ -151,6 +167,8 @@ class RunState(Generic[TContext, TAgent]):
         self._generated_items = []
         self._input_guardrail_results = []
         self._output_guardrail_results = []
+        self._tool_input_guardrail_results = []
+        self._tool_output_guardrail_results = []
         self._current_step = None
         self._current_turn = 0
         self._last_processed_response = None
@@ -328,6 +346,12 @@ class RunState(Generic[TContext, TAgent]):
             "input_guardrail_results": _serialize_guardrail_results(self._input_guardrail_results),
             "output_guardrail_results": _serialize_guardrail_results(
                 self._output_guardrail_results
+            ),
+            "tool_input_guardrail_results": _serialize_tool_guardrail_results(
+                self._tool_input_guardrail_results, type_label="tool_input"
+            ),
+            "tool_output_guardrail_results": _serialize_tool_guardrail_results(
+                self._tool_output_guardrail_results, type_label="tool_output"
             ),
         }
 
@@ -800,6 +824,31 @@ def _serialize_guardrail_results(
     return serialized
 
 
+def _serialize_tool_guardrail_results(
+    results: Sequence[ToolInputGuardrailResult | ToolOutputGuardrailResult],
+    *,
+    type_label: Literal["tool_input", "tool_output"],
+) -> list[dict[str, Any]]:
+    """Serialize tool guardrail results for persistence."""
+    serialized: list[dict[str, Any]] = []
+    for result in results:
+        guardrail_name = (
+            result.guardrail.get_name()
+            if hasattr(result.guardrail, "get_name")
+            else getattr(result.guardrail, "name", None)
+        )
+        serialized.append(
+            {
+                "guardrail": {"type": type_label, "name": guardrail_name},
+                "output": {
+                    "outputInfo": result.output.output_info,
+                    "behavior": result.output.behavior,
+                },
+            }
+        )
+    return serialized
+
+
 def _serialize_last_model_response(model_responses: list[dict[str, Any]]) -> Any:
     """Return the last serialized model response, if any."""
     if not model_responses:
@@ -1185,6 +1234,35 @@ def _parse_guardrail_entry(
     return name, guardrail_output, entry_dict
 
 
+def _parse_tool_guardrail_entry(
+    entry: Any, *, expected_type: Literal["tool_input", "tool_output"]
+) -> tuple[str, ToolGuardrailFunctionOutput] | None:
+    entry_dict = entry if isinstance(entry, dict) else {}
+    guardrail_info_raw = entry_dict.get("guardrail", {})
+    guardrail_info = guardrail_info_raw if isinstance(guardrail_info_raw, dict) else {}
+    guardrail_type = guardrail_info.get("type")
+    if guardrail_type and guardrail_type != expected_type:
+        return None
+    name = guardrail_info.get("name") or f"deserialized_{expected_type}_guardrail"
+    output_data_raw = entry_dict.get("output", {})
+    output_data = output_data_raw if isinstance(output_data_raw, dict) else {}
+    behavior_data = output_data.get("behavior")
+    behavior: RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior
+    if isinstance(behavior_data, dict) and "type" in behavior_data:
+        behavior = cast(
+            RejectContentBehavior | RaiseExceptionBehavior | AllowBehavior,
+            behavior_data,
+        )
+    else:
+        behavior = AllowBehavior(type="allow")
+    output_info = output_data.get("outputInfo")
+    guardrail_output = ToolGuardrailFunctionOutput(
+        output_info=output_info,
+        behavior=behavior,
+    )
+    return name, guardrail_output
+
+
 def _deserialize_input_guardrail_results(
     results_data: list[dict[str, Any]],
 ) -> list[InputGuardrailResult]:
@@ -1247,6 +1325,56 @@ def _deserialize_output_guardrail_results(
                 output=guardrail_output,
             )
         )
+    return deserialized
+
+
+def _deserialize_tool_input_guardrail_results(
+    results_data: list[dict[str, Any]],
+) -> list[ToolInputGuardrailResult]:
+    """Rehydrate tool input guardrail results from serialized data."""
+    deserialized: list[ToolInputGuardrailResult] = []
+    for entry in results_data or []:
+        parsed = _parse_tool_guardrail_entry(entry, expected_type="tool_input")
+        if not parsed:
+            continue
+        name, guardrail_output = parsed
+
+        def _tool_input_guardrail_fn(
+            data: Any,
+            *,
+            _output: ToolGuardrailFunctionOutput = guardrail_output,
+        ) -> ToolGuardrailFunctionOutput:
+            return _output
+
+        guardrail: ToolInputGuardrail[Any] = ToolInputGuardrail(
+            guardrail_function=_tool_input_guardrail_fn, name=name
+        )
+        deserialized.append(ToolInputGuardrailResult(guardrail=guardrail, output=guardrail_output))
+    return deserialized
+
+
+def _deserialize_tool_output_guardrail_results(
+    results_data: list[dict[str, Any]],
+) -> list[ToolOutputGuardrailResult]:
+    """Rehydrate tool output guardrail results from serialized data."""
+    deserialized: list[ToolOutputGuardrailResult] = []
+    for entry in results_data or []:
+        parsed = _parse_tool_guardrail_entry(entry, expected_type="tool_output")
+        if not parsed:
+            continue
+        name, guardrail_output = parsed
+
+        def _tool_output_guardrail_fn(
+            data: Any,
+            *,
+            _output: ToolGuardrailFunctionOutput = guardrail_output,
+        ) -> ToolGuardrailFunctionOutput:
+            return _output
+
+        guardrail: ToolOutputGuardrail[Any] = ToolOutputGuardrail(
+            guardrail_function=_tool_output_guardrail_fn, name=name
+        )
+        deserialized.append(ToolOutputGuardrailResult(guardrail=guardrail, output=guardrail_output))
     return deserialized
 
 
@@ -1327,6 +1455,12 @@ async def _build_run_state_from_json(
         state_json.get("output_guardrail_results", []),
         agent_map=agent_map,
         fallback_agent=current_agent,
+    )
+    state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
+        state_json.get("tool_input_guardrail_results", [])
+    )
+    state._tool_output_guardrail_results = _deserialize_tool_output_guardrail_results(
+        state_json.get("tool_output_guardrail_results", [])
     )
 
     current_step_data = state_json.get("current_step")

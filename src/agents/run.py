@@ -500,9 +500,19 @@ class AgentRunner:
                 )
 
             pending_server_items: list[RunItem] | None = None
-            input_guardrail_results: list[InputGuardrailResult] = []
-            tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
-            tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+            input_guardrail_results: list[InputGuardrailResult] = (
+                list(run_state._input_guardrail_results) if run_state is not None else []
+            )
+            tool_input_guardrail_results: list[ToolInputGuardrailResult] = (
+                list(getattr(run_state, "_tool_input_guardrail_results", []))
+                if run_state is not None
+                else []
+            )
+            tool_output_guardrail_results: list[ToolOutputGuardrailResult] = (
+                list(getattr(run_state, "_tool_output_guardrail_results", []))
+                if run_state is not None
+                else []
+            )
 
             current_span: Span[AgentSpanData] | None = None
             if is_resumed_state and run_state is not None and run_state._current_agent is not None:
@@ -895,7 +905,8 @@ class AgentRunner:
                         else:
                             turn_result = await model_task
 
-                        input_guardrail_results = sequential_results + parallel_results
+                        input_guardrail_results.extend(sequential_results)
+                        input_guardrail_results.extend(parallel_results)
                     else:
                         turn_result = await run_single_turn(
                             agent=current_agent,
@@ -1359,10 +1370,16 @@ class AgentRunner:
             is_complete=False,
             current_turn=run_state._current_turn if run_state else 0,
             max_turns=max_turns,
-            input_guardrail_results=[],
-            output_guardrail_results=[],
-            tool_input_guardrail_results=[],
-            tool_output_guardrail_results=[],
+            input_guardrail_results=(list(run_state._input_guardrail_results) if run_state else []),
+            output_guardrail_results=(
+                list(run_state._output_guardrail_results) if run_state else []
+            ),
+            tool_input_guardrail_results=(
+                list(getattr(run_state, "_tool_input_guardrail_results", [])) if run_state else []
+            ),
+            tool_output_guardrail_results=(
+                list(getattr(run_state, "_tool_output_guardrail_results", [])) if run_state else []
+            ),
             _current_agent_output_schema=output_schema,
             trace=new_trace,
             context_wrapper=context_wrapper,
