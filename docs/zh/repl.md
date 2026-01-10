@@ -4,8 +4,7 @@ search:
 ---
 # REPL 工具
 
-The SDK provides `run_demo_loop` for quick, interactive testing of an agent's behavior directly in your terminal.
-
+该 SDK 提供 `run_demo_loop`，可在终端中快速、交互式地测试智能体的行为。
 
 ```python
 import asyncio
@@ -19,6 +18,6 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-`run_demo_loop` 会在循环中提示用户输入，并在轮次之间保留对话历史。默认情况下，它会在模型生成输出时进行流式传输。当你运行上面的示例时，run_demo_loop 会启动一个交互式聊天会话。它会持续请求你的输入，记住轮次之间的整个对话历史（因此你的智能体知道已讨论的内容），并在生成过程中将智能体的响应实时流式传输给你。
+`run_demo_loop` 会在循环中提示用户输入，并在回合之间保留对话历史。默认情况下，它会在生成的同时流式传输模型输出。运行上面的示例后，run_demo_loop 会启动一个交互式聊天会话。它会持续请求你的输入、在回合之间记住完整的对话历史（让你的智能体知道已讨论的内容），并在生成时实时自动将智能体的回复流式传输给你。
 
 要结束此聊天会话，只需输入 `quit` 或 `exit`（然后按回车），或使用 `Ctrl-D` 键盘快捷键。

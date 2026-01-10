@@ -473,6 +473,39 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         types = [c[0][0].type for c in listener.on_event.call_args_list]
         assert types.count("item_updated") >= 2
 
+    @pytest.mark.asyncio
+    async def test_text_mode_output_item_content(self, model):
+        """output_text content is properly handled in message items."""
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        msg_added = {
+            "type": "response.output_item.added",
+            "item": {
+                "id": "text_item_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "test data"},
+                ],
+            },
+        }
+        await model._handle_ws_event(msg_added)
+
+        # Verify the item was updated with content
+        assert listener.on_event.call_count >= 2
+        item_updated_calls = [
+            call for call in listener.on_event.call_args_list if call[0][0].type == "item_updated"
+        ]
+        assert len(item_updated_calls) >= 1
+
+        item = item_updated_calls[0][0][0].item
+        assert item.type == "message"
+        assert item.role == "assistant"
+        assert len(item.content) >= 1
+        assert item.content[0].type == "text"
+        assert item.content[0].text == "test data"
+
     # Note: response.created/done require full OpenAI response payload which is
     # out-of-scope for unit tests here; covered indirectly via other branches.
 
@@ -483,7 +516,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Prepare tracker state to simulate ongoing audio
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("i1", 0, b"aaaa")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48)
         model._ongoing_response = True
 
         # Patch sending to avoid websocket dependency
@@ -503,6 +536,17 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "audio_end_ms": 1,
             }
         )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        truncate_event = truncate_events[0]
+        assert truncate_event.item_id == "i1"
+        assert truncate_event.content_index == 0
+        assert truncate_event.audio_end_ms == 1
 
         # Output transcript delta
         await model._handle_ws_event(
@@ -669,6 +713,48 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert cfg.audio.output is not None
         assert cfg.audio.output.format is None
 
+    def test_session_config_respects_audio_block_and_output_modalities(self, model):
+        settings = {
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "modalities": ["audio"],
+            "output_modalities": ["text"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "createResponse": True,
+                        "silenceDurationMs": 450,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcma"},
+                    "voice": "synth-1",
+                    "speed": 1.5,
+                },
+            },
+        }
+        cfg = model._get_session_config(settings)
+
+        assert cfg.output_modalities == ["text"]
+        assert cfg.audio is not None
+        assert cfg.audio.input.format is not None
+        assert cfg.audio.input.format.type == "audio/pcmu"
+        assert cfg.audio.output.format is not None
+        assert cfg.audio.output.format.type == "audio/pcma"
+        assert cfg.audio.output.voice == "synth-1"
+        assert cfg.audio.output.speed == 1.5
+        assert cfg.audio.input.transcription is not None
+
+        turn_detection = cfg.audio.input.turn_detection
+        turn_detection_mapping = (
+            turn_detection if isinstance(turn_detection, dict) else turn_detection.model_dump()
+        )
+        assert turn_detection_mapping["create_response"] is True
+        assert turn_detection_mapping["silence_duration_ms"] == 450
+        assert "silenceDurationMs" not in turn_detection_mapping
+
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
         """Test successful handling of error events."""
@@ -761,23 +847,27 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         for event in audio_deltas:
             await model._handle_ws_event(event)
 
-        # Should accumulate audio length: 8 bytes / 24 / 2 * 1000 = milliseconds
-        # Total: 8 bytes / 24 / 2 * 1000
-        expected_length = (8 / 24 / 2) * 1000
+        # Should accumulate audio length: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167 ms
+        expected_length = (8 / (24_000 * 2)) * 1000
 
         # Test through the actual audio state tracker
         audio_state = model._audio_state_tracker.get_state("item_1", 0)
         assert audio_state is not None
-        assert abs(audio_state.audio_length_ms - expected_length) < 0.001
+        assert audio_state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
 
     def test_calculate_audio_length_ms_pure_function(self, model):
         """Test the pure audio length calculation function."""
         from agents.realtime._util import calculate_audio_length_ms
 
         # Test various audio buffer sizes for pcm16 format
-        assert calculate_audio_length_ms("pcm16", b"test") == (4 / 24 / 2) * 1000  # 4 bytes
+        expected_pcm = (len(b"test") / (24_000 * 2)) * 1000
+        assert calculate_audio_length_ms("pcm16", b"test") == pytest.approx(
+            expected_pcm, rel=0, abs=1e-6
+        )  # 4 bytes
         assert calculate_audio_length_ms("pcm16", b"") == 0  # empty
-        assert calculate_audio_length_ms("pcm16", b"a" * 48) == 1000.0  # exactly 1000ms worth
+        assert calculate_audio_length_ms("pcm16", b"a" * 48) == pytest.approx(
+            (48 / (24_000 * 2)) * 1000, rel=0, abs=1e-6
+        )  # exactly 1ms worth
 
         # Test g711 format
         assert calculate_audio_length_ms("g711_ulaw", b"test") == (4 / 8000) * 1000  # 4 bytes
@@ -804,7 +894,8 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         # Test that audio state is tracked correctly
         audio_state = model._audio_state_tracker.get_state("test_item", 5)
         assert audio_state is not None
-        assert audio_state.audio_length_ms == (4 / 24 / 2) * 1000  # 4 bytes in milliseconds
+        expected_ms = (len(b"test") / (24_000 * 2)) * 1000
+        assert audio_state.audio_length_ms == pytest.approx(expected_ms, rel=0, abs=1e-6)
 
         # Test that last audio item is tracked
         last_item = model._audio_state_tracker.get_last_audio_item()

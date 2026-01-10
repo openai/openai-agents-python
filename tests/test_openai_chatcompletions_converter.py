@@ -370,6 +370,11 @@ def test_tool_call_conversion():
     tool_msg = messages[0]
     assert tool_msg["role"] == "assistant"
     assert tool_msg.get("content") is None
+
+    # Verify the content key exists in the message even when it is None.
+    # This is for Chat Completions API compatibility.
+    assert "content" in tool_msg, "content key should be present in assistant message"
+
     tool_calls = list(tool_msg.get("tool_calls", []))
     assert len(tool_calls) == 1
 
