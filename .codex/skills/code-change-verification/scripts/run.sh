@@ -22,4 +22,4 @@ make mypy
 echo "Running make tests..."
 make tests
 
-echo "verify-changes: all commands passed."
+echo "code-change-verification: all commands passed."

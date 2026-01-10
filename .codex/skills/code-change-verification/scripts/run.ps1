@@ -25,7 +25,7 @@ function Invoke-MakeStep {
     & make $Step
 
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "verify-changes: make $Step failed with exit code $LASTEXITCODE."
+        Write-Error "code-change-verification: make $Step failed with exit code $LASTEXITCODE."
         exit $LASTEXITCODE
     }
 }
@@ -35,4 +35,4 @@ Invoke-MakeStep -Step "lint"
 Invoke-MakeStep -Step "mypy"
 Invoke-MakeStep -Step "tests"
 
-Write-Host "verify-changes: all commands passed."
+Write-Host "code-change-verification: all commands passed."

@@ -21,5 +21,5 @@ make snapshots-fix
 ### Creating snapshots
 
 ```
-make snapshots-update
+make snapshots-create
 ```
