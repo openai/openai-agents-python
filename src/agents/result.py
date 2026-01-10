@@ -50,6 +50,9 @@ def _populate_state_from_result(
     last_processed_response: ProcessedResponse | None,
     current_turn_persisted_item_count: int,
     tool_use_tracker_snapshot: dict[str, list[str]],
+    conversation_id: str | None = None,
+    previous_response_id: str | None = None,
+    auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
     state._generated_items = result.new_items
@@ -62,6 +65,9 @@ def _populate_state_from_result(
     state._current_turn = current_turn
     state._current_turn_persisted_item_count = current_turn_persisted_item_count
     state.set_tool_use_tracker_snapshot(tool_use_tracker_snapshot)
+    state._conversation_id = conversation_id
+    state._previous_response_id = previous_response_id
+    state._auto_previous_response_id = auto_previous_response_id
 
     if result.interruptions:
         state._current_step = NextStepInterruption(interruptions=result.interruptions)
@@ -196,6 +202,12 @@ class RunResult(RunResultBase):
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
     """The original input from the first turn. Unlike `input`, this is never updated during the run.
     Used by to_state() to preserve the correct originalInput when serializing state."""
+    _conversation_id: str | None = field(default=None, repr=False)
+    """Conversation identifier for server-managed runs."""
+    _previous_response_id: str | None = field(default=None, repr=False)
+    """Response identifier returned by the server for the last turn."""
+    _auto_previous_response_id: bool = field(default=False, repr=False)
+    """Whether automatic previous response tracking was enabled."""
     max_turns: int = 10
     """The maximum number of turns allowed for this run."""
 
@@ -264,6 +276,9 @@ class RunResult(RunResultBase):
             last_processed_response=self._last_processed_response,
             current_turn_persisted_item_count=self._current_turn_persisted_item_count,
             tool_use_tracker_snapshot=self._tool_use_tracker_snapshot,
+            conversation_id=self._conversation_id,
+            previous_response_id=self._previous_response_id,
+            auto_previous_response_id=self._auto_previous_response_id,
         )
 
     def __str__(self) -> str:
@@ -342,6 +357,12 @@ class RunResultStreaming(RunResultBase):
     _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, repr=False)
     """Internal reference to the RunState for streaming results."""
+    _conversation_id: str | None = field(default=None, repr=False)
+    """Conversation identifier for server-managed runs."""
+    _previous_response_id: str | None = field(default=None, repr=False)
+    """Response identifier returned by the server for the last turn."""
+    _auto_previous_response_id: bool = field(default=False, repr=False)
+    """Whether automatic previous response tracking was enabled."""
 
     def __post_init__(self) -> None:
         self._current_agent_ref = weakref.ref(self.current_agent)
@@ -635,4 +656,7 @@ class RunResultStreaming(RunResultBase):
             last_processed_response=self._last_processed_response,
             current_turn_persisted_item_count=self._current_turn_persisted_item_count,
             tool_use_tracker_snapshot=self._tool_use_tracker_snapshot,
+            conversation_id=self._conversation_id,
+            previous_response_id=self._previous_response_id,
+            auto_previous_response_id=self._auto_previous_response_id,
         )

@@ -1858,6 +1858,12 @@ async def start_streaming(
     if streamed_result.trace:
         streamed_result.trace.start(mark_as_current=True)
 
+    if is_resumed_state and run_state is not None:
+        conversation_id = conversation_id or run_state._conversation_id
+        previous_response_id = previous_response_id or run_state._previous_response_id
+        if auto_previous_response_id is False and run_state._auto_previous_response_id:
+            auto_previous_response_id = True
+
     if conversation_id is not None or previous_response_id is not None or auto_previous_response_id:
         server_conversation_tracker = OpenAIServerConversationTracker(
             conversation_id=conversation_id,
@@ -1867,16 +1873,42 @@ async def start_streaming(
     else:
         server_conversation_tracker = None
 
+    def _sync_conversation_tracking_from_tracker() -> None:
+        if server_conversation_tracker is None:
+            return
+        if run_state is not None:
+            run_state._conversation_id = server_conversation_tracker.conversation_id
+            run_state._previous_response_id = server_conversation_tracker.previous_response_id
+            run_state._auto_previous_response_id = (
+                server_conversation_tracker.auto_previous_response_id
+            )
+        streamed_result._conversation_id = server_conversation_tracker.conversation_id
+        streamed_result._previous_response_id = server_conversation_tracker.previous_response_id
+        streamed_result._auto_previous_response_id = (
+            server_conversation_tracker.auto_previous_response_id
+        )
+
     if run_state is None:
         run_state = RunState(
             context=context_wrapper,
             original_input=copy_input_items(starting_input),
             starting_agent=starting_agent,
             max_turns=max_turns,
+            conversation_id=conversation_id,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
         )
         streamed_result._state = run_state
     elif streamed_result._state is None:
         streamed_result._state = run_state
+
+    if run_state is not None:
+        run_state._conversation_id = conversation_id
+        run_state._previous_response_id = previous_response_id
+        run_state._auto_previous_response_id = auto_previous_response_id
+    streamed_result._conversation_id = conversation_id
+    streamed_result._previous_response_id = previous_response_id
+    streamed_result._auto_previous_response_id = auto_previous_response_id
 
     current_span: Span[AgentSpanData] | None = None
     if run_state is not None and run_state._current_agent is not None:
@@ -2338,6 +2370,7 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:
                 triggered = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
