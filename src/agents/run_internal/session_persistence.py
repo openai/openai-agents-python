@@ -15,7 +15,11 @@ from typing import Any, cast
 from ..exceptions import UserError
 from ..items import ItemHelpers, RunItem, TResponseInputItem
 from ..logger import logger
-from ..memory import Session, SessionInputCallback
+from ..memory import (
+    Session,
+    SessionInputCallback,
+    is_openai_responses_compaction_aware_session,
+)
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
@@ -155,6 +159,8 @@ async def save_result_to_session(
     original_input: str | list[TResponseInputItem],
     new_items: list[RunItem],
     run_state: RunState | None = None,
+    *,
+    response_id: str | None = None,
 ) -> None:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
@@ -236,6 +242,9 @@ async def save_result_to_session(
 
     if run_state:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
+
+    if response_id and is_openai_responses_compaction_aware_session(session):
+        await session.run_compaction({"response_id": response_id})
 
 
 async def rewind_session_items(

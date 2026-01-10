@@ -1097,10 +1097,14 @@ async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPa
     real_save_result = sp.save_result_to_session
 
     async def save_wrapper(
-        sess: Any, original_input: Any, new_items: list[RunItem], run_state: RunState | None = None
+        sess: Any,
+        original_input: Any,
+        new_items: list[RunItem],
+        run_state: RunState | None = None,
+        **kwargs: Any,
     ) -> None:
         calls.append(list(new_items))
-        await real_save_result(sess, original_input, new_items, run_state)
+        await real_save_result(sess, original_input, new_items, run_state, **kwargs)
 
     async def fake_run_single_turn(**_: Any) -> SingleStepResult:
         return turn_result

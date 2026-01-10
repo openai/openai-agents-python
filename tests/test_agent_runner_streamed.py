@@ -639,11 +639,15 @@ async def test_stream_input_persistence_saves_only_new_turn_input(monkeypatch: p
     input_saves: list[list[TResponseInputItem]] = []
 
     async def save_wrapper(
-        sess: Any, original_input: Any, new_items: list[RunItem], run_state: Any = None
+        sess: Any,
+        original_input: Any,
+        new_items: list[RunItem],
+        run_state: Any = None,
+        **kwargs: Any,
     ) -> None:
         if isinstance(original_input, list) and original_input:
             input_saves.append(list(original_input))
-        await real_save_result(sess, original_input, new_items, run_state)
+        await real_save_result(sess, original_input, new_items, run_state, **kwargs)
 
     monkeypatch.setattr(
         "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
