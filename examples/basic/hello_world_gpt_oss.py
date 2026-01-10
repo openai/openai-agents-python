@@ -1,11 +1,12 @@
 import asyncio
-import logging
 
 from openai import AsyncOpenAI
 
 from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled
 
 set_tracing_disabled(True)
+
+# import logging
 # logging.basicConfig(level=logging.DEBUG)
 
 # This is an example of how to use gpt-oss with Ollama.
