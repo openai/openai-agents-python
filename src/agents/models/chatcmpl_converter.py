@@ -535,6 +535,24 @@ class Converter:
                     combined = "\n".join(text_segments)
                     new_asst["content"] = combined
 
+                # If we have pending thinking blocks, prepend them to the content
+                # This is required for Anthropic API with interleaved thinking
+                if pending_thinking_blocks:
+                    # If there is a text content, convert it to a list to prepend thinking blocks
+                    if "content" in new_asst and isinstance(new_asst["content"], str):
+                        text_content = ChatCompletionContentPartTextParam(
+                            text=new_asst["content"], type="text"
+                        )
+                        new_asst["content"] = [text_content]
+
+                    if "content" not in new_asst or new_asst["content"] is None:
+                        new_asst["content"] = []
+
+                    # Thinking blocks MUST come before any other content
+                    # We ignore type errors because pending_thinking_blocks is not openai standard
+                    new_asst["content"] = pending_thinking_blocks + new_asst["content"]  # type: ignore
+                    pending_thinking_blocks = None  # Clear after using
+
                 new_asst["tool_calls"] = []
                 current_assistant_msg = new_asst
 
