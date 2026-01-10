@@ -711,11 +711,11 @@ async def resolve_interrupted_turn(
                 existing_pending=existing_pending,
             )
 
-            if approval_status is False:
-                rejection_items.append(rejection_builder(call_id))
+            if output_exists_checker and output_exists_checker(call_id):
                 continue
 
-            if output_exists_checker and output_exists_checker(call_id):
+            if approval_status is False:
+                rejection_items.append(rejection_builder(call_id))
                 continue
 
             needs_approval = True
@@ -746,6 +746,12 @@ async def resolve_interrupted_turn(
 
     def _apply_patch_call_id_from_run(run: ToolRunApplyPatchCall) -> str:
         return extract_apply_patch_call_id(run.tool_call)
+
+    def _computer_call_id_from_run(run: ToolRunComputerAction) -> str:
+        call_id = extract_tool_call_id(run.tool_call)
+        if not call_id:
+            raise ModelBehaviorError("Computer action is missing call_id.")
+        return call_id
 
     def _shell_tool_name(run: ToolRunShellCall) -> str:
         return run.shell_tool.name
@@ -783,6 +789,9 @@ async def resolve_interrupted_turn(
 
     def _apply_patch_output_exists(call_id: str) -> bool:
         return _has_output_item(call_id, "apply_patch_call_output")
+
+    def _computer_output_exists(call_id: str) -> bool:
+        return _has_output_item(call_id, "computer_call_output")
 
     def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
         if item is None:
@@ -926,6 +935,23 @@ async def resolve_interrupted_turn(
             for interruption in result.interruptions:
                 _add_pending_interruption(interruption)
 
+    pending_computer_actions: list[ToolRunComputerAction] = []
+    for action in processed_response.computer_actions:
+        call_id = _computer_call_id_from_run(action)
+        if _computer_output_exists(call_id):
+            continue
+        pending_computer_actions.append(action)
+
+    computer_results: list[RunItem] = []
+    if pending_computer_actions:
+        computer_results = await execute_computer_actions(
+            agent=agent,
+            actions=pending_computer_actions,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
     # Execute shell/apply_patch only when approved; emit rejections otherwise.
     approved_shell_calls, rejected_shell_results = await _collect_runs_by_approval(
         processed_response.shell_calls,
@@ -975,6 +1001,8 @@ async def resolve_interrupted_turn(
 
     for function_result in function_results:
         append_if_new(function_result.run_item)
+    for computer_result in computer_results:
+        append_if_new(computer_result)
     for rejection_item in rejected_function_outputs:
         append_if_new(rejection_item)
     for pending_item in pending_interruptions:
