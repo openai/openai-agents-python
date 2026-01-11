@@ -46,24 +46,52 @@ if TYPE_CHECKING:
     from .run import RunConfig
     from .stream_events import StreamEvent
 
-# Ephemeral map linking tool call IDs to nested agent results within the same run.
-# Keyed by (tool name, call id) to reduce cross-run collisions.
-_agent_tool_run_results: dict[tuple[str, str], RunResult | RunResultStreaming] = {}
+# Ephemeral maps linking tool call objects to nested agent results within the same run.
+# Store by object identity to avoid collisions when call IDs repeat across tool calls.
+_agent_tool_run_results_by_obj: dict[int, RunResult | RunResultStreaming] = {}
+_agent_tool_run_results_by_call_id: dict[str, set[int]] = {}
+
+
+def _index_agent_tool_run_result(tool_call_id: str, tool_call_obj_id: int) -> None:
+    """Track tool call objects by call ID for fallback lookup."""
+    _agent_tool_run_results_by_call_id.setdefault(tool_call_id, set()).add(tool_call_obj_id)
+
+
+def _drop_agent_tool_run_result(tool_call_id: str | None, tool_call_obj_id: int) -> None:
+    """Remove a tool call object from the fallback index."""
+    if tool_call_id is None:
+        return
+    call_ids = _agent_tool_run_results_by_call_id.get(tool_call_id)
+    if not call_ids:
+        return
+    call_ids.discard(tool_call_obj_id)
+    if not call_ids:
+        _agent_tool_run_results_by_call_id.pop(tool_call_id, None)
 
 
 def consume_agent_tool_run_result(
     tool_call: ResponseFunctionToolCall,
 ) -> RunResult | RunResultStreaming | None:
     """Return and drop the stored nested agent run result for the given tool call ID."""
-    key = (tool_call.name or "<unknown_tool>", tool_call.call_id)
-    run_result = _agent_tool_run_results.pop(key, None)
-    if run_result is None:
-        # Fallback: if the tool name does not match, try matching by call_id only
-        for candidate_key in list(_agent_tool_run_results.keys()):
-            if candidate_key[1] == tool_call.call_id:
-                run_result = _agent_tool_run_results.pop(candidate_key, None)
-                break
-    return run_result
+    obj_id = id(tool_call)
+    run_result = _agent_tool_run_results_by_obj.pop(obj_id, None)
+    if run_result is not None:
+        _drop_agent_tool_run_result(tool_call.call_id, obj_id)
+        return run_result
+
+    call_id = tool_call.call_id
+    if not call_id:
+        return None
+
+    candidate_ids = _agent_tool_run_results_by_call_id.get(call_id)
+    if not candidate_ids:
+        return None
+    if len(candidate_ids) != 1:
+        return None
+
+    candidate_id = next(iter(candidate_ids))
+    _agent_tool_run_results_by_call_id.pop(call_id, None)
+    return _agent_tool_run_results_by_obj.pop(candidate_id, None)
 
 
 @dataclass
@@ -562,11 +590,13 @@ class Agent(AgentBase, Generic[TContext]):
                     session=session,
                 )
 
-            # Store the run result by (tool_name, tool_call_id) so nested interruptions can be read
-            # later without cross-run collisions.
-            if isinstance(context, ToolContext):
-                key = (context.tool_name or "<unknown_tool>", context.tool_call_id)
-                _agent_tool_run_results[key] = run_result
+            # Store the run result by tool call identity so nested interruptions can be read later.
+            if isinstance(context, ToolContext) and context.tool_call is not None:
+                tool_call_id = context.tool_call_id
+                tool_call_obj_id = id(context.tool_call)
+                _agent_tool_run_results_by_obj[tool_call_obj_id] = run_result
+                if isinstance(tool_call_id, str):
+                    _index_agent_tool_run_result(tool_call_id, tool_call_obj_id)
 
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)
