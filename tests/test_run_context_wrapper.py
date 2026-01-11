@@ -37,6 +37,18 @@ def test_run_context_scopes_approvals_to_call_ids() -> None:
     assert wrapper.is_tool_approved("tool_call", "call-2") is None
 
 
+def test_run_context_scopes_rejections_to_call_ids() -> None:
+    wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
+    agent = make_agent()
+    approval = ToolApprovalItem(agent=agent, raw_item={"type": "tool_call", "call_id": "call-1"})
+
+    wrapper.reject_tool(approval)
+    assert wrapper.is_tool_approved("tool_call", "call-1") is False
+
+    # A different call ID should require a fresh approval.
+    assert wrapper.is_tool_approved("tool_call", "call-2") is None
+
+
 def test_run_context_honors_global_approval_and_rejection() -> None:
     wrapper: RunContextWrapper[dict[str, object]] = RunContextWrapper(context={})
     agent = make_agent()

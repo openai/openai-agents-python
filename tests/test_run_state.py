@@ -432,8 +432,8 @@ class TestRunState:
         assert approvals["toolZ"].approved is False
         assert approvals["toolZ"].rejected is True
 
-    def test_rejection_is_reused_for_new_call_ids(self):
-        """Test that a rejected tool call auto-applies to subsequent retries with new IDs."""
+    def test_rejection_is_scoped_to_call_ids(self):
+        """Test that a rejected tool call does not auto-apply to new call IDs."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
         agent = Agent(name="AgentRejectReuse")
         state = make_state(agent, context=context, original_input="", max_turns=1)
@@ -446,7 +446,7 @@ class TestRunState:
 
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid789") is False
-        assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid999") is False
+        assert state._context.is_tool_approved(tool_name="toolZ", call_id="cid999") is None
 
     def test_approve_raises_when_context_is_none(self):
         """Test that approve raises UserError when context is None."""
