@@ -1013,6 +1013,16 @@ async def resolve_interrupted_turn(
     for pending_item in pending_interruptions:
         if pending_item:
             append_if_new(pending_item)
+    for shell_result in shell_results:
+        append_if_new(shell_result)
+    for shell_rejection in rejected_shell_results:
+        append_if_new(shell_rejection)
+    for apply_patch_result in apply_patch_results:
+        append_if_new(apply_patch_result)
+    for apply_patch_rejection in rejected_apply_patch_results:
+        append_if_new(apply_patch_rejection)
+    for approved_response in approved_mcp_responses:
+        append_if_new(approved_response)
 
     processed_response.interruptions = pending_interruptions
     if pending_interruptions:
@@ -1037,19 +1047,6 @@ async def resolve_interrupted_turn(
         )
         for approval_result in approval_results:
             append_if_new(approval_result)
-
-    for shell_result in shell_results:
-        append_if_new(shell_result)
-    for shell_rejection in rejected_shell_results:
-        append_if_new(shell_rejection)
-
-    for apply_patch_result in apply_patch_results:
-        append_if_new(apply_patch_result)
-    for apply_patch_rejection in rejected_apply_patch_results:
-        append_if_new(apply_patch_rejection)
-
-    for approved_response in approved_mcp_responses:
-        append_if_new(approved_response)
 
     (
         pending_hosted_mcp_approvals,
