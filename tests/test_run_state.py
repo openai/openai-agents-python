@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, TypeVar, cast
 
 import pytest
@@ -1840,6 +1841,33 @@ class TestRunStateSerializationEdgeCases:
         raw_item = generated_items[0]["raw_item"]
         # Check that snake_case fields are camelized
         assert "response_id" in raw_item or "id" in raw_item
+
+    @pytest.mark.asyncio
+    async def test_to_string_serializes_non_json_outputs(self):
+        """Test that to_string handles outputs with non-JSON values."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=context)
+
+        tool_call_output = ToolCallOutputItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call_output",
+                "call_id": "call123",
+                "output": "ok",
+            },
+            output={"timestamp": datetime(2024, 1, 1, 12, 0, 0)},
+        )
+        state._generated_items.append(tool_call_output)
+
+        state_string = state.to_string()
+        json_data = json.loads(state_string)
+
+        generated_items = json_data.get("generated_items", [])
+        assert len(generated_items) == 1
+        output_payload = generated_items[0]["output"]
+        assert isinstance(output_payload, dict)
+        assert isinstance(output_payload["timestamp"], str)
 
     @pytest.mark.asyncio
     async def test_from_json_with_last_processed_response(self):
