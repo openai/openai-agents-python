@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import json
+from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
 from typing import Any, Literal, TypeVar, cast
 
 from openai.types.responses import (
@@ -357,7 +358,21 @@ async def execute_tools_and_side_effects(
     # Make a copy of the generated items
     pre_step_items = list(pre_step_items)
 
-    def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, str | None]:
+    def _hashable_identity_value(value: Any) -> Hashable | None:
+        if value is None:
+            return None
+        if isinstance(value, (dict, list, tuple)):
+            try:
+                return json.dumps(value, sort_keys=True, default=str)
+            except Exception:
+                return repr(value)
+        try:
+            hash(value)
+        except Exception:
+            return str(value)
+        return cast(Hashable, value)
+
+    def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | None]:
         """Return a tuple that uniquely identifies a tool call for deduplication."""
         call_id = None
         name = None
@@ -370,9 +385,9 @@ async def execute_tools_and_side_effects(
             call_id = raw.call_id
             name = getattr(raw, "name", None)
             args = getattr(raw, "arguments", None)
-        return call_id, name, args
+        return call_id, name, _hashable_identity_value(args)
 
-    existing_call_keys: set[tuple[str | None, str | None, str | None]] = set()
+    existing_call_keys: set[tuple[str | None, str | None, Hashable | None]] = set()
     for item in pre_step_items:
         if isinstance(item, ToolCallItem):
             identity = _tool_call_identity(item.raw_item)

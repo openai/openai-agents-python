@@ -131,6 +131,24 @@ async def test_plaintext_agent_no_tool_calls_multiple_messages_is_final_output()
 
 
 @pytest.mark.asyncio
+async def test_execute_tools_allows_unhashable_tool_call_arguments():
+    agent = make_agent()
+    response = ModelResponse(output=[], usage=Usage(), response_id="resp")
+    raw_tool_call = {
+        "type": "function_call",
+        "call_id": "call-1",
+        "name": "tool",
+        "arguments": {"key": "value"},
+    }
+    pre_step_items: list[RunItem] = [ToolCallItem(agent=agent, raw_item=raw_tool_call)]
+
+    result = await get_execute_result(agent, response, generated_items=pre_step_items)
+
+    assert len(result.generated_items) == 1
+    assert isinstance(result.next_step, NextStepFinalOutput)
+
+
+@pytest.mark.asyncio
 async def test_plaintext_agent_with_tool_call_is_run_again():
     agent = Agent(name="test", tools=[get_function_tool(name="test", return_value="123")])
     response = ModelResponse(
