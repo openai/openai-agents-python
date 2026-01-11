@@ -586,9 +586,7 @@ class RunState(Generic[TContext, TAgent]):
                     serialized_output = serialized_output.model_dump(exclude_unset=True)
                 elif dataclasses.is_dataclass(serialized_output):
                     serialized_output = dataclasses.asdict(serialized_output)  # type: ignore[arg-type]
-                else:
-                    # Ensure output is JSON-serializable.
-                    json.dumps(serialized_output, default=str)
+                serialized_output = _ensure_json_compatible(serialized_output)
             except Exception:
                 serialized_output = str(item.output)
             result["output"] = serialized_output
@@ -884,6 +882,13 @@ def _serialize_raw_item_value(raw_item: Any) -> Any:
     if isinstance(raw_item, dict):
         return dict(raw_item)
     return raw_item
+
+
+def _ensure_json_compatible(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return str(value)
 
 
 def _serialize_tool_call_data(tool_call: Any) -> Any:
