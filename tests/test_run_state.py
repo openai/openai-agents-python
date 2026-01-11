@@ -2212,6 +2212,28 @@ class TestRunStateSerializationEdgeCases:
         assert len(result) == 1
         assert result[0].type == "reasoning_item"
 
+    async def test_deserialize_compaction_item(self):
+        """Test deserialization of compaction_item."""
+        agent = Agent(name="TestAgent")
+
+        item_data = {
+            "type": "compaction_item",
+            "agent": {"name": "TestAgent"},
+            "raw_item": {
+                "type": "compaction",
+                "summary": "...",
+            },
+        }
+
+        result = _deserialize_items([item_data], {"TestAgent": agent})
+        assert len(result) == 1
+        assert result[0].type == "compaction_item"
+        raw_item = result[0].raw_item
+        raw_type = (
+            raw_item.get("type") if isinstance(raw_item, dict) else getattr(raw_item, "type", None)
+        )
+        assert raw_type == "compaction"
+
     async def test_deserialize_handoff_call_item(self):
         """Test deserialization of handoff_call_item."""
         agent = Agent(name="TestAgent")
