@@ -793,6 +793,9 @@ async def resolve_interrupted_turn(
     def _computer_output_exists(call_id: str) -> bool:
         return _has_output_item(call_id, "computer_call_output")
 
+    def _function_output_exists(call_id: str) -> bool:
+        return _has_output_item(call_id, "function_call_output")
+
     def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
         if item is None:
             return
@@ -878,6 +881,8 @@ async def resolve_interrupted_turn(
     function_tool_runs: list[ToolRunFunction] = []
     for run in processed_response.functions:
         call_id = run.tool_call.call_id
+        if call_id and _function_output_exists(call_id):
+            continue
         approval_status = context_wrapper.get_approval_status(
             run.function_tool.name,
             call_id,

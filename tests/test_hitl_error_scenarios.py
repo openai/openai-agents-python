@@ -850,7 +850,7 @@ async def test_resume_skips_non_hitl_function_calls() -> None:
     def already_ran() -> str:
         return "done"
 
-    model, agent = make_model_and_agent(tools=[already_ran])
+    _, agent = make_model_and_agent(tools=[already_ran])
     function_call = make_function_tool_call(already_ran.name, call_id="call-skip")
 
     processed_response = ProcessedResponse(
@@ -880,6 +880,64 @@ async def test_resume_skips_non_hitl_function_calls() -> None:
 
     assert isinstance(result.next_step, NextStepRunAgain)
     assert not result.new_step_items, "Non-HITL tools should not be executed again on resume"
+
+
+@pytest.mark.asyncio
+async def test_resume_skips_non_hitl_function_calls_with_existing_output() -> None:
+    """Non-HITL function calls with persisted outputs should not re-run on resume."""
+
+    @function_tool
+    def already_ran() -> str:
+        return "done"
+
+    model, agent = make_model_and_agent(tools=[already_ran])
+    function_call = make_function_tool_call(already_ran.name, call_id="call-skip")
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[ToolRunFunction(tool_call=function_call, function_tool=already_ran)],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(
+        ToolApprovalItem(agent=agent, raw_item=function_call, tool_name=already_ran.name),
+        always_approve=True,
+    )
+
+    original_pre_step_items: list[RunItem] = [
+        ToolCallOutputItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call_output",
+                "call_id": "call-skip",
+                "output": "prior run",
+            },
+            output="prior run",
+        )
+    ]
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume run",
+        original_pre_step_items=original_pre_step_items,
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=None,
+    )
+
+    assert isinstance(result.next_step, NextStepRunAgain)
+    assert not result.new_step_items, "Existing outputs should prevent re-execution on resume"
 
 
 @pytest.mark.asyncio
