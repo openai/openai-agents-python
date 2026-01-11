@@ -35,6 +35,7 @@ from agents.guardrail import (
 from agents.handoffs import Handoff
 from agents.items import (
     HandoffOutputItem,
+    ItemHelpers,
     MessageOutputItem,
     ModelResponse,
     RunItem,
@@ -3048,6 +3049,36 @@ class TestRunStateSerializationEdgeCases:
         # Verify last processed response was deserialized
         assert new_state._last_processed_response is not None
         assert len(new_state._last_processed_response.new_items) == 1
+
+    @pytest.mark.asyncio
+    async def test_run_state_merge_keeps_tool_output_with_same_call_id(self):
+        """RunState merge should keep tool outputs even when call IDs already exist."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="TestAgent")
+
+        tool_call = ResponseFunctionToolCall(
+            type="function_call",
+            name="test_tool",
+            call_id="call-merge-1",
+            status="completed",
+            arguments="{}",
+        )
+        tool_call_item = ToolCallItem(agent=agent, raw_item=tool_call)
+        tool_output_item = ToolCallOutputItem(
+            agent=agent,
+            output="ok",
+            raw_item=ItemHelpers.tool_call_output_item(tool_call, "ok"),
+        )
+
+        processed_response = make_processed_response(new_items=[tool_output_item])
+        state = make_state(agent, context=context)
+        state._generated_items = [tool_call_item]
+        state._last_processed_response = processed_response
+
+        json_data = state.to_json()
+        generated_types = [item["type"] for item in json_data["generated_items"]]
+        assert "tool_call_item" in generated_types
+        assert "tool_call_output_item" in generated_types
 
     @pytest.mark.asyncio
     async def test_deserialize_processed_response_handoff_with_name_fallback(self):

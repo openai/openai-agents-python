@@ -390,6 +390,7 @@ class RunState(Generic[TContext, TAgent]):
 
         seen_id_types: set[tuple[str, str]] = set()
         seen_call_ids: set[str] = set()
+        seen_call_id_types: set[tuple[str, str]] = set()
 
         def _id_type_call(item: Any) -> tuple[str | None, str | None, str | None]:
             item_id = None
@@ -415,18 +416,25 @@ class RunState(Generic[TContext, TAgent]):
             item_id, item_type, call_id = _id_type_call(existing)
             if item_id and item_type:
                 seen_id_types.add((item_id, item_type))
-            if call_id:
+            if call_id and item_type:
+                seen_call_id_types.add((call_id, item_type))
+            elif call_id:
                 seen_call_ids.add(call_id)
 
         for new_item in self._last_processed_response.new_items:
             item_id, item_type, call_id = _id_type_call(new_item)
-            if call_id and call_id in seen_call_ids:
+            if call_id and item_type:
+                if (call_id, item_type) in seen_call_id_types:
+                    continue
+            elif call_id and call_id in seen_call_ids:
                 continue
             if item_id and item_type and (item_id, item_type) in seen_id_types:
                 continue
             if item_id and item_type:
                 seen_id_types.add((item_id, item_type))
-            if call_id:
+            if call_id and item_type:
+                seen_call_id_types.add((call_id, item_type))
+            elif call_id:
                 seen_call_ids.add(call_id)
             generated_items.append(new_item)
         return generated_items

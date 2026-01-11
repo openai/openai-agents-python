@@ -320,6 +320,52 @@ async def test_nested_agent_tool_reuses_rejection_without_reprompt() -> None:
     assert not third.interruptions, "rejected inner tool call should not re-prompt on retry"
 
 
+@pytest.mark.asyncio
+async def test_nested_agent_tool_interruptions_dont_collide_on_duplicate_call_ids() -> None:
+    """Nested agent tool interruptions should survive duplicate outer call IDs."""
+
+    @function_tool(needs_approval=True)
+    async def inner_hitl_tool() -> str:
+        return "ok"
+
+    inner_model = FakeModel()
+    inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_hitl_tool])
+    inner_model.add_multiple_turn_outputs(
+        [
+            [make_function_tool_call(inner_hitl_tool.name, call_id="inner-1")],
+            [make_function_tool_call(inner_hitl_tool.name, call_id="inner-2")],
+        ]
+    )
+
+    agent_tool = inner_agent.as_tool(
+        tool_name="inner_agent_tool",
+        tool_description="Inner agent tool",
+        needs_approval=False,
+    )
+
+    outer_model = FakeModel()
+    outer_agent = Agent(name="Outer", model=outer_model, tools=[agent_tool])
+    outer_model.add_multiple_turn_outputs(
+        [
+            [
+                make_function_tool_call(
+                    agent_tool.name, call_id="outer-dup", arguments='{"input":"a"}'
+                ),
+                make_function_tool_call(
+                    agent_tool.name, call_id="outer-dup", arguments='{"input":"b"}'
+                ),
+            ]
+        ]
+    )
+
+    result = await Runner.run(outer_agent, "start")
+    assert result.interruptions, "nested agent tool should request approvals"
+    nested_interruptions = [
+        item for item in result.interruptions if item.tool_name == inner_hitl_tool.name
+    ]
+    assert len(nested_interruptions) == 2
+
+
 @pytest.mark.parametrize(
     "setup_fn, output_type",
     [
@@ -347,6 +393,32 @@ async def test_pending_approvals_stay_pending_on_resume(
 
     if scenario.assert_result:
         scenario.assert_result(resumed)
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_duplicate_pending_shell_approvals() -> None:
+    """Resuming should not duplicate pending shell approvals."""
+    tool = ShellTool(executor=lambda _request: "shell_output", needs_approval=True)
+    model, agent = make_model_and_agent(tools=[tool])
+    raw_call = make_shell_call(
+        "call_shell_pending_dup",
+        id_value="shell_pending_dup",
+        commands=["echo pending"],
+    )
+    call_id = extract_tool_call_id(raw_call)
+    assert call_id, "shell call must have a call_id"
+
+    model.set_next_output([raw_call])
+    first = await Runner.run(agent, "run shell")
+    assert first.interruptions, "shell tool should require approval"
+
+    resumed = await Runner.run(agent, first.to_state())
+    pending_items = [
+        item
+        for item in resumed.new_items
+        if isinstance(item, ToolApprovalItem) and extract_tool_call_id(item.raw_item) == call_id
+    ]
+    assert len(pending_items) == 1
 
 
 @pytest.mark.asyncio
