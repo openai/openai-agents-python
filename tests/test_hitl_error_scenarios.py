@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, cast
 
 import pytest
-from openai.types.responses import ResponseComputerToolCall
+from openai.types.responses import ResponseComputerToolCall, ResponseFunctionToolCall
 from openai.types.responses.response_computer_tool_call import ActionScreenshot
 from openai.types.responses.response_input_param import (
     ComputerCallOutput,
@@ -840,6 +840,122 @@ async def test_resume_rebuilds_function_runs_from_pending_approvals() -> None:
         if isinstance(item, ToolCallOutputItem)
     }
     assert "call-rebuild-1" in executed_call_ids, "Function should be rebuilt and executed"
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuilds_function_runs_from_object_approvals() -> None:
+    """Rebuild should handle ResponseFunctionToolCall approval items."""
+
+    @function_tool(needs_approval=True)
+    def approve_me(reason: Optional[str] = None) -> str:  # noqa: UP007
+        return f"approved:{reason}" if reason else "approved"
+
+    model, agent = make_model_and_agent(tools=[approve_me])
+    tool_call = make_function_tool_call(
+        approve_me.name,
+        call_id="call-rebuild-obj",
+        arguments='{"reason": "ok"}',
+    )
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+    context_wrapper = make_context_wrapper()
+    context_wrapper.approve_tool(approval_item)
+
+    run_state = make_state_with_interruptions(agent, [approval_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    executed_call_ids = {
+        extract_tool_call_id(item.raw_item)
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+    }
+    assert "call-rebuild-obj" in executed_call_ids, (
+        "Function should be rebuilt from ResponseFunctionToolCall approval"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rebuild_function_runs_handles_object_pending_and_rejections() -> None:
+    """Rebuild should surface pending approvals and emit rejections for object approvals."""
+
+    @function_tool(needs_approval=True)
+    def reject_me(text: str = "nope") -> str:
+        return text
+
+    @function_tool(needs_approval=True)
+    def pending_me(text: str = "wait") -> str:
+        return text
+
+    _model, agent = make_model_and_agent(tools=[reject_me, pending_me])
+    context_wrapper = make_context_wrapper()
+
+    rejected_call = make_function_tool_call(reject_me.name, call_id="obj-reject")
+    pending_call = make_function_tool_call(pending_me.name, call_id="obj-pending")
+    assert isinstance(rejected_call, ResponseFunctionToolCall)
+    assert isinstance(pending_call, ResponseFunctionToolCall)
+
+    rejected_item = ToolApprovalItem(agent=agent, raw_item=rejected_call)
+    pending_item = ToolApprovalItem(agent=agent, raw_item=pending_call)
+    context_wrapper.reject_tool(rejected_item)
+
+    run_state = make_state_with_interruptions(agent, [rejected_item, pending_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert pending_item in result.next_step.interruptions
+    rejection_outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem) and item.output == HITL_REJECTION_MSG
+    ]
+    assert rejection_outputs, "Rejected function call should emit rejection output"
 
 
 @pytest.mark.asyncio
