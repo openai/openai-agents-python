@@ -293,6 +293,499 @@ def _partition_mcp_approval_requests(
     return with_callback, manual
 
 
+def _build_tool_output_index(items: Sequence[RunItem]) -> set[tuple[str, str]]:
+    """Index tool call output items by (type, call_id) for fast lookups."""
+    index: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, ToolCallOutputItem):
+            continue
+        raw_item = item.raw_item
+        if isinstance(raw_item, Mapping):
+            raw_type = raw_item.get("type")
+            call_id = raw_item.get("call_id") or raw_item.get("id")
+        else:
+            raw_type = getattr(raw_item, "type", None)
+            call_id = getattr(raw_item, "call_id", None) or getattr(raw_item, "id", None)
+        if isinstance(raw_type, str) and isinstance(call_id, str):
+            index.add((raw_type, call_id))
+    return index
+
+
+def _hashable_identity_value(value: Any) -> Hashable | None:
+    """Convert a tool call field into a stable, hashable representation."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except Exception:
+            return repr(value)
+    try:
+        hash(value)
+    except Exception:
+        return str(value)
+    return cast(Hashable, value)
+
+
+def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | None]:
+    """Return a tuple that identifies a tool call when call_id/id may be missing."""
+    call_id = extract_tool_call_id(raw)
+    name = None
+    args = None
+    # Name/arguments act as a fallback discriminator when call_id is unavailable.
+    if isinstance(raw, Mapping):
+        name = raw.get("name")
+        args = raw.get("arguments")
+    else:
+        name = getattr(raw, "name", None)
+        args = getattr(raw, "arguments", None)
+    return call_id, name, _hashable_identity_value(args)
+
+
+def _dedupe_tool_call_items(
+    *, existing_items: Sequence[RunItem], new_items: Sequence[RunItem]
+) -> list[RunItem]:
+    """Return new items while skipping tool call duplicates already seen by identity."""
+    existing_call_keys: set[tuple[str | None, str | None, Hashable | None]] = set()
+    for item in existing_items:
+        if isinstance(item, ToolCallItem):
+            existing_call_keys.add(_tool_call_identity(item.raw_item))
+    deduped: list[RunItem] = []
+    for item in new_items:
+        if isinstance(item, ToolCallItem):
+            identity = _tool_call_identity(item.raw_item)
+            if identity in existing_call_keys:
+                continue
+            existing_call_keys.add(identity)
+        deduped.append(item)
+    return deduped
+
+
+# Plan objects keep tool runs and approval metadata so fresh/resume paths share execution logic.
+@_dc.dataclass
+class ToolExecutionPlan:
+    """Represents tool execution work to perform in a single turn."""
+
+    function_runs: list[ToolRunFunction] = _dc.field(default_factory=list)
+    computer_actions: list[ToolRunComputerAction] = _dc.field(default_factory=list)
+    shell_calls: list[ToolRunShellCall] = _dc.field(default_factory=list)
+    apply_patch_calls: list[ToolRunApplyPatchCall] = _dc.field(default_factory=list)
+    local_shell_calls: list[ToolRunLocalShellCall] = _dc.field(default_factory=list)
+    pending_interruptions: list[ToolApprovalItem] = _dc.field(default_factory=list)
+    approved_mcp_responses: list[RunItem] = _dc.field(default_factory=list)
+    mcp_requests_with_callback: list[ToolRunMCPApprovalRequest] = _dc.field(default_factory=list)
+
+    @property
+    def has_interruptions(self) -> bool:
+        return bool(self.pending_interruptions)
+
+
+def _build_plan_for_fresh_turn(
+    *,
+    processed_response: ProcessedResponse,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+) -> ToolExecutionPlan:
+    """Build a ToolExecutionPlan for a fresh turn."""
+    pending_interruptions: list[ToolApprovalItem] = []
+    approved_mcp_responses: list[RunItem] = []
+    # Manual MCP approvals are surfaced as interruptions before tool execution.
+    (
+        mcp_requests_with_callback,
+        mcp_requests_requiring_manual_approval,
+    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
+    if mcp_requests_requiring_manual_approval:
+        approved_mcp_responses, _ = _apply_manual_mcp_approvals(
+            agent=agent,
+            requests=mcp_requests_requiring_manual_approval,
+            context_wrapper=context_wrapper,
+            approval_items_by_call_id=approval_items_by_call_id,
+            pending_interruption_adder=pending_interruptions.append,
+        )
+
+    return ToolExecutionPlan(
+        function_runs=processed_response.functions,
+        computer_actions=processed_response.computer_actions,
+        shell_calls=processed_response.shell_calls,
+        apply_patch_calls=processed_response.apply_patch_calls,
+        local_shell_calls=processed_response.local_shell_calls,
+        pending_interruptions=pending_interruptions,
+        approved_mcp_responses=approved_mcp_responses,
+        mcp_requests_with_callback=list(mcp_requests_with_callback),
+    )
+
+
+def _build_plan_for_resume_turn(
+    *,
+    processed_response: ProcessedResponse,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+    pending_interruptions: list[ToolApprovalItem],
+    pending_interruption_adder: Callable[[ToolApprovalItem], None],
+    function_runs: list[ToolRunFunction],
+    computer_actions: list[ToolRunComputerAction],
+    shell_calls: list[ToolRunShellCall],
+    apply_patch_calls: list[ToolRunApplyPatchCall],
+) -> ToolExecutionPlan:
+    """Build a ToolExecutionPlan for a resumed turn."""
+    approved_mcp_responses: list[RunItem] = []
+    # Resumes still need to re-surface pending MCP approvals when they exist.
+    (
+        mcp_requests_with_callback,
+        mcp_requests_requiring_manual_approval,
+    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
+    if mcp_requests_requiring_manual_approval:
+        approved_mcp_responses, _ = _apply_manual_mcp_approvals(
+            agent=agent,
+            requests=mcp_requests_requiring_manual_approval,
+            context_wrapper=context_wrapper,
+            approval_items_by_call_id=approval_items_by_call_id,
+            pending_interruption_adder=pending_interruption_adder,
+        )
+
+    return ToolExecutionPlan(
+        function_runs=function_runs,
+        computer_actions=computer_actions,
+        shell_calls=shell_calls,
+        apply_patch_calls=apply_patch_calls,
+        local_shell_calls=[],
+        pending_interruptions=pending_interruptions,
+        approved_mcp_responses=approved_mcp_responses,
+        mcp_requests_with_callback=list(mcp_requests_with_callback),
+    )
+
+
+def _collect_tool_interruptions(
+    *,
+    function_results: Sequence[FunctionToolResult],
+    shell_results: Sequence[RunItem],
+    apply_patch_results: Sequence[RunItem],
+) -> list[ToolApprovalItem]:
+    """Collect tool approval interruptions from tool results."""
+    interruptions: list[ToolApprovalItem] = []
+    for result in function_results:
+        if isinstance(result.run_item, ToolApprovalItem):
+            interruptions.append(result.run_item)
+        if result.interruptions:
+            interruptions.extend(result.interruptions)
+        elif result.agent_run_result and hasattr(result.agent_run_result, "interruptions"):
+            nested_interruptions = result.agent_run_result.interruptions
+            if nested_interruptions:
+                interruptions.extend(nested_interruptions)
+    for shell_result in shell_results:
+        if isinstance(shell_result, ToolApprovalItem):
+            interruptions.append(shell_result)
+    for apply_patch_result in apply_patch_results:
+        if isinstance(apply_patch_result, ToolApprovalItem):
+            interruptions.append(apply_patch_result)
+    return interruptions
+
+
+def _build_tool_result_items(
+    *,
+    function_results: Sequence[FunctionToolResult],
+    computer_results: Sequence[RunItem],
+    shell_results: Sequence[RunItem],
+    apply_patch_results: Sequence[RunItem],
+    local_shell_results: Sequence[RunItem] | None = None,
+) -> list[RunItem]:
+    """Build ordered tool result items for inclusion in new step items."""
+    results: list[RunItem] = [result.run_item for result in function_results]
+    results.extend(computer_results)
+    results.extend(shell_results)
+    results.extend(apply_patch_results)
+    if local_shell_results:
+        results.extend(local_shell_results)
+    return results
+
+
+def _make_unique_item_appender(
+    existing_items: Sequence[RunItem],
+) -> tuple[list[RunItem], Callable[[RunItem], None]]:
+    """Return (items, append_fn) that skips duplicates by object identity to avoid conflation."""
+    existing_ids = {id(item) for item in existing_items}
+    new_items: list[RunItem] = []
+    new_item_ids: set[int] = set()
+
+    def append_if_new(item: RunItem) -> None:
+        item_id = id(item)
+        if item_id in existing_ids or item_id in new_item_ids:
+            return
+        new_items.append(item)
+        new_item_ids.add(item_id)
+
+    return new_items, append_if_new
+
+
+async def _collect_runs_by_approval(
+    runs: Sequence[T],
+    *,
+    call_id_extractor: Callable[[T], str],
+    tool_name_resolver: Callable[[T], str],
+    rejection_builder: Callable[[str], RunItem],
+    context_wrapper: RunContextWrapper[Any],
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+    agent: Agent[Any],
+    pending_interruption_adder: Callable[[ToolApprovalItem], None],
+    needs_approval_checker: Callable[[T], Awaitable[bool]] | None = None,
+    output_exists_checker: Callable[[str], bool] | None = None,
+) -> tuple[list[T], list[RunItem]]:
+    """Return approved runs and rejection items, adding pending approvals via callback."""
+    approved_runs: list[T] = []
+    rejection_items: list[RunItem] = []
+    for run in runs:
+        call_id = call_id_extractor(run)
+        tool_name = tool_name_resolver(run)
+        existing_pending = approval_items_by_call_id.get(call_id)
+        approval_status = context_wrapper.get_approval_status(
+            tool_name,
+            call_id,
+            existing_pending=existing_pending,
+        )
+
+        if output_exists_checker and output_exists_checker(call_id):
+            continue
+
+        if approval_status is False:
+            rejection_items.append(rejection_builder(call_id))
+            continue
+
+        needs_approval = True
+        if needs_approval_checker:
+            try:
+                needs_approval = await needs_approval_checker(run)
+            except UserError:
+                raise
+            except Exception:
+                needs_approval = True
+
+        if not needs_approval:
+            approved_runs.append(run)
+            continue
+
+        if approval_status is True:
+            approved_runs.append(run)
+        else:
+            pending_item = existing_pending or ToolApprovalItem(
+                agent=agent,
+                raw_item=get_mapping_or_attr(run, "tool_call"),
+                tool_name=tool_name,
+            )
+            pending_interruption_adder(pending_item)
+
+    return approved_runs, rejection_items
+
+
+def _apply_manual_mcp_approvals(
+    *,
+    agent: Agent[Any],
+    requests: Sequence[ToolRunMCPApprovalRequest],
+    context_wrapper: RunContextWrapper[Any],
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+    pending_interruption_adder: Callable[[ToolApprovalItem], None],
+) -> tuple[list[RunItem], list[ToolApprovalItem]]:
+    """Collect manual MCP approvals and record pending interruptions via callback."""
+    approved_responses, pending_items = collect_manual_mcp_approvals(
+        agent=agent,
+        requests=requests,
+        context_wrapper=context_wrapper,
+        existing_pending_by_call_id=approval_items_by_call_id,
+    )
+    approved_items: list[RunItem] = list(approved_responses)
+    for approval_item in pending_items:
+        pending_interruption_adder(approval_item)
+    return approved_items, pending_items
+
+
+async def _append_mcp_callback_results(
+    *,
+    agent: Agent[Any],
+    requests: Sequence[ToolRunMCPApprovalRequest],
+    context_wrapper: RunContextWrapper[Any],
+    append_item: Callable[[RunItem], None],
+) -> None:
+    """Execute MCP approval callbacks and append results when present."""
+    if not requests:
+        return
+    approval_results = await execute_mcp_approval_requests(
+        agent=agent,
+        approval_requests=list(requests),
+        context_wrapper=context_wrapper,
+    )
+    for result in approval_results:
+        append_item(result)
+
+
+async def _select_function_tool_runs_for_resume(
+    runs: Sequence[ToolRunFunction],
+    *,
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+    context_wrapper: RunContextWrapper[Any],
+    needs_approval_checker: Callable[[ToolRunFunction], Awaitable[bool]],
+    output_exists_checker: Callable[[str], bool],
+    record_rejection: Callable[[str | None, ResponseFunctionToolCall], None],
+    pending_interruption_adder: Callable[[ToolApprovalItem], None],
+    pending_item_builder: Callable[[ToolRunFunction], ToolApprovalItem],
+) -> list[ToolRunFunction]:
+    """Filter function tool runs during resume, honoring approvals and outputs."""
+    selected: list[ToolRunFunction] = []
+    for run in runs:
+        call_id = run.tool_call.call_id
+        if call_id and output_exists_checker(call_id):
+            continue
+
+        approval_status = context_wrapper.get_approval_status(
+            run.function_tool.name,
+            call_id,
+            existing_pending=approval_items_by_call_id.get(call_id),
+        )
+
+        requires_approval = await needs_approval_checker(run)
+
+        if approval_status is False:
+            record_rejection(call_id, run.tool_call)
+            continue
+
+        # If the user has already approved this call, run it even if the original tool did
+        # not require approval. This avoids skipping execution when we are resuming from a
+        # purely HITL-driven interruption.
+        if approval_status is True:
+            selected.append(run)
+            continue
+
+        # If approval is not required and no explicit rejection is present, skip running again.
+        # The original turn already executed this tool, so resuming after an unrelated approval
+        # should not invoke it a second time.
+        if not requires_approval:
+            continue
+
+        if approval_status is None:
+            pending_interruption_adder(
+                approval_items_by_call_id.get(run.tool_call.call_id) or pending_item_builder(run)
+            )
+            continue
+        selected.append(run)
+
+    return selected
+
+
+async def _execute_tool_plan(
+    *,
+    plan: ToolExecutionPlan,
+    agent: Agent[Any],
+    hooks: RunHooks[Any],
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+    parallel: bool = True,
+) -> tuple[
+    list[FunctionToolResult],
+    list[ToolInputGuardrailResult],
+    list[ToolOutputGuardrailResult],
+    list[RunItem],
+    list[RunItem],
+    list[RunItem],
+    list[RunItem],
+]:
+    """Execute tool runs captured in a ToolExecutionPlan."""
+    # parallel=False preserves ordering for resume flows where tool state matters.
+    if parallel:
+        (
+            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
+            computer_results,
+            shell_results,
+            apply_patch_results,
+            local_shell_results,
+        ) = await asyncio.gather(
+            execute_function_tool_calls(
+                agent=agent,
+                tool_runs=plan.function_runs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            execute_computer_actions(
+                agent=agent,
+                actions=plan.computer_actions,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            execute_shell_calls(
+                agent=agent,
+                calls=plan.shell_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            execute_apply_patch_calls(
+                agent=agent,
+                calls=plan.apply_patch_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+            execute_local_shell_calls(
+                agent=agent,
+                calls=plan.local_shell_calls,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                config=run_config,
+            ),
+        )
+    else:
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+        ) = await execute_function_tool_calls(
+            agent=agent,
+            tool_runs=plan.function_runs,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        computer_results = await execute_computer_actions(
+            agent=agent,
+            actions=plan.computer_actions,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        shell_results = await execute_shell_calls(
+            agent=agent,
+            calls=plan.shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        apply_patch_results = await execute_apply_patch_calls(
+            agent=agent,
+            calls=plan.apply_patch_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+        local_shell_results = await execute_local_shell_calls(
+            agent=agent,
+            calls=plan.local_shell_calls,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            config=run_config,
+        )
+
+    return (
+        function_results,
+        tool_input_guardrail_results,
+        tool_output_guardrail_results,
+        computer_results,
+        shell_results,
+        apply_patch_results,
+        local_shell_results,
+    )
+
+
 async def execute_final_output_step(
     *,
     agent: Agent[Any],
@@ -371,137 +864,58 @@ async def execute_tools_and_side_effects(
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     # Make a copy of the generated items
     pre_step_items = list(pre_step_items)
-
-    def _hashable_identity_value(value: Any) -> Hashable | None:
-        if value is None:
-            return None
-        if isinstance(value, (dict, list, tuple)):
-            try:
-                return json.dumps(value, sort_keys=True, default=str)
-            except Exception:
-                return repr(value)
-        try:
-            hash(value)
-        except Exception:
-            return str(value)
-        return cast(Hashable, value)
-
-    def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | None]:
-        """Return a tuple that uniquely identifies a tool call for deduplication."""
-        call_id = extract_tool_call_id(raw)
-        name = None
-        args = None
-        if isinstance(raw, Mapping):
-            name = raw.get("name")
-            args = raw.get("arguments")
-        else:
-            name = getattr(raw, "name", None)
-            args = getattr(raw, "arguments", None)
-        return call_id, name, _hashable_identity_value(args)
-
-    existing_call_keys: set[tuple[str | None, str | None, Hashable | None]] = set()
-    for item in pre_step_items:
-        if isinstance(item, ToolCallItem):
-            identity = _tool_call_identity(item.raw_item)
-            existing_call_keys.add(identity)
     approval_items_by_call_id = index_approval_items_by_call_id(pre_step_items)
 
-    new_step_items: list[RunItem] = []
-    (
-        mcp_requests_with_callback,
-        mcp_requests_requiring_manual_approval,
-    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
-    for item in processed_response.new_items:
-        if isinstance(item, ToolCallItem):
-            identity = _tool_call_identity(item.raw_item)
-            if identity in existing_call_keys:
-                continue
-            existing_call_keys.add(identity)
-        new_step_items.append(item)
+    # Build the execution plan once so tool runs and approvals stay aligned.
+    plan = _build_plan_for_fresh_turn(
+        processed_response=processed_response,
+        agent=agent,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+    )
 
-    # First, run function tools, computer actions, shell calls, apply_patch calls,
-    # and legacy local shell calls.
+    # Deduplicate tool calls so replayed model outputs do not enqueue duplicate work.
+    new_step_items = _dedupe_tool_call_items(
+        existing_items=pre_step_items,
+        new_items=processed_response.new_items,
+    )
+
     (
-        (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
+        function_results,
+        tool_input_guardrail_results,
+        tool_output_guardrail_results,
         computer_results,
         shell_results,
         apply_patch_results,
         local_shell_results,
-    ) = await asyncio.gather(
-        execute_function_tool_calls(
-            agent=agent,
-            tool_runs=processed_response.functions,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        ),
-        execute_computer_actions(
-            agent=agent,
-            actions=processed_response.computer_actions,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        ),
-        execute_shell_calls(
-            agent=agent,
-            calls=processed_response.shell_calls,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        ),
-        execute_apply_patch_calls(
-            agent=agent,
-            calls=processed_response.apply_patch_calls,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        ),
-        execute_local_shell_calls(
-            agent=agent,
-            calls=processed_response.local_shell_calls,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        ),
+    ) = await _execute_tool_plan(
+        plan=plan,
+        agent=agent,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        run_config=run_config,
     )
-    for result in function_results:
-        new_step_items.append(result.run_item)
-
-    new_step_items.extend(computer_results)
-    for shell_result in shell_results:
-        new_step_items.append(shell_result)
-    for apply_patch_result in apply_patch_results:
-        new_step_items.append(apply_patch_result)
-    new_step_items.extend(local_shell_results)
+    new_step_items.extend(
+        _build_tool_result_items(
+            function_results=function_results,
+            computer_results=computer_results,
+            shell_results=shell_results,
+            apply_patch_results=apply_patch_results,
+            local_shell_results=local_shell_results,
+        )
+    )
 
     # Collect approval interruptions so they can be serialized and resumed.
-    interruptions: list[ToolApprovalItem] = []
-    for result in function_results:
-        if isinstance(result.run_item, ToolApprovalItem):
-            interruptions.append(result.run_item)
-        else:
-            if result.interruptions:
-                interruptions.extend(result.interruptions)
-            elif result.agent_run_result and hasattr(result.agent_run_result, "interruptions"):
-                nested_interruptions = result.agent_run_result.interruptions
-                if nested_interruptions:
-                    interruptions.extend(nested_interruptions)
-    for shell_result in shell_results:
-        if isinstance(shell_result, ToolApprovalItem):
-            interruptions.append(shell_result)
-    for apply_patch_result in apply_patch_results:
-        if isinstance(apply_patch_result, ToolApprovalItem):
-            interruptions.append(apply_patch_result)
-    if mcp_requests_requiring_manual_approval:
-        approved_mcp_responses, pending_mcp_approvals = collect_manual_mcp_approvals(
-            agent=agent,
-            requests=mcp_requests_requiring_manual_approval,
-            context_wrapper=context_wrapper,
-            existing_pending_by_call_id=approval_items_by_call_id,
-        )
-        interruptions.extend(pending_mcp_approvals)
-        new_step_items.extend(approved_mcp_responses)
-        new_step_items.extend(pending_mcp_approvals)
+    interruptions = _collect_tool_interruptions(
+        function_results=function_results,
+        shell_results=shell_results,
+        apply_patch_results=apply_patch_results,
+    )
+    if plan.approved_mcp_responses:
+        new_step_items.extend(plan.approved_mcp_responses)
+    if plan.pending_interruptions:
+        interruptions.extend(plan.pending_interruptions)
+        new_step_items.extend(plan.pending_interruptions)
 
     processed_response.interruptions = interruptions
 
@@ -517,13 +931,12 @@ async def execute_tools_and_side_effects(
             processed_response=processed_response,
         )
     # Next, run the MCP approval requests
-    if mcp_requests_with_callback:
-        approval_results = await execute_mcp_approval_requests(
-            agent=agent,
-            approval_requests=mcp_requests_with_callback,
-            context_wrapper=context_wrapper,
-        )
-        new_step_items.extend(approval_results)
+    await _append_mcp_callback_results(
+        agent=agent,
+        requests=plan.mcp_requests_with_callback,
+        context_wrapper=context_wrapper,
+        append_item=new_step_items.append,
+    )
 
     # Next, check if there are any handoffs
     if run_handoffs := processed_response.handoffs:
@@ -691,79 +1104,10 @@ async def resolve_interrupted_turn(
     pending_interruptions: list[ToolApprovalItem] = []
     pending_interruption_keys: set[str] = set()
 
-    (
-        mcp_requests_with_callback,
-        mcp_requests_requiring_manual_approval,
-    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
+    output_index = _build_tool_output_index(original_pre_step_items)
 
     def _has_output_item(call_id: str, expected_type: str) -> bool:
-        for item in original_pre_step_items:
-            if not isinstance(item, ToolCallOutputItem):
-                continue
-            raw_item = item.raw_item
-            raw_type = None
-            raw_call_id = None
-            if isinstance(raw_item, Mapping):
-                raw_type = raw_item.get("type")
-                raw_call_id = raw_item.get("call_id")
-            else:
-                raw_type = getattr(raw_item, "type", None)
-                raw_call_id = getattr(raw_item, "call_id", None)
-            if raw_type == expected_type and raw_call_id == call_id:
-                return True
-        return False
-
-    async def _collect_runs_by_approval(
-        runs: Sequence[T],
-        *,
-        call_id_extractor: Callable[[T], str],
-        tool_name_resolver: Callable[[T], str],
-        rejection_builder: Callable[[str], RunItem],
-        needs_approval_checker: Callable[[T], Awaitable[bool]] | None = None,
-        output_exists_checker: Callable[[str], bool] | None = None,
-    ) -> tuple[list[T], list[RunItem]]:
-        approved_runs: list[T] = []
-        rejection_items: list[RunItem] = []
-        for run in runs:
-            call_id = call_id_extractor(run)
-            tool_name = tool_name_resolver(run)
-            existing_pending = approval_items_by_call_id.get(call_id)
-            approval_status = context_wrapper.get_approval_status(
-                tool_name,
-                call_id,
-                existing_pending=existing_pending,
-            )
-
-            if output_exists_checker and output_exists_checker(call_id):
-                continue
-
-            if approval_status is False:
-                rejection_items.append(rejection_builder(call_id))
-                continue
-
-            needs_approval = True
-            if needs_approval_checker:
-                try:
-                    needs_approval = await needs_approval_checker(run)
-                except UserError:
-                    raise
-                except Exception:
-                    needs_approval = True
-
-            if not needs_approval:
-                approved_runs.append(run)
-                continue
-
-            if approval_status is True:
-                approved_runs.append(run)
-            else:
-                pending_item = existing_pending or ToolApprovalItem(
-                    agent=agent,
-                    raw_item=get_mapping_or_attr(run, "tool_call"),
-                    tool_name=tool_name,
-                )
-                _add_pending_interruption(pending_item)
-        return approved_runs, rejection_items
+        return (expected_type, call_id) in output_index
 
     def _shell_call_id_from_run(run: ToolRunShellCall) -> str:
         return extract_shell_call_id(run.tool_call)
@@ -829,18 +1173,6 @@ async def resolve_interrupted_turn(
             return
         pending_interruption_keys.add(key)
         pending_interruptions.append(item)
-
-    approved_mcp_responses: list[RunItem] = []
-
-    approved_manual_mcp, pending_manual_mcp = collect_manual_mcp_approvals(
-        agent=agent,
-        requests=mcp_requests_requiring_manual_approval,
-        context_wrapper=context_wrapper,
-        existing_pending_by_call_id=approval_items_by_call_id,
-    )
-    approved_mcp_responses.extend(approved_manual_mcp)
-    for approval_item in pending_manual_mcp:
-        _add_pending_interruption(approval_item)
 
     async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
         """Recreate function runs from pending approvals when runs are missing."""
@@ -915,67 +1247,22 @@ async def resolve_interrupted_turn(
         return rebuilt_runs
 
     # Run only the approved function calls for this turn; emit rejections for denied ones.
-    function_tool_runs: list[ToolRunFunction] = []
-    for run in processed_response.functions:
-        call_id = run.tool_call.call_id
-        if call_id and _function_output_exists(call_id):
-            continue
-        approval_status = context_wrapper.get_approval_status(
-            run.function_tool.name,
-            call_id,
-            existing_pending=approval_items_by_call_id.get(call_id),
-        )
-
-        requires_approval = await _function_requires_approval(run)
-
-        if approval_status is False:
-            _record_function_rejection(call_id, run.tool_call)
-            continue
-
-        # If the user has already approved this call, run it even if the original tool did
-        # not require approval. This avoids skipping execution when we are resuming from a
-        # purely HITL-driven interruption.
-        if approval_status is True:
-            function_tool_runs.append(run)
-            continue
-
-        # If approval is not required and no explicit rejection is present, skip running again.
-        # The original turn already executed this tool, so resuming after an unrelated approval
-        # should not invoke it a second time.
-        if not requires_approval:
-            continue
-
-        if approval_status is None:
-            _add_pending_interruption(
-                approval_items_by_call_id.get(run.tool_call.call_id)
-                or ToolApprovalItem(agent=agent, raw_item=run.tool_call)
-            )
-            continue
-        function_tool_runs.append(run)
+    function_tool_runs = await _select_function_tool_runs_for_resume(
+        processed_response.functions,
+        approval_items_by_call_id=approval_items_by_call_id,
+        context_wrapper=context_wrapper,
+        needs_approval_checker=_function_requires_approval,
+        output_exists_checker=_function_output_exists,
+        record_rejection=_record_function_rejection,
+        pending_interruption_adder=_add_pending_interruption,
+        pending_item_builder=lambda run: ToolApprovalItem(agent=agent, raw_item=run.tool_call),
+    )
 
     # If state lacks function runs, rebuild them from pending approvals.
     # This covers resume-from-serialization cases where only ToolApprovalItems were persisted,
     # so we reconstruct minimal tool calls to apply the user's decision.
     if not function_tool_runs:
         function_tool_runs = await _rebuild_function_runs_from_approvals()
-
-    (
-        function_results,
-        tool_input_guardrail_results,
-        tool_output_guardrail_results,
-    ) = await execute_function_tool_calls(
-        agent=agent,
-        tool_runs=function_tool_runs,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        config=run_config,
-    )
-
-    # Surface nested interruptions from function tool results (e.g., agent-as-tool HITL).
-    for result in function_results:
-        if result.interruptions:
-            for interruption in result.interruptions:
-                _add_pending_interruption(interruption)
 
     pending_computer_actions: list[ToolRunComputerAction] = []
     for action in processed_response.computer_actions:
@@ -984,22 +1271,16 @@ async def resolve_interrupted_turn(
             continue
         pending_computer_actions.append(action)
 
-    computer_results: list[RunItem] = []
-    if pending_computer_actions:
-        computer_results = await execute_computer_actions(
-            agent=agent,
-            actions=pending_computer_actions,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            config=run_config,
-        )
-
     # Execute shell/apply_patch only when approved; emit rejections otherwise.
     approved_shell_calls, rejected_shell_results = await _collect_runs_by_approval(
         processed_response.shell_calls,
         call_id_extractor=_shell_call_id_from_run,
         tool_name_resolver=_shell_tool_name,
         rejection_builder=_build_shell_rejection,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+        agent=agent,
+        pending_interruption_adder=_add_pending_interruption,
         needs_approval_checker=_shell_needs_approval,
         output_exists_checker=_shell_output_exists,
     )
@@ -1009,56 +1290,73 @@ async def resolve_interrupted_turn(
         call_id_extractor=_apply_patch_call_id_from_run,
         tool_name_resolver=_apply_patch_tool_name,
         rejection_builder=_build_apply_patch_rejection,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+        agent=agent,
+        pending_interruption_adder=_add_pending_interruption,
         needs_approval_checker=_apply_patch_needs_approval,
         output_exists_checker=_apply_patch_output_exists,
     )
 
-    shell_results = await execute_shell_calls(
+    # Resume plan uses filtered runs and pending interruptions to avoid double execution.
+    plan = _build_plan_for_resume_turn(
+        processed_response=processed_response,
         agent=agent,
-        calls=approved_shell_calls,
-        hooks=hooks,
         context_wrapper=context_wrapper,
-        config=run_config,
+        approval_items_by_call_id=approval_items_by_call_id,
+        pending_interruptions=pending_interruptions,
+        pending_interruption_adder=_add_pending_interruption,
+        function_runs=function_tool_runs,
+        computer_actions=pending_computer_actions,
+        shell_calls=approved_shell_calls,
+        apply_patch_calls=approved_apply_patch_calls,
     )
 
-    apply_patch_results = await execute_apply_patch_calls(
+    (
+        function_results,
+        tool_input_guardrail_results,
+        tool_output_guardrail_results,
+        computer_results,
+        shell_results,
+        apply_patch_results,
+        _local_shell_results,
+    ) = await _execute_tool_plan(
+        plan=plan,
         agent=agent,
-        calls=approved_apply_patch_calls,
         hooks=hooks,
         context_wrapper=context_wrapper,
-        config=run_config,
+        run_config=run_config,
     )
+
+    # Surface nested interruptions from function tool results (e.g., agent-as-tool HITL).
+    for interruption in _collect_tool_interruptions(
+        function_results=function_results,
+        shell_results=[],
+        apply_patch_results=[],
+    ):
+        _add_pending_interruption(interruption)
 
     # Resuming reuses the same RunItem objects; skip duplicates by identity.
-    original_pre_step_item_ids = {id(item) for item in original_pre_step_items}
-    new_items: list[RunItem] = []
-    new_items_ids: set[int] = set()
+    new_items, append_if_new = _make_unique_item_appender(original_pre_step_items)
 
-    def append_if_new(item: RunItem) -> None:
-        item_id = id(item)
-        if item_id in original_pre_step_item_ids or item_id in new_items_ids:
-            return
-        new_items.append(item)
-        new_items_ids.add(item_id)
-
-    for function_result in function_results:
-        append_if_new(function_result.run_item)
-    for computer_result in computer_results:
-        append_if_new(computer_result)
+    for item in _build_tool_result_items(
+        function_results=function_results,
+        computer_results=computer_results,
+        shell_results=shell_results,
+        apply_patch_results=apply_patch_results,
+        local_shell_results=[],
+    ):
+        append_if_new(item)
     for rejection_item in rejected_function_outputs:
         append_if_new(rejection_item)
     for pending_item in pending_interruptions:
         if pending_item:
             append_if_new(pending_item)
-    for shell_result in shell_results:
-        append_if_new(shell_result)
     for shell_rejection in rejected_shell_results:
         append_if_new(shell_rejection)
-    for apply_patch_result in apply_patch_results:
-        append_if_new(apply_patch_result)
     for apply_patch_rejection in rejected_apply_patch_results:
         append_if_new(apply_patch_rejection)
-    for approved_response in approved_mcp_responses:
+    for approved_response in plan.approved_mcp_responses:
         append_if_new(approved_response)
 
     processed_response.interruptions = pending_interruptions
@@ -1076,14 +1374,12 @@ async def resolve_interrupted_turn(
             processed_response=processed_response,
         )
 
-    if mcp_requests_with_callback:
-        approval_results = await execute_mcp_approval_requests(
-            agent=agent,
-            approval_requests=mcp_requests_with_callback,
-            context_wrapper=context_wrapper,
-        )
-        for approval_result in approval_results:
-            append_if_new(approval_result)
+    await _append_mcp_callback_results(
+        agent=agent,
+        requests=plan.mcp_requests_with_callback,
+        context_wrapper=context_wrapper,
+        append_item=append_if_new,
+    )
 
     (
         pending_hosted_mcp_approvals,
