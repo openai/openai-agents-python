@@ -88,6 +88,8 @@ if TYPE_CHECKING:
 TContext = TypeVar("TContext", default=Any)
 TAgent = TypeVar("TAgent", bound="Agent[Any]", default="Agent[Any]")
 ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
+ContextSerializer = Callable[[Any], Mapping[str, Any]]
+ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
 # Schema version for serialization compatibility
 CURRENT_SCHEMA_VERSION = "1.0"
@@ -261,18 +263,123 @@ class RunState(Generic[TContext, TAgent]):
                 normalized_items.append(item)
         return normalized_items
 
-    def _serialize_context_payload(self) -> dict[str, Any]:
+    def _serialize_context_payload(
+        self,
+        *,
+        context_serializer: ContextSerializer | None = None,
+        strict_context: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Validate and serialize the stored run context."""
         if self._context is None:
-            return {}
+            return {}, _build_context_meta(
+                None,
+                serialized_via="none",
+                requires_deserializer=False,
+                omitted=False,
+            )
+
         raw_context_payload = self._context.context
         if raw_context_payload is None:
-            return {}
+            return {}, _build_context_meta(
+                raw_context_payload,
+                serialized_via="none",
+                requires_deserializer=False,
+                omitted=False,
+            )
+
         if isinstance(raw_context_payload, Mapping):
-            return dict(raw_context_payload)
-        raise UserError(
-            "RunState serialization requires context to be a mapping. "
-            "Provide a dict-like context or pass context_override when deserializing."
+            return (
+                dict(raw_context_payload),
+                _build_context_meta(
+                    raw_context_payload,
+                    serialized_via="mapping",
+                    requires_deserializer=False,
+                    omitted=False,
+                ),
+            )
+
+        if strict_context and context_serializer is None:
+            # Avoid silently dropping non-mapping context data when strict mode is requested.
+            raise UserError(
+                "RunState serialization requires context to be a mapping when strict_context "
+                "is True. Provide context_serializer to serialize custom contexts."
+            )
+
+        if context_serializer is not None:
+            try:
+                serialized = context_serializer(raw_context_payload)
+            except Exception as exc:
+                raise UserError(
+                    "Context serializer failed while serializing RunState context."
+                ) from exc
+            if not isinstance(serialized, Mapping):
+                raise UserError("Context serializer must return a mapping.")
+            return (
+                dict(serialized),
+                _build_context_meta(
+                    raw_context_payload,
+                    serialized_via="context_serializer",
+                    requires_deserializer=True,
+                    omitted=False,
+                ),
+            )
+
+        if hasattr(raw_context_payload, "model_dump"):
+            try:
+                serialized = raw_context_payload.model_dump(exclude_unset=True)
+            except TypeError:
+                serialized = raw_context_payload.model_dump()
+            if not isinstance(serialized, Mapping):
+                raise UserError("RunState context model_dump must return a mapping.")
+            # We can persist the data, but the original type is lost unless the caller rebuilds it.
+            logger.warning(
+                "RunState context was serialized from a Pydantic model. "
+                "Provide context_deserializer or context_override to restore the original type."
+            )
+            return (
+                dict(serialized),
+                _build_context_meta(
+                    raw_context_payload,
+                    serialized_via="model_dump",
+                    requires_deserializer=True,
+                    omitted=False,
+                ),
+            )
+
+        if dataclasses.is_dataclass(raw_context_payload):
+            serialized = dataclasses.asdict(cast(Any, raw_context_payload))
+            if not isinstance(serialized, Mapping):
+                raise UserError("RunState dataclass context must serialize to a mapping.")
+            # Dataclass instances serialize to dicts, so reconstruction requires a deserializer.
+            logger.warning(
+                "RunState context was serialized from a dataclass. "
+                "Provide context_deserializer or context_override to restore the original type."
+            )
+            return (
+                dict(serialized),
+                _build_context_meta(
+                    raw_context_payload,
+                    serialized_via="asdict",
+                    requires_deserializer=True,
+                    omitted=False,
+                ),
+            )
+
+        # Fall back to an empty dict so the run state remains serializable, but
+        # explicitly warn because the original context will be unavailable on restore.
+        logger.warning(
+            "RunState context of type %s is not serializable; storing empty context. "
+            "Provide context_serializer to preserve it.",
+            type(raw_context_payload).__name__,
+        )
+        return (
+            {},
+            _build_context_meta(
+                raw_context_payload,
+                serialized_via="omitted",
+                requires_deserializer=True,
+                omitted=True,
+            ),
         )
 
     def _merge_generated_items_with_processed(self) -> list[RunItem]:
@@ -324,11 +431,20 @@ class RunState(Generic[TContext, TAgent]):
             generated_items.append(new_item)
         return generated_items
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(
+        self,
+        *,
+        context_serializer: ContextSerializer | None = None,
+        strict_context: bool = False,
+    ) -> dict[str, Any]:
         """Serializes the run state to a JSON-compatible dictionary.
 
         This method is used to serialize the run state to a dictionary that can be used to
         resume the run later.
+
+        Args:
+            context_serializer: Optional function to serialize non-mapping context values.
+            strict_context: When True, require mapping contexts or a context_serializer.
 
         Returns:
             A dictionary representation of the run state.
@@ -344,7 +460,10 @@ class RunState(Generic[TContext, TAgent]):
         approvals_dict = self._serialize_approvals()
         model_responses = self._serialize_model_responses()
         original_input_serialized = self._serialize_original_input()
-        context_payload = self._serialize_context_payload()
+        context_payload, context_meta = self._serialize_context_payload(
+            context_serializer=context_serializer,
+            strict_context=strict_context,
+        )
 
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
@@ -356,6 +475,8 @@ class RunState(Generic[TContext, TAgent]):
                 "usage": serialize_usage(self._context.usage),
                 "approvals": approvals_dict,
                 "context": context_payload,
+                # Preserve metadata so deserialization can warn when context types were erased.
+                "context_meta": context_meta,
             },
             "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
             "max_turns": self._max_turns,
@@ -521,13 +642,24 @@ class RunState(Generic[TContext, TAgent]):
 
         return ""
 
-    def to_string(self) -> str:
+    def to_string(
+        self,
+        *,
+        context_serializer: ContextSerializer | None = None,
+        strict_context: bool = False,
+    ) -> str:
         """Serializes the run state to a JSON string.
 
         Returns:
             JSON string representation of the run state.
         """
-        return json.dumps(self.to_json(), indent=2)
+        return json.dumps(
+            self.to_json(
+                context_serializer=context_serializer,
+                strict_context=strict_context,
+            ),
+            indent=2,
+        )
 
     def set_tool_use_tracker_snapshot(self, snapshot: Mapping[str, Sequence[str]] | None) -> None:
         """Store a copy of the serialized tool-use tracker data."""
@@ -555,6 +687,8 @@ class RunState(Generic[TContext, TAgent]):
         state_string: str,
         *,
         context_override: ContextOverride | None = None,
+        context_deserializer: ContextDeserializer | None = None,
+        strict_context: bool = False,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON string.
 
@@ -566,6 +700,8 @@ class RunState(Generic[TContext, TAgent]):
             state_string: The JSON string to deserialize.
             context_override: Optional context mapping or RunContextWrapper to use instead of the
                 serialized context.
+            context_deserializer: Optional function to rebuild non-mapping context values.
+            strict_context: When True, require a deserializer or override for non-mapping contexts.
 
         Returns:
             A reconstructed RunState instance.
@@ -582,6 +718,8 @@ class RunState(Generic[TContext, TAgent]):
             initial_agent=initial_agent,
             state_json=state_json,
             context_override=context_override,
+            context_deserializer=context_deserializer,
+            strict_context=strict_context,
         )
 
     @staticmethod
@@ -590,6 +728,8 @@ class RunState(Generic[TContext, TAgent]):
         state_json: dict[str, Any],
         *,
         context_override: ContextOverride | None = None,
+        context_deserializer: ContextDeserializer | None = None,
+        strict_context: bool = False,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON dictionary.
 
@@ -601,6 +741,8 @@ class RunState(Generic[TContext, TAgent]):
             state_json: The JSON dictionary to deserialize.
             context_override: Optional context mapping or RunContextWrapper to use instead of the
                 serialized context.
+            context_deserializer: Optional function to rebuild non-mapping context values.
+            strict_context: When True, require a deserializer or override for non-mapping contexts.
 
         Returns:
             A reconstructed RunState instance.
@@ -612,6 +754,8 @@ class RunState(Generic[TContext, TAgent]):
             initial_agent=initial_agent,
             state_json=state_json,
             context_override=context_override,
+            context_deserializer=context_deserializer,
+            strict_context=strict_context,
         )
 
 
@@ -623,6 +767,83 @@ class RunState(Generic[TContext, TAgent]):
 def _get_attr(obj: Any, attr: str, default: Any = None) -> Any:
     """Return attribute value if present, otherwise the provided default."""
     return getattr(obj, attr, default)
+
+
+def _describe_context_type(value: Any) -> str:
+    """Summarize a context object for serialization metadata."""
+    if value is None:
+        return "none"
+    if isinstance(value, Mapping):
+        return "mapping"
+    if hasattr(value, "model_dump"):
+        return "pydantic"
+    if dataclasses.is_dataclass(value):
+        return "dataclass"
+    return "custom"
+
+
+def _context_class_path(value: Any) -> str | None:
+    """Return module and qualname for debugging purposes."""
+    if value is None:
+        return None
+    cls = value.__class__
+    module = getattr(cls, "__module__", "")
+    qualname = getattr(cls, "__qualname__", "")
+    if not module or not qualname:
+        return None
+    return f"{module}:{qualname}"
+
+
+def _build_context_meta(
+    original_context: Any,
+    *,
+    serialized_via: str,
+    requires_deserializer: bool,
+    omitted: bool,
+) -> dict[str, Any]:
+    """Capture context serialization metadata for debugging and recovery hints."""
+    original_type = _describe_context_type(original_context)
+    meta: dict[str, Any] = {
+        "original_type": original_type,
+        "serialized_via": serialized_via,
+        "requires_deserializer": requires_deserializer,
+        "omitted": omitted,
+    }
+    class_path = _context_class_path(original_context)
+    if class_path and original_type not in {"mapping", "none"}:
+        # Store the class path for reference only; never auto-import it for safety.
+        meta["class_path"] = class_path
+    return meta
+
+
+def _context_meta_requires_deserializer(context_meta: Mapping[str, Any] | None) -> bool:
+    """Return True when metadata indicates a non-mapping context needs help to restore."""
+    if not isinstance(context_meta, Mapping):
+        return False
+    if context_meta.get("omitted"):
+        return True
+    return bool(context_meta.get("requires_deserializer"))
+
+
+def _context_meta_warning_message(context_meta: Mapping[str, Any] | None) -> str:
+    """Build a warning message describing context deserialization requirements."""
+    if not isinstance(context_meta, Mapping):
+        return (
+            "RunState context was serialized from a custom type; provide context_deserializer "
+            "or context_override to restore it."
+        )
+    original_type = context_meta.get("original_type") or "custom"
+    class_path = context_meta.get("class_path")
+    type_label = f"{original_type} ({class_path})" if class_path else str(original_type)
+    if context_meta.get("omitted"):
+        return (
+            "RunState context was omitted during serialization for "
+            f"{type_label}; provide context_override to supply it."
+        )
+    return (
+        "RunState context was serialized from "
+        f"{type_label}; provide context_deserializer or context_override to restore it."
+    )
 
 
 def _transform_field_names(
@@ -1402,6 +1623,8 @@ async def _build_run_state_from_json(
     initial_agent: Agent[Any],
     state_json: dict[str, Any],
     context_override: ContextOverride | None = None,
+    context_deserializer: ContextDeserializer | None = None,
+    strict_context: bool = False,
 ) -> RunState[Any, Agent[Any]]:
     """Shared helper to rebuild RunState from JSON payload."""
     schema_version = state_json.get("$schemaVersion")
@@ -1424,16 +1647,44 @@ async def _build_run_state_from_json(
     usage = deserialize_usage(context_data.get("usage", {}))
 
     serialized_context = context_data.get("context", {})
+    context_meta_raw = context_data.get("context_meta")
+    context_meta = context_meta_raw if isinstance(context_meta_raw, Mapping) else None
+
+    # If context was originally a custom type and no override/deserializer is supplied,
+    # surface the risk of losing behavior/state during restore.
+    if (
+        context_override is None
+        and context_deserializer is None
+        and _context_meta_requires_deserializer(context_meta)
+    ):
+        warning_message = _context_meta_warning_message(context_meta)
+        if strict_context:
+            raise UserError(warning_message)
+        logger.warning(warning_message)
+
     if isinstance(context_override, RunContextWrapper):
-        context_obj: Mapping[str, Any] = context_override.context or {}
+        context = context_override
     elif context_override is not None:
-        context_obj = context_override
+        context = RunContextWrapper(context=context_override)
+    elif context_deserializer is not None:
+        if not isinstance(serialized_context, Mapping):
+            raise UserError(
+                "Serialized run state context must be a mapping to use context_deserializer."
+            )
+        try:
+            rebuilt_context = context_deserializer(dict(serialized_context))
+        except Exception as exc:
+            raise UserError(
+                "Context deserializer failed while rebuilding RunState context."
+            ) from exc
+        if isinstance(rebuilt_context, RunContextWrapper):
+            context = rebuilt_context
+        else:
+            context = RunContextWrapper(context=rebuilt_context)
     elif isinstance(serialized_context, Mapping):
-        context_obj = serialized_context
+        context = RunContextWrapper(context=serialized_context)
     else:
         raise UserError("Serialized run state context must be a mapping. Please provide one.")
-
-    context = RunContextWrapper(context=context_obj)
     context.usage = usage
     context._rebuild_approvals(context_data.get("approvals", {}))
 
