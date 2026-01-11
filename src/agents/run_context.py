@@ -115,9 +115,6 @@ class RunContextWrapper(Generic[TContext]):
             return True
         if call_id in rejected_ids:
             return False
-        # Reuse past rejections to avoid re-prompting when the model retries with a new call ID.
-        if rejected_ids and not approved_ids:
-            return False
         # Per-call approvals are scoped to the exact call ID, so other calls require a new decision.
         return None
 
