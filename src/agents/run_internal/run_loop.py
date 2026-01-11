@@ -837,44 +837,57 @@ async def resolve_interrupted_turn(
             if not isinstance(approval, ToolApprovalItem):
                 continue
             raw = approval.raw_item
-            if isinstance(raw, dict) and raw.get("type") == "function_call":
-                name = raw.get("name")
-                if name and isinstance(name, str) and name in tool_map:
-                    rebuilt_call_id = extract_tool_call_id(raw)
-                    arguments = raw.get("arguments", "{}")
-                    status = raw.get("status")
-                    if isinstance(rebuilt_call_id, str) and isinstance(arguments, str):
-                        # Validate status is a valid Literal type
-                        valid_status: Literal["in_progress", "completed", "incomplete"] | None = (
-                            None
-                        )
-                        if isinstance(status, str) and status in (
-                            "in_progress",
-                            "completed",
-                            "incomplete",
-                        ):
-                            valid_status = status  # type: ignore[assignment]
-                        tool_call = ResponseFunctionToolCall(
-                            type="function_call",
-                            name=name,
-                            call_id=rebuilt_call_id,
-                            arguments=arguments,
-                            status=valid_status,
-                        )
-                        approval_status = context_wrapper.get_approval_status(
-                            name, rebuilt_call_id, existing_pending=approval
-                        )
-                        if approval_status is False:
-                            _record_function_rejection(rebuilt_call_id, tool_call)
-                            continue
-                        if approval_status is None:
-                            if rebuilt_call_id not in existing_pending_call_ids:
-                                _add_pending_interruption(approval)
-                                existing_pending_call_ids.add(rebuilt_call_id)
-                            continue
-                        rebuilt_runs.append(
-                            ToolRunFunction(function_tool=tool_map[name], tool_call=tool_call)
-                        )
+            raw_type = get_mapping_or_attr(raw, "type")
+            if raw_type != "function_call":
+                continue
+            name = get_mapping_or_attr(raw, "name")
+            if not (isinstance(name, str) and name in tool_map):
+                continue
+
+            rebuilt_call_id: str | None
+            arguments: str | None
+            tool_call: ResponseFunctionToolCall
+            if isinstance(raw, ResponseFunctionToolCall):
+                rebuilt_call_id = raw.call_id
+                arguments = raw.arguments
+                tool_call = raw
+            else:
+                rebuilt_call_id = extract_tool_call_id(raw)
+                arguments = get_mapping_or_attr(raw, "arguments") or "{}"
+                status = get_mapping_or_attr(raw, "status")
+                if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
+                    continue
+                # Validate status is a valid Literal type
+                valid_status: Literal["in_progress", "completed", "incomplete"] | None = None
+                if isinstance(status, str) and status in (
+                    "in_progress",
+                    "completed",
+                    "incomplete",
+                ):
+                    valid_status = status  # type: ignore[assignment]
+                tool_call = ResponseFunctionToolCall(
+                    type="function_call",
+                    name=name,
+                    call_id=rebuilt_call_id,
+                    arguments=arguments,
+                    status=valid_status,
+                )
+
+            if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
+                continue
+
+            approval_status = context_wrapper.get_approval_status(
+                name, rebuilt_call_id, existing_pending=approval
+            )
+            if approval_status is False:
+                _record_function_rejection(rebuilt_call_id, tool_call)
+                continue
+            if approval_status is None:
+                if rebuilt_call_id not in existing_pending_call_ids:
+                    _add_pending_interruption(approval)
+                    existing_pending_call_ids.add(rebuilt_call_id)
+                continue
+            rebuilt_runs.append(ToolRunFunction(function_tool=tool_map[name], tool_call=tool_call))
         return rebuilt_runs
 
     # Run only the approved function calls for this turn; emit rejections for denied ones.
