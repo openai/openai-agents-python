@@ -1,32 +1,50 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any, Callable, cast
 
 import pytest
+from openai.types.responses.response_output_item import McpApprovalRequest
 from pydantic import BaseModel
 
 from agents import (
     Agent,
+    ApplyPatchTool,
+    HostedMCPTool,
+    MCPApprovalRequestItem,
+    MCPApprovalResponseItem,
     MessageOutputItem,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
     RunHooks,
     RunItem,
+    ShellTool,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
     TResponseInputItem,
     Usage,
 )
-from agents._run_impl import (
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import (
     NextStepFinalOutput,
     NextStepHandoff,
+    NextStepInterruption,
     NextStepRunAgain,
-    RunImpl,
+    ProcessedResponse,
     SingleStepResult,
+    ToolRunApplyPatchCall,
+    ToolRunComputerAction,
+    ToolRunFunction,
+    ToolRunHandoff,
+    ToolRunLocalShellCall,
+    ToolRunMCPApprovalRequest,
+    ToolRunShellCall,
+    get_handoffs,
+    get_output_schema,
 )
-from agents.run import AgentRunner
 from agents.tool import function_tool
 from agents.tool_context import ToolContext
 
@@ -37,6 +55,16 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_input_item,
     get_text_message,
+)
+from .utils.hitl import (
+    RecordingEditor,
+    assert_single_approval_interruption,
+    make_agent,
+    make_apply_patch_dict,
+    make_context_wrapper,
+    make_function_tool_call,
+    make_shell_call,
+    reject_tool_call,
 )
 
 
@@ -100,6 +128,24 @@ async def test_plaintext_agent_no_tool_calls_multiple_messages_is_final_output()
 
     assert isinstance(result.next_step, NextStepFinalOutput)
     assert result.next_step.output == "bye"
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_allows_unhashable_tool_call_arguments():
+    agent = make_agent()
+    response = ModelResponse(output=[], usage=Usage(), response_id="resp")
+    raw_tool_call = {
+        "type": "function_call",
+        "call_id": "call-1",
+        "name": "tool",
+        "arguments": {"key": "value"},
+    }
+    pre_step_items: list[RunItem] = [ToolCallItem(agent=agent, raw_item=raw_tool_call)]
+
+    result = await get_execute_result(agent, response, generated_items=pre_step_items)
+
+    assert len(result.generated_items) == 1
+    assert isinstance(result.next_step, NextStepFinalOutput)
 
 
 @pytest.mark.asyncio
@@ -317,6 +363,35 @@ def assert_item_is_function_tool_call_output(item: RunItem, output: str) -> None
     assert raw_item["output"] == output
 
 
+def make_processed_response(
+    *,
+    new_items: list[RunItem] | None = None,
+    handoffs: list[ToolRunHandoff] | None = None,
+    functions: list[ToolRunFunction] | None = None,
+    computer_actions: list[ToolRunComputerAction] | None = None,
+    local_shell_calls: list[ToolRunLocalShellCall] | None = None,
+    shell_calls: list[ToolRunShellCall] | None = None,
+    apply_patch_calls: list[ToolRunApplyPatchCall] | None = None,
+    mcp_approval_requests: list[ToolRunMCPApprovalRequest] | None = None,
+    tools_used: list[str] | None = None,
+    interruptions: list[ToolApprovalItem] | None = None,
+) -> ProcessedResponse:
+    """Build a ProcessedResponse with empty collections by default."""
+
+    return ProcessedResponse(
+        new_items=new_items or [],
+        handoffs=handoffs or [],
+        functions=functions or [],
+        computer_actions=computer_actions or [],
+        local_shell_calls=local_shell_calls or [],
+        shell_calls=shell_calls or [],
+        apply_patch_calls=apply_patch_calls or [],
+        mcp_approval_requests=mcp_approval_requests or [],
+        tools_used=tools_used or [],
+        interruptions=interruptions or [],
+    )
+
+
 async def get_execute_result(
     agent: Agent[Any],
     response: ModelResponse,
@@ -327,17 +402,17 @@ async def get_execute_result(
     context_wrapper: RunContextWrapper[Any] | None = None,
     run_config: RunConfig | None = None,
 ) -> SingleStepResult:
-    output_schema = AgentRunner._get_output_schema(agent)
-    handoffs = await AgentRunner._get_handoffs(agent, context_wrapper or RunContextWrapper(None))
+    output_schema = get_output_schema(agent)
+    handoffs = await get_handoffs(agent, context_wrapper or RunContextWrapper(None))
 
-    processed_response = RunImpl.process_model_response(
+    processed_response = run_loop.process_model_response(
         agent=agent,
         all_tools=await agent.get_all_tools(context_wrapper or RunContextWrapper(None)),
         response=response,
         output_schema=output_schema,
         handoffs=handoffs,
     )
-    return await RunImpl.execute_tools_and_side_effects(
+    return await run_loop.execute_tools_and_side_effects(
         agent=agent,
         original_input=original_input or "hello",
         new_response=response,
@@ -348,3 +423,228 @@ async def get_execute_result(
         context_wrapper=context_wrapper or RunContextWrapper(None),
         run_config=run_config or RunConfig(),
     )
+
+
+async def run_execute_with_processed_response(
+    agent: Agent[Any], processed_response: ProcessedResponse
+) -> SingleStepResult:
+    """Execute tools for a pre-constructed ProcessedResponse."""
+
+    return await run_loop.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=make_context_wrapper(),
+        run_config=RunConfig(),
+    )
+
+
+@dataclass
+class ToolApprovalRun:
+    agent: Agent[Any]
+    processed_response: ProcessedResponse
+    expected_tool_name: str
+
+
+def _function_tool_approval_run() -> ToolApprovalRun:
+    async def _test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(_test_tool, name_override="test_tool", needs_approval=True)
+    agent = make_agent(tools=[tool])
+    tool_call = make_function_tool_call("test_tool", arguments="{}")
+    tool_run = ToolRunFunction(function_tool=tool, tool_call=tool_call)
+    processed_response = make_processed_response(functions=[tool_run])
+    return ToolApprovalRun(
+        agent=agent,
+        processed_response=processed_response,
+        expected_tool_name="test_tool",
+    )
+
+
+def _shell_tool_approval_run() -> ToolApprovalRun:
+    shell_tool = ShellTool(executor=lambda request: "output", needs_approval=True)
+    agent = make_agent(tools=[shell_tool])
+    tool_call = make_shell_call(
+        "call_shell", id_value="shell_call", commands=["echo hi"], status="completed"
+    )
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    processed_response = make_processed_response(shell_calls=[tool_run])
+    return ToolApprovalRun(
+        agent=agent,
+        processed_response=processed_response,
+        expected_tool_name="shell",
+    )
+
+
+def _apply_patch_tool_approval_run() -> ToolApprovalRun:
+    editor = RecordingEditor()
+    apply_patch_tool = ApplyPatchTool(editor=editor, needs_approval=True)
+    agent = make_agent(tools=[apply_patch_tool])
+    tool_call = make_apply_patch_dict("call_apply")
+    tool_run = ToolRunApplyPatchCall(tool_call=tool_call, apply_patch_tool=apply_patch_tool)
+    processed_response = make_processed_response(apply_patch_calls=[tool_run])
+    return ToolApprovalRun(
+        agent=agent,
+        processed_response=processed_response,
+        expected_tool_name="apply_patch",
+    )
+
+
+@pytest.mark.parametrize(
+    "setup_fn",
+    [
+        _function_tool_approval_run,
+        _shell_tool_approval_run,
+        _apply_patch_tool_approval_run,
+    ],
+    ids=["function_tool", "shell_tool", "apply_patch_tool"],
+)
+@pytest.mark.asyncio
+async def test_execute_tools_handles_tool_approval_items(
+    setup_fn: Callable[[], ToolApprovalRun],
+) -> None:
+    """Tool approvals should surface as interruptions across tool types."""
+    scenario = setup_fn()
+    result = await run_execute_with_processed_response(scenario.agent, scenario.processed_response)
+
+    assert_single_approval_interruption(result, tool_name=scenario.expected_tool_name)
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_runs_hosted_mcp_callback_when_present():
+    """Hosted MCP approvals should invoke on_approval_request callbacks."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=lambda request: {"approve": True},
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-1",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_execute_with_processed_response(agent, processed_response)
+
+    assert not isinstance(result.next_step, NextStepInterruption)
+    assert any(isinstance(item, MCPApprovalResponseItem) for item in result.new_step_items)
+    assert not result.processed_response or not result.processed_response.interruptions
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_surfaces_hosted_mcp_interruptions_without_callback():
+    """Hosted MCP approvals should surface as interruptions when no callback is provided."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-2",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+
+    result = await run_execute_with_processed_response(agent, processed_response)
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert result.next_step.interruptions
+    assert any(isinstance(item, ToolApprovalItem) for item in result.next_step.interruptions)
+    assert any(
+        isinstance(item, ToolApprovalItem)
+        and getattr(item.raw_item, "id", None) == "mcp-approval-2"
+        for item in result.new_step_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_emits_hosted_mcp_rejection_response():
+    """Hosted MCP rejections without callbacks should emit approval responses."""
+
+    mcp_tool = HostedMCPTool(
+        tool_config={
+            "type": "mcp",
+            "server_label": "test_mcp_server",
+            "server_url": "https://example.com",
+            "require_approval": "always",
+        },
+        on_approval_request=None,
+    )
+    agent = make_agent(tools=[mcp_tool])
+    request_item = McpApprovalRequest(
+        id="mcp-approval-reject",
+        type="mcp_approval_request",
+        server_label="test_mcp_server",
+        arguments="{}",
+        name="list_repo_languages",
+    )
+    processed_response = make_processed_response(
+        new_items=[MCPApprovalRequestItem(raw_item=request_item, agent=agent)],
+        mcp_approval_requests=[
+            ToolRunMCPApprovalRequest(
+                request_item=request_item,
+                mcp_tool=mcp_tool,
+            )
+        ],
+    )
+    context_wrapper = make_context_wrapper()
+    reject_tool_call(context_wrapper, agent, request_item, tool_name="list_repo_languages")
+
+    result = await run_loop.execute_tools_and_side_effects(
+        agent=agent,
+        original_input="test",
+        pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        output_schema=None,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+    )
+
+    responses = [
+        item for item in result.new_step_items if isinstance(item, MCPApprovalResponseItem)
+    ]
+    assert responses, "Rejection should emit an MCP approval response."
+    assert responses[0].raw_item["approve"] is False
+    assert responses[0].raw_item["approval_request_id"] == "mcp-approval-reject"
+    assert not isinstance(result.next_step, NextStepInterruption)

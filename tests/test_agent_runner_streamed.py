@@ -5,6 +5,7 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 from typing_extensions import TypedDict
 
 from agents import (
@@ -22,9 +23,12 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents.items import RunItem
+from agents.items import RunItem, ToolApprovalItem, TResponseInputItem
+from agents.memory.openai_conversations_session import OpenAIConversationsSession
 from agents.run import RunConfig
-from agents.stream_events import AgentUpdatedStreamEvent
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import QueueCompleteSentinel
+from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -34,6 +38,12 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_input_item,
     get_text_message,
+)
+from .utils.hitl import (
+    consume_stream,
+    make_model_and_agent,
+    queue_function_call_and_text,
+    resume_streamed_after_first_approval,
 )
 from .utils.simple_session import SimpleListSession
 
@@ -558,6 +568,117 @@ async def test_input_guardrail_streamed_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
+async def test_stream_input_persistence_strips_ids_for_openai_conversation_session():
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved: list[list[TResponseInputItem]] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            for item in items:
+                if isinstance(item, dict):
+                    assert "id" not in item, "IDs should be stripped before saving"
+            self.saved.append(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("ok")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+    )
+
+    run_config = RunConfig(session_input_callback=lambda existing, new: existing + new)
+
+    input_items = [
+        cast(
+            TResponseInputItem,
+            {"id": "message-1", "type": "message", "role": "user", "content": "hello"},
+        )
+    ]
+
+    result = Runner.run_streamed(agent, input=input_items, session=session, run_config=run_config)
+    async for _ in result.stream_events():
+        pass
+
+    assert session.saved, "input items should be persisted via save_result_to_session"
+    assert len(session.saved[0]) == 1
+    saved_item = session.saved[0][0]
+    assert isinstance(saved_item, dict)
+    assert "id" not in saved_item, "saved input items should not include IDs"
+
+
+@pytest.mark.asyncio
+async def test_stream_input_persistence_saves_only_new_turn_input(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleListSession()
+    model = FakeModel()
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("first")],
+            [get_text_message("second")],
+        ]
+    )
+    agent = Agent(name="test", model=model)
+
+    from agents.run_internal import session_persistence as sp
+
+    real_save_result = sp.save_result_to_session
+    input_saves: list[list[TResponseInputItem]] = []
+
+    async def save_wrapper(
+        sess: Any,
+        original_input: Any,
+        new_items: list[RunItem],
+        run_state: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        if isinstance(original_input, list) and original_input:
+            input_saves.append(list(original_input))
+        await real_save_result(sess, original_input, new_items, run_state, **kwargs)
+
+    monkeypatch.setattr(
+        "agents.run_internal.session_persistence.save_result_to_session", save_wrapper
+    )
+    monkeypatch.setattr("agents.run_internal.run_loop.save_result_to_session", save_wrapper)
+
+    run_config = RunConfig(session_input_callback=lambda existing, new: existing + new)
+
+    first = Runner.run_streamed(
+        agent, input=[get_text_input_item("hello")], session=session, run_config=run_config
+    )
+    async for _ in first.stream_events():
+        pass
+
+    second = Runner.run_streamed(
+        agent, input=[get_text_input_item("next")], session=session, run_config=run_config
+    )
+    async for _ in second.stream_events():
+        pass
+
+    assert len(input_saves) == 2, "each turn should persist only the turn input once"
+    assert all(len(saved) == 1 for saved in input_saves), (
+        "each persisted input should contain only the new turn items"
+    )
+    first_saved = input_saves[0][0]
+    second_saved = input_saves[1][0]
+    assert isinstance(first_saved, dict) and first_saved.get("content") == "hello"
+    assert isinstance(second_saved, dict) and second_saved.get("content") == "next"
+
+
+@pytest.mark.asyncio
 async def test_slow_input_guardrail_still_raises_exception_streamed():
     async def guardrail_function(
         context: RunContextWrapper[Any], agent: Agent[Any], input: Any
@@ -789,3 +910,79 @@ async def test_dynamic_tool_addition_run_streamed() -> None:
 
     assert executed["called"] is True
     assert result.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_step_items_to_queue_handles_tool_approval_item():
+    """Test that stream_step_items_to_queue handles ToolApprovalItem."""
+    _, agent = make_model_and_agent(name="test")
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = asyncio.Queue()
+
+    # ToolApprovalItem should not be streamed
+    run_loop.stream_step_items_to_queue([approval_item], queue)
+
+    # Queue should be empty since ToolApprovalItem is not streamed
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_resume_with_approved_tools():
+    """Test resuming streaming run from RunState with approved tools executes them."""
+    tool_called = False
+
+    async def test_tool() -> str:
+        nonlocal tool_called
+        tool_called = True
+        return "tool_result"
+
+    # Create a tool that requires approval
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+
+    # First run - tool call that requires approval
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({})),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool")
+    await consume_stream(first)
+
+    # Resume from state - should execute approved tool
+    result2 = await resume_streamed_after_first_approval(agent, first)
+
+    # Tool should have been called
+    assert tool_called is True
+    assert result2.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_server_conversation_tracker_priming():
+    """Test that resuming streaming run from RunState primes server conversation tracker."""
+    model, agent = make_model_and_agent(name="test")
+
+    # First run with conversation_id
+    model.set_next_output([get_text_message("First response")])
+    result1 = Runner.run_streamed(
+        agent, input="test", conversation_id="conv123", previous_response_id="resp123"
+    )
+    await consume_stream(result1)
+
+    # Create state from result
+    state = result1.to_state()
+
+    # Resume with same conversation_id - should not duplicate messages
+    model.set_next_output([get_text_message("Second response")])
+    result2 = Runner.run_streamed(
+        agent, state, conversation_id="conv123", previous_response_id="resp123"
+    )
+    await consume_stream(result2)
+
+    # Should complete successfully without message duplication
+    assert result2.final_output == "Second response"
+    assert len(result2.new_items) >= 1

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
 from agents.lifecycle import AgentHooksBase
 from agents.model_settings import ModelSettings
-from agents.run import AgentRunner
+from agents.run_internal.run_loop import get_handoffs, get_output_schema
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,7 @@ async def test_handoff_with_agents():
         handoffs=[agent_1, agent_2],
     )
 
-    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -80,7 +80,7 @@ async def test_handoff_with_handoff_obj():
         ],
     )
 
-    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -114,7 +114,7 @@ async def test_handoff_with_handoff_obj_and_agent():
         handoffs=[handoff(agent_1), agent_2],
     )
 
-    handoffs = await AgentRunner._get_handoffs(agent_3, RunContextWrapper(None))
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -162,7 +162,7 @@ async def test_agent_final_output():
         output_type=Foo,
     )
 
-    schema = AgentRunner._get_output_schema(agent)
+    schema = get_output_schema(agent)
     assert isinstance(schema, AgentOutputSchema)
     assert schema is not None
     assert schema.output_type == Foo

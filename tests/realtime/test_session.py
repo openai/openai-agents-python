@@ -20,6 +20,7 @@ from agents.realtime.events import (
     RealtimeHistoryAdded,
     RealtimeHistoryUpdated,
     RealtimeRawModelEvent,
+    RealtimeToolApprovalRequired,
     RealtimeToolEnd,
     RealtimeToolStart,
 )
@@ -54,7 +55,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendSessionUpdate,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.session import RealtimeSession
+from agents.realtime.session import REJECTION_MESSAGE, RealtimeSession
 from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 
@@ -311,6 +312,7 @@ def mock_function_tool():
     tool = Mock(spec=FunctionTool)
     tool.name = "test_function"
     tool.on_invoke_tool = AsyncMock(return_value="function_result")
+    tool.needs_approval = False
     return tool
 
 
@@ -327,7 +329,9 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_error_event_transformation(self, mock_model, mock_agent):
         """Test that error events are properly transformed and queued"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
 
         error_event = RealtimeModelErrorEvent(error="Test error")
 
@@ -349,7 +353,9 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_audio_events_transformation(self, mock_model, mock_agent):
         """Test that audio-related events are properly transformed"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
 
         # Test audio event
         audio_event = RealtimeModelAudioEvent(
@@ -387,7 +393,9 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_turn_events_transformation(self, mock_model, mock_agent):
         """Test that turn start/end events are properly transformed"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
 
         # Test turn started event
         turn_started = RealtimeModelTurnStartedEvent()
@@ -415,7 +423,9 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_transcription_completed_event_updates_history(self, mock_model, mock_agent):
         """Test that transcription completed events update history and emit events"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model, mock_agent, None, run_config={"async_tool_calls": False}
+        )
 
         # Set up initial history with an audio message
         initial_item = UserMessageItem(
@@ -447,7 +457,12 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_item_updated_event_adds_new_item(self, mock_model, mock_agent):
         """Test that item_updated events add new items to history"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
 
         new_item = AssistantMessageItem(
             item_id="new_item", role="assistant", content=[AssistantText(text="Hello")]
@@ -472,7 +487,12 @@ class TestEventHandling:
     @pytest.mark.asyncio
     async def test_item_updated_event_updates_existing_item(self, mock_model, mock_agent):
         """Test that item_updated events update existing items in history"""
-        session = RealtimeSession(mock_model, mock_agent, None)
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
 
         # Set up initial history
         initial_item = AssistantMessageItem(
@@ -1003,10 +1023,12 @@ class TestToolCallExecution:
         tool1 = Mock(spec=FunctionTool)
         tool1.name = "tool_one"
         tool1.on_invoke_tool = AsyncMock(return_value="result_one")
+        tool1.needs_approval = False
 
         tool2 = Mock(spec=FunctionTool)
         tool2.name = "tool_two"
         tool2.on_invoke_tool = AsyncMock(return_value="result_two")
+        tool2.needs_approval = False
 
         handoff = Mock(spec=Handoff)
         handoff.name = "handoff_tool"
@@ -1090,6 +1112,95 @@ class TestToolCallExecution:
 
         # Should not have called any tools
         mock_function_tool.on_invoke_tool.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_function_tool_needs_approval_emits_event(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Tools marked as needs_approval should pause and emit an approval request."""
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_needs_approval", arguments='{"param": "value"}'
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert tool_call_event.call_id in session._pending_tool_calls
+        assert mock_function_tool.on_invoke_tool.call_count == 0
+
+        approval_event = await session._event_queue.get()
+        assert isinstance(approval_event, RealtimeToolApprovalRequired)
+        assert approval_event.call_id == tool_call_event.call_id
+        assert approval_event.tool == mock_function_tool
+
+    @pytest.mark.asyncio
+    async def test_approve_pending_tool_call_runs_tool(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Approving a pending tool call should resume execution."""
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={"async_tool_calls": False},
+        )
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_approve", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session.approve_tool_call(tool_call_event.call_id)
+
+        assert mock_function_tool.on_invoke_tool.call_count == 1
+        assert len(mock_model.sent_tool_outputs) == 1
+        assert session._pending_tool_calls == {}
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        assert any(isinstance(ev, RealtimeToolStart) for ev in events)
+        assert any(isinstance(ev, RealtimeToolEnd) for ev in events)
+
+    @pytest.mark.asyncio
+    async def test_reject_pending_tool_call_sends_rejection_output(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Rejecting a pending tool call should notify the model and skip execution."""
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_reject", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session.reject_tool_call(tool_call_event.call_id)
+
+        assert mock_function_tool.on_invoke_tool.call_count == 0
+        assert len(mock_model.sent_tool_outputs) == 1
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == REJECTION_MESSAGE
+        assert start_response is True
+        assert session._pending_tool_calls == {}
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        assert any(
+            isinstance(ev, RealtimeToolEnd) and ev.output == REJECTION_MESSAGE for ev in events
+        )
 
     @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
@@ -1180,6 +1291,7 @@ class TestToolCallExecution:
         tool = Mock(spec=FunctionTool)
         tool.name = "test_function"
         tool.on_invoke_tool = AsyncMock(return_value={"result": "data", "count": 42})
+        tool.needs_approval = False
 
         mock_agent.get_all_tools.return_value = [tool]
 
@@ -1203,6 +1315,7 @@ class TestToolCallExecution:
         func_tool1 = Mock(spec=FunctionTool)
         func_tool1.name = "func1"
         func_tool1.on_invoke_tool = AsyncMock(return_value="result1")
+        func_tool1.needs_approval = False
 
         handoff1 = Mock(spec=Handoff)
         handoff1.name = "handoff1"
@@ -1210,6 +1323,7 @@ class TestToolCallExecution:
         func_tool2 = Mock(spec=FunctionTool)
         func_tool2.name = "func2"
         func_tool2.on_invoke_tool = AsyncMock(return_value="result2")
+        func_tool2.needs_approval = False
 
         handoff2 = Mock(spec=Handoff)
         handoff2.name = "handoff2"

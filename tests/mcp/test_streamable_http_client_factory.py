@@ -1,5 +1,7 @@
 """Tests for MCPServerStreamableHttp httpx_client_factory functionality."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock, patch
 
 import httpx
