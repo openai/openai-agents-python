@@ -747,13 +747,12 @@ async def resolve_interrupted_turn(
             if approval_status is True:
                 approved_runs.append(run)
             else:
-                _add_pending_interruption(
-                    ToolApprovalItem(
-                        agent=agent,
-                        raw_item=get_mapping_or_attr(run, "tool_call"),
-                        tool_name=tool_name,
-                    )
+                pending_item = existing_pending or ToolApprovalItem(
+                    agent=agent,
+                    raw_item=get_mapping_or_attr(run, "tool_call"),
+                    tool_name=tool_name,
                 )
+                _add_pending_interruption(pending_item)
         return approved_runs, rejection_items
 
     def _shell_call_id_from_run(run: ToolRunShellCall) -> str:
