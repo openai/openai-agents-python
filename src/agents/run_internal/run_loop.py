@@ -279,6 +279,20 @@ async def execute_mcp_approval_requests(
     return await asyncio.gather(*tasks)
 
 
+def _partition_mcp_approval_requests(
+    requests: Sequence[ToolRunMCPApprovalRequest],
+) -> tuple[list[ToolRunMCPApprovalRequest], list[ToolRunMCPApprovalRequest]]:
+    """Split MCP approval requests into callback-handled and manual buckets."""
+    with_callback: list[ToolRunMCPApprovalRequest] = []
+    manual: list[ToolRunMCPApprovalRequest] = []
+    for request in requests:
+        if request.mcp_tool.on_approval_request:
+            with_callback.append(request)
+        else:
+            manual.append(request)
+    return with_callback, manual
+
+
 async def execute_final_output_step(
     *,
     agent: Agent[Any],
@@ -374,15 +388,13 @@ async def execute_tools_and_side_effects(
 
     def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | None]:
         """Return a tuple that uniquely identifies a tool call for deduplication."""
-        call_id = None
+        call_id = extract_tool_call_id(raw)
         name = None
         args = None
-        if isinstance(raw, dict):
-            call_id = raw.get("call_id")
+        if isinstance(raw, Mapping):
             name = raw.get("name")
             args = raw.get("arguments")
-        elif hasattr(raw, "call_id"):
-            call_id = raw.call_id
+        else:
             name = getattr(raw, "name", None)
             args = getattr(raw, "arguments", None)
         return call_id, name, _hashable_identity_value(args)
@@ -395,13 +407,10 @@ async def execute_tools_and_side_effects(
     approval_items_by_call_id = index_approval_items_by_call_id(pre_step_items)
 
     new_step_items: list[RunItem] = []
-    mcp_requests_with_callback: list[ToolRunMCPApprovalRequest] = []
-    mcp_requests_requiring_manual_approval: list[ToolRunMCPApprovalRequest] = []
-    for request in processed_response.mcp_approval_requests:
-        if request.mcp_tool.on_approval_request:
-            mcp_requests_with_callback.append(request)
-        else:
-            mcp_requests_requiring_manual_approval.append(request)
+    (
+        mcp_requests_with_callback,
+        mcp_requests_requiring_manual_approval,
+    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
     for item in processed_response.new_items:
         if isinstance(item, ToolCallItem):
             identity = _tool_call_identity(item.raw_item)
@@ -682,13 +691,10 @@ async def resolve_interrupted_turn(
     pending_interruptions: list[ToolApprovalItem] = []
     pending_interruption_keys: set[str] = set()
 
-    mcp_requests_with_callback: list[ToolRunMCPApprovalRequest] = []
-    mcp_requests_requiring_manual_approval: list[ToolRunMCPApprovalRequest] = []
-    for request in processed_response.mcp_approval_requests:
-        if request.mcp_tool.on_approval_request:
-            mcp_requests_with_callback.append(request)
-        else:
-            mcp_requests_requiring_manual_approval.append(request)
+    (
+        mcp_requests_with_callback,
+        mcp_requests_requiring_manual_approval,
+    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
 
     def _has_output_item(call_id: str, expected_type: str) -> bool:
         for item in original_pre_step_items:
