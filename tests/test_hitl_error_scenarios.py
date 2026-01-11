@@ -996,6 +996,74 @@ async def test_resume_skips_shell_calls_with_existing_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_keeps_approved_shell_outputs_with_pending_interruptions() -> None:
+    """Approved shell outputs should be emitted even when other approvals are still pending."""
+
+    @function_tool(needs_approval=True)
+    def pending_tool() -> str:
+        return "ok"
+
+    shell_tool = ShellTool(executor=lambda _req: "shell-ok", needs_approval=True)
+    _model, agent = make_model_and_agent(tools=[pending_tool, shell_tool])
+    context_wrapper = make_context_wrapper()
+
+    function_call = make_function_tool_call(pending_tool.name, call_id="call-pending")
+    shell_call = make_shell_call(
+        "call_shell_ok", id_value="shell_ok", commands=["echo ok"], status="completed"
+    )
+
+    shell_approval = ToolApprovalItem(
+        agent=agent,
+        raw_item=cast(dict[str, Any], shell_call),
+        tool_name=shell_tool.name,
+    )
+    context_wrapper.approve_tool(shell_approval)
+
+    pending_approval = ToolApprovalItem(
+        agent=agent,
+        raw_item=function_call,
+        tool_name=pending_tool.name,
+    )
+    run_state = make_state_with_interruptions(agent, [pending_approval])
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[ToolRunFunction(function_tool=pending_tool, tool_call=function_call)],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[ToolRunShellCall(tool_call=shell_call, shell_tool=shell_tool)],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume shell with pending approval",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    shell_outputs = [
+        item
+        for item in result.new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and isinstance(item.raw_item, dict)
+        and item.raw_item.get("type") == "shell_call_output"
+        and item.raw_item.get("call_id") == "call_shell_ok"
+    ]
+    assert shell_outputs, "Approved shell output should be included with pending interruptions"
+
+
+@pytest.mark.asyncio
 async def test_resume_executes_pending_computer_actions() -> None:
     """Pending computer actions should execute when resuming an interrupted turn."""
 
