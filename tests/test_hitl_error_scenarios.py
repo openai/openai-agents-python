@@ -800,6 +800,48 @@ async def test_function_needs_approval_invalid_type_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_invalid_needs_approval_raises() -> None:
+    """Resume path should surface invalid needs_approval configuration errors."""
+
+    @function_tool(name_override="bad_tool", needs_approval=cast(Any, "always"))
+    def bad_tool() -> str:
+        return "ok"
+
+    agent = make_agent(tools=[bad_tool])
+    context_wrapper = make_context_wrapper()
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[
+            ToolRunFunction(
+                function_tool=bad_tool,
+                tool_call=make_function_tool_call("bad_tool", call_id="call-1"),
+            )
+        ],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    with pytest.raises(UserError, match="needs_approval"):
+        await run_loop.resolve_interrupted_turn(
+            agent=agent,
+            original_input="resume invalid",
+            original_pre_step_items=[],
+            new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+            processed_response=processed_response,
+            hooks=RunHooks(),
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(),
+            run_state=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     """Agent-as-tool with needs_approval should still surface nested tool approvals."""
 

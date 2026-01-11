@@ -661,6 +661,8 @@ async def resolve_interrupted_turn(
                 context_wrapper,
                 run.tool_call,
             )
+        except UserError:
+            raise
         except Exception:
             return True
 
@@ -737,6 +739,8 @@ async def resolve_interrupted_turn(
             if needs_approval_checker:
                 try:
                     needs_approval = await needs_approval_checker(run)
+                except UserError:
+                    raise
                 except Exception:
                     needs_approval = True
 
