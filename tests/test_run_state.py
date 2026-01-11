@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Callable, TypeVar, cast
 
 import pytest
@@ -17,6 +20,7 @@ from openai.types.responses.response_computer_tool_call import (
 )
 from openai.types.responses.response_output_item import LocalShellCall, McpApprovalRequest
 from openai.types.responses.tool_param import Mcp
+from pydantic import BaseModel
 
 from agents import Agent, Runner, handoff
 from agents.computer import Computer
@@ -283,8 +287,8 @@ class TestRunState:
         assert state._context is not None
         assert state._context.is_tool_approved(tool_name="toolY", call_id="cid456") is False
 
-    def test_to_json_requires_mapping_context(self):
-        """Ensure non-mapping contexts are rejected during serialization."""
+    def test_to_json_non_mapping_context_warns_and_omits(self, caplog):
+        """Ensure non-mapping contexts are omitted with a warning during serialization."""
 
         class NonMappingContext:
             pass
@@ -293,8 +297,159 @@ class TestRunState:
         agent = Agent(name="AgentMapping")
         state = make_state(agent, context=context, original_input="input", max_turns=1)
 
-        with pytest.raises(UserError, match="mapping"):
-            state.to_json()
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            json_data = state.to_json()
+
+        assert json_data["context"]["context"] == {}
+        context_meta = json_data["context"]["context_meta"]
+        assert context_meta["omitted"] is True
+        assert context_meta["serialized_via"] == "omitted"
+        assert any("not serializable" in record.message for record in caplog.records)
+
+    def test_to_json_strict_context_requires_serializer(self):
+        """Ensure strict_context enforces explicit serialization for custom contexts."""
+
+        class NonMappingContext:
+            pass
+
+        context = RunContextWrapper(context=NonMappingContext())
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        with pytest.raises(UserError, match="context_serializer"):
+            state.to_json(strict_context=True)
+
+    @pytest.mark.asyncio
+    async def test_from_json_with_context_deserializer(self, caplog):
+        """Ensure context_deserializer restores non-mapping contexts."""
+
+        @dataclass
+        class SampleContext:
+            value: str
+
+        context = RunContextWrapper(context=SampleContext(value="hello"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            json_data = state.to_json()
+
+        def deserialize_context(payload: Mapping[str, Any]) -> SampleContext:
+            return SampleContext(**payload)
+
+        new_state = await RunState.from_json(
+            agent,
+            json_data,
+            context_deserializer=deserialize_context,
+        )
+
+        assert new_state._context is not None
+        assert isinstance(new_state._context.context, SampleContext)
+        assert new_state._context.context.value == "hello"
+
+    def test_to_json_with_context_serializer_records_metadata(self):
+        """Ensure context_serializer output is stored with metadata."""
+
+        class CustomContext:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+        context = RunContextWrapper(context=CustomContext(value="ok"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        def serialize_context(value: Any) -> Mapping[str, Any]:
+            return {"value": value.value}
+
+        json_data = state.to_json(context_serializer=serialize_context)
+
+        assert json_data["context"]["context"] == {"value": "ok"}
+        context_meta = json_data["context"]["context_meta"]
+        assert context_meta["serialized_via"] == "context_serializer"
+        assert context_meta["requires_deserializer"] is True
+        assert context_meta["omitted"] is False
+
+    @pytest.mark.asyncio
+    async def test_from_json_warns_without_deserializer(self, caplog):
+        """Ensure deserialization warns when custom context needs help."""
+
+        @dataclass
+        class SampleContext:
+            value: str
+
+        context = RunContextWrapper(context=SampleContext(value="hello"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        json_data = state.to_json()
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            _ = await RunState.from_json(agent, json_data)
+
+        assert any("context_deserializer" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_from_json_strict_context_requires_deserializer(self):
+        """Ensure strict_context raises if deserializer is required."""
+
+        @dataclass
+        class SampleContext:
+            value: str
+
+        context = RunContextWrapper(context=SampleContext(value="hello"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        json_data = state.to_json()
+
+        with pytest.raises(UserError, match="context_deserializer"):
+            await RunState.from_json(agent, json_data, strict_context=True)
+
+    @pytest.mark.asyncio
+    async def test_from_json_context_deserializer_can_return_wrapper(self):
+        """Ensure deserializer can return a RunContextWrapper."""
+
+        @dataclass
+        class SampleContext:
+            value: str
+
+        context = RunContextWrapper(context=SampleContext(value="hello"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+        json_data = state.to_json()
+
+        def deserialize_context(payload: Mapping[str, Any]) -> RunContextWrapper[Any]:
+            return RunContextWrapper(context=SampleContext(**payload))
+
+        new_state = await RunState.from_json(
+            agent,
+            json_data,
+            context_deserializer=deserialize_context,
+        )
+
+        assert new_state._context is not None
+        assert isinstance(new_state._context.context, SampleContext)
+        assert new_state._context.context.value == "hello"
+
+    def test_to_json_pydantic_context_records_metadata(self, caplog):
+        """Ensure Pydantic contexts serialize with metadata and warnings."""
+
+        class SampleModel(BaseModel):
+            value: str
+
+        context = RunContextWrapper(context=SampleModel(value="hello"))
+        agent = Agent(name="AgentMapping")
+        state = make_state(agent, context=context, original_input="input", max_turns=1)
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            json_data = state.to_json()
+
+        context_meta = json_data["context"]["context_meta"]
+        assert context_meta["original_type"] == "pydantic"
+        assert context_meta["serialized_via"] == "model_dump"
+        assert context_meta["requires_deserializer"] is True
+        assert context_meta["omitted"] is False
+        assert any("Pydantic model" in record.message for record in caplog.records)
 
     @pytest.mark.asyncio
     async def test_guardrail_results_round_trip(self):
