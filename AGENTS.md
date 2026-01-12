@@ -7,16 +7,17 @@ This guide helps new contributors get started with the OpenAI Agents Python repo
 ## Table of Contents
 
 1. [Mandatory Skill Usage](#mandatory-skill-usage)
-2. [Overview](#overview)
-3. [Repo Structure & Important Files](#repo-structure--important-files)
-4. [Testing & Automated Checks](#testing--automated-checks)
-5. [Repo-Specific Utilities](#repo-specific-utilities)
-6. [Style, Linting & Type Checking](#style-linting--type-checking)
-7. [Development Workflow](#development-workflow)
-8. [Pull Request & Commit Guidelines](#pull-request--commit-guidelines)
-9. [Review Process & What Reviewers Look For](#review-process--what-reviewers-look-for)
-10. [Tips for Navigating the Repo](#tips-for-navigating-the-repo)
-11. [Prerequisites](#prerequisites)
+2. [ExecPlans](#planning-execplans)
+3. [Overview](#overview)
+4. [Repo Structure & Important Files](#repo-structure--important-files)
+5. [Testing & Automated Checks](#testing--automated-checks)
+6. [Repo-Specific Utilities](#repo-specific-utilities)
+7. [Style, Linting & Type Checking](#style-linting--type-checking)
+8. [Development Workflow](#development-workflow)
+9. [Pull Request & Commit Guidelines](#pull-request--commit-guidelines)
+10. [Review Process & What Reviewers Look For](#review-process--what-reviewers-look-for)
+11. [Tips for Navigating the Repo](#tips-for-navigating-the-repo)
+12. [Prerequisites](#prerequisites)
 
 ## Mandatory Skill Usage
 
@@ -36,9 +37,11 @@ You can skip `$code-change-verification` for docs-only or repo-meta changes (for
 
 When working on OpenAI API or OpenAI platform integrations in this repo (Responses API, tools, streaming, Realtime API, auth, models, rate limits, MCP, Agents SDK or ChatGPT Apps SDK), use `$openai-knowledge` to pull authoritative docs via the OpenAI Developer Docs MCP server (and guide setup if it is not configured).
 
-### Planning expectations
+## Planning & ExecPlans
 
 Call out potential backward compatibility or public API risks early in your plan and confirm the approach before implementing changes that could impact users.
+
+Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
 
 ## Overview
 
