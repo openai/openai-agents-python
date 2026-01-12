@@ -844,9 +844,6 @@ class AgentRunner:
                         if server_conversation_tracker is not None and pending_server_items
                         else generated_items
                     )
-                    starting_input_for_turn: str | list[TResponseInputItem] = (
-                        normalized_starting_input
-                    )
 
                     if current_turn <= 1:
                         all_input_guardrails = starting_agent.input_guardrails + (
@@ -900,7 +897,6 @@ class AgentRunner:
                                 agent=current_agent,
                                 all_tools=all_tools,
                                 original_input=original_input,
-                                starting_input=starting_input_for_turn,
                                 generated_items=items_for_model,
                                 hooks=hooks,
                                 context_wrapper=context_wrapper,
@@ -968,7 +964,6 @@ class AgentRunner:
                             agent=current_agent,
                             all_tools=all_tools,
                             original_input=original_input,
-                            starting_input=starting_input_for_turn,
                             generated_items=items_for_model,
                             hooks=hooks,
                             context_wrapper=context_wrapper,
