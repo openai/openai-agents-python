@@ -102,15 +102,43 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return None
 
 
+def _dedupe_key(item: TResponseInputItem) -> str | None:
+    """Return a stable identity key when items carry explicit identifiers."""
+    payload = _coerce_to_dict(item)
+    if payload is None:
+        return None
+
+    role = payload.get("role")
+    item_type = payload.get("type") or role
+    if role is not None or item_type == "message":
+        return None
+    item_id = payload.get("id")
+    if isinstance(item_id, str):
+        return f"id:{item_type}:{item_id}"
+
+    call_id = payload.get("call_id") or payload.get("callId")
+    if isinstance(call_id, str):
+        return f"call_id:{item_type}:{call_id}"
+
+    approval_request_id = payload.get("approval_request_id") or payload.get("approvalRequestId")
+    if isinstance(approval_request_id, str):
+        return f"approval_request_id:{item_type}:{approval_request_id}"
+
+    return None
+
+
 def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TResponseInputItem]:
-    """Remove duplicate items based on fingerprints to prevent re-sending the same content."""
+    """Remove duplicate items that share stable identifiers to avoid re-sending tool outputs."""
     seen_keys: set[str] = set()
     deduplicated: list[TResponseInputItem] = []
     for item in items:
-        serialized = fingerprint_input_item(item) or repr(item)
-        if serialized in seen_keys:
+        dedupe_key = _dedupe_key(item)
+        if dedupe_key is None:
+            deduplicated.append(item)
             continue
-        seen_keys.add(serialized)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
         deduplicated.append(item)
     return deduplicated
 

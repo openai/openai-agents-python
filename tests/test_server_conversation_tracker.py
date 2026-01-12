@@ -1,8 +1,19 @@
 from typing import Any, cast
 
+import pytest
+
+from agents import Agent
 from agents.items import ModelResponse, TResponseInputItem
+from agents.lifecycle import RunHooks
+from agents.run_config import ModelInputData, RunConfig
+from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
+from agents.run_internal.run_loop import get_new_response
+from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.usage import Usage
+
+from .fake_model import FakeModel
+from .test_responses import get_text_message
 
 
 class DummyRunItem:
@@ -89,3 +100,43 @@ def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> 
     tracker.track_server_items(model_response)
 
     assert tracker.remaining_initial_input == [pending_kept]
+
+
+@pytest.mark.asyncio
+async def test_get_new_response_marks_filtered_input_as_sent() -> None:
+    model = FakeModel()
+    model.set_next_output([get_text_message("ok")])
+    agent = Agent(name="test", model=model)
+    tracker = OpenAIServerConversationTracker(conversation_id="conv4", previous_response_id=None)
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    tool_use_tracker = AgentToolUseTracker()
+
+    item_1: TResponseInputItem = cast(TResponseInputItem, {"role": "user", "content": "first"})
+    item_2: TResponseInputItem = cast(TResponseInputItem, {"role": "user", "content": "second"})
+
+    def _filter_input(payload: Any) -> ModelInputData:
+        return ModelInputData(
+            input=[payload.model_data.input[0]],
+            instructions=payload.model_data.instructions,
+        )
+
+    run_config = RunConfig(call_model_input_filter=_filter_input)
+
+    await get_new_response(
+        agent,
+        None,
+        [item_1, item_2],
+        None,
+        [],
+        [],
+        RunHooks(),
+        context_wrapper,
+        run_config,
+        tool_use_tracker,
+        tracker,
+        None,
+    )
+
+    assert model.last_turn_args["input"] == [item_1]
+    assert id(item_1) in tracker.sent_items
+    assert id(item_2) not in tracker.sent_items
