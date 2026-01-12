@@ -161,15 +161,18 @@ async def save_result_to_session(
     run_state: RunState | None = None,
     *,
     response_id: str | None = None,
-) -> None:
+) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
     during streaming do not duplicate tool outputs or inputs.
+
+    Returns:
+        The number of new run items persisted for this call.
     """
     already_persisted = run_state._current_turn_persisted_item_count if run_state else 0
 
     if session is None:
-        return
+        return 0
 
     new_run_items: list[RunItem]
     if already_persisted >= len(new_items):
@@ -237,7 +240,7 @@ async def save_result_to_session(
     if len(items_to_save) == 0:
         if run_state:
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
-        return
+        return saved_run_items_count
 
     await session.add_items(items_to_save)
 
@@ -246,6 +249,8 @@ async def save_result_to_session(
 
     if response_id and is_openai_responses_compaction_aware_session(session):
         await session.run_compaction({"response_id": response_id})
+
+    return saved_run_items_count
 
 
 async def rewind_session_items(

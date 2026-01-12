@@ -1067,6 +1067,39 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
 
 
 @pytest.mark.asyncio
+async def test_save_result_to_session_returns_count_and_updates_state() -> None:
+    session = SimpleListSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    approval_item = ToolApprovalItem(
+        agent=agent,
+        raw_item={"type": "function_call", "call_id": "call-2", "name": "tool"},
+    )
+    output_item = _DummyRunItem(
+        {"type": "message", "role": "assistant", "content": "ok"},
+        "message_output_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [output_item, approval_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    assert cast(dict[str, Any], session.saved_items[0]).get("content") == "ok"
+
+
+@pytest.mark.asyncio
 async def test_session_persists_only_new_step_items(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure only per-turn new_step_items are persisted to the session."""
 
