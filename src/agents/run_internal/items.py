@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
+from ..models.fake_id import FAKE_RESPONSES_ID
 
 REJECTION_MESSAGE = "Tool execution was not approved."
 
@@ -113,6 +114,9 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     if role is not None or item_type == "message":
         return None
     item_id = payload.get("id")
+    if item_id == FAKE_RESPONSES_ID:
+        # Ignore placeholder IDs so call_id-based dedupe remains possible.
+        item_id = None
     if isinstance(item_id, str):
         return f"id:{item_type}:{item_id}"
 

@@ -580,6 +580,9 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
             for item in items:
                 if isinstance(item, dict):
                     assert "id" not in item, "IDs should be stripped before saving"
+                    assert "provider_data" not in item, (
+                        "provider_data should be stripped before saving"
+                    )
             self.saved.append(items)
 
         async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
@@ -606,7 +609,13 @@ async def test_stream_input_persistence_strips_ids_for_openai_conversation_sessi
     input_items = [
         cast(
             TResponseInputItem,
-            {"id": "message-1", "type": "message", "role": "user", "content": "hello"},
+            {
+                "id": "message-1",
+                "type": "message",
+                "role": "user",
+                "content": "hello",
+                "provider_data": {"model": "litellm/test"},
+            },
         )
     ]
 

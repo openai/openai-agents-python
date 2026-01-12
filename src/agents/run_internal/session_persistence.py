@@ -211,9 +211,10 @@ async def save_result_to_session(
     if isinstance(session, OpenAIConversationsSession) and items_to_save:
         sanitized: list[TResponseInputItem] = []
         for item in items_to_save:
-            if isinstance(item, dict) and "id" in item:
+            if isinstance(item, dict):
                 clean_item = dict(item)
                 clean_item.pop("id", None)
+                clean_item.pop("provider_data", None)
                 sanitized.append(cast(TResponseInputItem, clean_item))
             else:
                 sanitized.append(item)
