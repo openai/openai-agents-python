@@ -22,6 +22,7 @@ from agents import (
     InputGuardrailTripwireTriggered,
     ModelBehaviorError,
     ModelSettings,
+    OpenAIConversationsSession,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
     RunConfig,
@@ -1097,6 +1098,60 @@ async def test_save_result_to_session_returns_count_and_updates_state() -> None:
     assert run_state._current_turn_persisted_item_count == 1
     assert len(session.saved_items) == 1
     assert cast(dict[str, Any], session.saved_items[0]).get("content") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_counts_sanitized_openai_items() -> None:
+    class DummyOpenAIConversationsSession(OpenAIConversationsSession):
+        def __init__(self) -> None:
+            self.saved_items: list[TResponseInputItem] = []
+
+        async def _get_session_id(self) -> str:
+            return "conv_test"
+
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            self.saved_items.extend(items)
+
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            return []
+
+        async def pop_item(self) -> TResponseInputItem | None:
+            return None
+
+        async def clear_session(self) -> None:
+            return None
+
+    session = DummyOpenAIConversationsSession()
+    agent = Agent(name="agent", model=FakeModel())
+    run_state: RunState[Any] = RunState(
+        context=RunContextWrapper(context={}),
+        original_input="input",
+        starting_agent=agent,
+        max_turns=1,
+    )
+
+    output_item = _DummyRunItem(
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": "ok",
+            "provider_data": {"model": "litellm/test"},
+        },
+        "message_output_item",
+    )
+
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        cast(list[RunItem], [output_item]),
+        run_state,
+    )
+
+    assert saved_count == 1
+    assert run_state._current_turn_persisted_item_count == 1
+    assert len(session.saved_items) == 1
+    saved = cast(dict[str, Any], session.saved_items[0])
+    assert "provider_data" not in saved
 
 
 @pytest.mark.asyncio

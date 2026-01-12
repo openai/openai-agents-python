@@ -201,27 +201,33 @@ async def save_result_to_session(
         ensure_input_item_format(item.to_input_item()) for item in items_to_convert
     ]
 
-    ignore_ids_for_matching = isinstance(session, OpenAIConversationsSession) or getattr(
+    is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
+    ignore_ids_for_matching = is_openai_conversation_session or getattr(
         session, "_ignore_ids_for_matching", False
+    )
+
+    def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
+        if isinstance(item, dict):
+            clean_item = dict(item)
+            clean_item.pop("id", None)
+            clean_item.pop("provider_data", None)
+            return cast(TResponseInputItem, clean_item)
+        return item
+
+    new_items_for_fingerprint = (
+        [_sanitize_openai_conversation_item(item) for item in new_items_as_input]
+        if is_openai_conversation_session
+        else new_items_as_input
     )
     serialized_new_items = [
         fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(item)
-        for item in new_items_as_input
+        for item in new_items_for_fingerprint
     ]
 
     items_to_save = deduplicate_input_items(input_list + new_items_as_input)
 
-    if isinstance(session, OpenAIConversationsSession) and items_to_save:
-        sanitized: list[TResponseInputItem] = []
-        for item in items_to_save:
-            if isinstance(item, dict):
-                clean_item = dict(item)
-                clean_item.pop("id", None)
-                clean_item.pop("provider_data", None)
-                sanitized.append(cast(TResponseInputItem, clean_item))
-            else:
-                sanitized.append(item)
-        items_to_save = sanitized
+    if is_openai_conversation_session and items_to_save:
+        items_to_save = [_sanitize_openai_conversation_item(item) for item in items_to_save]
 
     serialized_to_save: list[str] = [
         fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(item)
