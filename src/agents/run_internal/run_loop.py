@@ -3013,7 +3013,6 @@ async def run_single_turn(
     agent: Agent[TContext],
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
-    starting_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],

@@ -156,6 +156,9 @@ def get_mapping_or_attr(target: Any, key: str) -> Any:
 
 def extract_tool_call_id(raw: Any) -> str | None:
     """Return a call ID from tool call payloads or approval items."""
+    # OpenAI tool call payloads are documented to include a call_id/id so outputs can be matched.
+    # See https://platform.openai.com/docs/guides/function-calling
+    # We still guard against missing IDs to avoid hard failures on malformed or non-OpenAI inputs.
     if isinstance(raw, Mapping):
         candidate = raw.get("call_id") or raw.get("id")
         return candidate if isinstance(candidate, str) else None
@@ -611,6 +614,8 @@ def process_hosted_mcp_approvals(
 
     for mcp_run in mcp_approval_requests:
         request_id = extract_mcp_request_id_from_run(mcp_run)
+        # MCP approval requests are documented to include an id used as approval_request_id.
+        # See https://platform.openai.com/docs/guides/tools-connectors-mcp#approvals
         approval_item = hosted_mcp_approvals_by_id.get(request_id) if request_id else None
         if not approval_item or not request_id:
             continue
@@ -656,6 +661,8 @@ def collect_manual_mcp_approvals(
     for request in requests:
         request_item = get_mapping_or_attr(request, "request_item")
         request_id = extract_mcp_request_id_from_run(request)
+        # The Responses API returns mcp_approval_request items with an id to correlate approvals.
+        # See https://platform.openai.com/docs/guides/tools-connectors-mcp#approvals
         if request_id and request_id in seen_request_ids:
             continue
         if request_id:
