@@ -5,6 +5,7 @@ import pytest
 from agents import Agent
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import RunHooks
+from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run_config import ModelInputData, RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
@@ -100,6 +101,27 @@ def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> 
     tracker.track_server_items(model_response)
 
     assert tracker.remaining_initial_input == [pending_kept]
+
+
+def test_prepare_input_does_not_skip_fake_response_ids() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv5", previous_response_id=None)
+
+    model_response = object.__new__(ModelResponse)
+    model_response.output = [cast(Any, {"id": FAKE_RESPONSES_ID, "type": "message"})]
+    model_response.usage = Usage()
+    model_response.response_id = "resp-3"
+
+    tracker.track_server_items(model_response)
+
+    raw_item = {"id": FAKE_RESPONSES_ID, "type": "message", "content": "hello"}
+    generated_items = [DummyRunItem(raw_item)]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+
+    assert prepared == [raw_item]
 
 
 @pytest.mark.asyncio
