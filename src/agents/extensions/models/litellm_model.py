@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from copy import copy
@@ -32,6 +33,7 @@ from openai.types.chat.chat_completion_message import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.responses import Response
+from pydantic import BaseModel
 
 from ... import _debug
 from ...agent_output import AgentOutputSchemaBase
@@ -51,6 +53,65 @@ from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
 from ...util._json import _to_dump_compatible
+
+
+def _patch_litellm_serializer_warnings() -> None:
+    """Ensure LiteLLM logging uses model_dump(warnings=False) when available."""
+    # Background: LiteLLM emits Pydantic serializer warnings for Message/Choices mismatches.
+    # See: https://github.com/BerriAI/litellm/issues/11759
+    # This patch relies on a private LiteLLM helper; if the name or signature changes,
+    # the wrapper should no-op or fall back to LiteLLM's default behavior. Revisit on upgrade.
+    # Remove this patch once the LiteLLM issue is resolved.
+
+    try:
+        from litellm.litellm_core_utils import litellm_logging as _litellm_logging
+    except Exception:
+        return
+
+    # Guard against double-patching if this module is imported multiple times.
+    if getattr(_litellm_logging, "_openai_agents_patched_serializer_warnings", False):
+        return
+
+    original = getattr(_litellm_logging, "_extract_response_obj_and_hidden_params", None)
+    if original is None:
+        return
+
+    def _wrapped_extract_response_obj_and_hidden_params(*args, **kwargs):
+        # init_response_obj is LiteLLM's raw response container (often a Pydantic BaseModel).
+        # Accept arbitrary args to stay compatible if LiteLLM changes the signature.
+        init_response_obj = args[0] if args else kwargs.get("init_response_obj")
+        if isinstance(init_response_obj, BaseModel):
+            hidden_params = getattr(init_response_obj, "_hidden_params", None)
+            try:
+                response_obj = init_response_obj.model_dump(warnings=False)
+            except TypeError:
+                response_obj = init_response_obj.model_dump()
+            if args:
+                response_obj_out, original_hidden = original(response_obj, *args[1:], **kwargs)
+            else:
+                updated_kwargs = dict(kwargs)
+                updated_kwargs["init_response_obj"] = response_obj
+                response_obj_out, original_hidden = original(**updated_kwargs)
+            return response_obj_out, hidden_params or original_hidden
+
+        return original(*args, **kwargs)
+
+    setattr(  # noqa: B010
+        _litellm_logging,
+        "_extract_response_obj_and_hidden_params",
+        _wrapped_extract_response_obj_and_hidden_params,
+    )
+    setattr(  # noqa: B010
+        _litellm_logging,
+        "_openai_agents_patched_serializer_warnings",
+        True,
+    )
+
+
+# Set OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH=true to opt in.
+_enable_litellm_patch = os.getenv("OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH", "")
+if _enable_litellm_patch.lower() in ("1", "true"):
+    _patch_litellm_serializer_warnings()
 
 
 class InternalChatCompletionMessage(ChatCompletionMessage):
