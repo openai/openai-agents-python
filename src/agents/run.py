@@ -645,7 +645,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items
                                 )
-                                await save_result_to_session(
+                                saved_count = await save_result_to_session(
                                     session,
                                     [],
                                     list(items_for_session),
@@ -655,7 +655,7 @@ class AgentRunner:
                                 )
                                 if run_state is not None:
                                     run_state._current_turn_persisted_item_count = (
-                                        persisted_before_partial + len(items_for_session)
+                                        persisted_before_partial + saved_count
                                     )
 
                             if isinstance(turn_result.next_step, NextStepInterruption):
