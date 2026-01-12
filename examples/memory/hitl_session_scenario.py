@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agents import Agent, ModelSettings, OpenAIConversationsSession, Runner, function_tool
+from agents import Agent, Model, ModelSettings, OpenAIConversationsSession, Runner, function_tool
 from agents.items import TResponseInputItem
 
 from .file_session import FileSession
@@ -65,7 +65,13 @@ class ScenarioStep:
     expected_output: str
 
 
-async def run_scenario_step(session: Any, label: str, step: ScenarioStep) -> None:
+async def run_scenario_step(
+    session: Any,
+    label: str,
+    step: ScenarioStep,
+    *,
+    model: str | Model | None = None,
+) -> None:
     agent = Agent(
         name=f"{label} HITL scenario",
         instructions=(
@@ -73,6 +79,7 @@ async def run_scenario_step(session: Any, label: str, step: ScenarioStep) -> Non
             "Pass the user input as the 'query' argument."
         ),
         tools=[approval_echo, approval_note],
+        model=model,
         model_settings=ModelSettings(tool_choice=step.tool_name),
         tool_use_behavior="stop_on_first_tool",
     )
@@ -134,7 +141,7 @@ async def run_scenario_step(session: Any, label: str, step: ScenarioStep) -> Non
     print(f"[{label}] final output: {result.final_output} (items: {len(items)})")
 
 
-async def run_file_session_scenario() -> None:
+async def run_file_session_scenario(*, model: str | Model | None = None) -> None:
     tmp_root = Path.cwd() / "tmp"
     tmp_root.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="hitl-scenario-", dir=tmp_root))
@@ -172,17 +179,32 @@ async def run_file_session_scenario() -> None:
     ]
 
     try:
-        await run_scenario_step(session, f"FileSession {steps[0].name}", steps[0])
+        await run_scenario_step(
+            session,
+            f"FileSession {steps[0].name}",
+            steps[0],
+            model=model,
+        )
         rehydrated_session = FileSession(dir=temp_dir, session_id=session_id)
         print(f"[FileSession] rehydrated session id: {session_id}")
-        await run_scenario_step(rehydrated_session, f"FileSession {steps[1].name}", steps[1])
-        await run_scenario_step(rehydrated_session, f"FileSession {steps[2].name}", steps[2])
+        await run_scenario_step(
+            rehydrated_session,
+            f"FileSession {steps[1].name}",
+            steps[1],
+            model=model,
+        )
+        await run_scenario_step(
+            rehydrated_session,
+            f"FileSession {steps[2].name}",
+            steps[2],
+            model=model,
+        )
     finally:
         await (rehydrated_session or session).clear_session()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-async def run_openai_session_scenario() -> None:
+async def run_openai_session_scenario(*, model: str | Model | None = None) -> None:
     existing_session_id = os.environ.get("OPENAI_SESSION_ID")
     session = OpenAIConversationsSession(conversation_id=existing_session_id)
     session_id = await get_conversation_id(session)
@@ -218,15 +240,26 @@ async def run_openai_session_scenario() -> None:
         ),
     ]
 
-    await run_scenario_step(session, f"OpenAIConversationsSession {steps[0].name}", steps[0])
+    await run_scenario_step(
+        session,
+        f"OpenAIConversationsSession {steps[0].name}",
+        steps[0],
+        model=model,
+    )
 
     rehydrated_session = OpenAIConversationsSession(conversation_id=session_id)
     print(f"[OpenAIConversationsSession] rehydrated session id: {session_id}")
     await run_scenario_step(
-        rehydrated_session, f"OpenAIConversationsSession {steps[1].name}", steps[1]
+        rehydrated_session,
+        f"OpenAIConversationsSession {steps[1].name}",
+        steps[1],
+        model=model,
     )
     await run_scenario_step(
-        rehydrated_session, f"OpenAIConversationsSession {steps[2].name}", steps[2]
+        rehydrated_session,
+        f"OpenAIConversationsSession {steps[2].name}",
+        steps[2],
+        model=model,
     )
 
     if should_keep:
@@ -356,8 +389,12 @@ async def main() -> None:
         print("OPENAI_API_KEY must be set to run the HITL session scenario.")
         raise SystemExit(1)
 
-    await run_file_session_scenario()
-    await run_openai_session_scenario()
+    model_override = os.environ.get("HITL_MODEL", "gpt-5.2")
+    if model_override:
+        print(f"Model: {model_override}")
+
+    await run_file_session_scenario(model=model_override)
+    await run_openai_session_scenario(model=model_override)
 
 
 if __name__ == "__main__":
