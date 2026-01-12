@@ -8,15 +8,24 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
 from ..items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from ..logger import logger
+from ..models.fake_id import FAKE_RESPONSES_ID
 from .items import drop_orphan_function_calls, fingerprint_input_item, normalize_input_items_for_api
 
 # --------------------------
 # Private helpers (no public exports in this module)
 # --------------------------
+
+
+def _normalize_server_item_id(value: Any) -> str | None:
+    """Return a stable server item id, ignoring placeholder IDs."""
+    if value == FAKE_RESPONSES_ID:
+        # Fake IDs are placeholders from non-Responses providers; ignore them for dedupe.
+        return None
+    return value if isinstance(value, str) else None
 
 
 @dataclass
@@ -64,8 +73,10 @@ class OpenAIServerConversationTracker:
             if item is None:
                 continue
             self.sent_items.add(id(item))
-            item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
-            if isinstance(item_id, str):
+            item_id = _normalize_server_item_id(
+                item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+            )
+            if item_id is not None:
                 self.server_item_ids.add(item_id)
             if isinstance(item, dict):
                 try:
@@ -83,12 +94,12 @@ class OpenAIServerConversationTracker:
                 if output_item is None:
                     continue
                 self.server_items.add(id(output_item))
-                item_id = (
+                item_id = _normalize_server_item_id(
                     output_item.get("id")
                     if isinstance(output_item, dict)
                     else getattr(output_item, "id", None)
                 )
-                if isinstance(item_id, str):
+                if item_id is not None:
                     self.server_item_ids.add(item_id)
                 call_id = (
                     output_item.get("call_id")
@@ -105,8 +116,10 @@ class OpenAIServerConversationTracker:
 
         if session_items:
             for item in session_items:
-                item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
-                if isinstance(item_id, str):
+                item_id = _normalize_server_item_id(
+                    item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+                )
+                if item_id is not None:
                     self.server_item_ids.add(item_id)
                 call_id = (
                     item.get("call_id")
@@ -130,11 +143,11 @@ class OpenAIServerConversationTracker:
                 continue
 
             if isinstance(raw_item, dict):
-                item_id = raw_item.get("id")
+                item_id = _normalize_server_item_id(raw_item.get("id"))
                 call_id = raw_item.get("call_id")
                 has_output_payload = "output" in raw_item
                 has_output_payload = has_output_payload or hasattr(raw_item, "output")
-                should_mark = isinstance(item_id, str) or (
+                should_mark = item_id is not None or (
                     isinstance(call_id, str) and has_output_payload
                 )
                 if not should_mark:
@@ -148,22 +161,22 @@ class OpenAIServerConversationTracker:
                 except Exception:
                     pass
 
-                if isinstance(item_id, str):
+                if item_id is not None:
                     self.server_item_ids.add(item_id)
                 if isinstance(call_id, str) and has_output_payload:
                     self.server_tool_call_ids.add(call_id)
             else:
-                item_id = getattr(raw_item, "id", None)
+                item_id = _normalize_server_item_id(getattr(raw_item, "id", None))
                 call_id = getattr(raw_item, "call_id", None)
                 has_output_payload = hasattr(raw_item, "output")
-                should_mark = isinstance(item_id, str) or (
+                should_mark = item_id is not None or (
                     isinstance(call_id, str) and has_output_payload
                 )
                 if not should_mark:
                     continue
 
                 self.sent_items.add(id(raw_item))
-                if isinstance(item_id, str):
+                if item_id is not None:
                     self.server_item_ids.add(item_id)
                 if isinstance(call_id, str) and has_output_payload:
                     self.server_tool_call_ids.add(call_id)
@@ -179,12 +192,12 @@ class OpenAIServerConversationTracker:
             if output_item is None:
                 continue
             self.server_items.add(id(output_item))
-            item_id = (
+            item_id = _normalize_server_item_id(
                 output_item.get("id")
                 if isinstance(output_item, dict)
                 else getattr(output_item, "id", None)
             )
-            if isinstance(item_id, str):
+            if item_id is not None:
                 self.server_item_ids.add(item_id)
             call_id = (
                 output_item.get("call_id")
@@ -317,10 +330,10 @@ class OpenAIServerConversationTracker:
             if raw_item is None:
                 continue
 
-            item_id = (
+            item_id = _normalize_server_item_id(
                 raw_item.get("id") if isinstance(raw_item, dict) else getattr(raw_item, "id", None)
             )
-            if isinstance(item_id, str) and item_id in self.server_item_ids:
+            if item_id is not None and item_id in self.server_item_ids:
                 continue
 
             call_id = (
