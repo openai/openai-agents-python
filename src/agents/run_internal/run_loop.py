@@ -3238,7 +3238,7 @@ async def get_new_response(
         filtered.input = deduplicate_input_items(filtered.input)
 
     if server_conversation_tracker is not None:
-        server_conversation_tracker.mark_input_as_sent(input)
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     model = get_model(agent, run_config)
     model_settings = agent.model_settings.resolve(run_config.model_settings)
