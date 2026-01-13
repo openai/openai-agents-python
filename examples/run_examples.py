@@ -268,11 +268,18 @@ def write_main_log_line(handle, line: str) -> None:
     handle.flush()
 
 
-def ensure_dirs(path: Path) -> None:
-    if path.suffix:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        path.mkdir(parents=True, exist_ok=True)
+def ensure_dirs(path: Path, is_file: bool | None = None) -> None:
+    """Create directories for a file or directory path.
+
+    If `is_file` is True, always create the parent directory. If False, create the
+    directory itself. When None, treat paths with a suffix as files and others as
+    directories, but suffix-less file names should pass is_file=True to avoid
+    accidental directory creation.
+    """
+    if is_file is None:
+        is_file = bool(path.suffix)
+    target = path.parent if is_file else path
+    target.mkdir(parents=True, exist_ok=True)
 
 
 def parse_rerun_from_log(log_path: Path) -> list[str]:
@@ -312,8 +319,8 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
     if auto_mode and "interactive" not in overrides:
         overrides.add("interactive")
 
-    ensure_dirs(logs_dir)
-    ensure_dirs(main_log_path)
+    ensure_dirs(logs_dir, is_file=False)
+    ensure_dirs(main_log_path, is_file=True)
     rerun_entries: list[str] = []
 
     if not examples:
@@ -344,7 +351,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         relpath = example.relpath
         log_filename = f"{relpath.replace('/', '__')}.log"
         log_path = logs_dir / log_filename
-        ensure_dirs(log_path)
+        ensure_dirs(log_path, is_file=True)
 
         env = os.environ.copy()
         if auto_mode:
@@ -456,7 +463,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         safe_write_main(f"# summary executed={executed} skipped={skipped} failed={failed}")
 
     if args.write_rerun and rerun_entries:
-        ensure_dirs(RERUN_FILE_DEFAULT)
+        ensure_dirs(RERUN_FILE_DEFAULT, is_file=True)
         RERUN_FILE_DEFAULT.write_text("\n".join(rerun_entries) + "\n", encoding="utf-8")
         print(f"Wrote rerun list to {RERUN_FILE_DEFAULT}")
 
@@ -493,7 +500,7 @@ def main() -> int:
         paths = parse_rerun_from_log(Path(args.collect))
         if args.output:
             out = Path(args.output)
-            ensure_dirs(out)
+            ensure_dirs(out, is_file=True)
             out.write_text("\n".join(paths) + "\n", encoding="utf-8")
             print(f"Wrote {len(paths)} entries to {out}")
         else:
