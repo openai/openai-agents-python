@@ -69,7 +69,7 @@ cmd_start() {
       export EXAMPLES_INCLUDE_AUDIO="${EXAMPLES_INCLUDE_AUDIO:-0}"
       export EXAMPLES_INCLUDE_EXTERNAL="${EXAMPLES_INCLUDE_EXTERNAL:-0}"
       cd "$ROOT"
-      "${run_cmd[@]}" "$@" 2>&1 | tee "$stdout_log" >/dev/null
+      exec "${run_cmd[@]}" "$@" > >(tee "$stdout_log") 2>&1
     ) &
     local pid=$!
     echo "$pid" >"$PID_FILE"

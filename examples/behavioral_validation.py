@@ -11,9 +11,9 @@ from __future__ import annotations
 import argparse
 import ast
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR_DEFAULT = ROOT_DIR / ".tmp" / "examples-start-logs"
@@ -89,7 +89,11 @@ def clean_text(value: str) -> str:
 def _extract_from_print_calls(tree: ast.AST) -> list[str]:
     texts: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        ):
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                     texts.append(arg.value)
