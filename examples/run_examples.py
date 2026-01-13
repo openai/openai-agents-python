@@ -469,6 +469,14 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
 
             run_list.append(example)
 
+        if run_list and (not auto_mode) and any("interactive" in ex.tags for ex in run_list):
+            if jobs != 1:
+                print(
+                    "Interactive examples detected; forcing serial execution to avoid shared stdin."
+                )
+                safe_write_main("# jobs_adjusted: 1 reason=interactive")
+            jobs = 1
+
         run_results: dict[str, ExampleResult] = {}
         if run_list:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
