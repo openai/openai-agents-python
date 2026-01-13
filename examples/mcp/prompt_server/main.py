@@ -4,7 +4,7 @@ import shutil
 import socket
 import subprocess
 import time
-from typing import Any
+from typing import Any, cast
 
 from agents import Agent, Runner, gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStreamableHttp
@@ -19,7 +19,8 @@ def _choose_port() -> int:
         return int(env_port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((STREAMABLE_HTTP_HOST, 0))
-        return s.getsockname()[1]
+        address = cast(tuple[str, int], s.getsockname())
+        return address[1]
 
 
 STREAMABLE_HTTP_PORT = _choose_port()
