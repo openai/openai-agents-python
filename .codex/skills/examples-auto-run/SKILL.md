@@ -66,14 +66,17 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 - `start` uses `--write-rerun` so failures are captured automatically.
 - If `.tmp/examples-rerun.txt` exists and is non-empty, invoking the skill with no args runs `rerun` by default.
 
-## Behavioral validation
+## Behavioral validation (Codex/LLM responsibility)
 
-- After every foreground `start` or `rerun`, the script automatically runs `uv run examples/behavioral_validation.py` against the generated main log.
-- The validator:
-  1. Reads the example source to derive expected messages (print strings and prompt/message assignments).
-  2. Reads each passed example’s log and checks those messages appeared.
-  3. Reports per-example status with the full matching log lines; missing expectations are flagged.
-- Background runs do not validate automatically; after they finish, run:
-  ```bash
-  .codex/skills/examples-auto-run/scripts/run.sh validate <main_log_path>
-  ```
+The runner no longer auto-runs `examples/behavioral_validation.py`. After every foreground `start` or `rerun`, **Codex must manually validate** all exit-0 entries:
+
+1. Read the example source (and comments) to infer intended flow, tools used, and expected key outputs.
+2. Open the matching per-example log under `.tmp/examples-start-logs/`.
+3. Confirm the intended actions/results occurred; flag omissions or divergences.
+4. Do this for **all passed examples**, not just a sample.
+5. Report immediately after the run with concise citations to the exact log lines that justify the validation.
+
+If you still want the heuristic validator, you can run it manually:
+```bash
+.codex/skills/examples-auto-run/scripts/run.sh validate <main_log_path>
+```
