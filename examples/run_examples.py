@@ -469,12 +469,16 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
 
             run_list.append(example)
 
-        if run_list and (not auto_mode) and any("interactive" in ex.tags for ex in run_list):
+        interactive_in_run_list = any("interactive" in ex.tags for ex in run_list)
+        interactive_requested = "interactive" in overrides
+
+        if run_list and (not auto_mode) and (interactive_in_run_list or interactive_requested):
             if jobs != 1:
                 print(
                     "Interactive examples detected; forcing serial execution to avoid shared stdin."
                 )
-                safe_write_main("# jobs_adjusted: 1 reason=interactive")
+                reason = "interactive" if interactive_in_run_list else "interactive-requested"
+                safe_write_main(f"# jobs_adjusted: 1 reason={reason}")
             jobs = 1
 
         run_results: dict[str, ExampleResult] = {}
