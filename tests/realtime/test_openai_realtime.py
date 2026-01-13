@@ -547,7 +547,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Prepare tracker state to simulate ongoing audio
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("i1", 0, b"aaaa")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48)
         model._ongoing_response = True
 
         # Patch sending to avoid websocket dependency
@@ -567,6 +567,17 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "audio_end_ms": 1,
             }
         )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        truncate_event = truncate_events[0]
+        assert truncate_event.item_id == "i1"
+        assert truncate_event.content_index == 0
+        assert truncate_event.audio_end_ms == 1
 
         # Output transcript delta
         await model._handle_ws_event(
@@ -867,23 +878,27 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         for event in audio_deltas:
             await model._handle_ws_event(event)
 
-        # Should accumulate audio length: 8 bytes / 24 / 2 * 1000 = milliseconds
-        # Total: 8 bytes / 24 / 2 * 1000
-        expected_length = (8 / 24 / 2) * 1000
+        # Should accumulate audio length: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167 ms
+        expected_length = (8 / (24_000 * 2)) * 1000
 
         # Test through the actual audio state tracker
         audio_state = model._audio_state_tracker.get_state("item_1", 0)
         assert audio_state is not None
-        assert abs(audio_state.audio_length_ms - expected_length) < 0.001
+        assert audio_state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
 
     def test_calculate_audio_length_ms_pure_function(self, model):
         """Test the pure audio length calculation function."""
         from agents.realtime._util import calculate_audio_length_ms
 
         # Test various audio buffer sizes for pcm16 format
-        assert calculate_audio_length_ms("pcm16", b"test") == (4 / 24 / 2) * 1000  # 4 bytes
+        expected_pcm = (len(b"test") / (24_000 * 2)) * 1000
+        assert calculate_audio_length_ms("pcm16", b"test") == pytest.approx(
+            expected_pcm, rel=0, abs=1e-6
+        )  # 4 bytes
         assert calculate_audio_length_ms("pcm16", b"") == 0  # empty
-        assert calculate_audio_length_ms("pcm16", b"a" * 48) == 1000.0  # exactly 1000ms worth
+        assert calculate_audio_length_ms("pcm16", b"a" * 48) == pytest.approx(
+            (48 / (24_000 * 2)) * 1000, rel=0, abs=1e-6
+        )  # exactly 1ms worth
 
         # Test g711 format
         assert calculate_audio_length_ms("g711_ulaw", b"test") == (4 / 8000) * 1000  # 4 bytes
@@ -910,7 +925,8 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         # Test that audio state is tracked correctly
         audio_state = model._audio_state_tracker.get_state("test_item", 5)
         assert audio_state is not None
-        assert audio_state.audio_length_ms == (4 / 24 / 2) * 1000  # 4 bytes in milliseconds
+        expected_ms = (len(b"test") / (24_000 * 2)) * 1000
+        assert audio_state.audio_length_ms == pytest.approx(expected_ms, rel=0, abs=1e-6)
 
         # Test that last audio item is tracked
         last_item = model._audio_state_tracker.get_last_audio_item()

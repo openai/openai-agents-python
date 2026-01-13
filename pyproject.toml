@@ -37,7 +37,7 @@ Repository = "https://github.com/openai/openai-agents-python"
 [project.optional-dependencies]
 voice = ["numpy>=2.2.0, <3; python_version>='3.10'", "websockets>=15.0, <16"]
 viz = ["graphviz>=0.17"]
-litellm = ["litellm>=1.80.8, <2"]
+litellm = ["litellm>=1.80.10, <2"]
 realtime = ["websockets>=15.0, <16"]
 sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]

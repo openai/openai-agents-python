@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import uuid
@@ -17,7 +18,23 @@ from .traces import NoOpTrace, Trace, TraceImpl
 
 def _safe_debug(message: str) -> None:
     """Best-effort debug logging that tolerates closed streams during shutdown."""
+
+    def _has_closed_stream_handler(log: logging.Logger) -> bool:
+        current: logging.Logger | None = log
+        while current is not None:
+            for handler in current.handlers:
+                stream = getattr(handler, "stream", None)
+                if stream is not None and getattr(stream, "closed", False):
+                    return True
+            if not current.propagate:
+                break
+            current = current.parent
+        return False
+
     try:
+        # Avoid emitting debug logs when any handler already owns a closed stream.
+        if _has_closed_stream_handler(logger):
+            return
         logger.debug(message)
     except Exception:
         # Avoid noisy shutdown errors when the underlying stream is already closed.

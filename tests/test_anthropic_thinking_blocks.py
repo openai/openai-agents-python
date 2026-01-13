@@ -246,3 +246,116 @@ def test_anthropic_thinking_blocks_with_tool_calls():
     tool_calls = assistant_msg.get("tool_calls", [])
     assert len(cast(list[Any], tool_calls)) == 1, "Tool calls should be preserved"
     assert cast(list[Any], tool_calls)[0]["function"]["name"] == "get_weather"
+
+
+def test_anthropic_thinking_blocks_without_tool_calls():
+    """
+    Test for models with extended thinking WITHOUT tool calls.
+
+    This test verifies that thinking blocks are properly attached to assistant
+    messages even when there are no tool calls (fixes issue #2195).
+    """
+    # Create a message with reasoning and thinking blocks but NO tool calls
+    message = InternalChatCompletionMessage(
+        role="assistant",
+        content="The weather in Paris is sunny with a temperature of 22°C.",
+        reasoning_content="The user wants to know about the weather in Paris.",
+        thinking_blocks=[
+            {
+                "type": "thinking",
+                "thinking": "Let me think about the weather in Paris.",
+                "signature": "TestSignatureNoTools123",
+            }
+        ],
+        tool_calls=None,  # No tool calls
+    )
+
+    # Step 1: Convert message to output items
+    output_items = Converter.message_to_output_items(message)
+
+    # Verify reasoning item exists and contains thinking blocks
+    reasoning_items = [
+        item for item in output_items if hasattr(item, "type") and item.type == "reasoning"
+    ]
+    assert len(reasoning_items) == 1, "Should have exactly one reasoning item"
+
+    reasoning_item = reasoning_items[0]
+
+    # Verify thinking text is stored in content
+    assert hasattr(reasoning_item, "content") and reasoning_item.content, (
+        "Reasoning item should have content"
+    )
+    assert reasoning_item.content[0].type == "reasoning_text", (
+        "Content should be reasoning_text type"
+    )
+    assert reasoning_item.content[0].text == "Let me think about the weather in Paris.", (
+        "Thinking text should be preserved"
+    )
+
+    # Verify signature is stored in encrypted_content
+    assert hasattr(reasoning_item, "encrypted_content"), (
+        "Reasoning item should have encrypted_content"
+    )
+    assert reasoning_item.encrypted_content == "TestSignatureNoTools123", (
+        "Signature should be preserved"
+    )
+
+    # Verify message item exists
+    message_items = [
+        item for item in output_items if hasattr(item, "type") and item.type == "message"
+    ]
+    assert len(message_items) == 1, "Should have exactly one message item"
+
+    # Step 2: Convert output items back to messages with preserve_thinking_blocks=True
+    items_as_dicts: list[dict[str, Any]] = []
+    for item in output_items:
+        if hasattr(item, "model_dump"):
+            items_as_dicts.append(item.model_dump())
+        else:
+            items_as_dicts.append(cast(dict[str, Any], item))
+
+    messages = Converter.items_to_messages(
+        items_as_dicts,  # type: ignore[arg-type]
+        model="anthropic/claude-4-opus",
+        preserve_thinking_blocks=True,
+    )
+
+    # Should have one assistant message
+    assistant_messages = [msg for msg in messages if msg.get("role") == "assistant"]
+    assert len(assistant_messages) == 1, "Should have exactly one assistant message"
+
+    assistant_msg = assistant_messages[0]
+
+    # Content must start with thinking blocks even WITHOUT tool calls
+    content = assistant_msg.get("content")
+    assert content is not None, "Assistant message should have content"
+    assert isinstance(content, list), (
+        f"Assistant message content should be a list when thinking blocks are present, "
+        f"but got {type(content)}"
+    )
+    assert len(content) >= 2, (
+        f"Assistant message should have at least 2 content items "
+        f"(thinking + text), got {len(content)}"
+    )
+
+    # First content should be thinking block
+    first_content = content[0]
+    assert first_content.get("type") == "thinking", (
+        f"First content must be 'thinking' type for Anthropic compatibility, "
+        f"but got '{first_content.get('type')}'"
+    )
+    assert first_content.get("thinking") == "Let me think about the weather in Paris.", (
+        "Thinking content should be preserved"
+    )
+    assert first_content.get("signature") == "TestSignatureNoTools123", (
+        "Signature should be preserved in thinking block"
+    )
+
+    # Second content should be text
+    second_content = content[1]
+    assert second_content.get("type") == "text", (
+        f"Second content must be 'text' type, but got '{second_content.get('type')}'"
+    )
+    assert (
+        second_content.get("text") == "The weather in Paris is sunny with a temperature of 22°C."
+    ), "Text content should be preserved"

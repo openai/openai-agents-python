@@ -2,7 +2,7 @@ import asyncio
 
 from agents import Agent, Runner
 
-URL = "https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg"
+URL = "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=400&q=80"
 
 
 async def main():
