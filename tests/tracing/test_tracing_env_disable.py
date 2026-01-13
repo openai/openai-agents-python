@@ -40,3 +40,17 @@ def test_manual_override_after_cache(monkeypatch):
     provider.set_disabled(False)
     enabled = provider.create_trace("enabled")
     assert isinstance(enabled, TraceImpl)
+
+
+def test_manual_override_env_disable(monkeypatch):
+    """Manual enable can override env disable flag."""
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "1")
+    provider = DefaultTraceProvider()
+
+    env_disabled = provider.create_trace("env_disabled")
+    assert isinstance(env_disabled, NoOpTrace)
+
+    provider.set_disabled(False)
+    reenabled = provider.create_trace("reenabled")
+
+    assert isinstance(reenabled, TraceImpl)
