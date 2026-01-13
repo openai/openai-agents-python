@@ -58,9 +58,22 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 - Main logs: `.tmp/examples-start-logs/main_*.log`
 - Per-example logs (from `run_examples.py`): `.tmp/examples-start-logs/<module_path>.log`
 - Rerun list: `.tmp/examples-rerun.txt`
+- Stdout logs: `.tmp/examples-start-logs/stdout_*.log`
 
 ## Notes
 
 - The runner delegates to `uv run examples/run_examples.py`, which already writes per-example logs and supports `--collect`, `--rerun-file`, and `--print-auto-skip`.
 - `start` uses `--write-rerun` so failures are captured automatically.
 - If `.tmp/examples-rerun.txt` exists and is non-empty, invoking the skill with no args runs `rerun` by default.
+
+## Behavioral validation
+
+- After every foreground `start` or `rerun`, the script automatically runs `uv run examples/behavioral_validation.py` against the generated main log.
+- The validator:
+  1. Reads the example source to derive expected messages (print strings and prompt/message assignments).
+  2. Reads each passed example’s log and checks those messages appeared.
+  3. Reports per-example status with the full matching log lines; missing expectations are flagged.
+- Background runs do not validate automatically; after they finish, run:
+  ```bash
+  .codex/skills/examples-auto-run/scripts/run.sh validate <main_log_path>
+  ```

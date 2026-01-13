@@ -15,6 +15,19 @@ is_running() {
   [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1
 }
 
+run_validation() {
+  local main_log="$1"
+  if [[ -z "$main_log" ]]; then
+    echo "Validation skipped: main log path is empty."
+    return 0
+  fi
+  if [[ ! -f "$main_log" ]]; then
+    echo "Validation skipped: main log not found: $main_log"
+    return 0
+  fi
+  uv run examples/behavioral_validation.py --main-log "$main_log" --logs-dir "$LOG_DIR" || true
+}
+
 cmd_start() {
   ensure_dirs
   local background=0
@@ -63,6 +76,7 @@ cmd_start() {
     echo "Started run_examples.py (pid=$pid)"
     echo "Main log: $main_log"
     echo "Stdout log: $stdout_log"
+    echo "Run '.codex/skills/examples-auto-run/scripts/run.sh validate \"$main_log\"' after it finishes."
     return 0
   fi
 
@@ -75,7 +89,12 @@ cmd_start() {
   export EXAMPLES_INCLUDE_AUDIO="${EXAMPLES_INCLUDE_AUDIO:-0}"
   export EXAMPLES_INCLUDE_EXTERNAL="${EXAMPLES_INCLUDE_EXTERNAL:-0}"
   cd "$ROOT"
+  set +e
   "${run_cmd[@]}" "$@" 2>&1 | tee "$stdout_log"
+  local run_status=${PIPESTATUS[0]}
+  set -e
+  run_validation "$main_log"
+  return "$run_status"
 }
 
 cmd_stop() {
@@ -157,12 +176,37 @@ cmd_rerun() {
     echo "Rerun list is empty: $file"
     exit 0
   fi
+  local ts main_log stdout_log
+  ts="$(date +%Y%m%d-%H%M%S)"
+  main_log="$LOG_DIR/main_${ts}.log"
+  stdout_log="$LOG_DIR/stdout_${ts}.log"
   cd "$ROOT"
   export EXAMPLES_INTERACTIVE_MODE="${EXAMPLES_INTERACTIVE_MODE:-auto}"
   export APPLY_PATCH_AUTO_APPROVE="${APPLY_PATCH_AUTO_APPROVE:-1}"
   export SHELL_AUTO_APPROVE="${SHELL_AUTO_APPROVE:-1}"
   export AUTO_APPROVE_MCP="${AUTO_APPROVE_MCP:-1}"
-  uv run examples/run_examples.py --auto-mode --rerun-file "$file" --write-rerun
+  set +e
+  uv run examples/run_examples.py --auto-mode --rerun-file "$file" --write-rerun --main-log "$main_log" --logs-dir "$LOG_DIR" 2>&1 | tee "$stdout_log"
+  local run_status=${PIPESTATUS[0]}
+  set -e
+  run_validation "$main_log"
+  return "$run_status"
+}
+
+cmd_validate() {
+  ensure_dirs
+  local main_log="${1:-}"
+  if [[ -z "$main_log" ]]; then
+    main_log="$(ls -1t "$LOG_DIR"/main_*.log 2>/dev/null | head -n1)"
+  fi
+  if [[ -z "$main_log" ]]; then
+    echo "No main log found."
+    exit 1
+  fi
+  if [[ "$main_log" != /* && -f "$LOG_DIR/$main_log" ]]; then
+    main_log="$LOG_DIR/$main_log"
+  fi
+  run_validation "$main_log"
 }
 
 usage() {
@@ -177,6 +221,7 @@ Commands:
   tail [logfile]                      Tail the latest (or specified) log.
   collect [main_log]                  Parse a main log and write failed examples to .tmp/examples-rerun.txt.
   rerun [rerun_file]                  Run only the examples listed in .tmp/examples-rerun.txt.
+  validate [main_log]                 Run behavioral validation against the latest (or given) main log.
 
 Environment overrides:
   EXAMPLES_INTERACTIVE_MODE (default auto)
@@ -198,5 +243,6 @@ case "${1:-$default_cmd}" in
   tail) shift; cmd_tail "${1:-}" ;;
   collect) shift || true; collect_rerun "${1:-}" ;;
   rerun) shift || true; cmd_rerun "${1:-}" ;;
+  validate) shift || true; cmd_validate "${1:-}" ;;
   *) usage; exit 1 ;;
 esac

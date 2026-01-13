@@ -112,11 +112,6 @@ def parse_args() -> argparse.Namespace:
         help="Include examples that rely on extra services like Redis, Dapr, Twilio, or Playwright.",
     )
     parser.add_argument(
-        "--fail-fast",
-        action="store_true",
-        help="Stop after the first failing example.",
-    )
-    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Show detected tags for each example entry.",
@@ -327,9 +322,6 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
     results: list[ExampleResult] = []
 
     jobs = max(1, args.jobs)
-    if args.fail_fast and jobs > 1:
-        # Preserve fail-fast semantics by forcing serial execution.
-        jobs = 1
 
     output_lock = threading.Lock()
     main_log_lock = threading.Lock()
@@ -454,10 +446,6 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
             elif result.status == "failed":
                 failed += 1
                 rerun_entries.append(ex.relpath)
-                if args.fail_fast:
-                    safe_write_main("# fail-fast stop")
-                    break
-
         safe_write_main(f"# summary executed={executed} skipped={skipped} failed={failed}")
 
     if args.write_rerun and rerun_entries:
