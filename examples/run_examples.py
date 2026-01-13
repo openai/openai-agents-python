@@ -462,9 +462,13 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
                 rerun_entries.append(ex.relpath)
         safe_write_main(f"# summary executed={executed} skipped={skipped} failed={failed}")
 
-    if args.write_rerun and rerun_entries:
+    if args.write_rerun:
         ensure_dirs(RERUN_FILE_DEFAULT, is_file=True)
-        RERUN_FILE_DEFAULT.write_text("\n".join(rerun_entries) + "\n", encoding="utf-8")
+        if rerun_entries:
+            contents = "\n".join(rerun_entries) + "\n"
+        else:
+            contents = ""
+        RERUN_FILE_DEFAULT.write_text(contents, encoding="utf-8")
         print(f"Wrote rerun list to {RERUN_FILE_DEFAULT}")
 
     print(f"Main log: {main_log_path}")
