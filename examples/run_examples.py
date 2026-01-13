@@ -22,7 +22,7 @@ import threading
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 EXAMPLES_DIR = ROOT_DIR / "examples"
@@ -57,7 +57,7 @@ class ExampleScript:
 
     @property
     def relpath(self) -> str:
-        return str(self.path.relative_to(ROOT_DIR))
+        return normalize_relpath(str(self.path.relative_to(ROOT_DIR)))
 
     @property
     def module(self) -> str:
@@ -77,6 +77,11 @@ class ExampleResult:
     reason: str = ""
     log_path: Path | None = None
     exit_code: int | None = None
+
+
+def normalize_relpath(relpath: str) -> str:
+    normalized = relpath.replace("\\", "/")
+    return str(PurePosixPath(normalized))
 
 
 def parse_args() -> argparse.Namespace:
@@ -263,8 +268,8 @@ def load_auto_skip() -> set[str]:
     env_value = os.environ.get("EXAMPLES_AUTO_SKIP", "")
     if env_value.strip():
         parts = re.split(r"[\s,]+", env_value.strip())
-        return {p for p in parts if p}
-    return set(DEFAULT_AUTO_SKIP)
+        return {normalize_relpath(p) for p in parts if p}
+    return {normalize_relpath(p) for p in DEFAULT_AUTO_SKIP}
 
 
 def write_main_log_line(handle, line: str) -> None:
@@ -300,7 +305,7 @@ def parse_rerun_from_log(log_path: Path) -> list[str]:
                 continue
             status, relpath = parts[0].upper(), parts[1]
             if status in {"FAILED", "ERROR", "UNKNOWN"}:
-                rerun.append(relpath)
+                rerun.append(normalize_relpath(relpath))
     return rerun
 
 
