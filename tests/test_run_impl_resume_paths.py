@@ -5,7 +5,7 @@ from agents.agent import ToolsToFinalOutputResult
 from agents.items import ModelResponse
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
-from agents.run_internal import run_loop
+from agents.run_internal import run_loop, turn_resolution
 from agents.run_internal.run_loop import NextStepFinalOutput, ProcessedResponse, SingleStepResult
 from agents.usage import Usage
 from tests.fake_model import FakeModel
@@ -17,14 +17,8 @@ async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) 
     agent: Agent[dict[str, str]] = make_agent(model=FakeModel())
     context_wrapper = make_context_wrapper()
 
-    async def fake_execute_function_tool_calls(*_: object, **__: object):
-        return [], [], []
-
-    async def fake_execute_shell_calls(*_: object, **__: object):
-        return []
-
-    async def fake_execute_apply_patch_calls(*_: object, **__: object):
-        return []
+    async def fake_execute_tool_plan(*_: object, **__: object):
+        return [], [], [], [], [], [], []
 
     async def fake_check_for_final_output_from_tools(*_: object, **__: object):
         return ToolsToFinalOutputResult(is_final_output=True, final_output="done")
@@ -50,13 +44,11 @@ async def test_resolve_interrupted_turn_final_output_short_circuit(monkeypatch) 
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
 
-    monkeypatch.setattr(run_loop, "execute_function_tool_calls", fake_execute_function_tool_calls)
-    monkeypatch.setattr(run_loop, "execute_shell_calls", fake_execute_shell_calls)
-    monkeypatch.setattr(run_loop, "execute_apply_patch_calls", fake_execute_apply_patch_calls)
     monkeypatch.setattr(
-        run_loop, "check_for_final_output_from_tools", fake_check_for_final_output_from_tools
+        turn_resolution, "check_for_final_output_from_tools", fake_check_for_final_output_from_tools
     )
-    monkeypatch.setattr(run_loop, "execute_final_output", fake_execute_final_output)
+    monkeypatch.setattr(turn_resolution, "execute_final_output", fake_execute_final_output)
+    monkeypatch.setattr(turn_resolution, "_execute_tool_plan", fake_execute_tool_plan)
 
     processed_response = ProcessedResponse(
         new_items=[],

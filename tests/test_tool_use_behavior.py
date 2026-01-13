@@ -10,7 +10,6 @@ from openai.types.responses.response_input_item_param import FunctionCallOutput
 from agents import (
     Agent,
     FunctionToolResult,
-    RunConfig,
     RunContextWrapper,
     ToolCallOutputItem,
     ToolsToFinalOutputResult,
@@ -47,7 +46,6 @@ async def test_no_tool_results_returns_not_final_output() -> None:
         agent=agent,
         tool_results=[],
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is False
     assert result.final_output is None
@@ -62,7 +60,6 @@ async def test_run_llm_again_behavior() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is False
     assert result.final_output is None
@@ -80,7 +77,6 @@ async def test_stop_on_first_tool_behavior() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is True
     assert result.final_output == "first_tool_output"
@@ -106,7 +102,6 @@ async def test_custom_tool_use_behavior_sync() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is True
     assert result.final_output == "custom"
@@ -132,7 +127,6 @@ async def test_custom_tool_use_behavior_async() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is True
     assert result.final_output == "async_custom"
@@ -150,7 +144,6 @@ async def test_invalid_tool_use_behavior_raises() -> None:
             agent=agent,
             tool_results=tool_results,
             context_wrapper=RunContextWrapper(context=None),
-            config=RunConfig(),
         )
 
 
@@ -174,7 +167,6 @@ async def test_tool_names_to_stop_at_behavior() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is False, "We should not have stopped at tool1"
 
@@ -188,7 +180,6 @@ async def test_tool_names_to_stop_at_behavior() -> None:
         agent=agent,
         tool_results=tool_results,
         context_wrapper=RunContextWrapper(context=None),
-        config=RunConfig(),
     )
     assert result.is_final_output is True, "We should have stopped at tool1"
     assert result.final_output == "output1"
