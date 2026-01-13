@@ -7,6 +7,7 @@ from typing import Union, cast
 
 from typing_extensions import Unpack
 
+from . import _debug
 from .agent import Agent
 from .exceptions import (
     AgentsException,
@@ -1046,7 +1047,7 @@ class AgentRunner:
                                     [item.type for item in items_to_save_turn],
                                 )
                                 if is_resumed_state and run_state is not None:
-                                    await save_result_to_session(
+                                    saved_count = await save_result_to_session(
                                         session,
                                         [],
                                         items_to_save_turn,
@@ -1054,9 +1055,7 @@ class AgentRunner:
                                         turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
-                                    run_state._current_turn_persisted_item_count += len(
-                                        items_to_save_turn
-                                    )
+                                    run_state._current_turn_persisted_item_count += saved_count
                                 else:
                                     await save_result_to_session(
                                         session,
@@ -1412,8 +1411,10 @@ class AgentRunner:
                     item_info["name"] = name  # type: ignore[assignment]
                     item_info["call_id"] = call_id  # type: ignore[assignment]
                     if item.type == "tool_call_output_item":
-                        output_str = str(item.raw_item.get("output", ""))[:100]
-                        item_info["output"] = output_str  # type: ignore[assignment]  # First 100 chars
+                        if not _debug.DONT_LOG_TOOL_DATA:
+                            output_str = str(item.raw_item.get("output", ""))[:100]
+                            # First 100 chars
+                            item_info["output"] = output_str  # type: ignore[assignment]
                 generated_items_details.append(item_info)
 
             logger.debug(

@@ -940,7 +940,8 @@ async def run_single_turn_streamed(
             len(filtered.input),
             [id(i) for i in filtered.input],
         )
-        server_conversation_tracker.mark_input_as_sent(original_input_for_tracking)
+        # Track only the items actually sent after call_model_input_filter runs.
+        server_conversation_tracker.mark_input_as_sent(filtered.input)
     if not filtered.input and server_conversation_tracker is None:
         raise RuntimeError("Prepared model input is empty")
 

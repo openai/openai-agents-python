@@ -6,10 +6,11 @@ from agents import Agent
 from agents.items import ModelResponse, TResponseInputItem
 from agents.lifecycle import RunHooks
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.result import RunResultStreaming
 from agents.run_config import ModelInputData, RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
-from agents.run_internal.run_loop import get_new_response
+from agents.run_internal.run_loop import get_new_response, run_single_turn_streamed
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.usage import Usage
 
@@ -162,3 +163,57 @@ async def test_get_new_response_marks_filtered_input_as_sent() -> None:
     assert model.last_turn_args["input"] == [item_1]
     assert id(item_1) in tracker.sent_items
     assert id(item_2) not in tracker.sent_items
+
+
+@pytest.mark.asyncio
+async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
+    model = FakeModel()
+    model.set_next_output([get_text_message("ok")])
+    agent = Agent(name="test", model=model)
+    tracker = OpenAIServerConversationTracker(conversation_id="conv6", previous_response_id=None)
+    context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
+    tool_use_tracker = AgentToolUseTracker()
+
+    item_1: TResponseInputItem = cast(TResponseInputItem, {"role": "user", "content": "first"})
+    item_2: TResponseInputItem = cast(TResponseInputItem, {"role": "user", "content": "second"})
+
+    def _filter_input(payload: Any) -> ModelInputData:
+        return ModelInputData(
+            input=[payload.model_data.input[0]],
+            instructions=payload.model_data.instructions,
+        )
+
+    run_config = RunConfig(call_model_input_filter=_filter_input)
+
+    streamed_result = RunResultStreaming(
+        input=[item_1, item_2],
+        new_items=[],
+        raw_responses=[],
+        final_output=None,
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=context_wrapper,
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    await run_single_turn_streamed(
+        streamed_result,
+        agent,
+        RunHooks(),
+        context_wrapper,
+        run_config,
+        should_run_agent_start_hooks=False,
+        tool_use_tracker=tool_use_tracker,
+        all_tools=[],
+        server_conversation_tracker=tracker,
+    )
+
+    assert model.last_turn_args["input"] == [item_1]
+    assert tracker.remaining_initial_input == [item_2]
