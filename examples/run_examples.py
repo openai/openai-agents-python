@@ -348,8 +348,8 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
 
         env = os.environ.copy()
         if auto_mode:
-            env.setdefault("EXAMPLES_INTERACTIVE_MODE", "auto")
-            env.setdefault("APPLY_PATCH_AUTO_APPROVE", "1")
+            env["EXAMPLES_INTERACTIVE_MODE"] = "auto"
+            env["APPLY_PATCH_AUTO_APPROVE"] = "1"
             env.setdefault("SHELL_AUTO_APPROVE", "1")
             env.setdefault("AUTO_APPROVE_MCP", "1")
 

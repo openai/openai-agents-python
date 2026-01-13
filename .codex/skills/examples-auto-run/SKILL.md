@@ -68,15 +68,10 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 
 ## Behavioral validation (Codex/LLM responsibility)
 
-The runner no longer auto-runs `examples/behavioral_validation.py`. After every foreground `start` or `rerun`, **Codex must manually validate** all exit-0 entries:
+The runner does not perform any automated behavioral validation. After every foreground `start` or `rerun`, **Codex must manually validate** all exit-0 entries:
 
 1. Read the example source (and comments) to infer intended flow, tools used, and expected key outputs.
 2. Open the matching per-example log under `.tmp/examples-start-logs/`.
 3. Confirm the intended actions/results occurred; flag omissions or divergences.
 4. Do this for **all passed examples**, not just a sample.
 5. Report immediately after the run with concise citations to the exact log lines that justify the validation.
-
-If you still want the heuristic validator, you can run it manually:
-```bash
-.codex/skills/examples-auto-run/scripts/run.sh validate <main_log_path>
-```
