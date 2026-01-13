@@ -241,6 +241,13 @@ def format_command(cmd: Sequence[str]) -> str:
     return shlex.join(cmd)
 
 
+def display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT_DIR))
+    except ValueError:
+        return str(path)
+
+
 def env_flag(name: str) -> bool | None:
     raw = os.environ.get(name)
     if raw is None:
@@ -374,7 +381,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
                     sys.stdout.write(f"[{relpath}] {line}")
 
         if exit_code == 0:
-            safe_write_main(f"PASSED {relpath} exit=0 log={log_path.relative_to(ROOT_DIR)}")
+            safe_write_main(f"PASSED {relpath} exit=0 log={display_path(log_path)}")
             return ExampleResult(
                 script=example,
                 status="passed",
@@ -385,7 +392,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         info = f"exit={exit_code}"
         with output_lock:
             print(f"  !! {relpath} exited with {exit_code}")
-        safe_write_main(f"FAILED {relpath} exit={exit_code} log={log_path.relative_to(ROOT_DIR)}")
+        safe_write_main(f"FAILED {relpath} exit={exit_code} log={display_path(log_path)}")
         return ExampleResult(
             script=example,
             status="failed",
@@ -466,9 +473,7 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
     for result in results:
         info = result.reason or ("exit 0" if result.status == "passed" else "")
         log_disp = (
-            str(result.log_path.relative_to(ROOT_DIR))
-            if result.log_path and result.log_path.exists()
-            else "-"
+            display_path(result.log_path) if result.log_path and result.log_path.exists() else "-"
         )
         print(
             f"{result.status.ljust(status_w)} {result.script.relpath.ljust(name_w)} {info.ljust(info_w)} {log_disp}"
