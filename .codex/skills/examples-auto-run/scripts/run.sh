@@ -23,15 +23,16 @@ cmd_start() {
     shift
   fi
 
-  local ts log_file
+  local ts main_log stdout_log
   ts="$(date +%Y%m%d-%H%M%S)"
-  log_file="$LOG_DIR/main_${ts}.log"
+  main_log="$LOG_DIR/main_${ts}.log"
+  stdout_log="$LOG_DIR/stdout_${ts}.log"
 
   local run_cmd=(
     uv run examples/run_examples.py
     --auto-mode
     --write-rerun
-    --main-log "$log_file"
+    --main-log "$main_log"
     --logs-dir "$LOG_DIR"
   )
 
@@ -55,12 +56,13 @@ cmd_start() {
       export EXAMPLES_INCLUDE_AUDIO="${EXAMPLES_INCLUDE_AUDIO:-0}"
       export EXAMPLES_INCLUDE_EXTERNAL="${EXAMPLES_INCLUDE_EXTERNAL:-0}"
       cd "$ROOT"
-      "${run_cmd[@]}" "$@" 2>&1 | tee "$log_file" >/dev/null
+      "${run_cmd[@]}" "$@" 2>&1 | tee "$stdout_log" >/dev/null
     ) &
     local pid=$!
     echo "$pid" >"$PID_FILE"
     echo "Started run_examples.py (pid=$pid)"
-    echo "Main log: $log_file"
+    echo "Main log: $main_log"
+    echo "Stdout log: $stdout_log"
     return 0
   fi
 
@@ -73,7 +75,7 @@ cmd_start() {
   export EXAMPLES_INCLUDE_AUDIO="${EXAMPLES_INCLUDE_AUDIO:-0}"
   export EXAMPLES_INCLUDE_EXTERNAL="${EXAMPLES_INCLUDE_EXTERNAL:-0}"
   cd "$ROOT"
-  "${run_cmd[@]}" "$@" 2>&1 | tee "$log_file"
+  "${run_cmd[@]}" "$@" 2>&1 | tee "$stdout_log"
 }
 
 cmd_stop() {
