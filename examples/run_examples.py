@@ -369,20 +369,36 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
             env=env,
         )
         assert proc.stdout is not None
+        force_prompt_stream = (not auto_mode) and ("interactive" in example.tags)
+        buffer_output_local = buffer_output and not force_prompt_stream
         buffer_lines: list[str] = []
 
         with log_path.open("w", encoding="utf-8") as per_log:
-            for line in proc.stdout:
-                per_log.write(line)
-                if buffer_output:
-                    buffer_lines.append(line)
-                else:
+            if force_prompt_stream:
+                at_line_start = True
+                while True:
+                    char = proc.stdout.read(1)
+                    if char == "":
+                        break
+                    per_log.write(char)
                     with output_lock:
-                        sys.stdout.write(f"[{relpath}] {line}")
+                        if at_line_start:
+                            sys.stdout.write(f"[{relpath}] ")
+                        sys.stdout.write(char)
+                        sys.stdout.flush()
+                    at_line_start = char == "\n"
+            else:
+                for line in proc.stdout:
+                    per_log.write(line)
+                    if buffer_output_local:
+                        buffer_lines.append(line)
+                    else:
+                        with output_lock:
+                            sys.stdout.write(f"[{relpath}] {line}")
         proc.wait()
         exit_code = proc.returncode
 
-        if buffer_output and buffer_lines:
+        if buffer_output_local and buffer_lines:
             with output_lock:
                 for line in buffer_lines:
                     sys.stdout.write(f"[{relpath}] {line}")
