@@ -173,7 +173,11 @@ def detect_tags(path: Path, source: str) -> set[str]:
     lower_source = source.lower()
     lower_parts = [part.lower() for part in path.parts]
 
-    if re.search(r"\binput\s*\(", source) or "input_with_fallback(" in lower_source:
+    if (
+        re.search(r"\binput\s*\(", source)
+        or "input_with_fallback(" in lower_source
+        or "confirm_with_fallback(" in lower_source
+    ):
         tags.add("interactive")
     if "prompt_toolkit" in lower_source or "questionary" in lower_source:
         tags.add("interactive")
