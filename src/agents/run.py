@@ -904,7 +904,6 @@ class AgentRunner:
                                 should_run_agent_start_hooks=should_run_agent_start_hooks,
                                 tool_use_tracker=tool_use_tracker,
                                 server_conversation_tracker=server_conversation_tracker,
-                                model_responses=model_responses,
                                 session=session,
                                 session_items_to_rewind=(
                                     last_saved_input_snapshot_for_rewind
@@ -971,7 +970,6 @@ class AgentRunner:
                             should_run_agent_start_hooks=should_run_agent_start_hooks,
                             tool_use_tracker=tool_use_tracker,
                             server_conversation_tracker=server_conversation_tracker,
-                            model_responses=model_responses,
                             session=session,
                             session_items_to_rewind=(
                                 last_saved_input_snapshot_for_rewind

@@ -9,6 +9,8 @@ import json
 from collections.abc import Sequence
 from typing import Any, cast
 
+from pydantic import BaseModel
+
 from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
 
@@ -228,10 +230,15 @@ def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
     return completed
 
 
-def _coerce_to_dict(value: TResponseInputItem) -> dict[str, Any] | None:
+def _coerce_to_dict(value: object) -> dict[str, Any] | None:
     """Convert model items to dicts so fields can be renamed and sanitized."""
     if isinstance(value, dict):
         return dict(value)
+    if isinstance(value, BaseModel):
+        try:
+            return value.model_dump(exclude_unset=True)
+        except Exception:
+            return None
     if hasattr(value, "model_dump"):
         try:
             return cast(dict[str, Any], value.model_dump(exclude_unset=True))
