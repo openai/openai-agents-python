@@ -4,6 +4,8 @@ from agents import Agent, Runner, ToolOutputImage, ToolOutputImageDict, function
 
 return_typed_dict = True
 
+URL = "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=400&q=80"
+
 
 @function_tool
 def fetch_random_image() -> ToolOutputImage | ToolOutputImageDict:
@@ -11,16 +13,9 @@ def fetch_random_image() -> ToolOutputImage | ToolOutputImageDict:
 
     print("Image tool called")
     if return_typed_dict:
-        return {
-            "type": "image",
-            "image_url": "https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg",
-            "detail": "auto",
-        }
+        return {"type": "image", "image_url": URL, "detail": "auto"}
 
-    return ToolOutputImage(
-        image_url="https://upload.wikimedia.org/wikipedia/commons/0/0c/GoldenGateBridge-001.jpg",
-        detail="auto",
-    )
+    return ToolOutputImage(image_url=URL, detail="auto")
 
 
 async def main():
@@ -35,8 +30,7 @@ async def main():
         input="Fetch an image using the random_image tool, then describe it",
     )
     print(result.final_output)
-    """The image shows the iconic Golden Gate Bridge, a large suspension bridge painted in a
-    bright reddish-orange color..."""
+    """This image features the famous clock tower, commonly known as Big Ben, ..."""
 
 
 if __name__ == "__main__":

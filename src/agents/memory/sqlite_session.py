@@ -101,7 +101,7 @@ class SQLiteSession(SessionABC):
         conn.execute(
             f"""
             CREATE INDEX IF NOT EXISTS idx_{self.messages_table}_session_id
-            ON {self.messages_table} (session_id, created_at)
+            ON {self.messages_table} (session_id, id)
         """
         )
 
@@ -127,7 +127,7 @@ class SQLiteSession(SessionABC):
                         f"""
                         SELECT message_data FROM {self.messages_table}
                         WHERE session_id = ?
-                        ORDER BY created_at ASC
+                        ORDER BY id ASC
                     """,
                         (self.session_id,),
                     )
@@ -137,7 +137,7 @@ class SQLiteSession(SessionABC):
                         f"""
                         SELECT message_data FROM {self.messages_table}
                         WHERE session_id = ?
-                        ORDER BY created_at DESC
+                        ORDER BY id DESC
                         LIMIT ?
                         """,
                         (self.session_id, limit),
@@ -223,7 +223,7 @@ class SQLiteSession(SessionABC):
                     WHERE id = (
                         SELECT id FROM {self.messages_table}
                         WHERE session_id = ?
-                        ORDER BY created_at DESC
+                        ORDER BY id DESC
                         LIMIT 1
                     )
                     RETURNING message_data

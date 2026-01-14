@@ -89,11 +89,13 @@ if __name__ == "__main__":
         "-t",
         "--tool-use-behavior",
         type=str,
-        required=True,
+        default="default",
         choices=["default", "first_tool", "custom"],
-        help="The behavior to use for tool use. Default will cause tool outputs to be sent to the model. "
-        "first_tool_result will cause the first tool result to be used as the final output. "
-        "custom will use a custom tool use behavior function.",
+        help=(
+            "The behavior to use for tool use. "
+            "default sends tool outputs back to the model, first_tool uses the first tool result as the final output, "
+            "custom runs a custom tool use behavior function."
+        ),
     )
     args = parser.parse_args()
     asyncio.run(main(args.tool_use_behavior))

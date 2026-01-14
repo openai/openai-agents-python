@@ -17,7 +17,7 @@ from openai.types.shared.reasoning import Reasoning
 from agents import Agent, ModelSettings, Runner, trace
 from agents.items import ReasoningItem
 
-MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "gpt-5"
+MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.2"
 
 
 async def main():
