@@ -57,6 +57,7 @@ from .exceptions import (
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
 from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -107,6 +108,7 @@ from .tool_guardrails import (
 from .tracing import (
     SpanError,
     Trace,
+    TracingConfig,
     function_span,
     get_current_trace,
     guardrail_span,
@@ -538,6 +540,9 @@ class RunImpl:
                 )
                 logger.debug("Queuing shell_call %s", call_identifier)
                 shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
+                continue
+            if output_type == "compaction":
+                items.append(CompactionItem(raw_item=cast(TResponseInputItem, output), agent=agent))
                 continue
             if output_type == "apply_patch_call":
                 items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
@@ -1515,6 +1520,7 @@ class TraceCtxManager:
         group_id: str | None,
         metadata: dict[str, Any] | None,
         disabled: bool,
+        tracing: TracingConfig | None = None,
     ):
         self.trace: Trace | None = None
         self.workflow_name = workflow_name
@@ -1522,6 +1528,7 @@ class TraceCtxManager:
         self.group_id = group_id
         self.metadata = metadata
         self.disabled = disabled
+        self.tracing = tracing
 
     def __enter__(self) -> TraceCtxManager:
         current_trace = get_current_trace()
@@ -1531,6 +1538,7 @@ class TraceCtxManager:
                 trace_id=self.trace_id,
                 group_id=self.group_id,
                 metadata=self.metadata,
+                tracing=self.tracing,
                 disabled=self.disabled,
             )
             self.trace.start(mark_as_current=True)

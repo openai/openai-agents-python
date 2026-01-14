@@ -64,9 +64,9 @@ class TestPlaybackTracker:
 
         state = tracker.get_state("item_1", 0)
         assert state is not None
-        # Should accumulate: 8 bytes / 24 / 2 * 1000 = 166.67ms
-        expected_length = (8 / 24 / 2) * 1000
-        assert abs(state.audio_length_ms - expected_length) < 0.01
+        # Should accumulate: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167ms
+        expected_length = (8 / (24_000 * 2)) * 1000
+        assert state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
 
     def test_state_cleanup_on_interruption(self):
         """Test both trackers properly reset state on interruption."""
@@ -105,8 +105,9 @@ class TestPlaybackTracker:
         # Test PCM format (24kHz, default)
         pcm_bytes = b"test"  # 4 bytes
         pcm_length = calculate_audio_length_ms("pcm16", pcm_bytes)
-        assert pcm_length == (4 / 24 / 2) * 1000  # ~83.33ms
+        expected_pcm = (len(pcm_bytes) / (24_000 * 2)) * 1000
+        assert pcm_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)
 
         # Test None format (defaults to PCM)
         none_length = calculate_audio_length_ms(None, pcm_bytes)
-        assert none_length == pcm_length
+        assert none_length == pytest.approx(expected_pcm, rel=0, abs=1e-6)

@@ -3,6 +3,7 @@ import shutil
 
 from agents import Agent, Runner, trace
 from agents.mcp import MCPServer, MCPServerStdio
+from examples.auto_mode import input_with_fallback
 
 
 async def run(mcp_server: MCPServer, directory_path: str):
@@ -27,7 +28,10 @@ async def run(mcp_server: MCPServer, directory_path: str):
 
 async def main():
     # Ask the user for the directory path
-    directory_path = input("Please enter the path to the git repository: ")
+    directory_path = input_with_fallback(
+        "Please enter the path to the git repository: ",
+        ".",
+    )
 
     async with MCPServerStdio(
         cache_tools_list=True,  # Cache the tools list, for demonstration

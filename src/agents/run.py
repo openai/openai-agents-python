@@ -59,7 +59,7 @@ from .items import (
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
-from .memory import Session, SessionInputCallback
+from .memory import Session, SessionInputCallback, is_openai_responses_compaction_aware_session
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -73,7 +73,7 @@ from .stream_events import (
 )
 from .tool import Tool, dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, trace
+from .tracing import Span, SpanError, TracingConfig, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
 from .usage import Usage
 from .util import _coro, _error_tracing
@@ -225,6 +225,9 @@ class RunConfig:
     tracing_disabled: bool = False
     """Whether tracing is disabled for the agent run. If disabled, we will not trace the agent run.
     """
+
+    tracing: TracingConfig | None = None
+    """Tracing configuration for this run."""
 
     trace_include_sensitive_data: bool = field(
         default_factory=_default_trace_include_sensitive_data
@@ -575,6 +578,7 @@ class AgentRunner:
             trace_id=run_config.trace_id,
             group_id=run_config.group_id,
             metadata=run_config.trace_metadata,
+            tracing=run_config.tracing,
             disabled=run_config.tracing_disabled,
         ):
             current_turn = 0
@@ -736,7 +740,10 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    turn_result.model_response.response_id,
                                 )
 
                             return result
@@ -748,7 +755,10 @@ class AgentRunner:
                                     for guardrail_result in input_guardrail_results
                                 ):
                                     await self._save_result_to_session(
-                                        session, [], turn_result.new_step_items
+                                        session,
+                                        [],
+                                        turn_result.new_step_items,
+                                        turn_result.model_response.response_id,
                                     )
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             current_span.finish(reset_current=True)
@@ -760,7 +770,10 @@ class AgentRunner:
                                 for guardrail_result in input_guardrail_results
                             ):
                                 await self._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    turn_result.model_response.response_id,
                                 )
                         else:
                             raise AgentsException(
@@ -902,6 +915,7 @@ class AgentRunner:
                 trace_id=run_config.trace_id,
                 group_id=run_config.group_id,
                 metadata=run_config.trace_metadata,
+                tracing=run_config.tracing,
                 disabled=run_config.tracing_disabled,
             )
         )
@@ -1229,7 +1243,10 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    turn_result.model_response.response_id,
                                 )
 
                         current_agent = turn_result.next_step.new_agent
@@ -1275,7 +1292,10 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    turn_result.model_response.response_id,
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1288,7 +1308,10 @@ class AgentRunner:
                             )
                             if should_skip_session_save is False:
                                 await AgentRunner._save_result_to_session(
-                                    session, [], turn_result.new_step_items
+                                    session,
+                                    [],
+                                    turn_result.new_step_items,
+                                    turn_result.model_response.response_id,
                                 )
 
                         # Check for soft cancel after turn completion
@@ -2006,6 +2029,7 @@ class AgentRunner:
         session: Session | None,
         original_input: str | list[TResponseInputItem],
         new_items: list[RunItem],
+        response_id: str | None = None,
     ) -> None:
         """
         Save the conversation turn to session.
@@ -2024,6 +2048,10 @@ class AgentRunner:
         # Save all items from this turn
         items_to_save = input_list + new_items_as_input
         await session.add_items(items_to_save)
+
+        # Run compaction if session supports it and we have a response_id
+        if response_id and is_openai_responses_compaction_aware_session(session):
+            await session.run_compaction({"response_id": response_id})
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(

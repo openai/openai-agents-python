@@ -1067,11 +1067,7 @@ class TestToolCallExecution:
 
     @pytest.mark.asyncio
     async def test_unknown_tool_handling(self, mock_model, mock_agent, mock_function_tool):
-        """Test that unknown tools raise an error"""
-        import pytest
-
-        from agents.exceptions import ModelBehaviorError
-
+        """Test that unknown tools emit a RealtimeError event"""
         # Set up agent to return different tool than what's called
         mock_function_tool.name = "known_tool"
         mock_agent.get_all_tools.return_value = [mock_function_tool]
@@ -1083,9 +1079,14 @@ class TestToolCallExecution:
             name="unknown_tool", call_id="call_unknown", arguments="{}"
         )
 
-        # Should raise an error for unknown tool
-        with pytest.raises(ModelBehaviorError, match="Tool unknown_tool not found"):
-            await session._handle_tool_call(tool_call_event)
+        # Should emit a RealtimeError event for unknown tool
+        await session._handle_tool_call(tool_call_event)
+
+        # Should have emitted a RealtimeError event
+        assert session._event_queue.qsize() >= 1
+        error_event = await session._event_queue.get()
+        assert isinstance(error_event, RealtimeError)
+        assert "Tool unknown_tool not found" in error_event.error.get("message", "")
 
         # Should not have called any tools
         mock_function_tool.on_invoke_tool.assert_not_called()

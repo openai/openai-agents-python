@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from agents import Agent, Runner, function_tool, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
@@ -24,6 +25,9 @@ def get_weather(city: str):
 
 
 async def main(model: str, api_key: str):
+    if api_key == "dummy":
+        print("Skipping run because no valid LITELLM_API_KEY was provided.")
+        return
     agent = Agent(
         name="Assistant",
         instructions="You only respond in haikus.",
@@ -36,7 +40,7 @@ async def main(model: str, api_key: str):
 
 
 if __name__ == "__main__":
-    # First try to get model/api key from args
+    # Prefer non-interactive defaults in auto mode to avoid blocking.
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -44,12 +48,12 @@ if __name__ == "__main__":
     parser.add_argument("--api-key", type=str, required=False)
     args = parser.parse_args()
 
-    model = args.model
-    if not model:
-        model = input("Enter a model name for Litellm: ")
+    model = args.model or os.environ.get("LITELLM_MODEL", "openai/gpt-4o-mini")
+    api_key = args.api_key or os.environ.get("LITELLM_API_KEY", "dummy")
 
-    api_key = args.api_key
-    if not api_key:
-        api_key = input("Enter an API key for Litellm: ")
+    if not args.model:
+        print(f"Using default model: {model}")
+    if not args.api_key:
+        print("Using LITELLM_API_KEY from environment (or dummy placeholder).")
 
     asyncio.run(main(model, api_key))
