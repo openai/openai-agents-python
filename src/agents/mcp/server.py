@@ -273,46 +273,17 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
     def _raise_user_error_for_http_error(self, http_error: Exception) -> None:
         """Raise appropriate UserError for HTTP error."""
+        error_message = f"Failed to connect to MCP server '{self.name}': "
         if isinstance(http_error, httpx.HTTPStatusError):
-            status_code = http_error.response.status_code
-            if status_code == 401:
-                raise UserError(
-                    f"Failed to connect to MCP server '{self.name}': "
-                    f"Authentication failed (401 Unauthorized). "
-                    f"Please check your credentials."
-                ) from http_error
-            elif status_code == 403:
-                raise UserError(
-                    f"Failed to connect to MCP server '{self.name}': "
-                    f"Access forbidden (403 Forbidden). "
-                    f"Please check your permissions."
-                ) from http_error
-
-            elif status_code >= 500:
-                raise UserError(
-                    f"Failed to connect to MCP server '{self.name}': "
-                    f"Server error ({status_code}). "
-                    f"The MCP server may be experiencing issues."
-                ) from http_error
-
-            else:
-                raise UserError(
-                    f"Failed to connect to MCP server '{self.name}': HTTP error {status_code}"
-                ) from http_error
+            error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
 
         elif isinstance(http_error, httpx.ConnectError):
-            raise UserError(
-                f"Failed to connect to MCP server '{self.name}': "
-                f"Could not reach the server. "
-                f"Please check that the server is running and the URL is correct."
-            ) from http_error
+            error_message += "Could not reach the server."
 
         elif isinstance(http_error, httpx.TimeoutException):
-            raise UserError(
-                f"Failed to connect to MCP server '{self.name}': "
-                f"Connection timeout. "
-                f"The server did not respond in time."
-            ) from http_error
+            error_message += "Connection timeout."
+
+        raise UserError(error_message) from http_error
 
     async def _run_with_retries(self, func: Callable[[], Awaitable[T]]) -> T:
         attempts = 0
@@ -473,6 +444,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def cleanup(self):
         """Cleanup the server."""
         async with self._cleanup_lock:
+            # Only raise HTTP errors if we're cleaning up after a failed connection.
+            # During normal teardown (via __aexit__), log but don't raise to avoid
+            # masking the original exception.
+            is_failed_connection_cleanup = self.session is None
+
             try:
                 await self.exit_stack.aclose()
             except BaseExceptionGroup as eg:
@@ -481,6 +457,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 http_error = None
                 connect_error = None
                 timeout_error = None
+                error_message = f"Failed to connect to MCP server '{self.name}': "
 
                 for exc in eg.exceptions:
                     if isinstance(exc, httpx.HTTPStatusError):
@@ -490,43 +467,33 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     elif isinstance(exc, httpx.TimeoutException):
                         timeout_error = exc
 
-                # If we found an HTTP error, raise it as UserError
+                # Only raise HTTP errors if we're cleaning up after a failed connection.
+                # During normal teardown, log them instead.
                 if http_error:
-                    status_code = http_error.response.status_code
-                    if status_code == 401:
-                        raise UserError(
-                            f"Failed to connect to MCP server '{self.name}': "
-                            f"Authentication failed (401 Unauthorized). "
-                            f"Please check your credentials."
-                        ) from http_error
-                    elif status_code == 403:
-                        raise UserError(
-                            f"Failed to connect to MCP server '{self.name}': "
-                            f"Access forbidden (403 Forbidden). "
-                            f"Please check your permissions."
-                        ) from http_error
-                    elif status_code >= 500:
-                        raise UserError(
-                            f"Failed to connect to MCP server '{self.name}': "
-                            f"Server error ({status_code}). "
-                            f"The MCP server may be experiencing issues."
-                        ) from http_error
+                    if is_failed_connection_cleanup:
+                        error_message += f"HTTP error {http_error.response.status_code} ({http_error.response.reason_phrase})"  # noqa: E501
+                        raise UserError(error_message) from http_error
                     else:
-                        raise UserError(
-                            f"Failed to connect to MCP server '{self.name}': HTTP error {status_code}"  # noqa: E501
-                        ) from http_error
+                        # Normal teardown - log but don't raise
+                        logger.warning(
+                            f"HTTP error during cleanup of MCP server '{self.name}': {http_error}"
+                        )
                 elif connect_error:
-                    raise UserError(
-                        f"Failed to connect to MCP server '{self.name}': "
-                        f"Could not reach the server. "
-                        f"Please check that the server is running and the URL is correct."
-                    ) from connect_error
+                    if is_failed_connection_cleanup:
+                        error_message += "Could not reach the server."
+                        raise UserError(error_message) from connect_error
+                    else:
+                        logger.warning(
+                            f"Connection error during cleanup of MCP server '{self.name}': {connect_error}"  # noqa: E501
+                        )
                 elif timeout_error:
-                    raise UserError(
-                        f"Failed to connect to MCP server '{self.name}': "
-                        f"Connection timeout. "
-                        f"The server did not respond in time."
-                    ) from timeout_error
+                    if is_failed_connection_cleanup:
+                        error_message += "Connection timeout."
+                        raise UserError(error_message) from timeout_error
+                    else:
+                        logger.warning(
+                            f"Timeout error during cleanup of MCP server '{self.name}': {timeout_error}"  # noqa: E501
+                        )
                 else:
                     # No HTTP error found, suppress RuntimeError about cancel scopes
                     has_cancel_scope_error = any(
