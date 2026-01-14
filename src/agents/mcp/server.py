@@ -356,12 +356,10 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             if http_error:
                 self._raise_user_error_for_http_error(http_error)
 
-            # For CancelledError, it might mask an HTTP error that will be raised during cleanup
+            # For CancelledError, preserve cancellation semantics - don't wrap it.
+            # If it's masking an HTTP error, cleanup() will extract and raise UserError.
             if isinstance(e, asyncio.CancelledError):
-                raise UserError(
-                    f"Failed to connect to MCP server '{self.name}': Connection was cancelled. "
-                    f"This may indicate the server is unreachable or returned an error."
-                ) from e
+                raise
 
             # For HTTP-related errors, wrap them
             if isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException)):
