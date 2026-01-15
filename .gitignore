@@ -149,3 +149,6 @@ cython_debug/
 
 # Redis database files
 dump.rdb
+
+#debug logs
+logs/

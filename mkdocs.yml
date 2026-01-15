@@ -152,6 +152,8 @@ plugins:
                     - ref/extensions/handoff_filters.md
                     - ref/extensions/handoff_prompt.md
                     - ref/extensions/litellm.md
+                    - ref/extensions/models/litellm_model.md
+                    - ref/extensions/models/litellm_provider.md
                     - ref/extensions/memory/sqlalchemy_session.md
                     - ref/extensions/memory/encrypt_session.md
                     - ref/extensions/memory/advanced_sqlite_session.md
