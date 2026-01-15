@@ -27,4 +27,6 @@ def test_litellm_logging_patch_env_var_controls_application(monkeypatch):
     if hasattr(litellm_logging, "_extract_response_obj_and_hidden_params"):
         assert getattr(litellm_logging, "_openai_agents_patched_serializer_warnings", False) is True
     else:
-        assert getattr(litellm_logging, "_openai_agents_patched_serializer_warnings", False) is False
+        assert (
+            getattr(litellm_logging, "_openai_agents_patched_serializer_warnings", False) is False
+        )
