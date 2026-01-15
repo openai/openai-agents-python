@@ -2,27 +2,27 @@
 search:
   exclude: true
 ---
-# LiteLLM를 통한 모든 모델 사용
+# LiteLLM을 통한 모든 모델 사용
 
 !!! note
 
-    LiteLLM 통합은 베타 단계입니다. 특히 소규모 모델 제공업체에서 일부 문제가 발생할 수 있습니다. 문제가 있으면 [Github issues](https://github.com/openai/openai-agents-python/issues)로 보고해 주시면 신속히 수정하겠습니다.
+    LiteLLM 통합은 베타 단계입니다. 특히 소규모 모델 제공업체에서는 문제가 발생할 수 있습니다. 문제가 있으면 [Github issues](https://github.com/openai/openai-agents-python/issues)로 보고해 주세요. 신속히 해결하겠습니다.
 
-[LiteLLM](https://docs.litellm.ai/docs/)은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. Agents SDK에서는 LiteLLM 통합을 통해 어떤 AI 모델이든 사용할 수 있습니다.
+[LiteLLM](https://docs.litellm.ai/docs/)은 단일 인터페이스로 100개 이상의 모델을 사용할 수 있게 해주는 라이브러리입니다. Agents SDK에서 어떤 AI 모델이든 사용할 수 있도록 LiteLLM 통합을 추가했습니다.
 
 ## 설정
 
-`litellm`이 사용 가능한지 확인해야 합니다. 선택적 `litellm` 종속성 그룹을 설치하면 됩니다:
+`litellm`이 사용 가능해야 합니다. 선택적 `litellm` 의존성 그룹을 설치하면 됩니다:
 
 ```bash
 pip install "openai-agents[litellm]"
 ```
 
-설치가 완료되면 어떤 에이전트에서도 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel]을 사용할 수 있습니다.
+완료되면 어떤 에이전트에서도 [`LitellmModel`][agents.extensions.models.litellm_model.LitellmModel]을 사용할 수 있습니다.
 
 ## 예제
 
-다음은 완전한 동작 예제입니다. 실행하면 모델 이름과 API 키 입력을 요청합니다. 예를 들어 다음과 같이 입력할 수 있습니다:
+다음은 완전한 동작 예제입니다. 실행하면 모델 이름과 API 키를 입력하라는 메시지가 표시됩니다. 예를 들어 다음과 같이 입력할 수 있습니다:
 
 - `openai/gpt-4.1` 모델과 OpenAI API 키
 - `anthropic/claude-3-5-sonnet-20240620` 모델과 Anthropic API 키
@@ -76,9 +76,9 @@ if __name__ == "__main__":
     asyncio.run(main(model, api_key))
 ```
 
-## 사용 데이터 추적
+## 사용량 데이터 추적
 
-LiteLLM 응답을 Agents SDK 사용량 메트릭에 반영하려면 에이전트를 생성할 때 `ModelSettings(include_usage=True)`를 전달하세요.
+LiteLLM 응답이 Agents SDK 사용량 메트릭에 반영되길 원한다면, 에이전트를 생성할 때 `ModelSettings(include_usage=True)`를 전달하세요.
 
 ```python
 from agents import Agent, ModelSettings
@@ -91,14 +91,14 @@ agent = Agent(
 )
 ```
 
-`include_usage=True`를 사용하면, LiteLLM 요청은 기본 OpenAI 모델과 마찬가지로 `result.context_wrapper.usage`를 통해 토큰 및 요청 수를 보고합니다.
+`include_usage=True`를 사용하면, LiteLLM 요청은 기본 제공 OpenAI 모델과 마찬가지로 `result.context_wrapper.usage`를 통해 토큰 및 요청 수를 보고합니다.
 
 ## 문제 해결
 
-LiteLLM 응답에서 Pydantic 직렬화기 경고가 보인다면 다음 설정으로 작은 호환성 패치를 활성화하세요:
+LiteLLM 응답에서 Pydantic 직렬화기 경고가 보인다면, 다음 설정으로 소규모 호환성 패치를 활성화하세요:
 
 ```bash
 export OPENAI_AGENTS_ENABLE_LITELLM_SERIALIZER_PATCH=true
 ```
 
-이 옵트인 플래그는 정상 동작을 유지하면서 알려진 LiteLLM 직렬화기 경고를 억제합니다. 필요 없다면 해제(설정 해제 또는 `false`)할 수 있습니다.
+이 옵트인 플래그는 정상 동작을 유지하면서 알려진 LiteLLM 직렬화기 경고를 숨깁니다. 필요하지 않다면 해제(미설정 또는 `false`)하세요.

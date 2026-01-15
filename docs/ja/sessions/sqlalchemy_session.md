@@ -4,7 +4,7 @@ search:
 ---
 # SQLAlchemy セッション
 
-`SQLAlchemySession` は SQLAlchemy を使用してプロダクション対応のセッション実装を提供し、セッションの保存先として SQLAlchemy がサポートする任意のデータベース (PostgreSQL、MySQL、SQLite など) を利用できます。
+`SQLAlchemySession` は SQLAlchemy を使用して本番運用可能なセッション実装を提供し、セッション保存に SQLAlchemy がサポートする任意のデータベース (PostgreSQL、MySQL、SQLite など) を利用できます。
 
 ## インストール
 
@@ -42,7 +42,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 既存のエンジンの使用
+### 既存の SQLAlchemy エンジンの使用
 
 既存の SQLAlchemy エンジンを持つアプリケーション向け:
 
@@ -77,4 +77,4 @@ if __name__ == "__main__":
 ## API リファレンス
 
 - [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - メインクラス
-- [`Session`][agents.memory.session.Session] - セッションのベースプロトコル
+- [`Session`][agents.memory.session.Session] - ベースセッションプロトコル

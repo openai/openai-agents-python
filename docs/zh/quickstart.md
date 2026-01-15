@@ -2,7 +2,7 @@
 search:
   exclude: true
 ---
-# 快速开始
+# 快速入门
 
 ## 创建项目与虚拟环境
 
@@ -30,7 +30,7 @@ pip install openai-agents # or `uv add openai-agents`, etc
 
 ### 设置 OpenAI API 密钥
 
-如果你还没有，请按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建 OpenAI API 密钥。
+如果你还没有，请按照[这些说明](https://platform.openai.com/docs/quickstart#create-and-export-an-api-key)创建一个 OpenAI API 密钥。
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -38,7 +38,7 @@ export OPENAI_API_KEY=sk-...
 
 ## 创建你的第一个智能体
 
-智能体由 instructions、名称以及可选的配置（如 `model_config`）定义。
+智能体由 instructions、名称以及可选配置（例如 `model_config`）定义。
 
 ```python
 from agents import Agent
@@ -51,7 +51,7 @@ agent = Agent(
 
 ## 添加更多智能体
 
-可以用相同方式定义更多智能体。`handoff_descriptions` 为确定任务转移路由提供额外上下文。
+可以用相同方式定义额外的智能体。`handoff_descriptions` 提供额外上下文以决定任务转移的路由。
 
 ```python
 from agents import Agent
@@ -83,7 +83,7 @@ triage_agent = Agent(
 
 ## 运行智能体编排
 
-让我们检查工作流是否运行，以及分诊智能体是否在两个专家智能体之间正确路由。
+让我们检查工作流是否运行，以及分诊智能体是否能在两个专家智能体之间正确路由。
 
 ```python
 from agents import Runner
@@ -121,9 +121,9 @@ async def homework_guardrail(ctx, agent, input_data):
     )
 ```
 
-## 整体运行
+## 整合到一起
 
-让我们把上述内容整合起来，运行整个工作流，使用任务转移和输入安全防护措施。
+让我们把它们整合起来，运行整个工作流，使用任务转移和输入安全防护措施。
 
 ```python
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner
@@ -190,13 +190,13 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 查看追踪
+## 查看你的追踪
 
-要回顾智能体运行期间发生的事情，请前往 [OpenAI 仪表盘中的 Trace viewer](https://platform.openai.com/traces) 查看你的运行追踪。
+要回顾智能体运行期间发生的事情，请前往 [OpenAI 仪表板中的 Trace viewer](https://platform.openai.com/traces)查看你的智能体运行追踪。
 
 ## 后续步骤
 
-了解如何构建更复杂的智能体流程：
+了解如何构建更复杂的智能体流：
 
 - 学习如何配置[智能体](agents.md)。
 - 了解[运行智能体](running_agents.md)。

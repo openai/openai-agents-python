@@ -7,13 +7,13 @@ search:
 实时智能体通过 OpenAI 的 Realtime API 让你的 AI 智能体支持语音对话。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "测试版功能"
-实时智能体目前为测试版。随着实现不断改进，可能会有不向后兼容的变更。
+实时智能体目前处于测试阶段。随着实现的改进，可能会出现不兼容的变更。
 
 ## 前提条件
 
 - Python 3.9 或更高版本
 - OpenAI API key
-- 对 OpenAI Agents SDK 有基本了解
+- 对 OpenAI Agents SDK 的基本了解
 
 ## 安装
 
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. 设置 runner
+### 3. 设置运行器
 
 ```python
 runner = RealtimeRunner(
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 完整示例
 
-以下是一个可运行的完整示例：
+下面是一个可运行的完整示例：
 
 ```python
 import asyncio
@@ -212,20 +212,20 @@ if __name__ == "__main__":
 ## 后续步骤
 
 - [了解更多关于实时智能体](guide.md)
-- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可用示例
+- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可用的示例
 - 为你的智能体添加工具
 - 在智能体之间实现任务转移
-- 设置安全防护措施以保证安全
+- 设置安全防护措施以确保安全
 
 ## 身份验证
 
-确保你的 OpenAI API key 已在环境中设置：
+确保已在环境中设置你的 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或在创建会话时直接传入：
+或者在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

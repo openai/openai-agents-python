@@ -4,15 +4,15 @@ search:
 ---
 # 高度な SQLite セッション
 
-`AdvancedSQLiteSession` は、基本の `SQLiteSession` を拡張したもので、会話の分岐、詳細な使用状況分析、構造化された会話クエリなど、高度な会話管理機能を提供します。
+`AdvancedSQLiteSession` は、基本的な `SQLiteSession` を拡張したもので、会話の分岐、詳細な使用状況分析、構造化された会話クエリなどの高度な会話管理機能を提供します。
 
 ## 機能
 
--  **会話の分岐**: 任意の ユーザー メッセージから代替の会話パスを作成
--  **使用状況の追跡**: JSON の完全な内訳付きで、ターンごとの詳細なトークン使用分析
--  **構造化クエリ**: ターン単位の会話取得、ツール使用統計など
--  **ブランチ管理**: 独立したブランチの切り替えと管理
--  **メッセージ構造メタデータ**: メッセージ種別、ツール使用状況、会話フローを追跡
+-  **会話の分岐** : 任意の ユーザー メッセージから代替の会話パスを作成
+-  **使用状況の追跡** : 各ターンごとの詳細なトークン使用分析（完全な JSON 内訳つき）
+-  **構造化クエリ** : ターン単位での会話取得、ツール使用統計など
+-  **ブランチ管理** : 独立したブランチの切り替えと管理
+-  **メッセージ構造メタデータ** : メッセージタイプ、ツール使用状況、会話フローの追跡
 
 ## クイックスタート
 
@@ -84,14 +84,14 @@ session = AdvancedSQLiteSession(
 
 ### パラメーター
 
-- `session_id` (str): 会話セッションの一意の識別子
-- `db_path` (str | Path): SQLite データベースファイルへのパス。メモリ内保存の場合はデフォルトで `:memory:` です
-- `create_tables` (bool): 高度なテーブルを自動作成するかどうか。デフォルトは `False`
-- `logger` (logging.Logger | None): セッション用のカスタムロガー。デフォルトはモジュールロガー
+- `session_id` ( str ): 会話セッションの一意の識別子
+- `db_path` ( str | Path ): SQLite データベースファイルへのパス。インメモリ保存の場合のデフォルトは `:memory:` です
+- `create_tables` ( bool ): 高度なテーブルを自動作成するかどうか。デフォルトは `False`
+- `logger` ( logging.Logger | None ): セッション用のカスタムロガー。デフォルトはモジュールロガー
 
 ## 使用状況の追跡
 
-AdvancedSQLiteSession は、会話の各ターンごとにトークン使用データを保存することで、詳細な使用状況分析を提供します。これは、各 エージェント 実行後に `store_run_usage` メソッドが呼び出されることに完全に依存します。
+AdvancedSQLiteSession は、会話の各ターンごとのトークン使用データを保存することで、詳細な使用状況分析を提供します。これは各エージェント実行後に `store_run_usage` メソッドが呼び出されることに完全に依存します。
 
 ### 使用データの保存
 
@@ -137,7 +137,7 @@ turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 
 ## 会話の分岐
 
-AdvancedSQLiteSession の主要機能の 1 つは、任意の ユーザー メッセージから会話のブランチを作成し、代替の会話パスを探索できることです。
+AdvancedSQLiteSession の主な機能の 1 つは、任意の ユーザー メッセージから会話ブランチを作成し、代替の会話パスを探索できることです。
 
 ### ブランチの作成
 
@@ -247,7 +247,7 @@ for turn in matching_turns:
 
 セッションは次のようなメッセージ構造を自動的に追跡します。
 
-- メッセージ種別（user、assistant、tool_call など）
+- メッセージタイプ（ ユーザー、アシスタント、tool_call など）
 - ツール呼び出しのツール名
 - ターン番号とシーケンス番号
 - ブランチの関連付け
@@ -255,7 +255,7 @@ for turn in matching_turns:
 
 ## データベーススキーマ
 
-AdvancedSQLiteSession は、基本の SQLite スキーマを拡張し、2 つの追加テーブルを提供します。
+AdvancedSQLiteSession は、基本的な SQLite スキーマを 2 つの追加テーブルで拡張します。
 
 ### message_structure テーブル
 
@@ -296,9 +296,9 @@ CREATE TABLE turn_usage (
 );
 ```
 
-## 完全なサンプルコード
+## 完全な例
 
-すべての機能を網羅したデモについては、[完全なサンプルコード](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)をご覧ください。
+すべての機能を包括的に示す [完全な例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py) をご覧ください。
 
 
 ## API リファレンス

@@ -4,16 +4,16 @@ search:
 ---
 # 빠른 시작
 
-실시간 에이전트는 OpenAI의 Realtime API를 사용해 AI 에이전트와 음성 대화를 가능하게 합니다. 이 가이드는 첫 실시간 음성 에이전트를 만드는 과정을 안내합니다.
+실시간 에이전트는 OpenAI의 Realtime API를 사용하여 AI 에이전트와 음성 대화를 가능하게 합니다. 이 가이드에서는 첫 번째 실시간 음성 에이전트를 만드는 방법을 안내합니다.
 
-!!! warning "베타 기능"
-실시간 에이전트는 베타 단계입니다. 구현을 개선하는 동안 일부 변경이 발생할 수 있습니다.
+!!! warning "Beta feature"
+실시간 에이전트는 베타 버전입니다. 구현을 개선하는 동안 변경 사항이 발생할 수 있습니다.
 
-## 사전 준비 사항
+## 사전 준비
 
 - Python 3.9 이상
 - OpenAI API 키
-- OpenAI Agents SDK 에 대한 기본적인 이해
+- OpenAI Agents SDK에 대한 기본적인 이해
 
 ## 설치
 
@@ -25,7 +25,7 @@ pip install openai-agents
 
 ## 첫 실시간 에이전트 생성
 
-### 1. 필수 구성요소 가져오기
+### 1. 필요한 구성 요소 불러오기
 
 ```python
 import asyncio
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 전체 예제
 
-완전한 작동 예제는 다음과 같습니다:
+완전한 동작 예제는 다음과 같습니다:
 
 ```python
 import asyncio
@@ -188,11 +188,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 구성 옵션
+## 설정 옵션
 
 ### 모델 설정
 
-- `model_name`: 사용 가능한 실시간 모델에서 선택 (예: `gpt-realtime`)
+- `model_name`: 사용 가능한 실시간 모델 중 선택 (예: `gpt-realtime`)
 - `voice`: 음성 선택 (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 - `modalities`: 텍스트 또는 오디오 활성화 (`["text"]` 또는 `["audio"]`)
 
@@ -200,32 +200,32 @@ if __name__ == "__main__":
 
 - `input_audio_format`: 입력 오디오 형식 (`pcm16`, `g711_ulaw`, `g711_alaw`)
 - `output_audio_format`: 출력 오디오 형식
-- `input_audio_transcription`: 전사 구성
+- `input_audio_transcription`: 전사 설정
 
 ### 턴 감지
 
 - `type`: 감지 방식 (`server_vad`, `semantic_vad`)
 - `threshold`: 음성 활동 임계값 (0.0-1.0)
-- `silence_duration_ms`: 턴 종료 감지를 위한 무음 지속 시간
+- `silence_duration_ms`: 턴 종료를 감지할 무음 지속 시간
 - `prefix_padding_ms`: 발화 전 오디오 패딩
 
 ## 다음 단계
 
-- [실시간 에이전트에 대해 더 알아보기](guide.md)
-- [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작 예제를 확인하세요
+- [실시간 에이전트 더 알아보기](guide.md)
+- [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작하는 code examples 확인
 - 에이전트에 도구 추가
 - 에이전트 간 핸드오프 구현
 - 안전을 위한 가드레일 설정
 
 ## 인증
 
-환경에 OpenAI API 키가 설정되어 있는지 확인하세요:
+환경 변수에 OpenAI API 키가 설정되어 있는지 확인하세요:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-또는 세션을 생성할 때 직접 전달하세요:
+또는 세션 생성 시 직접 전달하세요:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
