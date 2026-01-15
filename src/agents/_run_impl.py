@@ -1770,6 +1770,9 @@ class ShellAction:
         except Exception as exc:
             status = "failed"
             output_text = _format_shell_error(exc)
+            if requested_max_output_length is not None:
+                max_output_length = requested_max_output_length
+                output_text = output_text[:max_output_length]
             logger.error("Shell executor failed: %s", exc, exc_info=True)
 
         await asyncio.gather(
