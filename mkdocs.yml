@@ -101,11 +101,15 @@ plugins:
                     - ref/lifecycle.md
                     - ref/items.md
                     - ref/run_context.md
-                    - ref/tool_context.md
                     - ref/usage.md
+                    - ref/logger.md
                     - ref/exceptions.md
                     - ref/guardrail.md
+                    - ref/prompts.md
                     - ref/model_settings.md
+                    - ref/strict_schema.md
+                    - ref/tool_guardrails.md
+                    - ref/computer.md
                     - ref/agent_output.md
                     - ref/function_schema.md
                     - ref/models/interface.md

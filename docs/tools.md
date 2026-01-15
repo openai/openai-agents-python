@@ -1,10 +1,11 @@
 # Tools
 
-Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. There are three classes of tools in the Agent SDK:
+Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports four categories:
 
--   Hosted tools: these run on LLM servers alongside the AI models. OpenAI offers retrieval, web search and computer use as hosted tools.
--   Function calling: these allow you to use any Python function as a tool.
--   Agents as tools: this allows you to use an agent as a tool, allowing Agents to call other agents without handing off to them.
+-   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   Local runtime tools: run in your environment (computer use, shell, apply patch).
+-   Function calling: wrap any Python function as a tool.
+-   Agents as tools: expose an agent as a callable tool without a full handoff.
 
 ## Hosted tools
 
@@ -12,11 +13,9 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 
 -   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
 -   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
--   The [`ComputerTool`][agents.tool.ComputerTool] allows automating computer use tasks.
 -   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
--   The [`LocalShellTool`][agents.tool.LocalShellTool] runs shell commands on your machine.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -35,6 +34,54 @@ agent = Agent(
 async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
+```
+
+## Local runtime tools
+
+Local runtime tools execute in your environment and require you to supply implementations:
+
+-   [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
+-   [`ShellTool`][agents.tool.ShellTool] or [`LocalShellTool`][agents.tool.LocalShellTool]: provide a shell executor to run commands.
+-   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
+
+```python
+from agents import Agent, ApplyPatchTool, ShellTool
+from agents.computer import AsyncComputer
+from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEditor
+
+
+class NoopComputer(AsyncComputer):
+    environment = "browser"
+    dimensions = (1024, 768)
+    async def screenshot(self): return ""
+    async def click(self, x, y, button): ...
+    async def double_click(self, x, y): ...
+    async def scroll(self, x, y, scroll_x, scroll_y): ...
+    async def type(self, text): ...
+    async def wait(self): ...
+    async def move(self, x, y): ...
+    async def keypress(self, keys): ...
+    async def drag(self, path): ...
+
+
+class NoopEditor(ApplyPatchEditor):
+    async def create_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def update_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def delete_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+
+
+async def run_shell(request):
+    return "shell output"
+
+
+agent = Agent(
+    name="Local tools agent",
+    tools=[
+        ShellTool(executor=run_shell),
+        ApplyPatchTool(editor=NoopEditor()),
+        # ComputerTool expects a Computer/AsyncComputer implementation; omitted here for brevity.
+    ],
+)
 ```
 
 ## Function tools
