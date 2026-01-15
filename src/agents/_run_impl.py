@@ -1739,7 +1739,9 @@ class ShellAction:
         shell_output_payload: list[dict[str, Any]] | None = None
         provider_meta: dict[str, Any] | None = None
         max_output_length: int | None = None
-        requested_max_output_length = shell_call.action.max_output_length
+        requested_max_output_length = _normalize_max_output_length(
+            shell_call.action.max_output_length
+        )
 
         try:
             executor_result = call.shell_tool.executor(request)
@@ -1749,12 +1751,13 @@ class ShellAction:
 
             if isinstance(result, ShellResult):
                 normalized = [_normalize_shell_output(entry) for entry in result.output]
-                if result.max_output_length is None:
+                result_max_output_length = _normalize_max_output_length(result.max_output_length)
+                if result_max_output_length is None:
                     max_output_length = requested_max_output_length
                 elif requested_max_output_length is None:
-                    max_output_length = result.max_output_length
+                    max_output_length = result_max_output_length
                 else:
-                    max_output_length = min(result.max_output_length, requested_max_output_length)
+                    max_output_length = min(result_max_output_length, requested_max_output_length)
                 if max_output_length is not None:
                     normalized = _truncate_shell_outputs(normalized, max_output_length)
                 output_text = _render_shell_outputs(normalized)
@@ -2082,6 +2085,12 @@ def _truncate_shell_outputs(
         )
 
     return truncated
+
+
+def _normalize_max_output_length(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, value)
 
 
 def _format_shell_error(error: Exception | BaseException | Any) -> str:
