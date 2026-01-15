@@ -1,0 +1,84 @@
+name: Update release PR on main updates
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-pr-update
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Fetch tags
+        run: git fetch origin --tags --prune
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Find release PR
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          base_branch="main"
+          prs_json="$(gh pr list \
+            --base "$base_branch" \
+            --state open \
+            --search "head:release/v" \
+            --limit 200 \
+            --json number,headRefName,isCrossRepository,headRepositoryOwner)"
+          count="$(echo "$prs_json" | jq '[.[] | select(.isCrossRepository == false) | select(.headRefName|startswith("release/v"))] | length')"
+          if [ "$count" -eq 0 ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "Multiple release PRs found; expected a single release PR." >&2
+            exit 1
+          fi
+          number="$(echo "$prs_json" | jq -r '.[] | select(.isCrossRepository == false) | select(.headRefName|startswith("release/v")) | .number')"
+          branch="$(echo "$prs_json" | jq -r '.[] | select(.isCrossRepository == false) | select(.headRefName|startswith("release/v")) | .headRefName')"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Rebase release branch
+        if: steps.find.outputs.found == 'true'
+        env:
+          RELEASE_BRANCH: ${{ steps.find.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin main "$RELEASE_BRANCH"
+          git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
+          git rebase origin/main
+      - name: Run Codex release review
+        if: steps.find.outputs.found == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/release-review.md
+          output-file: release-review.md
+          safety-strategy: drop-sudo
+          sandbox: read-only
+      - name: Update PR body and push
+        if: steps.find.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.find.outputs.number }}
+          RELEASE_BRANCH: ${{ steps.find.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "$RELEASE_BRANCH"
+          gh pr edit "$PR_NUMBER" --body-file release-review.md
