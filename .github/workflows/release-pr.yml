@@ -113,14 +113,51 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
           head_branch="release/v${RELEASE_VERSION}"
+          milestone_name="$(python - <<'PY'
+          import os
+          import re
+
+          version = os.environ.get("RELEASE_VERSION", "")
+          match = re.match(r"^(\d+)\.(\d+)", version)
+          if not match:
+              print("")
+          else:
+              print(f"{match.group(1)}.{match.group(2)}.x")
+          PY
+          )"
           pr_number="$(gh pr list --head "$head_branch" --base "main" --json number --jq '.[0].number // empty')"
           if [ -z "$pr_number" ]; then
-            gh pr create \
-              --title "Release ${RELEASE_VERSION}" \
-              --body-file pr-body.md \
-              --base "main" \
+            create_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --base "main"
               --head "$head_branch"
+              --label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              create_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr create "${create_args[@]}"; then
+              echo "PR create with label/milestone failed; retrying without them." >&2
+              gh pr create \
+                --title "Release ${RELEASE_VERSION}" \
+                --body-file pr-body.md \
+                --base "main" \
+                --head "$head_branch"
+            fi
           else
-            gh pr edit "$pr_number" --title "Release ${RELEASE_VERSION}" --body-file pr-body.md
+            edit_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --add-label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              edit_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr edit "$pr_number" "${edit_args[@]}"; then
+              echo "PR edit with label/milestone failed; retrying without them." >&2
+              gh pr edit "$pr_number" --title "Release ${RELEASE_VERSION}" --body-file pr-body.md
+            fi
           fi

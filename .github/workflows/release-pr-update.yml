@@ -82,3 +82,25 @@ jobs:
           set -euo pipefail
           git push --force-with-lease origin "$RELEASE_BRANCH"
           gh pr edit "$PR_NUMBER" --body-file release-review.md
+          milestone_name="$(python - <<'PY'
+          import os
+          import re
+
+          branch = os.environ.get("RELEASE_BRANCH", "")
+          version = branch.replace("release/v", "", 1)
+          match = re.match(r"^(\d+)\.(\d+)", version)
+          if not match:
+              print("")
+          else:
+              print(f"{match.group(1)}.{match.group(2)}.x")
+          PY
+          )"
+          if [ -n "$milestone_name" ]; then
+            if ! gh pr edit "$PR_NUMBER" --add-label "project" --milestone "$milestone_name"; then
+              echo "PR label/milestone update failed; continuing without changes." >&2
+            fi
+          else
+            if ! gh pr edit "$PR_NUMBER" --add-label "project"; then
+              echo "PR label update failed; continuing without changes." >&2
+            fi
+          fi
