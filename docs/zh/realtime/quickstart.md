@@ -4,12 +4,12 @@ search:
 ---
 # 快速开始
 
-实时智能体使你的 AI 智能体能够通过 OpenAI 的 Realtime API 进行语音对话。本指南将带你创建第一个实时语音智能体。
+实时智能体通过 OpenAI 的 Realtime API 让你的 AI 智能体支持语音对话。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "测试版功能"
-Realtime agents 处于测试阶段。随着实现的改进，可能会有不兼容的变更。
+实时智能体目前为测试版。随着实现不断改进，可能会有不向后兼容的变更。
 
-## 先决条件
+## 前提条件
 
 - Python 3.9 或更高版本
 - OpenAI API key
@@ -17,7 +17,7 @@ Realtime agents 处于测试阶段。随着实现的改进，可能会有不兼�
 
 ## 安装
 
-如果尚未安装，请安装 OpenAI Agents SDK：
+如果尚未安装，请先安装 OpenAI Agents SDK：
 
 ```bash
 pip install openai-agents
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. 创建一个实时智能体
+### 2. 创建实时智能体
 
 ```python
 agent = RealtimeAgent(
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. 设置运行器
+### 3. 设置 runner
 
 ```python
 runner = RealtimeRunner(
@@ -193,7 +193,7 @@ if __name__ == "__main__":
 ### 模型设置
 
 - `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
-- `voice`: 选择音色（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+- `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 - `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
@@ -202,30 +202,30 @@ if __name__ == "__main__":
 - `output_audio_format`: 输出音频格式
 - `input_audio_transcription`: 转写配置
 
-### 回合检测
+### 轮次检测
 
 - `type`: 检测方法（`server_vad`、`semantic_vad`）
 - `threshold`: 语音活动阈值（0.0-1.0）
-- `silence_duration_ms`: 判定回合结束的静音时长
+- `silence_duration_ms`: 用于检测轮次结束的静音时长
 - `prefix_padding_ms`: 语音前的音频填充
 
 ## 后续步骤
 
-- [深入了解实时智能体](guide.md)
-- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹查看可运行的示例
+- [了解更多关于实时智能体](guide.md)
+- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中查看可用示例
 - 为你的智能体添加工具
 - 在智能体之间实现任务转移
-- 设置安全防护措施以保障安全
+- 设置安全防护措施以保证安全
 
-## 认证
+## 身份验证
 
-请确保在你的环境中设置了 OpenAI API key：
+确保你的 OpenAI API key 已在环境中设置：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传入：
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

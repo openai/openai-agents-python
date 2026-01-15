@@ -4,15 +4,15 @@ search:
 ---
 # ストリーミング
 
-ストリーミングにより、エージェントの実行が進むにつれて更新を購読できます。これはエンドユーザーに進捗や部分的な応答を表示するのに役立ちます。
+ストリーミングを使うと、エージェントの実行が進むにつれて更新を購読できます。これはエンドユーザーへの進行状況の表示や部分的な応答の表示に役立ちます。
 
-ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これにより [`RunResultStreaming`][agents.result.RunResultStreaming] が得られます。`result.stream_events()` を呼ぶと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームを受け取れます。
+ストリーミングするには、[`Runner.run_streamed()`][agents.run.Runner.run_streamed] を呼び出します。これは [`RunResultStreaming`][agents.result.RunResultStreaming] を返します。`result.stream_events()` を呼ぶと、以下で説明する [`StreamEvent`][agents.stream_events.StreamEvent] オブジェクトの非同期ストリームが得られます。
 
-## raw response イベント
+## raw レスポンスイベント
 
-[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw なイベントです。OpenAI Responses API の形式であり、各イベントにはタイプ（`response.created`、`response.output_text.delta` など）とデータがあります。これらのイベントは、生成され次第、ユーザーにレスポンスメッセージをストリーミングしたい場合に有用です。
+[`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] は、LLM から直接渡される raw なイベントです。OpenAI Responses API の形式であり、各イベントにはタイプ（`response.created`、`response.output_text.delta` など）とデータがあります。生成され次第、レスポンスメッセージをユーザーにストリーミングしたい場合に有用です。
 
-例えば、これは LLM が生成するテキストをトークンごとに出力します。
+たとえば、次の例は LLM によって生成されたテキストをトークンごとに出力します。
 
 ```python
 import asyncio
@@ -35,11 +35,11 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Run item イベントと エージェント イベント
+## Run アイテムイベントと エージェントイベント
 
-[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルのイベントです。アイテムが完全に生成されたタイミングを知らせます。これにより、トークン単位ではなく、「メッセージが生成された」「ツールが実行された」などのレベルで進捗更新を配信できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は、現在のエージェントが変更されたとき（ハンドオフの結果など）に更新を提供します。
+[`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent] は、より高レベルなイベントです。アイテムが完全に生成されたタイミングを通知します。これにより、各トークンではなく「メッセージが生成された」「ツールを実行した」などのレベルで進行状況を更新できます。同様に、[`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] は現在のエージェントが変更された際（例: handoff の結果）に更新を提供します。
 
-例えば、これは raw イベントを無視し、ユーザーへ更新をストリーミングします。
+たとえば、次の例は raw イベントを無視し、ユーザーに更新をストリーミングします。
 
 ```python
 import asyncio
