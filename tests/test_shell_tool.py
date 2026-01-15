@@ -184,6 +184,53 @@ async def test_shell_tool_output_respects_max_output_length() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_tool_uses_smaller_max_output_length() -> None:
+    shell_tool = ShellTool(
+        executor=lambda request: ShellResult(
+            output=[
+                ShellCommandOutput(
+                    stdout="0123456789",
+                    stderr="abcdef",
+                    outcome=ShellCallOutcome(type="exit", exit_code=0),
+                )
+            ],
+            max_output_length=8,
+        )
+    )
+
+    tool_call = {
+        "type": "shell_call",
+        "id": "shell_call",
+        "call_id": "call_shell",
+        "status": "completed",
+        "action": {
+            "commands": ["echo hi"],
+            "timeout_ms": 1000,
+            "max_output_length": 6,
+        },
+    }
+
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert result.output == "012345"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["max_output_length"] == 6
+    assert raw_item["output"][0]["stdout"] == "012345"
+    assert raw_item["output"][0]["stderr"] == ""
+
+
+@pytest.mark.asyncio
 async def test_shell_tool_executor_can_override_max_output_length_to_zero() -> None:
     shell_tool = ShellTool(
         executor=lambda request: ShellResult(

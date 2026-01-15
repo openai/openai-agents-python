@@ -1749,12 +1749,12 @@ class ShellAction:
 
             if isinstance(result, ShellResult):
                 normalized = [_normalize_shell_output(entry) for entry in result.output]
-                # User defined max output length overrides the shell executor's max output length.
-                max_output_length = (
-                    result.max_output_length
-                    if result.max_output_length is not None
-                    else requested_max_output_length
-                )
+                if result.max_output_length is None:
+                    max_output_length = requested_max_output_length
+                elif requested_max_output_length is None:
+                    max_output_length = result.max_output_length
+                else:
+                    max_output_length = min(result.max_output_length, requested_max_output_length)
                 if max_output_length is not None:
                     normalized = _truncate_shell_outputs(normalized, max_output_length)
                 output_text = _render_shell_outputs(normalized)
