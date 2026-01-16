@@ -121,6 +121,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
+        self._deferred_response_id: str | None = None
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -153,6 +154,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             logger.debug(f"skip: decision hook declined compaction for {self._response_id}")
             return
 
+        self._deferred_response_id = None
         logger.debug(f"compact: start for {self._response_id} using {self.model}")
 
         compacted = await self.client.responses.compact(
@@ -187,6 +189,15 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
+    def _defer_compaction(self, response_id: str) -> None:
+        self._deferred_response_id = response_id
+
+    def _get_deferred_compaction_response_id(self) -> str | None:
+        return self._deferred_response_id
+
+    def _clear_deferred_compaction(self) -> None:
+        self._deferred_response_id = None
+
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
@@ -207,6 +218,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         await self.underlying_session.clear_session()
         self._compaction_candidate_items = []
         self._session_items = []
+        self._deferred_response_id = None
 
     async def _ensure_compaction_candidates(
         self,

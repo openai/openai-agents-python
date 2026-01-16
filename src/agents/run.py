@@ -2100,12 +2100,26 @@ class AgentRunner:
                 isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
             )
             if has_local_tool_outputs:
+                defer_compaction = getattr(session, "_defer_compaction", None)
+                if callable(defer_compaction):
+                    defer_compaction(response_id)
                 logger.debug(
                     "skip: deferring compaction for response %s due to local tool outputs",
                     response_id,
                 )
                 return
-            await session.run_compaction({"response_id": response_id})
+            deferred_response_id = None
+            get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
+            if callable(get_deferred):
+                deferred_response_id = get_deferred()
+            force_compaction = deferred_response_id is not None
+            if force_compaction:
+                logger.debug(
+                    "compact: forcing for response %s after deferred %s",
+                    response_id,
+                    deferred_response_id,
+                )
+            await session.run_compaction({"response_id": response_id, "force": force_compaction})
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(
