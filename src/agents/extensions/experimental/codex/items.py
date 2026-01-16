@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from typing_extensions import Literal, TypeAlias, TypeGuard
 
@@ -183,7 +183,7 @@ def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
             command=cast(str, raw["command"]),
             aggregated_output=cast(str, raw.get("aggregated_output", "")),
             status=cast(CommandExecutionStatus, raw["status"]),
-            exit_code=cast(int | None, raw.get("exit_code")),
+            exit_code=cast(Optional[int], raw.get("exit_code")),
         )
     if item_type == "file_change":
         changes = [_coerce_file_update_change(change) for change in raw.get("changes", [])]
@@ -241,5 +241,5 @@ def coerce_thread_item(raw: ThreadItem | Mapping[str, Any]) -> ThreadItem:
     return _UnknownThreadItem(
         type=cast(str, item_type) if item_type is not None else "unknown",
         payload=dict(raw),
-        id=cast(str | None, raw.get("id")),
+        id=cast(Optional[str], raw.get("id")),
     )

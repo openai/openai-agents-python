@@ -598,9 +598,7 @@ def _build_codex_output_schema(descriptor: OutputSchemaDescriptor) -> dict[str, 
             prop_schema["description"] = prop["description"]
         properties[prop["name"]] = prop_schema
 
-    required = list(
-        {prop["name"] for prop in descriptor["properties"]} | set(descriptor.get("required", []))
-    )
+    required = list(descriptor.get("required", []))
 
     schema: dict[str, Any] = {
         "type": "object",

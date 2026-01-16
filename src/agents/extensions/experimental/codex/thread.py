@@ -27,6 +27,16 @@ from .thread_options import ThreadOptions
 from .turn_options import TurnOptions
 
 
+@contextlib.asynccontextmanager
+async def _aclosing(
+    generator: AsyncGenerator[str, None],
+) -> AsyncGenerator[AsyncGenerator[str, None], None]:
+    try:
+        yield generator
+    finally:
+        await generator.aclose()
+
+
 class TextInput(TypedDict):
     type: Literal["text"]
     text: str
@@ -120,7 +130,7 @@ class Thread:
         )
 
         try:
-            async with contextlib.aclosing(generator) as stream:
+            async with _aclosing(generator) as stream:
                 while True:
                     try:
                         if idle_timeout is None or isinstance(self._exec, CodexExec):

@@ -410,6 +410,7 @@ async def test_codex_tool_accepts_output_schema_descriptor() -> None:
     assert output_schema["additionalProperties"] is False
     assert output_schema["properties"]["summary"]["type"] == "string"
     assert output_schema["properties"]["summary"]["description"] == "Short summary"
+    assert output_schema["required"] == []
 
 
 @pytest.mark.asyncio
@@ -669,7 +670,12 @@ def test_codex_tool_resolve_output_schema_descriptor() -> None:
                     "description": "Tags array",
                     "items": {"type": "string", "description": "Tag value"},
                 },
-            }
+            },
+            {
+                "name": "summary",
+                "description": "Summary text",
+                "schema": {"type": "string"},
+            },
         ],
         "required": ["tags"],
     }
@@ -680,6 +686,7 @@ def test_codex_tool_resolve_output_schema_descriptor() -> None:
     assert schema["properties"]["tags"]["description"] == "Tag list"
     assert schema["properties"]["tags"]["items"]["description"] == "Tag value"
     assert schema["properties"]["tags"]["items"]["type"] == "string"
+    assert schema["required"] == ["tags"]
 
 
 def test_codex_tool_resolve_codex_options_reads_env_override() -> None:
