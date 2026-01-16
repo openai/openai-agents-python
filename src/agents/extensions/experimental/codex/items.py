@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
 from typing_extensions import Literal, TypeAlias, TypeGuard
 
@@ -116,17 +116,17 @@ class _UnknownThreadItem(_DictLike):
     id: str | None = None
 
 
-ThreadItem: TypeAlias = (
-    AgentMessageItem
-    | ReasoningItem
-    | CommandExecutionItem
-    | FileChangeItem
-    | McpToolCallItem
-    | WebSearchItem
-    | TodoListItem
-    | ErrorItem
-    | _UnknownThreadItem
-)
+ThreadItem: TypeAlias = Union[
+    AgentMessageItem,
+    ReasoningItem,
+    CommandExecutionItem,
+    FileChangeItem,
+    McpToolCallItem,
+    WebSearchItem,
+    TodoListItem,
+    ErrorItem,
+    _UnknownThreadItem,
+]
 
 
 def is_agent_message_item(item: ThreadItem) -> TypeGuard[AgentMessageItem]:

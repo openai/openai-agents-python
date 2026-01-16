@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Union, cast
 
 from typing_extensions import Literal, TypeAlias
 
@@ -77,17 +77,17 @@ class _UnknownThreadEvent(_DictLike):
     payload: Mapping[str, Any] = field(default_factory=dict)
 
 
-ThreadEvent: TypeAlias = (
-    ThreadStartedEvent
-    | TurnStartedEvent
-    | TurnCompletedEvent
-    | TurnFailedEvent
-    | ItemStartedEvent
-    | ItemUpdatedEvent
-    | ItemCompletedEvent
-    | ThreadErrorEvent
-    | _UnknownThreadEvent
-)
+ThreadEvent: TypeAlias = Union[
+    ThreadStartedEvent,
+    TurnStartedEvent,
+    TurnCompletedEvent,
+    TurnFailedEvent,
+    ItemStartedEvent,
+    ItemUpdatedEvent,
+    ItemCompletedEvent,
+    ThreadErrorEvent,
+    _UnknownThreadEvent,
+]
 
 
 def _coerce_thread_error(raw: ThreadError | Mapping[str, Any]) -> ThreadError:

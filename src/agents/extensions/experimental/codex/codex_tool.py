@@ -7,11 +7,11 @@ import json
 import os
 from collections.abc import AsyncGenerator, Awaitable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Union
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from typing_extensions import Literal, NotRequired, TypedDict, TypeGuard
+from typing_extensions import Literal, NotRequired, TypeAlias, TypedDict, TypeGuard
 
 from agents import _debug
 from agents.exceptions import ModelBehaviorError, UserError
@@ -118,7 +118,7 @@ class OutputSchemaArray(TypedDict, total=False):
     items: OutputSchemaPrimitive
 
 
-OutputSchemaField = OutputSchemaPrimitive | OutputSchemaArray
+OutputSchemaField: TypeAlias = Union[OutputSchemaPrimitive, OutputSchemaArray]
 
 
 class OutputSchemaPropertyDescriptor(TypedDict, total=False):
@@ -593,7 +593,10 @@ def _build_codex_output_schema(descriptor: OutputSchemaDescriptor) -> dict[str, 
     # Compose the strict object schema required by Codex structured outputs.
     properties: dict[str, Any] = {}
     for prop in descriptor["properties"]:
-        properties[prop["name"]] = _build_codex_output_schema_field(prop["schema"])
+        prop_schema = _build_codex_output_schema_field(prop["schema"])
+        if prop.get("description"):
+            prop_schema["description"] = prop["description"]
+        properties[prop["name"]] = prop_schema
 
     required = list(
         {prop["name"] for prop in descriptor["properties"]} | set(descriptor.get("required", []))
@@ -616,11 +619,16 @@ def _build_codex_output_schema(descriptor: OutputSchemaDescriptor) -> dict[str, 
 
 def _build_codex_output_schema_field(field: OutputSchemaField) -> dict[str, Any]:
     if field["type"] == "array":
-        return {
+        schema: dict[str, Any] = {
             "type": "array",
             "items": _build_codex_output_schema_field(field["items"]),
         }
+        if "description" in field and field["description"]:
+            schema["description"] = field["description"]
+        return schema
     result: dict[str, Any] = {"type": field["type"]}
+    if "description" in field and field["description"]:
+        result["description"] = field["description"]
     if "enum" in field:
         result["enum"] = field["enum"]
     return result

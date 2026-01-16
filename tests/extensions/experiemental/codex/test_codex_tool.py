@@ -387,7 +387,7 @@ async def test_codex_tool_accepts_output_schema_descriptor() -> None:
             {
                 "name": "summary",
                 "description": "Short summary",
-                "schema": {"type": "string"},
+                "schema": {"type": "string", "description": "Summary field"},
             }
         ],
     }
@@ -409,6 +409,7 @@ async def test_codex_tool_accepts_output_schema_descriptor() -> None:
     assert output_schema["type"] == "object"
     assert output_schema["additionalProperties"] is False
     assert output_schema["properties"]["summary"]["type"] == "string"
+    assert output_schema["properties"]["summary"]["description"] == "Short summary"
 
 
 @pytest.mark.asyncio
@@ -659,13 +660,25 @@ def test_codex_tool_resolve_output_schema_descriptor() -> None:
     descriptor = {
         "title": "Report",
         "description": "Structured output",
-        "properties": [{"name": "tags", "schema": {"type": "array", "items": {"type": "string"}}}],
+        "properties": [
+            {
+                "name": "tags",
+                "description": "Tag list",
+                "schema": {
+                    "type": "array",
+                    "description": "Tags array",
+                    "items": {"type": "string", "description": "Tag value"},
+                },
+            }
+        ],
         "required": ["tags"],
     }
     schema = codex_tool_module._resolve_output_schema(descriptor)
     assert schema["title"] == "Report"
     assert schema["description"] == "Structured output"
     assert schema["properties"]["tags"]["type"] == "array"
+    assert schema["properties"]["tags"]["description"] == "Tag list"
+    assert schema["properties"]["tags"]["items"]["description"] == "Tag value"
     assert schema["properties"]["tags"]["items"]["type"] == "string"
 
 
