@@ -6,7 +6,7 @@ search:
 
 ## 前提条件
 
-Agents SDK の基本 [クイックスタート手順](../quickstart.md) に従い、仮想環境を設定してください。次に、SDK から音声用のオプション依存関係をインストールします。
+Agents SDK の基本的な[クイックスタート手順](../quickstart.md)に従い、仮想環境をセットアップしてください。次に、SDK から音声関連のオプション依存関係をインストールします。
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,11 +14,11 @@ pip install 'openai-agents[voice]'
 
 ## 概念
 
-主に知っておくべき概念は、[`VoicePipeline`][agents.voice.pipeline.VoicePipeline] です。これは 3 ステップのプロセスです。
+中心となる概念は [`VoicePipeline`][agents.voice.pipeline.VoicePipeline] で、これは 3 ステップのプロセスです。
 
-1. 音声をテキストに変換するために、音声認識モデルを実行します。
-2. 通常はエージェント的なワークフローであるあなたのコードを実行し、結果を生成します。
-3. 結果のテキストを音声に戻すために、音声合成モデルを実行します。
+1. 音声をテキストに変換するために音声認識（speech-to-text）モデルを実行します。
+2. 通常はエージェントによるワークフローであるあなたのコードを実行して結果を生成します。
+3. 結果のテキストを音声に戻すために音声合成（text-to-speech）モデルを実行します。
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
 
 ## エージェント
 
-まず、いくつかのエージェントを設定しましょう。これは、この SDK でエージェントを構築したことがあれば馴染みがあるはずです。ここでは、複数のエージェント、ハンドオフ、そしてツールを用意します。
+まず、いくつかのエージェントを設定します。これは、この SDK でエージェントを作成したことがある方にはおなじみのはずです。ここでは、2 つのエージェント、ハンドオフ、そして 1 つのツールを用意します。
 
 ```python
 import asyncio
@@ -92,12 +92,9 @@ agent = Agent(
 
 ## 音声パイプライン
 
-ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用して、シンプルな音声パイプラインを設定します。
+ワークフローとして [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] を使用し、シンプルな音声パイプラインを設定します。
 
-```python
-from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
-pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
-```
+CODE_BLOCK_3
 
 ## パイプラインの実行
 
@@ -124,7 +121,7 @@ async for event in result.stream():
 
 ```
 
-## まとめ
+## まとめて実行
 
 ```python
 import asyncio
@@ -195,4 +192,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモは、[examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。
+このサンプルを実行すると、エージェントがあなたに話しかけます。自分でエージェントに話しかけられるデモは [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) をご覧ください。

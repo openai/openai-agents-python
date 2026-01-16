@@ -4,21 +4,21 @@ search:
 ---
 # 工具
 
-工具让智能体能够采取行动：如获取数据、运行代码、调用外部 API，甚至进行计算机操作。该 SDK 支持四种目录：
+工具让智能体能够采取行动：例如获取数据、运行代码、调用外部 API，甚至进行计算机操作。SDK 支持四种目录：
 
-- 由 OpenAI 托管的工具：与模型一起在 OpenAI 服务 上运行。
+- 由OpenAI托管的工具：与模型一起在 OpenAI 服务 上运行。
 - 本地运行时工具：在你的环境中运行（计算机操作、shell、apply patch）。
 - Function calling：将任意 Python 函数包装为工具。
-- 作为工具的智能体：将智能体暴露为可调用的工具，而无需完整的任务转移。
+- 将智能体作为工具：将智能体暴露为可调用的工具而无需完整的任务转移。
 
 ## 托管工具
 
-在使用[`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]时，OpenAI 提供了一些内置工具：
+使用 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 时，OpenAI 提供了一些内置工具：
 
 - [`WebSearchTool`][agents.tool.WebSearchTool] 让智能体进行网络检索。
-- [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的 OpenAI 向量存储中检索信息。
-- [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 让 LLM 在沙盒环境中执行代码。
-- [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务 的工具暴露给模型。
+- [`FileSearchTool`][agents.tool.FileSearchTool] 允许从你的 OpenAI 向量存储 中检索信息。
+- [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 让 LLM 在沙箱环境中执行代码。
+- [`HostedMCPTool`][agents.tool.HostedMCPTool] 将远程 MCP 服务的工具暴露给模型。
 - [`ImageGenerationTool`][agents.tool.ImageGenerationTool] 根据提示生成图像。
 
 ```python
@@ -45,8 +45,8 @@ async def main():
 本地运行时工具在你的环境中执行，需要你提供实现：
 
 - [`ComputerTool`][agents.tool.ComputerTool]：实现 [`Computer`][agents.computer.Computer] 或 [`AsyncComputer`][agents.computer.AsyncComputer] 接口以启用 GUI/浏览器自动化。
-- [`ShellTool`][agents.tool.ShellTool] 或 [`LocalShellTool`][agents.tool.LocalShellTool]：提供 shell 执行器以运行命令。
-- [`ApplyPatchTool`][agents.tool.ApplyPatchTool]：实现 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 在本地应用 diff。
+- [`ShellTool`][agents.tool.ShellTool] 或 [`LocalShellTool`][agents.tool.LocalShellTool]：提供一个 shell 执行器来运行命令。
+- [`ApplyPatchTool`][agents.tool.ApplyPatchTool]：实现 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 以在本地应用 diff。
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -92,12 +92,12 @@ agent = Agent(
 
 你可以将任意 Python 函数用作工具。Agents SDK 会自动设置该工具：
 
-- 工具名称将是 Python 函数名（或你可以自定义名称）
-- 工具描述将取自函数的 docstring（或你可以自定义描述）
-- 函数输入的模式会根据函数参数自动创建
-- 每个输入的描述将取自函数的 docstring，除非禁用
+- 工具名称将是 Python 函数名（也可以自定义名称）
+- 工具描述将来自函数的 docstring（也可以自定义描述）
+- 函数输入的 schema 会根据函数参数自动创建
+- 每个输入的描述将来自函数的 docstring，除非禁用
 
-我们使用 Python 的 `inspect` 模块提取函数签名，使用 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析 docstring，并使用 `pydantic` 创建模式。
+我们使用 Python 的 `inspect` 模块提取函数签名，使用 [`griffe`](https://mkdocstrings.github.io/griffe/) 解析 docstring，并使用 `pydantic` 创建 schema。
 
 ```python
 import json
@@ -149,9 +149,9 @@ for tool in agent.tools:
 
 ```
 
-1. 你可以使用任意 Python 类型作为函数参数，函数可以是同步或异步。
-2. 若存在 docstring，则用于提取描述和参数说明。
-3. 函数可选接收 `context`（必须为第一个参数）。你也可以设置覆盖项，如工具名称、描述、docstring 样式等。
+1. 你可以在函数参数中使用任意 Python 类型，函数可以是同步或异步。
+2. 如果存在 docstring，会用于提取函数和参数的描述。
+3. 函数可选地接收 `context`（必须是第一个参数）。你也可以设置覆盖项，如工具名称、描述、docstring 风格等。
 4. 你可以将装饰后的函数传入工具列表。
 
 ??? note "展开以查看输出"
@@ -226,20 +226,20 @@ for tool in agent.tools:
 
 ### 从工具调用返回图像或文件
 
-除了返回文本输出外，你还可以将一个或多个图像或文件作为函数工具的输出返回。可返回以下任意类型：
+除了返回文本输出外，你还可以将一个或多个图像或文件作为工具调用的输出。为此，你可以返回以下任意一种：
 
-- 图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或其 TypedDict 版本 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
-- 文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或其 TypedDict 版本 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
-- 文本：字符串或可转为字符串的对象，或 [`ToolOutputText`][agents.tool.ToolOutputText]（或其 TypedDict 版本 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
+- 图像：[`ToolOutputImage`][agents.tool.ToolOutputImage]（或 TypedDict 版本 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict]）
+- 文件：[`ToolOutputFileContent`][agents.tool.ToolOutputFileContent]（或 TypedDict 版本 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict]）
+- 文本：字符串或可转为字符串的对象，或 [`ToolOutputText`][agents.tool.ToolOutputText]（或 TypedDict 版本 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict]）
 
 ### 自定义函数工具
 
-有时你可能不希望使用 Python 函数作为工具。如果需要，你可以直接创建一个 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
+有时你可能不想将 Python 函数作为工具使用。你可以直接创建 [`FunctionTool`][agents.tool.FunctionTool]。你需要提供：
 
 - `name`
 - `description`
-- `params_json_schema`，即参数的 JSON schema
-- `on_invoke_tool`，这是一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和 JSON 字符串形式的参数，并且必须以字符串形式返回工具输出。
+- `params_json_schema`，即参数的 JSON 架构
+- `on_invoke_tool`，这是一个异步函数，接收 [`ToolContext`][agents.tool_context.ToolContext] 和 JSON 字符串形式的参数，并且必须返回字符串形式的工具输出。
 
 ```python
 from typing import Any
@@ -272,18 +272,18 @@ tool = FunctionTool(
 )
 ```
 
-### 参数与 docstring 的自动解析
+### 自动解析参数与 docstring
 
-如前所述，我们会自动解析函数签名以提取工具的 schema，并解析 docstring 以提取工具及各参数的描述。说明如下：
+如前所述，我们会自动解析函数签名以提取工具的 schema，并解析 docstring 以提取工具和各个参数的描述。说明如下：
 
-1. 通过 `inspect` 模块解析签名。我们使用类型注解理解参数类型，并动态构建 Pydantic 模型来表示整体 schema。支持大多数类型，包括 Python 基本组件、Pydantic 模型、TypedDict 等。
+1. 使用 `inspect` 模块进行签名解析。我们利用类型注解理解参数类型，并动态构建一个 Pydantic 模型来表示整体 schema。支持大多数类型，包括 Python 基本组件、Pydantic 模型、TypedDict 等。
 2. 我们使用 `griffe` 解析 docstring。支持的 docstring 格式包括 `google`、`sphinx` 和 `numpy`。我们会尝试自动检测 docstring 格式，但这只是尽力而为；你也可以在调用 `function_tool` 时显式设置。你还可以通过将 `use_docstring_info` 设为 `False` 来禁用 docstring 解析。
 
 用于 schema 提取的代码位于 [`agents.function_schema`][]。
 
-## 作为工具的智能体
+## 将智能体作为工具
 
-在某些工作流中，你可能希望由一个中心智能体来编排一组专业智能体的网络，而不是进行控制权的转移。你可以通过将智能体建模为工具来实现。
+在某些工作流中，你可能希望由一个中心智能体来编排一个由多个专业化智能体组成的网络，而不是进行控制权的任务转移。你可以通过将智能体建模为工具来实现。
 
 ```python
 from agents import Agent, Runner
@@ -324,7 +324,7 @@ async def main():
 
 ### 自定义工具化智能体
 
-`agent.as_tool` 函数是一个便捷方法，便于将智能体转换为工具。但它不支持所有配置；例如，你无法设置 `max_turns`。对于高级用例，请在你的工具实现中直接使用 `Runner.run`：
+`agent.as_tool` 函数是一个便捷方法，可轻松将智能体转换为工具。但它不支持所有配置；例如，你不能设置 `max_turns`。对于高级用例，请在你的工具实现中直接使用 `Runner.run`：
 
 ```python
 @function_tool
@@ -347,9 +347,9 @@ async def run_my_agent() -> str:
 
 在某些情况下，你可能希望在将工具化智能体的输出返回给中心智能体之前对其进行修改。如果你希望：
 
-- 从子智能体的对话历史中提取特定信息（例如 JSON 负载）。
-- 转换或重新格式化智能体的最终回答（例如将 Markdown 转换为纯文本或 CSV）。
-- 验证输出，或在智能体响应缺失或格式错误时提供回退值。
+- 从子智能体的对话历史中提取特定信息（例如 JSON 负载）
+- 转换或重新格式化智能体的最终答案（例如将 Markdown 转为纯文本或 CSV）
+- 验证输出，或在智能体响应缺失或格式错误时提供后备值
 
 你可以通过向 `as_tool` 方法提供 `custom_output_extractor` 参数来实现：
 
@@ -372,7 +372,7 @@ json_tool = data_agent.as_tool(
 
 ### 嵌套智能体运行的流式传输
 
-向 `as_tool` 传入 `on_stream` 回调，以在仍按流完成后返回最终输出的同时，监听由嵌套智能体发出的流式事件。
+向 `as_tool` 传入 `on_stream` 回调，以监听嵌套智能体发出的流式事件，同时在流结束后仍返回其最终输出。
 
 ```python
 from agents import AgentToolStreamEvent
@@ -393,14 +393,14 @@ billing_agent_tool = billing_agent.as_tool(
 预期行为：
 
 - 事件类型与 `StreamEvent["type"]` 一致：`raw_response_event`、`run_item_stream_event`、`agent_updated_stream_event`。
-- 提供 `on_stream` 会自动以流式模式运行嵌套智能体，并在返回最终输出前耗尽该流。
+- 提供 `on_stream` 会自动以流式模式运行嵌套智能体，并在返回最终输出前消费完整个流。
 - 处理器可以是同步或异步的；每个事件会按到达顺序依次投递。
-- 当通过模型的工具调用触发时会包含 `tool_call_id`；直接调用时可能为 `None`。
-- 参见 `examples/agent_patterns/agents_as_tools_streaming.py` 获取完整可运行的 sample code。
+- 当通过模型工具调用触发时会包含 `tool_call_id`；直接调用时可能为 `None`。
+- 参见 `examples/agent_patterns/agents_as_tools_streaming.py` 获取完整可运行示例。
 
-### 条件启用工具
+### 条件性启用工具
 
-你可以使用 `is_enabled` 参数在运行时有条件地启用或禁用智能体工具。这样可以基于上下文、用户偏好或运行时条件，动态筛选对 LLM 可用的工具。
+你可以使用 `is_enabled` 参数在运行时有条件地启用或禁用智能体工具。这样可以根据上下文、用户偏好或运行时条件，动态筛选对 LLM 可用的工具。
 
 ```python
 import asyncio
@@ -455,26 +455,26 @@ async def main():
 asyncio.run(main())
 ```
 
-`is_enabled` 参数接受：
+`is_enabled` 参数可接受：
 
 - **布尔值**：`True`（始终启用）或 `False`（始终禁用）
 - **可调用函数**：接收 `(context, agent)` 并返回布尔值的函数
-- **异步函数**：用于复杂条件逻辑的异步函数
+- **异步函数**：用于更复杂的条件逻辑
 
 被禁用的工具在运行时对 LLM 完全不可见，适用于：
 
-- 基于用户权限的特性门控
-- 特定环境的工具可用性（开发 vs 生产）
+- 基于用户权限的功能门控
+- 环境特定的工具可用性（开发与生产环境）
 - 不同工具配置的 A/B 测试
 - 基于运行时状态的动态工具筛选
 
-## 工具调用的错误处理
+## 在工具调用中处理错误
 
-当你通过 `@function_tool` 创建函数工具时，可以传入 `failure_error_function`。这是一个函数，用于在工具调用崩溃时向 LLM 提供错误响应。
+当你通过 `@function_tool` 创建一个函数工具时，你可以传入 `failure_error_function`。这是一个在工具调用崩溃时向 LLM 提供错误响应的函数。
 
-- 默认情况下（即未传入时），会运行 `default_tool_error_function`，告知 LLM 发生了错误。
-- 如果传入你自己的错误函数，则会运行该函数，并将其响应发送给 LLM。
-- 如果显式传入 `None`，则任何工具调用错误都会被重新抛出以供你处理。若模型生成了无效 JSON，则可能是 `ModelBehaviorError`；若你的代码崩溃，则可能是 `UserError`，等等。
+- 默认情况下（即未传入任何内容），会运行 `default_tool_error_function`，告知 LLM 发生了错误。
+- 如果你传入了自定义错误函数，则会运行该函数，并将其响应发送给 LLM。
+- 如果你显式传入 `None`，则任何工具调用错误都会重新抛出供你处理。如果模型生成了无效 JSON，可能是 `ModelBehaviorError`；如果你的代码崩溃，可能是 `UserError`，等等。
 
 ```python
 from agents import function_tool, RunContextWrapper
@@ -497,4 +497,4 @@ def get_user_profile(user_id: str) -> str:
 
 ```
 
-如果你手动创建 `FunctionTool` 对象，则必须在 `on_invoke_tool` 函数内处理错误。
+如果你是手动创建 `FunctionTool` 对象，则必须在 `on_invoke_tool` 函数内部处理错误。

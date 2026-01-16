@@ -4,14 +4,14 @@ search:
 ---
 # 加密会话
 
-`EncryptedSession` 为任何会话实现提供透明加密，通过自动过期机制保护会话数据，并在项目过期后自动跳过。
+`EncryptedSession` 为任意会话实现提供透明加密，通过自动过期机制保护会话数据并在到期后自动忽略旧项。
 
 ## 功能
 
-- **透明加密**：使用 Fernet 加密包装任何会话
-- **按会话生成密钥**：使用 HKDF 密钥派生，为每个会话生成唯一加密密钥
-- **自动过期**：当 TTL 到期时，旧项目会被静默跳过
-- **即插即用**：可与任何现有的会话实现配合使用
+- **透明加密**：使用 Fernet 加密封装任意会话
+- **每会话独立密钥**：使用 HKDF 为每个会话派生唯一加密密钥
+- **自动过期**：到达 TTL 的旧项会在读取时被静默跳过
+- **即插即用**：适用于任何现有会话实现
 
 ## 安装
 
@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 ### 加密密钥
 
-加密密钥可以是 Fernet 密钥或任意字符串：
+加密密钥可以是一个 Fernet 密钥或任意字符串：
 
 ```python
 from agents.extensions.memory import EncryptedSession
@@ -79,9 +79,9 @@ session = EncryptedSession(
 )
 ```
 
-### TTL（生存时间）
+### TTL（存活时间）
 
-设置加密项目的有效时长：
+设置加密项的有效时长：
 
 ```python
 # Items expire after 1 hour
@@ -101,7 +101,7 @@ session = EncryptedSession(
 )
 ```
 
-## 与不同会话类型的配合使用
+## 不同会话类型的用法
 
 ### 搭配 SQLite 会话
 
@@ -140,10 +140,10 @@ session = EncryptedSession(
 
 !!! warning "高级会话特性"
 
-    将 `EncryptedSession` 用于诸如 `AdvancedSQLiteSession` 等高级会话实现时，请注意：
+    当将 `EncryptedSession` 与诸如 `AdvancedSQLiteSession` 的高级会话实现一起使用时，请注意：
 
-    - 由于消息内容被加密，`find_turns_by_content()` 等方法将无法有效工作
-    - 基于内容的搜索将作用于加密数据，因而效果受限
+    - 由于消息内容被加密，诸如 `find_turns_by_content()` 等方法将无法有效工作
+    - 基于内容的搜索会作用在加密数据上，其效果会受到限制
 
 
 
@@ -158,12 +158,12 @@ EncryptedSession 使用 HKDF（基于 HMAC 的密钥派生函数）为每个会�
 
 这确保了：
 - 每个会话都有唯一的加密密钥
-- 没有主密钥无法派生密钥
-- 不同会话之间无法互相解密会话数据
+- 没有主密钥无法推导出各会话密钥
+- 不同会话之间的数据无法互相解密
 
 ## 自动过期
 
-当项目超过 TTL 时，在检索时会被自动跳过：
+当条目超过 TTL 后，在检索时会被自动跳过：
 
 ```python
 # Items older than TTL are silently ignored
