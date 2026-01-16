@@ -1,7 +1,7 @@
 import pytest
 
 from agents import Agent, ModelSettings, Runner
-from agents._run_impl import AgentToolUseTracker, RunImpl
+from agents.run_internal.run_loop import AgentToolUseTracker, maybe_reset_tool_choice
 
 from .fake_model import FakeModel
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
@@ -18,47 +18,47 @@ class TestToolChoiceReset:
         # Case 1: Empty tool use tracker should not change the "None" tool choice
         model_settings = ModelSettings(tool_choice=None)
         tracker = AgentToolUseTracker()
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice == model_settings.tool_choice
 
         # Case 2: Empty tool use tracker should not change the "auto" tool choice
         model_settings = ModelSettings(tool_choice="auto")
         tracker = AgentToolUseTracker()
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert model_settings.tool_choice == new_settings.tool_choice
 
         # Case 3: Empty tool use tracker should not change the "required" tool choice
         model_settings = ModelSettings(tool_choice="required")
         tracker = AgentToolUseTracker()
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert model_settings.tool_choice == new_settings.tool_choice
 
         # Case 4: tool_choice = "required" with one tool should reset
         model_settings = ModelSettings(tool_choice="required")
         tracker = AgentToolUseTracker()
         tracker.add_tool_use(agent, ["tool1"])
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice is None
 
         # Case 5: tool_choice = "required" with multiple tools should reset
         model_settings = ModelSettings(tool_choice="required")
         tracker = AgentToolUseTracker()
         tracker.add_tool_use(agent, ["tool1", "tool2"])
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice is None
 
         # Case 6: Tool usage on a different agent should not affect the tool choice
         model_settings = ModelSettings(tool_choice="foo_bar")
         tracker = AgentToolUseTracker()
         tracker.add_tool_use(Agent(name="other_agent"), ["foo_bar", "baz"])
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice == model_settings.tool_choice
 
         # Case 7: tool_choice = "foo_bar" with multiple tools should reset
         model_settings = ModelSettings(tool_choice="foo_bar")
         tracker = AgentToolUseTracker()
         tracker.add_tool_use(agent, ["foo_bar", "baz"])
-        new_settings = RunImpl.maybe_reset_tool_choice(agent, tracker, model_settings)
+        new_settings = maybe_reset_tool_choice(agent, tracker, model_settings)
         assert new_settings.tool_choice is None
 
     @pytest.mark.asyncio

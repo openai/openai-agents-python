@@ -211,7 +211,7 @@ def test_handoff_output_item_retains_agents_until_gc() -> None:
     assert item.target_agent is None
 
 
-def test_handoff_output_item_converts_api_payload() -> None:
+def test_handoff_output_item_converts_protocol_payload() -> None:
     raw_item = cast(
         TResponseInputItem,
         {
@@ -231,7 +231,6 @@ def test_handoff_output_item_converts_api_payload() -> None:
     )
 
     converted = item.to_input_item()
-    # HandoffOutputItem should be passthrough for API-shaped payloads, not mutate fields.
     assert converted["type"] == "function_call_output"
     assert converted["call_id"] == "call-123"
     assert converted["output"] == "ok"

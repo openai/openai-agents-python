@@ -279,9 +279,26 @@ class ToolCallOutputItem(RunItemBase[Any]):
             payload = dict(self.raw_item)
             payload_type = payload.get("type")
             if payload_type == "shell_call_output":
+                payload = dict(payload)
                 payload.pop("status", None)
                 payload.pop("shell_output", None)
                 payload.pop("provider_data", None)
+                outputs = payload.get("output")
+                if isinstance(outputs, list):
+                    for entry in outputs:
+                        if not isinstance(entry, dict):
+                            continue
+                        outcome = entry.get("outcome")
+                        if isinstance(outcome, dict):
+                            if outcome.get("type") == "exit":
+                                exit_code = (
+                                    outcome["exit_code"]
+                                    if "exit_code" in outcome
+                                    else outcome.get("exitCode")
+                                )
+                                outcome["exit_code"] = 1 if exit_code is None else exit_code
+                                outcome.pop("exitCode", None)
+                                entry["outcome"] = outcome
             return cast(TResponseInputItem, payload)
 
         return super().to_input_item()
@@ -338,6 +355,90 @@ class CompactionItem(RunItemBase[TResponseInputItem]):
         return self.raw_item
 
 
+# Union type for tool approval raw items - supports function tools, hosted tools, shell tools, etc.
+ToolApprovalRawItem: TypeAlias = Union[
+    ResponseFunctionToolCall,
+    McpCall,
+    McpApprovalRequest,
+    LocalShellCall,
+    dict[str, Any],  # For flexibility with other tool types
+]
+
+
+@dataclass
+class ToolApprovalItem(RunItemBase[Any]):
+    """Tool call that requires approval before execution."""
+
+    raw_item: ToolApprovalRawItem
+    """Raw tool call awaiting approval (function, hosted, shell, etc.)."""
+
+    tool_name: str | None = None
+    """Tool name for approval tracking; falls back to raw_item.name when absent."""
+
+    type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    def __post_init__(self) -> None:
+        """Populate tool_name from the raw item if not provided."""
+        if self.tool_name is None:
+            # Extract name from raw_item - handle different types
+            if isinstance(self.raw_item, dict):
+                self.tool_name = self.raw_item.get("name")
+            elif hasattr(self.raw_item, "name"):
+                self.tool_name = self.raw_item.name
+            else:
+                self.tool_name = None
+
+    def __hash__(self) -> int:
+        """Hash by call_id and tool_name so items can live in sets."""
+        # Extract call_id or id from raw_item for hashing
+        call_id = self._extract_call_id()
+
+        # Hash using call_id and tool_name for uniqueness
+        return hash((call_id, self.tool_name))
+
+    def __eq__(self, other: object) -> bool:
+        """Equality based on call_id and tool_name."""
+        if not isinstance(other, ToolApprovalItem):
+            return False
+
+        # Extract call_id from both items
+        self_call_id = self._extract_call_id()
+        other_call_id = other._extract_call_id()
+
+        return self_call_id == other_call_id and self.tool_name == other.tool_name
+
+    @property
+    def name(self) -> str | None:
+        """Return the tool name from tool_name or raw_item (backwards compatible)."""
+        return self.tool_name or (
+            getattr(self.raw_item, "name", None)
+            if not isinstance(self.raw_item, dict)
+            else self.raw_item.get("name")
+        )
+
+    @property
+    def arguments(self) -> str | None:
+        """Return tool call arguments if present on the raw item."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("arguments")
+        elif hasattr(self.raw_item, "arguments"):
+            return self.raw_item.arguments
+        return None
+
+    def _extract_call_id(self) -> str | None:
+        """Return call identifier from the raw item."""
+        if isinstance(self.raw_item, dict):
+            return self.raw_item.get("call_id") or self.raw_item.get("id")
+        return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
+
+    def to_input_item(self) -> TResponseInputItem:
+        """ToolApprovalItem should never be sent as input; raise to surface misuse."""
+        raise AgentsException(
+            "ToolApprovalItem cannot be converted to an input item. "
+            "These items should be filtered out before preparing input for the API."
+        )
+
+
 RunItem: TypeAlias = Union[
     MessageOutputItem,
     HandoffCallItem,
@@ -349,6 +450,7 @@ RunItem: TypeAlias = Union[
     MCPApprovalRequestItem,
     MCPApprovalResponseItem,
     CompactionItem,
+    ToolApprovalItem,
 ]
 """An item generated by an agent."""
 
