@@ -319,7 +319,7 @@ def codex_tool(
 
             result = resolved_options.failure_error_function(ctx, exc)
             if inspect.isawaitable(result):
-                return await result
+                result = await result
 
             _error_tracing.attach_error_to_current_span(
                 SpanError(
