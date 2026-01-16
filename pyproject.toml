@@ -123,7 +123,8 @@ module = "sounddevice.*"
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["tests", "src/agents"]
+source = ["src/agents"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 show_missing = true
