@@ -583,7 +583,8 @@ class AgentRunner:
         ):
             current_turn = 0
             original_input: str | list[TResponseInputItem] = _copy_str_or_list(prepared_input)
-            generated_items: list[RunItem] = []
+            generated_items: list[RunItem] = []  # For model input (may be filtered on handoffs)
+            session_items: list[RunItem] = []  # For observability (always unfiltered)
             model_responses: list[ModelResponse] = []
 
             context_wrapper: RunContextWrapper[TContext] = RunContextWrapper(
@@ -705,7 +706,15 @@ class AgentRunner:
 
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
-                    generated_items = turn_result.generated_items
+                    # For model input, use new_step_items (filtered on handoffs)
+                    generated_items = turn_result.pre_step_items + turn_result.new_step_items
+                    # Accumulate unfiltered items for observability
+                    session_items_for_turn = (
+                        turn_result.session_step_items
+                        if turn_result.session_step_items is not None
+                        else turn_result.new_step_items
+                    )
+                    session_items.extend(session_items_for_turn)
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -725,7 +734,7 @@ class AgentRunner:
                             )
                             result = RunResult(
                                 input=original_input,
-                                new_items=generated_items,
+                                new_items=session_items,  # Use unfiltered items for observability
                                 raw_responses=model_responses,
                                 final_output=turn_result.next_step.output,
                                 _last_agent=current_agent,
@@ -742,7 +751,9 @@ class AgentRunner:
                                 await self._save_result_to_session(
                                     session,
                                     [],
-                                    turn_result.new_step_items,
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
                                 )
 
@@ -757,7 +768,9 @@ class AgentRunner:
                                     await self._save_result_to_session(
                                         session,
                                         [],
-                                        turn_result.new_step_items,
+                                        turn_result.session_step_items
+                                        if turn_result.session_step_items is not None
+                                        else turn_result.new_step_items,
                                         turn_result.model_response.response_id,
                                     )
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
@@ -772,7 +785,9 @@ class AgentRunner:
                                 await self._save_result_to_session(
                                     session,
                                     [],
-                                    turn_result.new_step_items,
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
                                 )
                         else:
@@ -789,7 +804,7 @@ class AgentRunner:
             except AgentsException as exc:
                 exc.run_data = RunErrorDetails(
                     input=original_input,
-                    new_items=generated_items,
+                    new_items=session_items,  # Use unfiltered items for observability
                     raw_responses=model_responses,
                     last_agent=current_agent,
                     context_wrapper=context_wrapper,
@@ -1227,7 +1242,17 @@ class AgentRunner:
                         turn_result.model_response
                     ]
                     streamed_result.input = turn_result.original_input
-                    streamed_result.new_items = turn_result.generated_items
+                    # Keep filtered items for building model input on the next turn.
+                    streamed_result._model_input_items = (
+                        turn_result.pre_step_items + turn_result.new_step_items
+                    )
+                    # Accumulate unfiltered items for observability
+                    session_items_for_turn = (
+                        turn_result.session_step_items
+                        if turn_result.session_step_items is not None
+                        else turn_result.new_step_items
+                    )
+                    streamed_result.new_items.extend(session_items_for_turn)
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1245,7 +1270,9 @@ class AgentRunner:
                                 await AgentRunner._save_result_to_session(
                                     session,
                                     [],
-                                    turn_result.new_step_items,
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
                                 )
 
@@ -1294,7 +1321,9 @@ class AgentRunner:
                                 await AgentRunner._save_result_to_session(
                                     session,
                                     [],
-                                    turn_result.new_step_items,
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
                                 )
 
@@ -1310,7 +1339,9 @@ class AgentRunner:
                                 await AgentRunner._save_result_to_session(
                                     session,
                                     [],
-                                    turn_result.new_step_items,
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
                                 )
 
@@ -1423,11 +1454,11 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, streamed_result._model_input_items
             )
         else:
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            input.extend([item.to_input_item() for item in streamed_result._model_input_items])
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1547,7 +1578,7 @@ class AgentRunner:
         single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
             original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            pre_step_items=streamed_result._model_input_items,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -1561,14 +1592,21 @@ class AgentRunner:
 
         import dataclasses as _dc
 
-        # Filter out items that have already been sent to avoid duplicates
-        items_to_filter = single_step_result.new_step_items
+        # Stream session items (unfiltered) when available for observability.
+        streaming_items = (
+            single_step_result.session_step_items
+            if single_step_result.session_step_items is not None
+            else single_step_result.new_step_items
+        )
+
+        # Filter out items that have already been sent to avoid duplicates.
+        items_to_stream = streaming_items
 
         if emitted_tool_call_ids:
             # Filter out tool call items that were already emitted during streaming
-            items_to_filter = [
+            items_to_stream = [
                 item
-                for item in items_to_filter
+                for item in items_to_stream
                 if not (
                     isinstance(item, ToolCallItem)
                     and (
@@ -1582,9 +1620,9 @@ class AgentRunner:
 
         if emitted_reasoning_item_ids:
             # Filter out reasoning items that were already emitted during streaming
-            items_to_filter = [
+            items_to_stream = [
                 item
-                for item in items_to_filter
+                for item in items_to_stream
                 if not (
                     isinstance(item, ReasoningItem)
                     and (reasoning_id := getattr(item.raw_item, "id", None))
@@ -1593,12 +1631,12 @@ class AgentRunner:
             ]
 
         # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
-        items_to_filter = [
-            item for item in items_to_filter if not isinstance(item, HandoffCallItem)
+        items_to_stream = [
+            item for item in items_to_stream if not isinstance(item, HandoffCallItem)
         ]
 
         # Create filtered result and send to queue
-        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
+        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_stream)
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
@@ -1738,7 +1776,7 @@ class AgentRunner:
         tool_use_tracker: AgentToolUseTracker,
     ) -> SingleStepResult:
         original_input = streamed_result.input
-        pre_step_items = streamed_result.new_items
+        pre_step_items = streamed_result._model_input_items
         event_queue = streamed_result._event_queue
 
         processed_response = RunImpl.process_model_response(
@@ -1763,10 +1801,15 @@ class AgentRunner:
             context_wrapper=context_wrapper,
             run_config=run_config,
         )
+        # Use session_step_items (unfiltered) if available for streaming observability,
+        # otherwise fall back to new_step_items.
+        streaming_items = (
+            single_step_result.session_step_items
+            if single_step_result.session_step_items is not None
+            else single_step_result.new_step_items
+        )
         new_step_items = [
-            item
-            for item in single_step_result.new_step_items
-            if item not in new_items_processed_response
+            item for item in streaming_items if item not in new_items_processed_response
         ]
         RunImpl.stream_step_items_to_queue(new_step_items, event_queue)
 
