@@ -20,7 +20,7 @@ from agents.memory.openai_responses_compaction_session import (
     select_compaction_candidate_items,
 )
 from tests.fake_model import FakeModel
-from tests.test_responses import get_text_message
+from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -288,6 +288,32 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_awaited_once()
         items = await session.get_items()
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+    @pytest.mark.asyncio
+    async def test_compaction_skips_when_tool_outputs_present(self) -> None:
+        underlying = SimpleListSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=lambda ctx: True,
+        )
+
+        tool = get_function_tool(name="do_thing", return_value="done")
+        model = FakeModel(initial_output=[get_function_tool_call("do_thing")])
+        agent = Agent(
+            name="assistant",
+            model=model,
+            tools=[tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+
+        await Runner.run(agent, "hello", session=session)
+
+        mock_client.responses.compact.assert_not_called()
 
 
 class TestTypeGuard:

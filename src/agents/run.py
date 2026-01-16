@@ -49,12 +49,14 @@ from .guardrail import (
 from .handoffs import Handoff, HandoffHistoryMapper, HandoffInputFilter, handoff
 from .items import (
     HandoffCallItem,
+    HandoffOutputItem,
     ItemHelpers,
     ModelResponse,
     ReasoningItem,
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
@@ -2094,6 +2096,15 @@ class AgentRunner:
 
         # Run compaction if session supports it and we have a response_id
         if response_id and is_openai_responses_compaction_aware_session(session):
+            has_local_tool_outputs = any(
+                isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
+            )
+            if has_local_tool_outputs:
+                logger.debug(
+                    "skip: deferring compaction for response %s due to local tool outputs",
+                    response_id,
+                )
+                return
             await session.run_compaction({"response_id": response_id})
 
     @staticmethod
