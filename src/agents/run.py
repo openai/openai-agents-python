@@ -1242,6 +1242,10 @@ class AgentRunner:
                         turn_result.model_response
                     ]
                     streamed_result.input = turn_result.original_input
+                    # Keep filtered items for building model input on the next turn.
+                    streamed_result._model_input_items = (
+                        turn_result.pre_step_items + turn_result.new_step_items
+                    )
                     # Accumulate unfiltered items for observability
                     session_items_for_turn = (
                         turn_result.session_step_items
@@ -1450,11 +1454,11 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result.new_items
+                streamed_result.input, streamed_result._model_input_items
             )
         else:
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-            input.extend([item.to_input_item() for item in streamed_result.new_items])
+            input.extend([item.to_input_item() for item in streamed_result._model_input_items])
 
         # THIS IS THE RESOLVED CONFLICT BLOCK
         filtered = await cls._maybe_filter_model_input(
@@ -1574,7 +1578,7 @@ class AgentRunner:
         single_step_result = await cls._get_single_step_result_from_response(
             agent=agent,
             original_input=streamed_result.input,
-            pre_step_items=streamed_result.new_items,
+            pre_step_items=streamed_result._model_input_items,
             new_response=final_response,
             output_schema=output_schema,
             all_tools=all_tools,
@@ -1765,7 +1769,7 @@ class AgentRunner:
         tool_use_tracker: AgentToolUseTracker,
     ) -> SingleStepResult:
         original_input = streamed_result.input
-        pre_step_items = streamed_result.new_items
+        pre_step_items = streamed_result._model_input_items
         event_queue = streamed_result._event_queue
 
         processed_response = RunImpl.process_model_response(
