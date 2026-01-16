@@ -316,7 +316,7 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_compaction_forces_after_deferred_tool_outputs(self) -> None:
+    async def test_compaction_runs_after_deferred_tool_outputs_when_due(self) -> None:
         underlying = SimpleListSession()
         compacted = SimpleNamespace(
             output=[{"type": "compaction", "summary": "compacted"}],
@@ -324,11 +324,17 @@ class TestOpenAIResponsesCompactionSession:
         mock_client = MagicMock()
         mock_client.responses.compact = AsyncMock(return_value=compacted)
 
+        def should_trigger_compaction(context: dict[str, Any]) -> bool:
+            return any(
+                isinstance(item, dict) and item.get("type") == "function_call_output"
+                for item in context["session_items"]
+            )
+
         session = OpenAIResponsesCompactionSession(
             session_id="demo",
             underlying_session=underlying,
             client=mock_client,
-            should_trigger_compaction=lambda ctx: False,
+            should_trigger_compaction=should_trigger_compaction,
         )
 
         tool = get_function_tool(name="do_thing", return_value="done")

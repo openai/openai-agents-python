@@ -2102,7 +2102,9 @@ class AgentRunner:
             if has_local_tool_outputs:
                 defer_compaction = getattr(session, "_defer_compaction", None)
                 if callable(defer_compaction):
-                    defer_compaction(response_id)
+                    result = defer_compaction(response_id)
+                    if inspect.isawaitable(result):
+                        await result
                 logger.debug(
                     "skip: deferring compaction for response %s due to local tool outputs",
                     response_id,
