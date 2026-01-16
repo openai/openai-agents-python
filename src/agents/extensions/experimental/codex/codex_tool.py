@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import AsyncGenerator, Awaitable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Union
+from typing import Any, Callable, Optional, Union
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -179,7 +179,7 @@ class CodexToolOptions:
     failure_error_function: ToolErrorFunction | None = default_tool_error_function
 
 
-CodexToolCallArguments = dict[str, list[UserInput] | None]
+CodexToolCallArguments: TypeAlias = dict[str, Optional[list[UserInput]]]
 
 
 class _UnsetType:
