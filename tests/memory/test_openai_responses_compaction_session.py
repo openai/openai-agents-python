@@ -357,6 +357,50 @@ class TestOpenAIResponsesCompactionSession:
 
         mock_client.responses.compact.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_deferred_compaction_persists_across_tool_turns(self) -> None:
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(
+            output=[{"type": "compaction", "summary": "compacted"}],
+        )
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+
+        should_compact_calls = {"count": 0}
+
+        def should_trigger_compaction(context: dict[str, Any]) -> bool:
+            should_compact_calls["count"] += 1
+            return should_compact_calls["count"] == 1
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=should_trigger_compaction,
+        )
+
+        tool = get_function_tool(name="do_thing", return_value="done")
+        model = FakeModel()
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("do_thing")],
+                [get_function_tool_call("do_thing")],
+                [get_text_message("ok")],
+            ]
+        )
+        agent = Agent(
+            name="assistant",
+            model=model,
+            tools=[tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+
+        await Runner.run(agent, "hello", session=session)
+        await Runner.run(agent, "again", session=session)
+        await Runner.run(agent, "final", session=session)
+
+        mock_client.responses.compact.assert_awaited_once()
+
 
 class TestTypeGuard:
     def test_is_compaction_aware_session_true(self) -> None:

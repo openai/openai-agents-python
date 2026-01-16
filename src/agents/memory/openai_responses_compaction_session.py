@@ -190,6 +190,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         return await self.underlying_session.get_items(limit)
 
     async def _defer_compaction(self, response_id: str) -> None:
+        if self._deferred_response_id is not None:
+            return
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         should_compact = self.should_trigger_compaction(
             {
@@ -200,8 +202,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
         if should_compact:
             self._deferred_response_id = response_id
-        else:
-            self._deferred_response_id = None
 
     def _get_deferred_compaction_response_id(self) -> str | None:
         return self._deferred_response_id
