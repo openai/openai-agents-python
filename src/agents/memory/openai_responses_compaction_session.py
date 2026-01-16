@@ -121,6 +121,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._compaction_candidate_items: list[TResponseInputItem] | None = None
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
+        self._deferred_compaction_response_id: str | None = None
 
     @property
     def client(self) -> AsyncOpenAI:

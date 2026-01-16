@@ -245,6 +245,56 @@ async def test_nested_handoff_filters_model_input_but_preserves_session_items():
     assert has_function_call_output
 
 
+@pytest.mark.asyncio
+async def test_handoff_filtering_preserves_tool_outputs_in_server_conversation():
+    model = FakeModel()
+    delegate = Agent(
+        name="delegate",
+        model=model,
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_text_message("a_message"), get_handoff_tool_call(delegate)],
+            [get_text_message("done")],
+        ]
+    )
+
+    model_input_types: list[list[str]] = []
+
+    def capture_model_input(data):
+        types: list[str] = []
+        for item in data.model_data.input:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if isinstance(item_type, str):
+                    types.append(item_type)
+        model_input_types.append(types)
+        return data.model_data
+
+    result = await Runner.run(
+        triage,
+        input="user_message",
+        conversation_id="conv-test-123",
+        run_config=RunConfig(
+            nest_handoff_history=True,
+            call_model_input_filter=capture_model_input,
+        ),
+    )
+
+    assert result.final_output == "done"
+    assert len(model_input_types) >= 3
+    handoff_input_types = model_input_types[2]
+    assert "function_call_output" in handoff_input_types
+
+
 class Foo(TypedDict):
     bar: str
 

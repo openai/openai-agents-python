@@ -55,11 +55,17 @@ from .items import (
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
-from .memory import Session, SessionInputCallback, is_openai_responses_compaction_aware_session
+from .memory import (
+    OpenAIResponsesCompactionAwareSession,
+    Session,
+    SessionInputCallback,
+    is_openai_responses_compaction_aware_session,
+)
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -706,8 +712,6 @@ class AgentRunner:
 
                     model_responses.append(turn_result.model_response)
                     original_input = turn_result.original_input
-                    # For model input, use new_step_items (filtered on handoffs)
-                    generated_items = turn_result.pre_step_items + turn_result.new_step_items
                     # Accumulate unfiltered items for observability
                     session_items_for_turn = (
                         turn_result.session_step_items
@@ -715,6 +719,11 @@ class AgentRunner:
                         else turn_result.new_step_items
                     )
                     session_items.extend(session_items_for_turn)
+                    # For model input, use filtered items unless server-managed conversation
+                    if server_conversation_tracker is not None:
+                        generated_items = list(session_items)
+                    else:
+                        generated_items = turn_result.pre_step_items + turn_result.new_step_items
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1454,7 +1463,7 @@ class AgentRunner:
 
         if server_conversation_tracker is not None:
             input = server_conversation_tracker.prepare_input(
-                streamed_result.input, streamed_result._model_input_items
+                streamed_result.input, streamed_result.new_items
             )
         else:
             input = ItemHelpers.input_to_new_input_list(streamed_result.input)
@@ -2087,7 +2096,69 @@ class AgentRunner:
 
         # Run compaction if session supports it and we have a response_id
         if response_id and is_openai_responses_compaction_aware_session(session):
-            await session.run_compaction({"response_id": response_id})
+            await cls._maybe_run_session_compaction(
+                session=session,
+                response_id=response_id,
+                items_to_save=items_to_save,
+                new_items=new_items,
+            )
+
+    @staticmethod
+    def _has_local_tool_outputs(new_items: list[RunItem]) -> bool:
+        return any(isinstance(item, ToolCallOutputItem) for item in new_items)
+
+    @staticmethod
+    def _normalize_session_item(
+        item: TResponseInputItem, *, ignore_ids: bool
+    ) -> TResponseInputItem:
+        if ignore_ids and isinstance(item, dict):
+            cleaned = dict(item)
+            cleaned.pop("id", None)
+            return cast(TResponseInputItem, cleaned)
+        return item
+
+    @classmethod
+    async def _session_tail_matches_items(
+        cls,
+        session: Session,
+        items: list[TResponseInputItem],
+    ) -> bool:
+        if not items:
+            return True
+        tail = await session.get_items(limit=len(items))
+        if len(tail) < len(items):
+            return False
+        ignore_ids = bool(getattr(session, "_ignore_ids_for_matching", False))
+        normalized_tail = [
+            cls._normalize_session_item(item, ignore_ids=ignore_ids) for item in tail
+        ]
+        normalized_items = [
+            cls._normalize_session_item(item, ignore_ids=ignore_ids) for item in items
+        ]
+        return normalized_tail == normalized_items
+
+    @classmethod
+    async def _maybe_run_session_compaction(
+        cls,
+        *,
+        session: OpenAIResponsesCompactionAwareSession,
+        response_id: str,
+        items_to_save: list[TResponseInputItem],
+        new_items: list[RunItem],
+    ) -> None:
+        session_any = cast(Any, session)
+        deferred_response_id = getattr(session_any, "_deferred_compaction_response_id", None)
+        if cls._has_local_tool_outputs(new_items):
+            session_any._deferred_compaction_response_id = response_id
+            return
+
+        if deferred_response_id:
+            await session.run_compaction({"response_id": deferred_response_id})
+            session_any._deferred_compaction_response_id = None
+            if not await cls._session_tail_matches_items(session, items_to_save):
+                await session.add_items(items_to_save)
+
+        await session.run_compaction({"response_id": response_id})
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(

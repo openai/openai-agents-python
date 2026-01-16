@@ -20,7 +20,11 @@ from agents.memory.openai_responses_compaction_session import (
     select_compaction_candidate_items,
 )
 from tests.fake_model import FakeModel
-from tests.test_responses import get_text_message
+from tests.test_responses import (
+    get_function_tool,
+    get_function_tool_call,
+    get_text_message,
+)
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -288,6 +292,54 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_awaited_once()
         items = await session.get_items()
         assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+    @pytest.mark.asyncio
+    async def test_deferred_compaction_preserves_current_items(self) -> None:
+        underlying = SimpleListSession()
+        compacted = SimpleNamespace(output=[{"type": "compaction", "summary": "compacted"}])
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=compacted)
+        calls = {"count": 0}
+
+        def should_trigger_compaction(_: dict[str, Any]) -> bool:
+            calls["count"] += 1
+            return calls["count"] == 1
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            should_trigger_compaction=should_trigger_compaction,
+        )
+
+        model = FakeModel()
+        agent = Agent(
+            name="assistant",
+            model=model,
+            tools=[get_function_tool("tool", "result")],
+        )
+
+        model.add_multiple_turn_outputs(
+            [
+                [get_function_tool_call("tool", "{}")],
+                [get_text_message("done")],
+            ]
+        )
+
+        await Runner.run(agent, "hello", session=session)
+
+        items = await session.get_items()
+        assert any(isinstance(item, dict) and item.get("type") == "compaction" for item in items)
+
+        def _message_has_text(item: TResponseInputItem, text: str) -> bool:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                return False
+            content = item.get("content")
+            if not isinstance(content, list):
+                return False
+            return any(isinstance(part, dict) and part.get("text") == text for part in content)
+
+        assert any(_message_has_text(item, "done") for item in items)
 
 
 class TestTypeGuard:
