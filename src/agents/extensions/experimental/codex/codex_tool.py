@@ -172,7 +172,7 @@ class CodexToolOptions:
     working_directory: str | None = None
     skip_git_repo_check: bool | None = None
     default_turn_options: TurnOptions | Mapping[str, Any] | None = None
-    span_data_max_chars: int | None = 2048
+    span_data_max_chars: int | None = 8192
     persist_session: bool = False
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None = None
     is_enabled: bool | Callable[[RunContextWrapper[Any], Any], MaybeAwaitable[bool]] = True
