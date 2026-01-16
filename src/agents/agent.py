@@ -163,6 +163,14 @@ class Agent(AgentBase, Generic[TContext]):
     Agents are generic on the context type. The context is a (mutable) object you create. It is
     passed to tool functions, handoffs, guardrails, etc.
 
+    Example:
+        from agents import Agent
+
+        agent = Agent(
+            name="example",
+            instructions="Say hello"
+        )
+
     See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
     """
 
