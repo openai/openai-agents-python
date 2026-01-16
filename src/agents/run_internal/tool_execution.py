@@ -199,9 +199,9 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
     )
     timeout_ms = int(timeout_value) if isinstance(timeout_value, (int, float)) else None
 
-    max_length_value = get_mapping_or_attr(
-        action_payload, "max_output_length"
-    ) or get_mapping_or_attr(action_payload, "maxOutputLength")
+    max_length_value = get_mapping_or_attr(action_payload, "max_output_length")
+    if max_length_value is None:
+        max_length_value = get_mapping_or_attr(action_payload, "maxOutputLength")
     max_output_length = (
         int(max_length_value) if isinstance(max_length_value, (int, float)) else None
     )
