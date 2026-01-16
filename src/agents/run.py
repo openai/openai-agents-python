@@ -49,12 +49,14 @@ from .guardrail import (
 from .handoffs import Handoff, HandoffHistoryMapper, HandoffInputFilter, handoff
 from .items import (
     HandoffCallItem,
+    HandoffOutputItem,
     ItemHelpers,
     ModelResponse,
     ReasoningItem,
     RunItem,
     ToolCallItem,
     ToolCallItemTypes,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
@@ -2094,7 +2096,32 @@ class AgentRunner:
 
         # Run compaction if session supports it and we have a response_id
         if response_id and is_openai_responses_compaction_aware_session(session):
-            await session.run_compaction({"response_id": response_id})
+            has_local_tool_outputs = any(
+                isinstance(item, (ToolCallOutputItem, HandoffOutputItem)) for item in new_items
+            )
+            if has_local_tool_outputs:
+                defer_compaction = getattr(session, "_defer_compaction", None)
+                if callable(defer_compaction):
+                    result = defer_compaction(response_id)
+                    if inspect.isawaitable(result):
+                        await result
+                logger.debug(
+                    "skip: deferring compaction for response %s due to local tool outputs",
+                    response_id,
+                )
+                return
+            deferred_response_id = None
+            get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
+            if callable(get_deferred):
+                deferred_response_id = get_deferred()
+            force_compaction = deferred_response_id is not None
+            if force_compaction:
+                logger.debug(
+                    "compact: forcing for response %s after deferred %s",
+                    response_id,
+                    deferred_response_id,
+                )
+            await session.run_compaction({"response_id": response_id, "force": force_compaction})
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(
