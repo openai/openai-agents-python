@@ -801,8 +801,8 @@ async def test_streaming_events():
         "tool_call_output": 2,
         "message": 2,  # get_text_message("a_message") + get_final_output_message(...)
         "handoff": 1,  # get_handoff_tool_call(agent_1)
-        # Handoff output is summarized in conversation history, not emitted as a streamed item.
-        "handoff_output": 0,
+        # Handoff output is now emitted as a streamed item for observability.
+        "handoff_output": 1,
     }
 
     total_expected_item_count = sum(expected_item_type_map.values())

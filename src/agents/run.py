@@ -1592,14 +1592,21 @@ class AgentRunner:
 
         import dataclasses as _dc
 
-        # Filter out items that have already been sent to avoid duplicates
-        items_to_filter = single_step_result.new_step_items
+        # Stream session items (unfiltered) when available for observability.
+        streaming_items = (
+            single_step_result.session_step_items
+            if single_step_result.session_step_items is not None
+            else single_step_result.new_step_items
+        )
+
+        # Filter out items that have already been sent to avoid duplicates.
+        items_to_stream = streaming_items
 
         if emitted_tool_call_ids:
             # Filter out tool call items that were already emitted during streaming
-            items_to_filter = [
+            items_to_stream = [
                 item
-                for item in items_to_filter
+                for item in items_to_stream
                 if not (
                     isinstance(item, ToolCallItem)
                     and (
@@ -1613,9 +1620,9 @@ class AgentRunner:
 
         if emitted_reasoning_item_ids:
             # Filter out reasoning items that were already emitted during streaming
-            items_to_filter = [
+            items_to_stream = [
                 item
-                for item in items_to_filter
+                for item in items_to_stream
                 if not (
                     isinstance(item, ReasoningItem)
                     and (reasoning_id := getattr(item.raw_item, "id", None))
@@ -1624,12 +1631,12 @@ class AgentRunner:
             ]
 
         # Filter out HandoffCallItem to avoid duplicates (already sent earlier)
-        items_to_filter = [
-            item for item in items_to_filter if not isinstance(item, HandoffCallItem)
+        items_to_stream = [
+            item for item in items_to_stream if not isinstance(item, HandoffCallItem)
         ]
 
         # Create filtered result and send to queue
-        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
+        filtered_result = _dc.replace(single_step_result, new_step_items=items_to_stream)
         RunImpl.stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
         return single_step_result
 
