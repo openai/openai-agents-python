@@ -398,3 +398,280 @@ def test_nest_handoff_history_supports_custom_mapper() -> None:
     )
     assert second["role"] == "user"
     assert second["content"] == "Hello"
+
+
+def _get_user_input_item_with_image(text: str, image_url: str) -> TResponseInputItem:
+    """Create a user input item with both text and an image."""
+    return {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": text},
+            {"type": "input_image", "image_url": image_url, "detail": "auto"},
+        ],
+    }
+
+
+def _get_user_input_item_with_file(text: str, file_data: str) -> TResponseInputItem:
+    """Create a user input item with both text and a file."""
+    return {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": text},
+            {"type": "input_file", "file_data": file_data, "filename": "test.txt"},
+        ],
+    }
+
+
+def _get_user_input_item_image_only(image_url: str) -> TResponseInputItem:
+    """Create a user input item with only an image (no text)."""
+    return {
+        "role": "user",
+        "content": [
+            {"type": "input_image", "image_url": image_url, "detail": "high"},
+        ],
+    }
+
+
+def test_nest_handoff_history_preserves_image_content() -> None:
+    """Test that image content from user messages is preserved during handoff."""
+    image_url = "https://example.com/test-image.jpg"
+    data = HandoffInputData(
+        input_history=(_get_user_input_item_with_image("What's in this image?", image_url),),
+        pre_handoff_items=(_get_message_output_run_item("I see an image"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    # Should have 2 items: summary message + user message with image.
+    assert len(nested.input_history) == 2
+
+    # First item should be the summary.
+    summary = _as_message(nested.input_history[0])
+    assert summary["role"] == "assistant"
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "What's in this image?" in summary_content
+    assert "[1 image(s) attached]" in summary_content
+
+    # Second item should be the preserved image content.
+    image_msg = _as_message(nested.input_history[1])
+    assert image_msg["role"] == "user"
+    image_content = image_msg["content"]
+    assert isinstance(image_content, list)
+    assert len(image_content) == 1
+    assert image_content[0]["type"] == "input_image"
+    assert image_content[0]["image_url"] == image_url
+    assert image_content[0]["detail"] == "auto"
+
+
+def test_nest_handoff_history_preserves_file_content() -> None:
+    """Test that file content from user messages is preserved during handoff."""
+    file_data = "base64encodeddata"
+    data = HandoffInputData(
+        input_history=(_get_user_input_item_with_file("Analyze this file", file_data),),
+        pre_handoff_items=(_get_message_output_run_item("Analyzing file"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    assert len(nested.input_history) == 2
+
+    # First item should be the summary.
+    summary = _as_message(nested.input_history[0])
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "[1 file(s) attached]" in summary_content
+
+    # Second item should be the preserved file content.
+    file_msg = _as_message(nested.input_history[1])
+    assert file_msg["role"] == "user"
+    file_content = file_msg["content"]
+    assert isinstance(file_content, list)
+    assert len(file_content) == 1
+    assert file_content[0]["type"] == "input_file"
+    assert file_content[0]["file_data"] == file_data
+
+
+def test_nest_handoff_history_preserves_multiple_images() -> None:
+    """Test that multiple images from different user messages are preserved."""
+    image_url1 = "https://example.com/image1.jpg"
+    image_url2 = "https://example.com/image2.jpg"
+    data = HandoffInputData(
+        input_history=(
+            _get_user_input_item_image_only(image_url1),
+            _get_user_input_item_image_only(image_url2),
+        ),
+        pre_handoff_items=(_get_message_output_run_item("Two images received"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    assert len(nested.input_history) == 2
+
+    # Second item should contain both images.
+    image_msg = _as_message(nested.input_history[1])
+    assert image_msg["role"] == "user"
+    image_content = image_msg["content"]
+    assert isinstance(image_content, list)
+    assert len(image_content) == 2
+    assert image_content[0]["type"] == "input_image"
+    assert image_content[0]["image_url"] == image_url1
+    assert image_content[1]["type"] == "input_image"
+    assert image_content[1]["image_url"] == image_url2
+
+
+def test_nest_handoff_history_no_multimodal_single_message() -> None:
+    """Test that text-only messages result in a single summary message."""
+    data = HandoffInputData(
+        input_history=(_get_user_input_item("Hello, how are you?"),),
+        pre_handoff_items=(_get_message_output_run_item("I am fine"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    # Should only have 1 item (no multimodal content).
+    assert len(nested.input_history) == 1
+    summary = _as_message(nested.input_history[0])
+    assert summary["role"] == "assistant"
+
+
+def test_nest_handoff_history_ignores_multimodal_in_assistant_messages() -> None:
+    """Test that multimodal content in non-user messages is not extracted.
+
+    Only user-uploaded content should be preserved, not content from assistant responses.
+    """
+    # Create an assistant message that somehow has image content.
+    assistant_with_image: TResponseInputItem = {  # type: ignore[misc,assignment]
+        "role": "assistant",
+        "content": [
+            {"type": "output_text", "text": "Here is the image"},
+            {"type": "input_image", "image_url": "https://example.com/generated.jpg"},
+        ],
+    }
+    data = HandoffInputData(
+        input_history=(assistant_with_image,),
+        pre_handoff_items=(),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    # Should only have 1 item - no additional user message with multimodal content.
+    assert len(nested.input_history) == 1
+    summary = _as_message(nested.input_history[0])
+    assert summary["role"] == "assistant"
+
+
+def test_nest_handoff_history_preserves_audio_content() -> None:
+    """Test that audio content from user messages is preserved during handoff."""
+    audio_data = "base64audiocontent"
+    user_with_audio: TResponseInputItem = {  # type: ignore[misc,assignment]
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "Listen to this"},
+            {"type": "input_audio", "input_audio": {"data": audio_data, "format": "mp3"}},
+        ],
+    }
+    data = HandoffInputData(
+        input_history=(user_with_audio,),
+        pre_handoff_items=(_get_message_output_run_item("Audio received"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert isinstance(nested.input_history, tuple)
+    assert len(nested.input_history) == 2
+
+    # Check summary mentions audio.
+    summary = _as_message(nested.input_history[0])
+    summary_content = summary["content"]
+    assert isinstance(summary_content, str)
+    assert "[1 audio file(s) attached]" in summary_content
+
+    # Check audio is preserved.
+    audio_msg = _as_message(nested.input_history[1])
+    assert audio_msg["role"] == "user"
+    audio_content = audio_msg["content"]
+    assert isinstance(audio_content, list)
+    assert len(audio_content) == 1
+    assert audio_content[0]["type"] == "input_audio"
+
+
+def test_nest_handoff_history_no_duplicate_on_chained_handoffs() -> None:
+    """Test that multimodal content is not duplicated across chained handoffs.
+
+    When an agent hands off to another agent, and that agent hands off again,
+    the multimodal content should only appear once, not be re-extracted and duplicated.
+    """
+    image_url = "https://example.com/test-image.jpg"
+
+    # First handoff: user sends image, agent responds and hands off.
+    first_data = HandoffInputData(
+        input_history=(_get_user_input_item_with_image("What's in this image?", image_url),),
+        pre_handoff_items=(_get_message_output_run_item("Let me hand this off"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    first_nested = nest_handoff_history(first_data)
+
+    # Verify first handoff has 2 items: summary + preserved image.
+    assert len(first_nested.input_history) == 2
+    assert not isinstance(first_nested.input_history, str)
+    first_preserved = _as_message(first_nested.input_history[1])
+    assert first_preserved["role"] == "user"
+    first_content = first_preserved["content"]
+    assert isinstance(first_content, list)
+    assert len(first_content) == 1
+    assert first_content[0]["type"] == "input_image"
+
+    # Second handoff: the new agent responds and hands off again.
+    # The input_history now contains the result from the first handoff.
+    second_data = HandoffInputData(
+        input_history=first_nested.input_history,
+        pre_handoff_items=(_get_message_output_run_item("Handing off again"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    second_nested = nest_handoff_history(second_data)
+
+    # The second handoff should still only have 2 items, not 3.
+    # The preserved image from the first handoff should not be re-extracted.
+    assert len(second_nested.input_history) == 2
+    assert not isinstance(second_nested.input_history, str)
+
+    # Verify the image is still preserved (only once).
+    second_preserved = _as_message(second_nested.input_history[1])
+    assert second_preserved["role"] == "user"
+    second_content = second_preserved["content"]
+    assert isinstance(second_content, list)
+    assert len(second_content) == 1
+    assert second_content[0]["type"] == "input_image"
+    assert second_content[0]["image_url"] == image_url
+
+    # Third handoff: verify it still doesn't duplicate.
+    third_data = HandoffInputData(
+        input_history=second_nested.input_history,
+        pre_handoff_items=(_get_message_output_run_item("One more handoff"),),
+        new_items=(),
+        run_context=RunContextWrapper(context=()),
+    )
+    third_nested = nest_handoff_history(third_data)
+
+    # Still only 2 items after three handoffs.
+    assert len(third_nested.input_history) == 2
