@@ -1,4 +1,5 @@
 import functools
+import inspect
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
@@ -11,8 +12,10 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
-from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
+from ..tool import FunctionTool, Tool, default_tool_error_function
+from ..tool_context import ToolContext
+from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_span
+from ..util import _error_tracing
 from ..util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -156,7 +159,7 @@ class MCPUtil:
         cls, tool: "MCPTool", server: "MCPServer", convert_schemas_to_strict: bool
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
-        invoke_func = functools.partial(cls.invoke_mcp_tool, server, tool)
+        invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
         schema, is_strict = tool.inputSchema, False
 
         # MCP spec doesn't require the inputSchema to have `properties`, but OpenAI spec does.
@@ -169,6 +172,40 @@ class MCPUtil:
                 is_strict = True
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
+
+        # Wrap the invoke function with error handling, similar to regular function tools.
+        # This ensures that MCP tool errors (like timeouts) are handled gracefully instead
+        # of halting the entire agent flow.
+        async def invoke_func(ctx: ToolContext[Any], input_json: str) -> str:
+            try:
+                return await invoke_func_impl(ctx, input_json)
+            except Exception as e:
+                # Use default error handling function to convert exception to error message.
+                result = default_tool_error_function(ctx, e)
+                if inspect.isawaitable(result):
+                    result = await result
+
+                # Attach error to tracing span.
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Error running tool (non-fatal)",
+                        data={
+                            "tool_name": tool.name,
+                            "error": str(e),
+                        },
+                    )
+                )
+
+                # Log the error.
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"MCP tool {tool.name} failed")
+                else:
+                    logger.error(
+                        f"MCP tool {tool.name} failed: {input_json} {e}",
+                        exc_info=e,
+                    )
+
+                return result
 
         return FunctionTool(
             name=tool.name,
