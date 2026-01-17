@@ -1,11 +1,12 @@
 # Tools
 
-Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports four categories:
+Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
 -   Hosted OpenAI tools: run alongside the model on OpenAI servers.
 -   Local runtime tools: run in your environment (computer use, shell, apply patch).
 -   Function calling: wrap any Python function as a tool.
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
+-   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
 
 ## Hosted tools
 
@@ -463,6 +464,44 @@ Disabled tools are completely hidden from the LLM at runtime, making this useful
 -   Environment-specific tool availability (dev vs prod)
 -   A/B testing different tool configurations
 -   Dynamic tool filtering based on runtime state
+
+## Experimental: Codex tool
+
+The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools)
+during a tool call. This surface is experimental and may change.
+
+```python
+from agents import Agent
+from agents.extensions.experimental.codex import ThreadOptions, codex_tool
+
+agent = Agent(
+    name="Codex Agent",
+    instructions="Use the codex tool to inspect the workspace and answer the question.",
+    tools=[
+        codex_tool(
+            sandbox_mode="workspace-write",
+            working_directory="/path/to/repo",
+            default_thread_options=ThreadOptions(
+                model="gpt-5.2-codex",
+                network_access_enabled=True,
+                web_search_enabled=False,
+            ),
+            persist_session=True,
+        )
+    ],
+)
+```
+
+What to know:
+
+-   Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
+-   Inputs: tool calls must include at least one item in `inputs` with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`.
+-   Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
+-   Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
+-   Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
+-   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
+-   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
+-   See `examples/tools/codex.py` for a complete runnable sample.
 
 ## Handling errors in function tools
 
