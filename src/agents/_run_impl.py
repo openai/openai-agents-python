@@ -96,6 +96,8 @@ from .tool import (
     ShellResult,
     ShellTool,
     Tool,
+    ToolOrigin,
+    ToolOriginType,
     resolve_computer,
 )
 from .tool_context import ToolContext
@@ -157,6 +159,20 @@ class ToolRunHandoff:
 class ToolRunFunction:
     tool_call: ResponseFunctionToolCall
     function_tool: FunctionTool
+
+
+def _get_tool_origin_info(function_tool: FunctionTool) -> ToolOrigin | None:
+    """Extract origin information from a FunctionTool.
+
+    Returns:
+        ToolOrigin object if origin is set, otherwise None (defaults to FUNCTION type).
+    """
+    origin = function_tool._tool_origin
+    if origin is None:
+        # Default to FUNCTION if not explicitly set
+        return ToolOrigin(type=ToolOriginType.FUNCTION)
+
+    return origin
 
 
 @dataclass
@@ -763,11 +779,19 @@ class RunImpl:
                         error = f"Tool {output.name} not found in agent {agent.name}"
                         raise ModelBehaviorError(error)
 
-                items.append(ToolCallItem(raw_item=output, agent=agent))
+                function_tool = function_map[output.name]
+                tool_origin = _get_tool_origin_info(function_tool)
+                items.append(
+                    ToolCallItem(
+                        raw_item=output,
+                        agent=agent,
+                        tool_origin=tool_origin,
+                    )
+                )
                 functions.append(
                     ToolRunFunction(
                         tool_call=output,
-                        function_tool=function_map[output.name],
+                        function_tool=function_tool,
                     )
                 )
 
@@ -1032,6 +1056,7 @@ class RunImpl:
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=agent,
+                    tool_origin=_get_tool_origin_info(tool_run.function_tool),
                 ),
             )
             for tool_run, result in zip(tool_runs, results)

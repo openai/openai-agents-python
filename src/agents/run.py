@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, cast, get_args, get_origin
 
 from openai.types.responses import (
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_prompt_param import (
@@ -27,6 +28,7 @@ from ._run_impl import (
     RunImpl,
     SingleStepResult,
     TraceCtxManager,
+    _get_tool_origin_info,
     get_model_tracing_impl,
 )
 from .agent import Agent
@@ -73,7 +75,7 @@ from .stream_events import (
     RunItemStreamEvent,
     StreamEvent,
 )
-from .tool import Tool, dispose_resolved_computers
+from .tool import FunctionTool, Tool, dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Span, SpanError, TracingConfig, agent_span, get_current_trace, trace
 from .tracing.span_data import AgentSpanData
@@ -1451,6 +1453,7 @@ class AgentRunner:
         model = cls._get_model(agent, run_config)
         model_settings = agent.model_settings.resolve(run_config.model_settings)
         model_settings = RunImpl.maybe_reset_tool_choice(agent, tool_use_tracker, model_settings)
+        function_map = {tool.name: tool for tool in all_tools if isinstance(tool, FunctionTool)}
 
         final_response: ModelResponse | None = None
 
@@ -1542,9 +1545,19 @@ class AgentRunner:
                     if call_id and call_id not in emitted_tool_call_ids:
                         emitted_tool_call_ids.add(call_id)
 
+                        # Try to get origin info if this is a FunctionTool call
+                        # Use same lookup logic as _run_impl (function_map with last-wins semantics)
+                        tool_origin = None
+                        if isinstance(output_item, ResponseFunctionToolCall):
+                            tool_name = getattr(output_item, "name", None)
+                            if tool_name and tool_name in function_map:
+                                function_tool = function_map[tool_name]
+                                tool_origin = _get_tool_origin_info(function_tool)
+
                         tool_item = ToolCallItem(
                             raw_item=cast(ToolCallItemTypes, output_item),
                             agent=agent,
+                            tool_origin=tool_origin,
                         )
                         streamed_result._event_queue.put_nowait(
                             RunItemStreamEvent(item=tool_item, name="tool_called")
