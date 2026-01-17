@@ -4,7 +4,7 @@ search:
 ---
 # パイプラインとワークフロー
 
-[`VoicePipeline`][agents.voice.pipeline.VoicePipeline] は、エージェントのワークフローを音声アプリに簡単に変換できるクラスです。実行するワークフローを渡すと、パイプラインが入力音声の文字起こし、音声の終了検知、適切なタイミングでのワークフロー呼び出し、そしてワークフロー出力の音声化までを処理します。
+[`VoicePipeline`][agents.voice.pipeline.VoicePipeline] は、エージェント ワークフローを音声アプリに簡単に変換できるクラスです。実行するワークフローを渡すと、パイプラインが入力音声の文字起こし、音声終了の検出、適切なタイミングでのワークフロー呼び出し、そしてワークフロー出力の音声化までを処理します。
 
 ```mermaid
 graph LR
@@ -34,29 +34,29 @@ graph LR
 
 ## パイプラインの設定
 
-パイプラインを作成する際、次の項目を設定できます。
+パイプラインを作成する際には、次の項目を設定できます。
 
 1. 新しい音声が文字起こしされるたびに実行されるコードである [`workflow`][agents.voice.workflow.VoiceWorkflowBase]
-2. 使用する [`speech-to-text`][agents.voice.model.STTModel] および [`text-to-speech`][agents.voice.model.TTSModel] のモデル
-3. 次のような項目を設定できる [`config`][agents.voice.pipeline_config.VoicePipelineConfig]
-    - モデル名をモデルにマッピングできるモデルプロバイダー
-    - トレーシング（無効化の可否、音声ファイルのアップロード可否、ワークフロー名、Trace ID など）
-    - TTS および STT モデルの設定（プロンプト、言語、使用するデータ型など）
+2. 使用する [`speech-to-text`][agents.voice.model.STTModel] と [`text-to-speech`][agents.voice.model.TTSModel] のモデル
+3. 次のような設定が可能な [`config`][agents.voice.pipeline_config.VoicePipelineConfig]
+    - モデル名をモデルに対応付けるモデルプロバイダー
+    - トレーシング（トレーシングの無効化可否、音声ファイルのアップロード可否、ワークフロー名、トレース ID など）
+    - プロンプト、言語、使用するデータ型などの TTS と STT のモデル設定
 
 ## パイプラインの実行
 
-[`run()`][agents.voice.pipeline.VoicePipeline.run] メソッドでパイプラインを実行できます。音声入力は次の 2 つの形式で渡せます。
+パイプラインは [`run()`][agents.voice.pipeline.VoicePipeline.run] メソッドで実行でき、音声入力を次の 2 つの形式で渡せます。
 
-1. [`AudioInput`][agents.voice.input.AudioInput] は、完全な音声の書き起こし結果があり、その結果に対する出力だけを生成したい場合に使用します。これは、話者の発話終了を検知する必要がないケース、たとえば事前録音の音声や、ユーザーの発話終了が明確なプッシュトゥトークのアプリで有用です。
-2. [`StreamedAudioInput`][agents.voice.input.StreamedAudioInput] は、ユーザーの発話終了を検知する必要がある場合に使用します。検出された音声チャンクを随時プッシュでき、音声パイプラインは「アクティビティ検出」と呼ばれるプロセスを通じて、適切なタイミングで自動的にエージェントのワークフローを実行します。
+1. [`AudioInput`][agents.voice.input.AudioInput] は、完全な音声の文字起こしがあり、その結果だけを生成したい場合に使用します。話者の発話終了を検出する必要がないケース、たとえば録音済み音声や、ユーザーの発話終了が明確なプッシュトゥトーク アプリで便利です。
+2. [`StreamedAudioInput`][agents.voice.input.StreamedAudioInput] は、ユーザーの発話終了を検出する必要がある場合に使用します。検出された音声チャンクを逐次プッシュでき、音声パイプラインは「アクティビティ検出」と呼ばれるプロセスを通じて、適切なタイミングで自動的にエージェント ワークフローを実行します。
 
 ## 結果
 
-音声パイプライン実行の結果は [`StreamedAudioResult`][agents.voice.result.StreamedAudioResult] です。これは、発生したイベントをストリーミングで受け取れるオブジェクトです。いくつかの種類の [`VoiceStreamEvent`][agents.voice.events.VoiceStreamEvent] があり、次を含みます。
+音声パイプライン実行の結果は [`StreamedAudioResult`][agents.voice.result.StreamedAudioResult] です。これは、イベントの発生と同時にストリーミングできるオブジェクトです。いくつかの種類の [`VoiceStreamEvent`][agents.voice.events.VoiceStreamEvent] があり、次を含みます。
 
-1. 音声チャンクを含む [`VoiceStreamEventAudio`][agents.voice.events.VoiceStreamEventAudio]
-2. ターンの開始や終了などのライフサイクルイベントを通知する [`VoiceStreamEventLifecycle`][agents.voice.events.VoiceStreamEventLifecycle]
-3. エラーイベントである [`VoiceStreamEventError`][agents.voice.events.VoiceStreamEventError]
+1. [`VoiceStreamEventAudio`][agents.voice.events.VoiceStreamEventAudio] は、音声のチャンクを含みます。
+2. [`VoiceStreamEventLifecycle`][agents.voice.events.VoiceStreamEventLifecycle] は、ターンの開始や終了などのライフサイクルイベントを知らせます。
+3. [`VoiceStreamEventError`][agents.voice.events.VoiceStreamEventError] は、エラーイベントです。
 
 ```python
 
@@ -76,4 +76,4 @@ async for event in result.stream():
 
 ### 割り込み
 
-Agents SDK は現在、[`StreamedAudioInput`][agents.voice.input.StreamedAudioInput] に対する組み込みの割り込みサポートを提供していません。代わりに、検出された各ターンごとに、ワークフローの個別の実行がトリガーされます。アプリケーション内で割り込みを扱いたい場合は、[`VoiceStreamEventLifecycle`][agents.voice.events.VoiceStreamEventLifecycle] イベントをリッスンしてください。`turn_started` は新しいターンが文字起こしされ、処理が開始されたことを示します。`turn_ended` は該当ターンのすべての音声がディスパッチされた後に発火します。モデルがターンを開始したときに話者のマイクをミュートし、そのターンに関連する音声をすべてフラッシュした後にアンミュートする、といった用途にこれらのイベントを利用できます。
+Agents SDK は現在、[`StreamedAudioInput`][agents.voice.input.StreamedAudioInput] に対する組み込みの割り込み対応をサポートしていません。検出された各ターンごとに、ワークフローの個別の実行がトリガーされます。アプリケーション内で割り込みを処理したい場合は、[`VoiceStreamEventLifecycle`][agents.voice.events.VoiceStreamEventLifecycle] イベントをリッスンしてください。`turn_started` は新しいターンが文字起こしされ処理が開始されたことを示し、`turn_ended` は該当ターンのすべての音声がディスパッチされた後にトリガーされます。モデルがターンを開始したときに話者のマイクをミュートし、ターンに関する音声をすべてフラッシュし終えた後にミュート解除する、といった制御にこれらのイベントを利用できます。

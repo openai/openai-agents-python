@@ -4,31 +4,31 @@ search:
 ---
 # OpenAI Agents SDK
 
-[OpenAI Agents SDK](https://github.com/openai/openai-agents-python) 使你能够以轻量、易用、抽象极少的方式构建智能体式 AI 应用。它是我们此前针对智能体的试验项目 [Swarm](https://github.com/openai/swarm/tree/main) 的可用于生产的升级版。Agents SDK 仅包含一小组基本组件：
+[OpenAI Agents SDK](https://github.com/openai/openai-agents-python) 让你以轻量、易用、低抽象的方式构建具备自主能力的 AI 应用。它是我们此前面向智能体的实验项目 [Swarm](https://github.com/openai/swarm/tree/main) 的生产级升级版。Agents SDK 仅包含一小组基本组件：
 
--   **智能体（Agents）**，即配备 instructions 和 tools 的 LLM
--   **任务转移（Handoffs）**，允许智能体将特定任务委派给其他智能体
--   **安全防护措施（Guardrails）**，用于验证智能体的输入与输出
--   **会话（Sessions）**，在多次智能体运行间自动维护对话历史
+- **智能体（Agents）**：配备指令（instructions）与工具（tools）的 LLM
+- **任务转移（Handoffs）**：允许智能体将特定任务委派给其他智能体
+- **安全防护措施（Guardrails）**：支持对智能体输入与输出进行校验
+- **会话（Sessions）**：自动在多次运行间维护对话历史
 
-结合 Python，这些基本组件足以表达 tools 与智能体之间的复杂关系，让你无需陡峭学习曲线即可构建真实世界应用。此外，SDK 自带内置的 **追踪（tracing）**，可帮助你可视化与调试智能体流程，对其进行评估，甚至为你的应用微调模型。
+结合 Python，这些基本组件足以表达工具与智能体之间的复杂关系，让你无需陡峭的学习曲线即可构建真实应用。此外，SDK 内置 **追踪（tracing）**，便于可视化与调试你的智能体流程，并可对其进行评估，甚至为你的应用微调模型。
 
-## 为何使用 Agents SDK
+## 为什么使用 Agents SDK
 
-该 SDK 遵循两条核心设计原则：
+该 SDK 的设计原则有两点：
 
-1. 功能足够多以值得使用，但基本组件足够少以便快速上手。
-2. 开箱即用且效果良好，同时支持你精确定制执行过程。
+1. 功能足够丰富值得使用，但基础组件足够少，便于快速上手。
+2. 开箱即用表现优秀，同时可精准自定义行为。
 
 SDK 的主要特性包括：
 
--   智能体循环：内置循环，负责调用 tools、将结果发送给 LLM，并循环直至 LLM 完成。
--   Python 优先：使用内置语言特性来编排并串联智能体，而无需学习新的抽象概念。
--   任务转移：在多个智能体间进行协调与委派的强大能力。
--   安全防护措施：与智能体并行运行输入验证与检查，如失败则尽早中止。
--   会话：跨多次智能体运行的对话历史自动管理，省去手动状态处理。
--   工具调用：将任意 Python 函数变为 tool，自动生成 schema，并由 Pydantic 提供验证。
--   追踪：内置追踪，支持可视化、调试与监控工作流，并可使用 OpenAI 的评估、微调与蒸馏工具套件。
+- 智能体循环（Agent loop）：内置循环处理调用工具、将结果回传给 LLM，并迭代直至 LLM 完成。
+- Python 优先（Python-first）：使用语言内置特性编排与串联智能体，无需学习新的抽象。
+- 任务转移（Handoffs）：强大的特性，用于在多个智能体间协调与委派。
+- 安全防护措施（Guardrails）：与智能体并行运行输入校验与检查，失败时可提前中断。
+- 会话（Sessions）：跨多次运行自动管理对话历史，免去手动状态处理。
+- 工具调用（Function tools）：将任意 Python 函数变为工具，自动生成模式并通过 Pydantic 提供校验。
+- 追踪（Tracing）：内置追踪，便于可视化、调试与监控工作流，并可使用 OpenAI 的评估、微调与蒸馏工具套件。
 
 ## 安装
 
@@ -51,7 +51,7 @@ print(result.final_output)
 # Infinite loop's dance.
 ```
 
-(_If running this, ensure you set the `OPENAI_API_KEY` environment variable_)
+(_如果运行此示例，请确保已设置 `OPENAI_API_KEY` 环境变量_)
 
 ```bash
 export OPENAI_API_KEY=sk-...
