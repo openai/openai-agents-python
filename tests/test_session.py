@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, RunConfig, Runner, SQLiteSession, TResponseInputItem
-from agents.exceptions import UserError
 
 from .fake_model import FakeModel
 from .test_responses import get_text_message
@@ -371,10 +370,8 @@ async def test_sqlite_session_get_items_with_limit():
 
 @pytest.mark.parametrize("runner_method", ["run", "run_sync", "run_streamed"])
 @pytest.mark.asyncio
-async def test_session_memory_rejects_both_session_and_list_input(runner_method):
-    """Test that passing both a session and list input raises a UserError across all runner
-    methods.
-    """
+async def test_session_memory_appends_list_input_by_default(runner_method):
+    """Test that list inputs are appended to session history when no callback is provided."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_validation.db"
         session_id = "test_validation_parametrized"
@@ -383,19 +380,18 @@ async def test_session_memory_rejects_both_session_and_list_input(runner_method)
         model = FakeModel()
         agent = Agent(name="test", model=model)
 
-        # Test that providing both a session and a list input raises a UserError
-        model.set_next_output([get_text_message("This shouldn't run")])
-
-        list_input = [
-            {"role": "user", "content": "Test message"},
+        initial_history: list[TResponseInputItem] = [
+            {"role": "user", "content": "Earlier message"},
+            {"role": "assistant", "content": "Saved reply"},
         ]
+        await session.add_items(initial_history)
 
-        with pytest.raises(UserError) as exc_info:
-            await run_agent_async(runner_method, agent, list_input, session=session)
+        list_input = [{"role": "user", "content": "Test message"}]
 
-        # Verify the error message explains the issue
-        assert "list inputs require a `RunConfig.session_input_callback" in str(exc_info.value)
-        assert "to manage the history manually" in str(exc_info.value)
+        model.set_next_output([get_text_message("This should run")])
+        await run_agent_async(runner_method, agent, list_input, session=session)
+
+        assert model.last_turn_args["input"] == initial_history + list_input
 
         session.close()
 
