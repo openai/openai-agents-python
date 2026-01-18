@@ -364,8 +364,9 @@ class LitellmModel(Model):
             model=self.model,
         )
 
-        # Fix for interleaved thinking bug: reorder messages to ensure tool_use comes before tool_result  # noqa: E501
-        if "anthropic" in self.model.lower() or "claude" in self.model.lower():
+        # Fix message ordering: reorder to ensure tool_use comes before tool_result.
+        # Required for Anthropic and Vertex AI Gemini APIs which reject tool responses without preceding tool calls.  # noqa: E501
+        if any(model.lower() in self.model.lower() for model in ["anthropic", "claude", "gemini"]):
             converted_messages = self._fix_tool_message_ordering(converted_messages)
 
         # Convert Google's extra_content to litellm's provider_specific_fields format
@@ -588,8 +589,8 @@ class LitellmModel(Model):
         """
         Fix the ordering of tool messages to ensure tool_use messages come before tool_result messages.
 
-        This addresses the interleaved thinking bug where conversation histories may contain
-        tool results before their corresponding tool calls, causing Anthropic API to reject the request.
+        Required for Anthropic and Vertex AI Gemini APIs which require tool calls to immediately
+        precede their corresponding tool responses in conversation history.
         """  # noqa: E501
         if not messages:
             return messages
