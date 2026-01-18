@@ -9,6 +9,7 @@ Check out a variety of sample implementations of the SDK in the examples section
 
     -   Deterministic workflows
     -   Agents as tools
+    -   Agent skills
     -   Parallel agent execution
     -   Conditional tool usage
     -   Input/output guardrails
