@@ -30,6 +30,18 @@ For example, you could model the translation task above as tool calls instead: r
 See the [`agents_as_tools.py`](./agents_as_tools.py) file for an example of this.
 See the [`agents_as_tools_streaming.py`](./agents_as_tools_streaming.py) file for a streaming variant that taps into nested agent events via `on_stream`.
 
+## Agent Skills
+
+Skills bundle reusable instructions, references, and helper scripts into a named package that an agent can load on demand. This is useful when you want a consistent way to bring in domain knowledge or workflows without hard-coding them into the base prompt.
+
+The key idea is progressive disclosure: only load a skill when it is needed so you can keep prompts short and avoid overwhelming the agent.
+
+Start with [`agent_skills.py`](./agent_skills.py) for a minimal implementation that discovers skills under `examples/agent_patterns/skills` and exposes a `load_skill` tool so the agent can pull in a specific skill when needed. Choose this when you only need to read a single skill instructions document.
+
+If a skill needs to execute scripts, add a tool that can run them, such as the [shell tool](https://platform.openai.com/docs/guides/tools-shell). In this case, use [`agent_skills_shell.py`](./agent_skills_shell.py), which reads skills and runs skill scripts via bash with the `ShellTool`.
+
+For more information, see [https://agentskills.io](https://agentskills.io).
+
 ## LLM-as-a-judge
 
 LLMs can often improve the quality of their output if given feedback. A common pattern is to generate a response using a model, and then use a second model to provide feedback. You can even use a small model for the initial generation and a larger model for the feedback, to optimize cost.
