@@ -107,6 +107,7 @@ from .model import (
     RealtimeModelListener,
     RealtimePlaybackState,
     RealtimePlaybackTracker,
+    TransportConfig,
 )
 from .model_events import (
     RealtimeModelAudioDoneEvent,
@@ -312,14 +313,46 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 raise UserError("API key is required but was not provided.")
 
             headers.update({"Authorization": f"Bearer {api_key}"})
-        self._websocket = await websockets.connect(
-            url,
-            user_agent_header=_USER_AGENT,
-            additional_headers=headers,
-            max_size=None,  # Allow any size of message
+
+        self._websocket = await self._create_websocket_connection(
+            url=url,
+            headers=headers,
+            transport_config=options.get("transport"),
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
+
+    async def _create_websocket_connection(
+        self,
+        url: str,
+        headers: dict[str, str],
+        transport_config: TransportConfig | None = None,
+    ) -> ClientConnection:
+        """Create a WebSocket connection with the given configuration.
+
+        Args:
+            url: The WebSocket URL to connect to.
+            headers: HTTP headers to include in the connection request.
+            transport_config: Optional low-level transport configuration.
+
+        Returns:
+            A connected WebSocket client connection.
+        """
+        connect_kwargs: dict[str, Any] = {
+            "user_agent_header": _USER_AGENT,
+            "additional_headers": headers,
+            "max_size": None,  # Allow any size of message
+        }
+
+        if transport_config:
+            if "ping_interval" in transport_config:
+                connect_kwargs["ping_interval"] = transport_config["ping_interval"]
+            if "ping_timeout" in transport_config:
+                connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
+            if "connect_timeout" in transport_config:
+                connect_kwargs["open_timeout"] = transport_config["connect_timeout"]
+
+        return await websockets.connect(url, **connect_kwargs)
 
     async def _send_tracing_config(
         self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
