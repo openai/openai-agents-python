@@ -201,9 +201,14 @@ class MCPUtil:
 
         try:
             result = await server.call_tool(tool.name, json_data)
+        except UserError:
+            # Re-raise UserError as-is (it already has a good message)
+            raise
         except Exception as e:
-            logger.error(f"Error invoking MCP tool {tool.name}: {e}")
-            raise AgentsException(f"Error invoking MCP tool {tool.name}: {e}") from e
+            logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
+            raise AgentsException(
+                f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
+            ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug(f"MCP tool {tool.name} completed.")
