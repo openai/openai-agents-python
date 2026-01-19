@@ -19,6 +19,7 @@ from agents.items import (
     HandoffCallItem,
     HandoffOutputItem,
     MessageOutputItem,
+    ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
 )
@@ -96,6 +97,17 @@ def _create_message_item(agent: Agent) -> MessageOutputItem:
     return MessageOutputItem(agent=agent, raw_item=raw_item, type="message_output_item")
 
 
+def _create_tool_approval_item(agent: Agent) -> ToolApprovalItem:
+    """Create a mock ToolApprovalItem."""
+    raw_item = {
+        "type": "function_call",
+        "call_id": "call_tool_approve",
+        "name": "needs_approval",
+        "arguments": "{}",
+    }
+    return ToolApprovalItem(agent=agent, raw_item=raw_item)
+
+
 class TestHandoffHistoryDuplicationFix:
     """Tests for Issue #2171: nest_handoff_history duplication fix."""
 
@@ -128,6 +140,22 @@ class TestHandoffHistoryDuplicationFix:
         first_item = nested.input_history[0]
         assert isinstance(first_item, dict)
         assert "<CONVERSATION HISTORY>" in str(first_item.get("content", ""))
+
+    def test_tool_approval_items_are_skipped(self):
+        """Verify ToolApprovalItem does not break handoff history mapping."""
+        agent = _create_mock_agent()
+
+        handoff_data = HandoffInputData(
+            input_history=({"role": "user", "content": "Hello"},),
+            pre_handoff_items=(_create_tool_approval_item(agent),),
+            new_items=(),
+        )
+
+        nested = nest_handoff_history(handoff_data)
+
+        assert isinstance(nested.input_history, tuple)
+        assert len(nested.pre_handoff_items) == 0
+        assert nested.input_items == ()
 
     def test_new_items_handoff_output_is_filtered_for_input(self):
         """Verify HandoffOutputItem in new_items is filtered from input_items.

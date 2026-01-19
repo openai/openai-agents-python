@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ..items import (
     ItemHelpers,
     RunItem,
+    ToolApprovalItem,
     TResponseInputItem,
 )
 
@@ -79,6 +80,8 @@ def nest_handoff_history(
     pre_items_as_inputs: list[TResponseInputItem] = []
     filtered_pre_items: list[RunItem] = []
     for run_item in handoff_input_data.pre_handoff_items:
+        if isinstance(run_item, ToolApprovalItem):
+            continue
         plain_input = _run_item_to_plain_input(run_item)
         pre_items_as_inputs.append(plain_input)
         if _should_forward_pre_item(plain_input):
@@ -87,6 +90,8 @@ def nest_handoff_history(
     new_items_as_inputs: list[TResponseInputItem] = []
     filtered_input_items: list[RunItem] = []
     for run_item in handoff_input_data.new_items:
+        if isinstance(run_item, ToolApprovalItem):
+            continue
         plain_input = _run_item_to_plain_input(run_item)
         new_items_as_inputs.append(plain_input)
         if _should_forward_new_item(plain_input):
