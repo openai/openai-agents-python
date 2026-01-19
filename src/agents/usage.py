@@ -77,6 +77,28 @@ class RequestUsage:
     """Details about the output tokens for this individual request."""
 
 
+def _normalize_input_tokens_details(
+    v: InputTokensDetails | PromptTokensDetails | None,
+) -> InputTokensDetails:
+    """Converts None or PromptTokensDetails to InputTokensDetails."""
+    if v is None:
+        return InputTokensDetails(cached_tokens=0)
+    if isinstance(v, PromptTokensDetails):
+        return InputTokensDetails(cached_tokens=v.cached_tokens or 0)
+    return v
+
+
+def _normalize_output_tokens_details(
+    v: OutputTokensDetails | CompletionTokensDetails | None,
+) -> OutputTokensDetails:
+    """Converts None or CompletionTokensDetails to OutputTokensDetails."""
+    if v is None:
+        return OutputTokensDetails(reasoning_tokens=0)
+    if isinstance(v, CompletionTokensDetails):
+        return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
+    return v
+
+
 @dataclass
 class Usage:
     requests: int = 0
@@ -189,33 +211,6 @@ class Usage:
         elif other.request_usage_entries:
             # If the other Usage already has individual request breakdowns, merge them.
             self.request_usage_entries.extend(other.request_usage_entries)
-
-
-# --------------------------
-# Private helpers
-# --------------------------
-
-
-def _normalize_input_tokens_details(
-    v: InputTokensDetails | PromptTokensDetails | None,
-) -> InputTokensDetails:
-    """Converts None or PromptTokensDetails to InputTokensDetails."""
-    if v is None:
-        return InputTokensDetails(cached_tokens=0)
-    if isinstance(v, PromptTokensDetails):
-        return InputTokensDetails(cached_tokens=v.cached_tokens or 0)
-    return v
-
-
-def _normalize_output_tokens_details(
-    v: OutputTokensDetails | CompletionTokensDetails | None,
-) -> OutputTokensDetails:
-    """Converts None or CompletionTokensDetails to OutputTokensDetails."""
-    if v is None:
-        return OutputTokensDetails(reasoning_tokens=0)
-    if isinstance(v, CompletionTokensDetails):
-        return OutputTokensDetails(reasoning_tokens=v.reasoning_tokens or 0)
-    return v
 
 
 def _serialize_usage_details(details: Any, default: dict[str, int]) -> dict[str, Any]:
