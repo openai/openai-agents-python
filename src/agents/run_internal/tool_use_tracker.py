@@ -25,7 +25,9 @@ class AgentToolUseTracker:
     """Track which tools an agent has used to support model_settings resets."""
 
     def __init__(self) -> None:
+        # Name-keyed map is used for serialization/hydration only.
         self.agent_map: dict[str, set[str]] = {}
+        # Instance-keyed list is used for runtime checks.
         self.agent_to_tools: list[tuple[Agent[Any], list[str]]] = []
 
     def record_used_tools(self, agent: Agent[Any], tools: list[ToolRunFunction]) -> None:
@@ -45,8 +47,8 @@ class AgentToolUseTracker:
             self.agent_to_tools.append((agent, list(tool_names)))
 
     def has_used_tools(self, agent: Agent[Any]) -> bool:
-        agent_name = getattr(agent, "name", agent.__class__.__name__)
-        return bool(self.agent_map.get(agent_name))
+        existing = next((item for item in self.agent_to_tools if item[0] is agent), None)
+        return bool(existing and existing[1])
 
     def as_serializable(self) -> dict[str, list[str]]:
         if self.agent_map:
