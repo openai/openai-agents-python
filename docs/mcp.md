@@ -181,6 +181,10 @@ The constructor accepts additional options:
 
 ## 3. HTTP with SSE MCP servers
 
+!!! warning
+
+    The MCP project has deprecated the Server-Sent Events transport. Prefer Streamable HTTP or stdio for new integrations and keep SSE only for legacy servers.
+
 If the MCP server implements the HTTP with SSE transport, instantiate
 [`MCPServerSse`][agents.mcp.server.MCPServerSse]. Apart from the transport, the API is identical to the Streamable HTTP server.
 

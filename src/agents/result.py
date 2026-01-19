@@ -209,6 +209,9 @@ class RunResultStreaming(RunResultBase):
         default=None,
     )
 
+    _model_input_items: list[RunItem] = field(default_factory=list, repr=False)
+    """Filtered items used to build model input between streaming turns."""
+
     # Queues that the background run_loop writes to
     _event_queue: asyncio.Queue[StreamEvent | QueueCompleteSentinel] = field(
         default_factory=asyncio.Queue, repr=False

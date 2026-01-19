@@ -1,0 +1,174 @@
+name: Create release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g., 0.6.6)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Fetch tags
+        run: git fetch origin --tags --prune
+      - name: Ensure release branch does not exist
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v${RELEASE_VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            echo "Branch $branch already exists on origin." >&2
+            exit 1
+          fi
+      - name: Update version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["RELEASE_VERSION"]
+          if version.startswith("v"):
+              print("Version must not start with 'v' (use x.y.z...).", file=sys.stderr)
+              sys.exit(1)
+          if ".." in version:
+              print("Version contains consecutive dots (use x.y.z...).", file=sys.stderr)
+              sys.exit(1)
+          if not re.match(r"^\d+\.\d+(\.\d+)*([a-zA-Z0-9\.-]+)?$", version):
+              print(
+                  "Version must be semver-like (e.g., 0.6.6, 0.6.6-rc1, 0.6.6.dev1).",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          updated, count = re.subn(
+              r'(?m)^version\s*=\s*"[^\"]+"',
+              f'version = "{version}"',
+              text,
+          )
+          if count != 1:
+              print("Expected to update exactly one version line.", file=sys.stderr)
+              sys.exit(1)
+          if updated == text:
+              print("Version already set; no changes made.", file=sys.stderr)
+              sys.exit(1)
+          path.write_text(updated)
+          PY
+      - name: Sync dependencies
+        run: make sync
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Create release branch and commit
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v${RELEASE_VERSION}"
+          git checkout -b "$branch"
+          git add pyproject.toml uv.lock
+          if git diff --cached --quiet; then
+            echo "No changes to commit." >&2
+            exit 1
+          fi
+          git commit -m "Bump version to ${RELEASE_VERSION}"
+          git push --set-upstream origin "$branch"
+      - name: Prepare Codex output
+        id: codex-output
+        run: |
+          set -euo pipefail
+          output_dir=".tmp/codex/outputs"
+          output_file="${output_dir}/release-review.md"
+          mkdir -p "$output_dir"
+          echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
+      - name: Run Codex release review
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/release-review.md
+          output-file: ${{ steps.codex-output.outputs.output_file }}
+          safety-strategy: drop-sudo
+          sandbox: read-only
+      - name: Build PR body
+        env:
+          RELEASE_REVIEW_PATH: ${{ steps.codex-output.outputs.output_file }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+
+          report = pathlib.Path(os.environ["RELEASE_REVIEW_PATH"]).read_text()
+          pathlib.Path("pr-body.md").write_text(report)
+          PY
+      - name: Create or update PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          head_branch="release/v${RELEASE_VERSION}"
+          milestone_name="$(python - <<'PY'
+          import os
+          import re
+
+          version = os.environ.get("RELEASE_VERSION", "")
+          match = re.match(r"^(\d+)\.(\d+)", version)
+          if not match:
+              print("")
+          else:
+              print(f"{match.group(1)}.{match.group(2)}.x")
+          PY
+          )"
+          pr_number="$(gh pr list --head "$head_branch" --base "main" --json number --jq '.[0].number // empty')"
+          if [ -z "$pr_number" ]; then
+            create_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --base "main"
+              --head "$head_branch"
+              --label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              create_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr create "${create_args[@]}"; then
+              echo "PR create with label/milestone failed; retrying without them." >&2
+              gh pr create \
+                --title "Release ${RELEASE_VERSION}" \
+                --body-file pr-body.md \
+                --base "main" \
+                --head "$head_branch"
+            fi
+          else
+            edit_args=(
+              --title "Release ${RELEASE_VERSION}"
+              --body-file pr-body.md
+              --add-label "project"
+            )
+            if [ -n "$milestone_name" ]; then
+              edit_args+=(--milestone "$milestone_name")
+            fi
+            if ! gh pr edit "$pr_number" "${edit_args[@]}"; then
+              echo "PR edit with label/milestone failed; retrying without them." >&2
+              gh pr edit "$pr_number" --title "Release ${RELEASE_VERSION}" --body-file pr-body.md
+            fi
+          fi

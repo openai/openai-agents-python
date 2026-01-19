@@ -4,8 +4,22 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - ".codex/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
+      - ".github/codex/**"
+      - "*.md"
   pull_request:
     # All PRs, including stacked PRs
+    paths-ignore:
+      - "docs/**"
+      - ".codex/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE/**"
+      - ".github/codex/**"
+      - "*.md"
 
 env:
   UV_FROZEN: "1"
