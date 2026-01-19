@@ -61,7 +61,12 @@ from .items import (
 )
 from .lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from .logger import logger
-from .memory import Session, SessionInputCallback, is_openai_responses_compaction_aware_session
+from .memory import (
+    OpenAIResponsesCompactionArgs,
+    Session,
+    SessionInputCallback,
+    is_openai_responses_compaction_aware_session,
+)
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
@@ -717,6 +722,9 @@ class AgentRunner:
                         else turn_result.new_step_items
                     )
                     session_items.extend(session_items_for_turn)
+                    store_setting = current_agent.model_settings.resolve(
+                        run_config.model_settings
+                    ).store
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -757,6 +765,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
+                                    store=store_setting,
                                 )
 
                             return result
@@ -774,6 +783,7 @@ class AgentRunner:
                                         if turn_result.session_step_items is not None
                                         else turn_result.new_step_items,
                                         turn_result.model_response.response_id,
+                                        store=store_setting,
                                     )
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             current_span.finish(reset_current=True)
@@ -791,6 +801,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
+                                    store=store_setting,
                                 )
                         else:
                             raise AgentsException(
@@ -1255,6 +1266,9 @@ class AgentRunner:
                         else turn_result.new_step_items
                     )
                     streamed_result.new_items.extend(session_items_for_turn)
+                    store_setting = current_agent.model_settings.resolve(
+                        run_config.model_settings
+                    ).store
 
                     if server_conversation_tracker is not None:
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1276,6 +1290,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
+                                    store=store_setting,
                                 )
 
                         current_agent = turn_result.next_step.new_agent
@@ -1327,6 +1342,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
+                                    store=store_setting,
                                 )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
@@ -1345,6 +1361,7 @@ class AgentRunner:
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items,
                                     turn_result.model_response.response_id,
+                                    store=store_setting,
                                 )
 
                         # Check for soft cancel after turn completion
@@ -2075,6 +2092,7 @@ class AgentRunner:
         original_input: str | list[TResponseInputItem],
         new_items: list[RunItem],
         response_id: str | None = None,
+        store: bool | None = None,
     ) -> None:
         """
         Save the conversation turn to session.
@@ -2121,7 +2139,13 @@ class AgentRunner:
                     response_id,
                     deferred_response_id,
                 )
-            await session.run_compaction({"response_id": response_id, "force": force_compaction})
+            compaction_args: OpenAIResponsesCompactionArgs = {
+                "response_id": response_id,
+                "force": force_compaction,
+            }
+            if store is not None:
+                compaction_args["store"] = store
+            await session.run_compaction(compaction_args)
 
     @staticmethod
     async def _input_guardrail_tripwire_triggered_for_stream(
