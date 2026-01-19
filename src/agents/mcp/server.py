@@ -39,6 +39,13 @@ class RequireApprovalObject(TypedDict, total=False):
     never: RequireApprovalToolList
 
 
+RequireApprovalPolicy = Literal["always", "never"]
+RequireApprovalMapping = dict[str, RequireApprovalPolicy]
+RequireApprovalSetting = (
+    RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | None
+)
+
+
 T = TypeVar("T")
 
 if TYPE_CHECKING:
@@ -51,7 +58,7 @@ class MCPServer(abc.ABC):
     def __init__(
         self,
         use_structured_content: bool = False,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+        require_approval: RequireApprovalSetting = None,
     ):
         """
         Args:
@@ -121,7 +128,7 @@ class MCPServer(abc.ABC):
     @staticmethod
     def _normalize_needs_approval(
         *,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None,
+        require_approval: RequireApprovalSetting,
     ) -> (
         bool
         | dict[str, bool]
@@ -132,7 +139,7 @@ class MCPServer(abc.ABC):
         if require_approval is None:
             return False
 
-        def _to_bool(value: Literal["always", "never"]) -> bool:
+        def _to_bool(value: str) -> bool:
             return value == "always"
 
         if isinstance(require_approval, dict) and (
@@ -144,16 +151,19 @@ class MCPServer(abc.ABC):
                 always_entry.get("tool_names", []) if isinstance(always_entry, dict) else []
             )
             never_names = never_entry.get("tool_names", []) if isinstance(never_entry, dict) else []
-            mapping: dict[str, bool] = {}
+            tool_list_mapping: dict[str, bool] = {}
             for name in always_names:
-                mapping[str(name)] = True
+                tool_list_mapping[str(name)] = True
             for name in never_names:
-                mapping[str(name)] = False
-            return mapping
+                tool_list_mapping[str(name)] = False
+            return tool_list_mapping
 
         if isinstance(require_approval, dict):
-            # Unrecognized dict shape; default to no approvals.
-            return False
+            tool_mapping: dict[str, bool] = {}
+            for name, value in require_approval.items():
+                if isinstance(value, str) and value in ("always", "never"):
+                    tool_mapping[str(name)] = _to_bool(value)
+            return tool_mapping
 
         return _to_bool(require_approval)
 
@@ -196,7 +206,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+        require_approval: RequireApprovalSetting = None,
     ):
         """
         Args:
@@ -656,7 +666,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+        require_approval: RequireApprovalSetting = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -762,7 +772,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+        require_approval: RequireApprovalSetting = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -873,7 +883,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         max_retry_attempts: int = 0,
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
-        require_approval: Literal["always", "never"] | RequireApprovalObject | None = None,
+        require_approval: RequireApprovalSetting = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 

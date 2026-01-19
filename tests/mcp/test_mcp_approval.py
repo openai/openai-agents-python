@@ -62,3 +62,28 @@ async def test_mcp_require_approval_tool_lists():
     resumed = await resume_after_first_approval(agent, first, always_approve=True)
     assert resumed.final_output == "done"
     assert server.tool_calls == ["add"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_require_approval_tool_mapping():
+    """Tool-name require_approval mappings should map to needs_approval."""
+
+    require_approval = {"add": "always", "noop": "never"}
+    server = FakeMCPServer(require_approval=require_approval)
+    server.add_tool("add", {"type": "object", "properties": {}})
+
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("add", "{}"),
+        followup=[get_text_message("done")],
+    )
+
+    first = await Runner.run(agent, "call add")
+    assert first.interruptions, "add should require approval via require_approval mapping"
+
+    resumed = await resume_after_first_approval(agent, first, always_approve=True)
+    assert resumed.final_output == "done"
+    assert server.tool_calls == ["add"]
