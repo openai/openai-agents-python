@@ -248,7 +248,7 @@ class TestOpenAIResponsesCompactionSession:
         assert call_kwargs.get("input") == items
 
     @pytest.mark.asyncio
-    async def test_run_compaction_auto_remembers_store_setting(self) -> None:
+    async def test_run_compaction_auto_uses_default_store_when_unset(self) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
             cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
@@ -273,14 +273,14 @@ class TestOpenAIResponsesCompactionSession:
         )
 
         await session.run_compaction({"response_id": "resp-auto", "store": False, "force": True})
-        await session.run_compaction({"force": True})
+        await session.run_compaction({"response_id": "resp-stored", "force": True})
 
         assert mock_client.responses.compact.call_count == 2
         first_kwargs = mock_client.responses.compact.call_args_list[0].kwargs
         second_kwargs = mock_client.responses.compact.call_args_list[1].kwargs
         assert "previous_response_id" not in first_kwargs
-        assert "previous_response_id" not in second_kwargs
-        assert second_kwargs.get("input") == mock_compact_response.output
+        assert second_kwargs.get("previous_response_id") == "resp-stored"
+        assert "input" not in second_kwargs
 
     @pytest.mark.asyncio
     async def test_run_compaction_skips_when_below_threshold(self) -> None:

@@ -129,7 +129,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
-        self._last_store: bool | None = None
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -141,15 +140,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         """Run compaction using responses.compact API."""
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
-        if args and "store" in args:
-            self._last_store = args["store"]
-
         requested_mode = args.get("compaction_mode") if args else None
-        store: bool | None
-        if args and "store" in args:
-            store = args["store"]
-        else:
-            store = self._last_store
+        store = args.get("store") if args and "store" in args else None
         resolved_mode = _resolve_compaction_mode(
             requested_mode or self.compaction_mode,
             response_id=self._response_id,
@@ -225,13 +217,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
-        if store is not None:
-            self._last_store = store
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
         resolved_mode = _resolve_compaction_mode(
             self.compaction_mode,
             response_id=response_id,
-            store=store if store is not None else self._last_store,
+            store=store,
         )
         should_compact = self.should_trigger_compaction(
             {
