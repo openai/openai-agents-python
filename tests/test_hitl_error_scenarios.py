@@ -846,9 +846,11 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     """Agent-as-tool with needs_approval should still surface nested tool approvals."""
 
     nested_model, spanish_agent = make_model_and_agent(name="spanish_agent")
+    tool_calls: list[str] = []
 
     @function_tool(needs_approval=True)
     async def get_current_timestamp() -> str:
+        tool_calls.append("called")
         return "timestamp"
 
     spanish_agent.tools = [get_current_timestamp]
@@ -897,6 +899,13 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     resumed = await Runner.run(orchestrator, state)
     assert resumed.interruptions, "Nested agent tool approval should bubble up"
     assert resumed.interruptions[0].tool_name == "get_current_timestamp"
+
+    assert not tool_calls, "Nested tool should not execute before approval"
+
+    final_state = approve_first_interruption(resumed, always_approve=True)
+    final = await Runner.run(orchestrator, final_state)
+    assert final.final_output == "done"
+    assert tool_calls == ["called"]
 
 
 @pytest.mark.asyncio

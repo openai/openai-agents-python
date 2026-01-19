@@ -439,7 +439,7 @@ async def _select_function_tool_runs_for_resume(
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     context_wrapper: RunContextWrapper[Any],
     needs_approval_checker: Callable[[ToolRunFunction], Awaitable[bool]],
-    output_exists_checker: Callable[[str], bool],
+    output_exists_checker: Callable[[ToolRunFunction], bool],
     record_rejection: Callable[[str | None, ResponseFunctionToolCall], None],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
     pending_item_builder: Callable[[ToolRunFunction], ToolApprovalItem],
@@ -448,7 +448,7 @@ async def _select_function_tool_runs_for_resume(
     selected: list[ToolRunFunction] = []
     for run in runs:
         call_id = run.tool_call.call_id
-        if call_id and output_exists_checker(call_id):
+        if output_exists_checker(run):
             continue
 
         approval_status = context_wrapper.get_approval_status(

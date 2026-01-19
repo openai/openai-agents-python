@@ -19,7 +19,8 @@ from openai.types.responses.response_input_item_param import (
 from openai.types.responses.response_input_param import McpApprovalResponse
 from openai.types.responses.response_output_item import McpApprovalRequest
 
-from ..agent import Agent, consume_agent_tool_run_result
+from ..agent import Agent
+from ..agent_tool_state import consume_agent_tool_run_result, peek_agent_tool_run_result
 from ..editor import ApplyPatchOperation, ApplyPatchResult
 from ..exceptions import (
     AgentsException,
@@ -875,7 +876,7 @@ async def execute_function_tool_calls(
 
             function_tool_results.append(result)
         else:
-            nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+            nested_run_result = peek_agent_tool_run_result(tool_run.tool_call)
             nested_interruptions: list[ToolApprovalItem] = []
             if nested_run_result:
                 nested_interruptions = (
@@ -883,6 +884,16 @@ async def execute_function_tool_calls(
                     if hasattr(nested_run_result, "interruptions")
                     else []
                 )
+            if nested_run_result and not nested_interruptions:
+                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+            elif nested_run_result is None:
+                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                if nested_run_result:
+                    nested_interruptions = (
+                        nested_run_result.interruptions
+                        if hasattr(nested_run_result, "interruptions")
+                        else []
+                    )
 
             function_tool_results.append(
                 FunctionToolResult(

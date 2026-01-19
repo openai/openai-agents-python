@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal, cast
 
 from openai.types.responses import (
@@ -27,6 +27,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
+from ..agent_tool_state import drop_agent_tool_run_result, peek_agent_tool_run_result
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff, HandoffInputData, nest_handoff_history
 from ..items import (
@@ -670,6 +671,7 @@ async def resolve_interrupted_turn(
 
     rejected_function_outputs: list[RunItem] = []
     rejected_function_call_ids: set[str] = set()
+    rerun_function_call_ids: set[str] = set()
     pending_interruptions: list[ToolApprovalItem] = []
     pending_interruption_keys: set[str] = set()
 
@@ -730,7 +732,40 @@ async def resolve_interrupted_turn(
     def _computer_output_exists(call_id: str) -> bool:
         return _has_output_item(call_id, "computer_call_output")
 
-    def _function_output_exists(call_id: str) -> bool:
+    def _nested_interruptions_status(
+        interruptions: Sequence[ToolApprovalItem],
+    ) -> Literal["approved", "pending", "rejected"]:
+        has_pending = False
+        for interruption in interruptions:
+            call_id = extract_tool_call_id(interruption.raw_item)
+            if not call_id:
+                has_pending = True
+                continue
+            status = context_wrapper.get_approval_status(
+                interruption.tool_name or "", call_id, existing_pending=interruption
+            )
+            if status is False:
+                return "rejected"
+            if status is None:
+                has_pending = True
+        return "pending" if has_pending else "approved"
+
+    def _function_output_exists(run: ToolRunFunction) -> bool:
+        call_id = extract_tool_call_id(run.tool_call)
+        if not call_id:
+            return False
+
+        pending_run_result = peek_agent_tool_run_result(run.tool_call)
+        if pending_run_result and getattr(pending_run_result, "interruptions", None):
+            status = _nested_interruptions_status(pending_run_result.interruptions)
+            if status == "approved":
+                rerun_function_call_ids.add(call_id)
+                return False
+            if status == "rejected":
+                drop_agent_tool_run_result(run.tool_call)
+                return True
+            return True
+
         return _has_output_item(call_id, "function_call_output")
 
     def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
@@ -970,6 +1005,18 @@ async def resolve_interrupted_turn(
                 and (
                     extract_tool_call_id(getattr(item, "raw_item", None))
                     in rejected_function_call_ids
+                )
+            )
+        ]
+
+    if rerun_function_call_ids:
+        pre_step_items = [
+            item
+            for item in pre_step_items
+            if not (
+                item.type == "tool_call_output_item"
+                and (
+                    extract_tool_call_id(getattr(item, "raw_item", None)) in rerun_function_call_ids
                 )
             )
         ]

@@ -11,6 +11,11 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 from .agent_output import AgentOutputSchemaBase
+from .agent_tool_state import (
+    consume_agent_tool_run_result,
+    peek_agent_tool_run_result,
+    record_agent_tool_run_result,
+)
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .logger import logger
@@ -39,59 +44,14 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 
+    from .items import ToolApprovalItem
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
     from .result import RunResult, RunResultStreaming
     from .run import RunConfig
+    from .run_state import RunState
     from .stream_events import StreamEvent
-
-# Ephemeral maps linking tool call objects to nested agent results within the same run.
-# Store by object identity to avoid collisions when call IDs repeat across tool calls.
-_agent_tool_run_results_by_obj: dict[int, RunResult | RunResultStreaming] = {}
-_agent_tool_run_results_by_call_id: dict[str, set[int]] = {}
-
-
-def _index_agent_tool_run_result(tool_call_id: str, tool_call_obj_id: int) -> None:
-    """Track tool call objects by call ID for fallback lookup."""
-    _agent_tool_run_results_by_call_id.setdefault(tool_call_id, set()).add(tool_call_obj_id)
-
-
-def _drop_agent_tool_run_result(tool_call_id: str | None, tool_call_obj_id: int) -> None:
-    """Remove a tool call object from the fallback index."""
-    if tool_call_id is None:
-        return
-    call_ids = _agent_tool_run_results_by_call_id.get(tool_call_id)
-    if not call_ids:
-        return
-    call_ids.discard(tool_call_obj_id)
-    if not call_ids:
-        _agent_tool_run_results_by_call_id.pop(tool_call_id, None)
-
-
-def consume_agent_tool_run_result(
-    tool_call: ResponseFunctionToolCall,
-) -> RunResult | RunResultStreaming | None:
-    """Return and drop the stored nested agent run result for the given tool call ID."""
-    obj_id = id(tool_call)
-    run_result = _agent_tool_run_results_by_obj.pop(obj_id, None)
-    if run_result is not None:
-        _drop_agent_tool_run_result(tool_call.call_id, obj_id)
-        return run_result
-
-    call_id = tool_call.call_id
-    if not call_id:
-        return None
-
-    candidate_ids = _agent_tool_run_results_by_call_id.get(call_id)
-    if not candidate_ids:
-        return None
-    if len(candidate_ids) != 1:
-        return None
-
-    candidate_id = next(iter(candidate_ids))
-    _agent_tool_run_results_by_call_id.pop(call_id, None)
-    return _agent_tool_run_results_by_obj.pop(candidate_id, None)
 
 
 @dataclass
@@ -515,18 +475,52 @@ class Agent(AgentBase, Generic[TContext]):
             else:
                 nested_context = context
             run_result: RunResult | RunResultStreaming
+            resume_state: RunState | None = None
+
+            def _nested_approvals_status(
+                interruptions: list[ToolApprovalItem],
+            ) -> Literal["approved", "pending", "rejected"]:
+                has_pending = False
+                for interruption in interruptions:
+                    call_id = interruption._extract_call_id()
+                    if not call_id:
+                        has_pending = True
+                        continue
+                    status = context.get_approval_status(
+                        interruption.tool_name or "", call_id, existing_pending=interruption
+                    )
+                    if status is False:
+                        return "rejected"
+                    if status is None:
+                        has_pending = True
+                return "pending" if has_pending else "approved"
+
+            if isinstance(context, ToolContext) and context.tool_call is not None:
+                pending_run_result = peek_agent_tool_run_result(context.tool_call)
+                if pending_run_result and getattr(pending_run_result, "interruptions", None):
+                    status = _nested_approvals_status(pending_run_result.interruptions)
+                    if status == "approved":
+                        resume_state = pending_run_result.to_state()
+                        if resume_state._context is not None:
+                            resume_state._context._approvals = context._approvals
+                        consume_agent_tool_run_result(context.tool_call)
+                    elif status == "rejected":
+                        consume_agent_tool_run_result(context.tool_call)
+                        if custom_output_extractor:
+                            return await custom_output_extractor(pending_run_result)
+                        return pending_run_result.final_output
 
             if on_stream is not None:
                 run_result_streaming = Runner.run_streamed(
                     starting_agent=cast(Agent[Any], self),
-                    input=input,
-                    context=cast(Any, nested_context),
+                    input=resume_state or input,
+                    context=None if resume_state is not None else cast(Any, nested_context),
                     run_config=run_config,
                     max_turns=resolved_max_turns,
                     hooks=hooks,
-                    previous_response_id=previous_response_id,
-                    conversation_id=conversation_id,
-                    session=session,
+                    previous_response_id=None if resume_state is not None else previous_response_id,
+                    conversation_id=None if resume_state is not None else conversation_id,
+                    session=None if resume_state is not None else session,
                 )
                 # Dispatch callbacks in the background so slow handlers do not block
                 # event consumption.
@@ -581,23 +575,19 @@ class Agent(AgentBase, Generic[TContext]):
             else:
                 run_result = await Runner.run(
                     starting_agent=cast(Agent[Any], self),
-                    input=input,
-                    context=cast(Any, nested_context),
+                    input=resume_state or input,
+                    context=None if resume_state is not None else cast(Any, nested_context),
                     run_config=run_config,
                     max_turns=resolved_max_turns,
                     hooks=hooks,
-                    previous_response_id=previous_response_id,
-                    conversation_id=conversation_id,
-                    session=session,
+                    previous_response_id=None if resume_state is not None else previous_response_id,
+                    conversation_id=None if resume_state is not None else conversation_id,
+                    session=None if resume_state is not None else session,
                 )
 
             # Store the run result by tool call identity so nested interruptions can be read later.
             if isinstance(context, ToolContext) and context.tool_call is not None:
-                tool_call_id = context.tool_call_id
-                tool_call_obj_id = id(context.tool_call)
-                _agent_tool_run_results_by_obj[tool_call_obj_id] = run_result
-                if isinstance(tool_call_id, str):
-                    _index_agent_tool_run_result(tool_call_id, tool_call_obj_id)
+                record_agent_tool_run_result(context.tool_call, run_result)
 
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)
