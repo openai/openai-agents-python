@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from ..exceptions import UserError
-from ..items import HandoffOutputItem, ItemHelpers, RunItem, TResponseInputItem, ToolCallOutputItem
+from ..items import HandoffOutputItem, ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
 from ..logger import logger
 from ..memory import (
     OpenAIResponsesCompactionArgs,
@@ -160,6 +160,7 @@ async def save_result_to_session(
     original_input: str | list[TResponseInputItem],
     new_items: list[RunItem],
     run_state: RunState | None = None,
+    *,
     response_id: str | None = None,
     store: bool | None = None,
 ) -> int:

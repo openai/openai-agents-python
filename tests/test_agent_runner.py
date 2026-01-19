@@ -1122,7 +1122,6 @@ async def test_save_result_to_session_preserves_function_outputs():
         [original_item],
         [cast(RunItem, dummy_run_item)],
         None,
-        None,
     )
 
     assert len(session.saved_items) == 2
@@ -1165,7 +1164,6 @@ async def test_save_result_to_session_does_not_increment_counter_when_nothing_sa
         [],
         cast(list[RunItem], [approval_item]),
         run_state,
-        None,
     )
 
     assert run_state._current_turn_persisted_item_count == 0

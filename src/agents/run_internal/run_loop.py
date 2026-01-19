@@ -413,7 +413,7 @@ async def start_streaming(
                                     [],
                                     list(session_items_for_turn),
                                     streamed_result._state,
-                                    turn_result.model_response.response_id,
+                                    response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
@@ -476,7 +476,7 @@ async def start_streaming(
                                     [],
                                     list(items_for_session),
                                     streamed_result._state,
-                                    turn_result.model_response.response_id,
+                                    response_id=turn_result.model_response.response_id,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
                                     streamed_result._state._current_turn_persisted_item_count
@@ -661,7 +661,7 @@ async def start_streaming(
                                 [],
                                 list(items_for_session),
                                 run_state,
-                                turn_result.model_response.response_id,
+                                response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                             )
                     current_agent = turn_result.next_step.new_agent
@@ -712,7 +712,7 @@ async def start_streaming(
                                 [],
                                 list(items_for_session),
                                 streamed_result._state,
-                                turn_result.model_response.response_id,
+                                response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                             )
                             streamed_result._current_turn_persisted_item_count = (
@@ -737,7 +737,7 @@ async def start_streaming(
                                 [],
                                 list(items_for_session),
                                 streamed_result._state,
-                                turn_result.model_response.response_id,
+                                response_id=turn_result.model_response.response_id,
                                 store=store_setting,
                             )
                             streamed_result._current_turn_persisted_item_count = (
@@ -1086,7 +1086,11 @@ async def run_single_turn_streamed(
         event_queue=streamed_result._event_queue,
     )
 
-    items_to_filter = single_step_result.new_step_items
+    items_to_filter = (
+        single_step_result.session_step_items
+        if single_step_result.session_step_items is not None
+        else single_step_result.new_step_items
+    )
 
     if emitted_tool_call_ids:
         items_to_filter = [

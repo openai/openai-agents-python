@@ -468,17 +468,17 @@ class AgentRunner:
             return result
 
         if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
-            session_items: list[TResponseInputItem] | None = None
+            session_input_items: list[TResponseInputItem] | None = None
             if session is not None:
                 try:
-                    session_items = await session.get_items()
+                    session_input_items = await session.get_items()
                 except Exception:
-                    session_items = None
+                    session_input_items = None
             server_conversation_tracker.hydrate_from_state(
                 original_input=run_state._original_input,
                 generated_items=run_state._generated_items,
                 model_responses=run_state._model_responses,
-                session_items=session_items,
+                session_items=session_input_items,
             )
 
         tool_use_tracker = AgentToolUseTracker()
@@ -651,7 +651,7 @@ class AgentRunner:
                                     [],
                                     list(items_for_session),
                                     None,
-                                    turn_result.model_response.response_id,
+                                    response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                 )
                                 if run_state is not None:
@@ -772,7 +772,7 @@ class AgentRunner:
                                             else turn_result.new_step_items
                                         ),
                                         run_state,
-                                        turn_result.model_response.response_id,
+                                        response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
                                 result._original_input = copy_input_items(original_input)
@@ -1052,7 +1052,7 @@ class AgentRunner:
                                         [],
                                         items_to_save_turn,
                                         None,
-                                        turn_result.model_response.response_id,
+                                        response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
                                     run_state._current_turn_persisted_item_count += saved_count
@@ -1062,7 +1062,7 @@ class AgentRunner:
                                         [],
                                         items_to_save_turn,
                                         run_state,
-                                        turn_result.model_response.response_id,
+                                        response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
 
@@ -1110,19 +1110,25 @@ class AgentRunner:
                                 guardrail_result.output.tripwire_triggered
                                 for guardrail_result in input_guardrail_results
                             ):
-                                items_for_session = (
-                                    turn_result.session_step_items
-                                    if turn_result.session_step_items is not None
-                                    else turn_result.new_step_items
+                                already_persisted = (
+                                    session_persistence_enabled
+                                    and run_state is not None
+                                    and run_state._current_turn_persisted_item_count > 0
                                 )
-                                await save_result_to_session(
-                                    session,
-                                    [],
-                                    list(items_for_session),
-                                    run_state,
-                                    turn_result.model_response.response_id,
-                                    store=store_setting,
-                                )
+                                if not already_persisted:
+                                    items_for_session = (
+                                        turn_result.session_step_items
+                                        if turn_result.session_step_items is not None
+                                        else turn_result.new_step_items
+                                    )
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        list(items_for_session),
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
                             result._original_input = copy_input_items(original_input)
                             return _finalize_conversation_tracking(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
@@ -1146,7 +1152,7 @@ class AgentRunner:
                                             else turn_result.new_step_items
                                         ),
                                         run_state,
-                                        turn_result.model_response.response_id,
+                                        response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
                             if not model_responses or (
@@ -1208,19 +1214,25 @@ class AgentRunner:
                                 guardrail_result.output.tripwire_triggered
                                 for guardrail_result in input_guardrail_results
                             ):
-                                items_for_session = (
-                                    turn_result.session_step_items
-                                    if turn_result.session_step_items is not None
-                                    else turn_result.new_step_items
+                                already_persisted = (
+                                    session_persistence_enabled
+                                    and run_state is not None
+                                    and run_state._current_turn_persisted_item_count > 0
                                 )
-                                await save_result_to_session(
-                                    session,
-                                    [],
-                                    list(items_for_session),
-                                    run_state,
-                                    turn_result.model_response.response_id,
-                                    store=store_setting,
-                                )
+                                if not already_persisted:
+                                    items_for_session = (
+                                        turn_result.session_step_items
+                                        if turn_result.session_step_items is not None
+                                        else turn_result.new_step_items
+                                    )
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        list(items_for_session),
+                                        run_state,
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
+                                    )
                             continue
                         else:
                             raise AgentsException(
