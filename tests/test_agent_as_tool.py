@@ -20,10 +20,13 @@ from agents import (
     Runner,
     Session,
     SessionSettings,
+    ToolApprovalItem,
     TResponseInputItem,
 )
+from agents.agent_tool_state import record_agent_tool_run_result
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
+from tests.utils.hitl import make_function_tool_call
 
 
 class BoolCtx(BaseModel):
@@ -381,6 +384,69 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
     assert output == "custom output"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_rejected_nested_approval_uses_pending_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejected nested approvals should short-circuit to the pending run result."""
+
+    agent = Agent(name="outer")
+    tool_call = make_function_tool_call(
+        "outer_tool",
+        call_id="outer-1",
+        arguments='{"input": "hello"}',
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="outer_tool",
+        tool_call_id="outer-1",
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+
+    inner_call = make_function_tool_call("inner_tool", call_id="inner-1")
+    approval_item = ToolApprovalItem(agent=agent, raw_item=inner_call)
+
+    class DummyState:
+        def __init__(self) -> None:
+            self._context = None
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.interruptions = [approval_item]
+            self.final_output = "rejected"
+
+        def to_state(self) -> DummyState:
+            return DummyState()
+
+    pending_result = DummyResult()
+    record_agent_tool_run_result(tool_call, cast(Any, pending_result))
+    tool_context.reject_tool(approval_item)
+
+    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Runner.run should not be called for rejected nested approvals.")
+
+    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+
+    async def extractor(result: Any) -> str:
+        assert result is pending_result
+        return "from_pending"
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="outer_tool",
+            tool_description="Outer agent tool",
+            custom_output_extractor=extractor,
+            is_enabled=True,
+        ),
+    )
+
+    output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
+
+    assert output == "from_pending"
 
 
 @pytest.mark.asyncio
