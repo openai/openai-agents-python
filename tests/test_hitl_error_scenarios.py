@@ -1073,8 +1073,8 @@ async def test_rebuild_function_runs_handles_object_pending_and_rejections() -> 
 
 
 @pytest.mark.asyncio
-async def test_resume_skips_non_hitl_function_calls() -> None:
-    """Non-HITL function calls should not re-run when resuming unrelated approvals."""
+async def test_resume_executes_non_hitl_function_calls_without_output() -> None:
+    """Non-HITL function calls should run on resume when no output exists."""
 
     @function_tool
     def already_ran() -> str:
@@ -1109,7 +1109,10 @@ async def test_resume_skips_non_hitl_function_calls() -> None:
     )
 
     assert isinstance(result.next_step, NextStepRunAgain)
-    assert not result.new_step_items, "Non-HITL tools should not be executed again on resume"
+    assert any(
+        isinstance(item, ToolCallOutputItem) and item.output == "done"
+        for item in result.new_step_items
+    ), "Non-HITL tools should run on resume when output is missing"
 
 
 @pytest.mark.asyncio

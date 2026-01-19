@@ -468,6 +468,7 @@ async def _select_function_tool_runs_for_resume(
             continue
 
         if not requires_approval:
+            selected.append(run)
             continue
 
         if approval_status is None:
