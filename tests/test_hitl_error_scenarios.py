@@ -318,6 +318,14 @@ async def test_nested_agent_tool_reuses_rejection_without_reprompt() -> None:
 
     third = await Runner.run(outer_agent, state_after_inner_reject)
     assert not third.interruptions, "rejected inner tool call should not re-prompt on retry"
+    rejection_outputs = [
+        item
+        for item in third.new_items
+        if isinstance(item, ToolCallOutputItem)
+        and item.output == HITL_REJECTION_MSG
+        and extract_tool_call_id(item.raw_item) == "outer-1"
+    ]
+    assert rejection_outputs, "Rejected nested approval should yield rejection output"
 
 
 @pytest.mark.asyncio
@@ -1539,6 +1547,70 @@ async def test_rebuild_function_runs_handles_pending_and_rejections() -> None:
         if isinstance(item, ToolCallOutputItem) and item.output == HITL_REJECTION_MSG
     ]
     assert rejection_outputs, "Rejected function call should emit rejection output"
+
+
+@pytest.mark.parametrize(
+    "raw_item, tool_name",
+    [
+        (
+            make_shell_call(
+                "call_shell_pending_rebuild",
+                id_value="shell_pending_rebuild",
+                commands=["echo pending"],
+            ),
+            "shell",
+        ),
+        (cast(Any, make_apply_patch_dict("call_apply_pending_rebuild")), "apply_patch"),
+        (
+            {
+                "type": "function_call",
+                "name": "missing_tool",
+                "call_id": "call_missing_tool",
+                "arguments": "{}",
+            },
+            "missing_tool",
+        ),
+    ],
+    ids=["shell", "apply_patch", "missing_function_tool"],
+)
+@pytest.mark.asyncio
+async def test_rebuild_preserves_unmatched_pending_approvals(
+    raw_item: Any,
+    tool_name: str,
+) -> None:
+    """Unmatched pending approvals should remain interruptions when rebuilding."""
+    _model, agent = make_model_and_agent()
+    approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
+    run_state = make_state_with_interruptions(agent, [approval_item])
+    context_wrapper = make_context_wrapper()
+
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert approval_item in result.next_step.interruptions
 
 
 @pytest.mark.asyncio

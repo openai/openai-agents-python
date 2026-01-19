@@ -641,6 +641,8 @@ async def resolve_interrupted_turn(
     def _record_function_rejection(
         call_id: str | None, tool_call: ResponseFunctionToolCall
     ) -> None:
+        if isinstance(call_id, str) and call_id in rejected_function_call_ids:
+            return
         rejected_function_outputs.append(function_rejection_item(agent, tool_call))
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
@@ -763,6 +765,7 @@ async def resolve_interrupted_turn(
                 return False
             if status == "rejected":
                 drop_agent_tool_run_result(run.tool_call)
+                _record_function_rejection(call_id, run.tool_call)
                 return True
             return True
 
@@ -792,15 +795,30 @@ async def resolve_interrupted_turn(
                 if existing_call_id:
                     existing_pending_call_ids.add(existing_call_id)
         rebuilt_runs: list[ToolRunFunction] = []
+
+        def _add_unmatched_pending(approval: ToolApprovalItem) -> None:
+            call_id = extract_tool_call_id(approval.raw_item)
+            if not call_id:
+                _add_pending_interruption(approval)
+                return
+            tool_name = approval.tool_name or ""
+            approval_status = context_wrapper.get_approval_status(
+                tool_name, call_id, existing_pending=approval
+            )
+            if approval_status is None:
+                _add_pending_interruption(approval)
+
         for approval in pending_approval_items:
             if not isinstance(approval, ToolApprovalItem):
                 continue
             raw = approval.raw_item
             raw_type = get_mapping_or_attr(raw, "type")
             if raw_type != "function_call":
+                _add_unmatched_pending(approval)
                 continue
             name = get_mapping_or_attr(raw, "name")
             if not (isinstance(name, str) and name in tool_map):
+                _add_unmatched_pending(approval)
                 continue
 
             rebuilt_call_id: str | None
@@ -815,6 +833,7 @@ async def resolve_interrupted_turn(
                 arguments = get_mapping_or_attr(raw, "arguments") or "{}"
                 status = get_mapping_or_attr(raw, "status")
                 if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
+                    _add_unmatched_pending(approval)
                     continue
                 valid_status: Literal["in_progress", "completed", "incomplete"] | None = None
                 if isinstance(status, str) and status in (
@@ -832,6 +851,7 @@ async def resolve_interrupted_turn(
                 )
 
             if not (isinstance(rebuilt_call_id, str) and isinstance(arguments, str)):
+                _add_unmatched_pending(approval)
                 continue
 
             approval_status = context_wrapper.get_approval_status(
