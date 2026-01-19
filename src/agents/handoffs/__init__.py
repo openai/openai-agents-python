@@ -62,6 +62,13 @@ class HandoffInputData:
     later on, it is optional for backwards compatibility.
     """
 
+    input_items: tuple[RunItem, ...] | None = None
+    """
+    Items to include in the next agent's input. When set, these items are used instead of
+    new_items for building the input to the next agent. This allows filtering duplicates
+    from agent input while preserving all items in new_items for session history.
+    """
+
     def clone(self, **kwargs: Any) -> HandoffInputData:
         """
         Make a copy of the handoff input data, with the given arguments changed. For example, you
@@ -117,10 +124,11 @@ class Handoff(Generic[TContext, TAgent]):
     filter inputs (for example, to remove older inputs or remove tools from existing inputs). The
     function receives the entire conversation history so far, including the input item that
     triggered the handoff and a tool call output item representing the handoff tool's output. You
-    are free to modify the input history or new items as you see fit. The next agent that runs will
-    receive ``handoff_input_data.all_items``. IMPORTANT: in streaming mode, we will not stream
-    anything as a result of this function. The items generated before will already have been
-    streamed.
+    are free to modify the input history or new items as you see fit. The next agent receives the
+    input history plus ``input_items`` when provided, otherwise it receives ``new_items``. Use
+    ``input_items`` to filter model input while keeping ``new_items`` intact for session history.
+    IMPORTANT: in streaming mode, we will not stream anything as a result of this function. The
+    items generated before will already have been streamed.
     """
 
     nest_handoff_history: bool | None = None

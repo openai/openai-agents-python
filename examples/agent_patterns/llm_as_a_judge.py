@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from agents import Agent, ItemHelpers, Runner, TResponseInputItem, trace
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """
 This example shows the LLM as a judge pattern. The first agent generates an outline for a story.
@@ -39,10 +40,16 @@ evaluator = Agent[None](
 
 
 async def main() -> None:
-    msg = input("What kind of story would you like to hear? ")
+    msg = input_with_fallback(
+        "What kind of story would you like to hear? ",
+        "A detective story in space.",
+    )
     input_items: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
     latest_outline: str | None = None
+    auto_mode = is_auto_mode()
+    max_rounds = 3 if auto_mode else None
+    rounds = 0
 
     # We'll run the entire workflow in a single trace
     with trace("LLM as a judge"):
@@ -64,6 +71,12 @@ async def main() -> None:
             if result.score == "pass":
                 print("Story outline is good enough, exiting.")
                 break
+
+            if auto_mode:
+                rounds += 1
+                if max_rounds is not None and rounds >= max_rounds:
+                    print("Auto mode: stopping after limited rounds.")
+                    break
 
             print("Re-running with feedback")
 

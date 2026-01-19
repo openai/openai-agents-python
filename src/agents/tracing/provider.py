@@ -196,10 +196,10 @@ class TraceProvider(ABC):
 class DefaultTraceProvider(TraceProvider):
     def __init__(self) -> None:
         self._multi_processor = SynchronousMultiTracingProcessor()
-        self._disabled = os.environ.get("OPENAI_AGENTS_DISABLE_TRACING", "false").lower() in (
-            "true",
-            "1",
-        )
+        # Lazily read env flag on first use to honor env set after import but before first trace.
+        self._env_disabled: bool | None = None
+        self._manual_disabled: bool | None = None
+        self._disabled = False
 
     def register_processor(self, processor: TracingProcessor):
         """
@@ -229,7 +229,27 @@ class DefaultTraceProvider(TraceProvider):
         """
         Set whether tracing is disabled.
         """
-        self._disabled = disabled
+        self._manual_disabled = disabled
+        self._refresh_disabled_flag()
+
+    def _refresh_disabled_flag(self) -> None:
+        """Refresh disabled flag from cached env value and manual override.
+
+        The env flag is read once on first use to avoid surprises mid-run; further env
+        changes are ignored after the manual flag is set via set_disabled, which always
+        takes precedence over the env value.
+        """
+        if self._env_disabled is None:
+            self._env_disabled = os.environ.get(
+                "OPENAI_AGENTS_DISABLE_TRACING", "false"
+            ).lower() in (
+                "true",
+                "1",
+            )
+        if self._manual_disabled is None:
+            self._disabled = bool(self._env_disabled)
+        else:
+            self._disabled = self._manual_disabled
 
     def time_iso(self) -> str:
         """Return the current time in ISO 8601 format."""
@@ -259,6 +279,7 @@ class DefaultTraceProvider(TraceProvider):
         """
         Create a new trace.
         """
+        self._refresh_disabled_flag()
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating trace {name}")
             return NoOpTrace()
@@ -286,6 +307,7 @@ class DefaultTraceProvider(TraceProvider):
         """
         Create a new span.
         """
+        self._refresh_disabled_flag()
         tracing_api_key: str | None = None
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating span {span_data}")

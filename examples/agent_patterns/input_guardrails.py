@@ -13,6 +13,7 @@ from agents import (
     TResponseInputItem,
     input_guardrail,
 )
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """
 This example shows how to use guardrails.
@@ -68,9 +69,13 @@ async def main():
     )
 
     input_data: list[TResponseInputItem] = []
+    auto_mode = is_auto_mode()
 
     while True:
-        user_input = input("Enter a message: ")
+        user_input = input_with_fallback(
+            "Enter a message: ",
+            "What's the capital of California?",
+        )
         input_data.append(
             {
                 "role": "user",
@@ -93,6 +98,8 @@ async def main():
                     "content": message,
                 }
             )
+        if auto_mode:
+            break
 
     # Sample run:
     # Enter a message: What's the capital of California?

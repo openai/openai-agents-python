@@ -1,10 +1,12 @@
 # Tools
 
-Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. There are three classes of tools in the Agent SDK:
+Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
--   Hosted tools: these run on LLM servers alongside the AI models. OpenAI offers retrieval, web search and computer use as hosted tools.
--   Function calling: these allow you to use any Python function as a tool.
--   Agents as tools: this allows you to use an agent as a tool, allowing Agents to call other agents without handing off to them.
+-   Hosted OpenAI tools: run alongside the model on OpenAI servers.
+-   Local runtime tools: run in your environment (computer use, shell, apply patch).
+-   Function calling: wrap any Python function as a tool.
+-   Agents as tools: expose an agent as a callable tool without a full handoff.
+-   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
 
 ## Hosted tools
 
@@ -12,11 +14,9 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 
 -   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
 -   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
--   The [`ComputerTool`][agents.tool.ComputerTool] allows automating computer use tasks.
 -   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
--   The [`LocalShellTool`][agents.tool.LocalShellTool] runs shell commands on your machine.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -35,6 +35,54 @@ agent = Agent(
 async def main():
     result = await Runner.run(agent, "Which coffee shop should I go to, taking into account my preferences and the weather today in SF?")
     print(result.final_output)
+```
+
+## Local runtime tools
+
+Local runtime tools execute in your environment and require you to supply implementations:
+
+-   [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
+-   [`ShellTool`][agents.tool.ShellTool] or [`LocalShellTool`][agents.tool.LocalShellTool]: provide a shell executor to run commands.
+-   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
+
+```python
+from agents import Agent, ApplyPatchTool, ShellTool
+from agents.computer import AsyncComputer
+from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEditor
+
+
+class NoopComputer(AsyncComputer):
+    environment = "browser"
+    dimensions = (1024, 768)
+    async def screenshot(self): return ""
+    async def click(self, x, y, button): ...
+    async def double_click(self, x, y): ...
+    async def scroll(self, x, y, scroll_x, scroll_y): ...
+    async def type(self, text): ...
+    async def wait(self): ...
+    async def move(self, x, y): ...
+    async def keypress(self, keys): ...
+    async def drag(self, path): ...
+
+
+class NoopEditor(ApplyPatchEditor):
+    async def create_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def update_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def delete_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+
+
+async def run_shell(request):
+    return "shell output"
+
+
+agent = Agent(
+    name="Local tools agent",
+    tools=[
+        ShellTool(executor=run_shell),
+        ApplyPatchTool(editor=NoopEditor()),
+        # ComputerTool expects a Computer/AsyncComputer implementation; omitted here for brevity.
+    ],
+)
 ```
 
 ## Function tools
@@ -416,6 +464,44 @@ Disabled tools are completely hidden from the LLM at runtime, making this useful
 -   Environment-specific tool availability (dev vs prod)
 -   A/B testing different tool configurations
 -   Dynamic tool filtering based on runtime state
+
+## Experimental: Codex tool
+
+The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools)
+during a tool call. This surface is experimental and may change.
+
+```python
+from agents import Agent
+from agents.extensions.experimental.codex import ThreadOptions, codex_tool
+
+agent = Agent(
+    name="Codex Agent",
+    instructions="Use the codex tool to inspect the workspace and answer the question.",
+    tools=[
+        codex_tool(
+            sandbox_mode="workspace-write",
+            working_directory="/path/to/repo",
+            default_thread_options=ThreadOptions(
+                model="gpt-5.2-codex",
+                network_access_enabled=True,
+                web_search_enabled=False,
+            ),
+            persist_session=True,
+        )
+    ],
+)
+```
+
+What to know:
+
+-   Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
+-   Inputs: tool calls must include at least one item in `inputs` with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`.
+-   Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
+-   Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
+-   Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
+-   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
+-   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
+-   See `examples/tools/codex.py` for a complete runnable sample.
 
 ## Handling errors in function tools
 

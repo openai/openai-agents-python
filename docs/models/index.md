@@ -9,22 +9,37 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 
 When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) for higher quality while keeping explicit `model_settings`.
 
-If you want to switch to other models like [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2), follow the steps in the next section.
+If you want to switch to other models like [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2), there are two ways to configure your agents.
 
-### Default OpenAI model
+### Default model
 
-If you want to consistently use a specific model for all agents that do not set a custom model, set the `OPENAI_DEFAULT_MODEL` environment variable before running your agents.
+First, if you want to consistently use a specific model for all agents that do not set a custom model, set the `OPENAI_DEFAULT_MODEL` environment variable before running your agents.
 
 ```bash
-export OPENAI_DEFAULT_MODEL=gpt-5
+export OPENAI_DEFAULT_MODEL=gpt-5.2
 python3 my_awesome_agent.py
 ```
 
-#### GPT-5 models
+Second, you can set a default model for a run via `RunConfig`. If you don't set a model for an agent, this run's model will be used.
 
-When you use any of GPT-5's reasoning models ([`gpt-5`](https://platform.openai.com/docs/models/gpt-5), [`gpt-5-mini`](https://platform.openai.com/docs/models/gpt-5-mini), or [`gpt-5-nano`](https://platform.openai.com/docs/models/gpt-5-nano)) this way, the SDK applies sensible `ModelSettings` by default. Specifically, it sets both `reasoning.effort` and `verbosity` to `"low"`. If you want to build these settings yourself, call `agents.models.get_default_model_settings("gpt-5")`.
+```python
+from agents import Agent, RunConfig, Runner
 
-For lower latency or specific requirements, you can choose a different model and settings. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
+agent = Agent(
+    name="Assistant",
+    instructions="You're a helpful agent.",
+)
+
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model="gpt-5.2"),
+)
+```
+
+#### GPT-5.x models
+
+When you use any GPT-5.x model such as [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) in this way, the SDK applies default `ModelSettings`. It sets the ones that work the best for most use cases. To adjust the reasoning effort for the default model, pass your own `ModelSettings`:
 
 ```python
 from openai.types.shared import Reasoning
@@ -33,14 +48,14 @@ from agents import Agent, ModelSettings
 my_agent = Agent(
     name="My Agent",
     instructions="You're a helpful agent.",
-    model_settings=ModelSettings(reasoning=Reasoning(effort="minimal"), verbosity="low")
-    # If OPENAI_DEFAULT_MODEL=gpt-5 is set, passing only model_settings works.
-    # It's also fine to pass a GPT-5 model name explicitly:
-    # model="gpt-5",
+    # If OPENAI_DEFAULT_MODEL=gpt-5.2 is set, passing only model_settings works.
+    # It's also fine to pass a GPT-5.x model name explicitly:
+    model="gpt-5.2",
+    model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low")
 )
 ```
 
-Specifically for lower latency, using either [`gpt-5-mini`](https://platform.openai.com/docs/models/gpt-5-mini) or [`gpt-5-nano`](https://platform.openai.com/docs/models/gpt-5-nano) model with `reasoning.effort="minimal"` will often return responses faster than the default settings. However, some built-in tools (such as file search and image generation) in Responses API do not support `"minimal"` reasoning effort, which is why this Agents SDK defaults to `"low"`.
+For lower latency, using `reasoning.effort="none"` with `gpt-5.2` is recommended. The gpt-4.1 family (including mini and nano variants) also remains a solid choice for building interactive agent apps.
 
 #### Non-GPT-5 models
 

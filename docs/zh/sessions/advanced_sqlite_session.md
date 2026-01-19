@@ -4,15 +4,15 @@ search:
 ---
 # 高级 SQLite 会话
 
-`AdvancedSQLiteSession` 是基础 `SQLiteSession` 的增强版本，提供高级对话管理能力，包括会话分支、详细的使用分析以及结构化会话查询。
+`AdvancedSQLiteSession` 是对基础 `SQLiteSession` 的增强版本，提供高级对话管理功能，包括对话分支、详细的用量分析以及结构化的对话查询。
 
 ## 功能
 
-- **会话分支**: 从任意用户消息创建备选对话路径
-- **使用追踪**: 每轮详尽的 token 使用分析，附完整 JSON 明细
-- **结构化查询**: 按轮次获取会话、工具使用统计等
+- **对话分支**: 从任意用户消息创建替代的对话路径
+- **用量跟踪**: 按回合的详细 token 用量分析，并提供完整的 JSON 分解
+- **结构化查询**: 按回合获取对话、工具使用统计等
 - **分支管理**: 独立的分支切换与管理
-- **消息结构元数据**: 追踪消息类型、工具使用与会话流转
+- **消息结构元数据**: 跟踪消息类型、工具使用与对话流转
 
 ## 快速开始
 
@@ -84,16 +84,16 @@ session = AdvancedSQLiteSession(
 
 ### 参数
 
-- `session_id` (str): 会话会话的唯一标识符
+- `session_id` (str): 对话会话的唯一标识符
 - `db_path` (str | Path): SQLite 数据库文件路径。默认为 `:memory:`（内存存储）
-- `create_tables` (bool): 是否自动创建高级表。默认为 `False`
-- `logger` (logging.Logger | None): 会话的自定义日志记录器。默认为模块级 logger
+- `create_tables` (bool): 是否自动创建高级表。默认 `False`
+- `logger` (logging.Logger | None): 会话的自定义日志记录器。默认为模块级日志记录器
 
-## 使用追踪
+## 用量跟踪
 
-AdvancedSQLiteSession 通过按会话轮次存储 token 使用数据来提供详细的使用分析。**这完全依赖于在每次智能体运行后调用 `store_run_usage` 方法。**
+AdvancedSQLiteSession 通过按对话回合存储 token 用量数据来提供详细的用量分析。**这完全依赖于在每次智能体运行后调用 `store_run_usage` 方法。**
 
-### 存储使用数据
+### 存储用量数据
 
 ```python
 # After each agent run, store the usage data
@@ -107,7 +107,7 @@ await session.store_run_usage(result)
 # - Detailed JSON token information (if available)
 ```
 
-### 获取使用统计
+### 获取用量统计
 
 ```python
 # Get session-level usage (all branches)
@@ -135,9 +135,9 @@ for turn_data in turn_usage:
 turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 ```
 
-## 会话分支
+## 对话分支
 
-AdvancedSQLiteSession 的关键特性之一是能够从任意用户消息创建会话分支，使你可以探索备选对话路径。
+AdvancedSQLiteSession 的关键特性之一是能够从任意用户消息创建对话分支，从而探索替代的对话路径。
 
 ### 创建分支
 
@@ -217,9 +217,9 @@ await session.store_run_usage(result)
 
 ## 结构化查询
 
-AdvancedSQLiteSession 提供多种方法用于分析会话结构与内容。
+AdvancedSQLiteSession 提供多种方法来分析对话结构与内容。
 
-### 会话分析
+### 对话分析
 
 ```python
 # Get conversation organized by turns
@@ -245,11 +245,11 @@ for turn in matching_turns:
 
 ### 消息结构
 
-会话会自动追踪消息结构，包括：
+会话会自动跟踪消息结构，包括：
 
-- 消息类型（user、assistant、tool_call 等）
+- 消息类型（用户、助手、tool_call 等）
 - 工具调用的工具名称
-- 轮次编号与序号
+- 回合号与序列号
 - 分支关联
 - 时间戳
 
@@ -296,9 +296,10 @@ CREATE TABLE turn_usage (
 );
 ```
 
-## 完整代码示例
+## 完整示例
 
-查看[完整代码示例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)，全面了解所有功能。
+查看[完整示例](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)，以获得对所有功能的全面演示。
+
 
 ## API 参考
 
