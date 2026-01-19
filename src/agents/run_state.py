@@ -1800,6 +1800,17 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
             if handoff_agent and handoff_agent.name not in agent_map:  # type: ignore[union-attr]
                 queue.append(handoff_agent)  # type: ignore[arg-type]
 
+        # Include agent-as-tool instances so nested approvals can be restored.
+        tools = getattr(current, "tools", None)
+        if tools:
+            for tool in tools:
+                if not getattr(tool, "_is_agent_tool", False):
+                    continue
+                tool_agent = getattr(tool, "_agent_instance", None)
+                tool_agent_name = getattr(tool_agent, "name", None)
+                if tool_agent and tool_agent_name and tool_agent_name not in agent_map:
+                    queue.append(tool_agent)
+
     return agent_map
 
 

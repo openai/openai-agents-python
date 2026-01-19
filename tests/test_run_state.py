@@ -101,6 +101,7 @@ from .utils.factories import (
 )
 from .utils.hitl import (
     HITL_REJECTION_MSG,
+    make_function_tool_call,
     make_model_and_agent,
     make_state_with_interruptions,
     run_and_resume_with_mutation,
@@ -1551,6 +1552,34 @@ class TestDeserializeHelpers:
         assert isinstance(restored._current_step, NextStepInterruption)
         assert len(restored._current_step.interruptions) == 1
         assert restored._current_step.interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
+
+    async def test_nested_agent_tool_interruptions_roundtrip(self):
+        """Test that nested agent tool approvals survive serialization."""
+        inner_agent = Agent(name="InnerAgent")
+        outer_agent = Agent(name="OuterAgent")
+        outer_agent.tools = [
+            inner_agent.as_tool(
+                tool_name="inner_agent_tool",
+                tool_description="Inner agent tool",
+                needs_approval=True,
+            )
+        ]
+
+        approval_item = ToolApprovalItem(
+            agent=inner_agent,
+            raw_item=make_function_tool_call("sensitive_tool", call_id="inner-1"),
+        )
+        state = make_state_with_interruptions(
+            outer_agent, [approval_item], original_input="test", max_turns=2
+        )
+
+        json_str = state.to_string()
+        restored = await RunState.from_string(outer_agent, json_str)
+
+        interruptions = restored.get_interruptions()
+        assert len(interruptions) == 1
+        assert interruptions[0].agent.name == "InnerAgent"
+        assert interruptions[0].raw_item.name == "sensitive_tool"  # type: ignore[union-attr]
 
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""
