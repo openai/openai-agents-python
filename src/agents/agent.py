@@ -420,8 +420,6 @@ class Agent(AgentBase, Generic[TContext]):
         is_enabled: bool
         | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
         on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
-        needs_approval: bool
-        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
         run_config: RunConfig | None = None,
         max_turns: int | None = None,
         hooks: RunHooks[TContext] | None = None,
@@ -429,6 +427,8 @@ class Agent(AgentBase, Generic[TContext]):
         conversation_id: str | None = None,
         session: Session | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        needs_approval: bool
+        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -451,9 +451,9 @@ class Agent(AgentBase, Generic[TContext]):
                 agent run. The callback receives an `AgentToolStreamEvent` containing the nested
                 agent, the originating tool call (when available), and each stream event. When
                 provided, the nested agent is executed in streaming mode.
-            needs_approval: Bool or callable to decide if this agent tool should pause for approval.
             failure_error_function: If provided, generate an error message when the tool (agent) run
                 fails. The message is sent to the LLM. If None, the exception is raised instead.
+            needs_approval: Bool or callable to decide if this agent tool should pause for approval.
         """
 
         @function_tool(
