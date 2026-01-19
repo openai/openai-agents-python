@@ -38,11 +38,7 @@ from .run_config import (
     RunOptions,
 )
 from .run_context import RunContextWrapper, TContext
-from .run_internal.approvals import (
-    apply_rewind_offset,
-    collect_approvals_and_rewind,
-    filter_tool_approvals,
-)
+from .run_internal.approvals import filter_tool_approvals
 from .run_internal.items import (
     copy_input_items,
     drop_orphan_function_calls,
@@ -619,15 +615,6 @@ class AgentRunner:
                                 tool_use_tracker.add_tool_use(
                                     current_agent,
                                     run_state._last_processed_response.tools_used,
-                                )
-
-                            pending_approval_items, rewind_count = collect_approvals_and_rewind(
-                                run_state._current_step, run_state._generated_items
-                            )
-
-                            if rewind_count > 0:
-                                run_state._current_turn_persisted_item_count = apply_rewind_offset(
-                                    run_state._current_turn_persisted_item_count, rewind_count
                                 )
 
                             original_input = turn_result.original_input

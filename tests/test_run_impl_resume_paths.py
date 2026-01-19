@@ -1,10 +1,11 @@
+import json
 from typing import cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent
+from agents import Agent, Runner, function_tool
 from agents.agent import ToolsToFinalOutputResult
 from agents.items import MessageOutputItem, ModelResponse, ToolCallItem, ToolCallOutputItem
 from agents.lifecycle import RunHooks
@@ -22,7 +23,12 @@ from agents.run_state import RunState
 from agents.usage import Usage
 from tests.fake_model import FakeModel
 from tests.test_responses import get_function_tool_call, get_text_message
-from tests.utils.hitl import make_agent, make_context_wrapper
+from tests.utils.hitl import (
+    make_agent,
+    make_context_wrapper,
+    make_model_and_agent,
+    queue_function_call_and_text,
+)
 from tests.utils.simple_session import SimpleListSession
 
 
@@ -217,3 +223,46 @@ async def test_resumed_run_again_resets_persisted_count(monkeypatch) -> None:
         for item in session.saved_items
     ]
     assert "function_call" in saved_types
+
+
+@pytest.mark.asyncio
+async def test_resumed_approval_does_not_duplicate_session_items() -> None:
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = SimpleListSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = await Runner.run(agent, input="Use test_tool", session=session)
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = await Runner.run(agent, state, session=session)
+    assert resumed.final_output == "done"
+
+    saved_items = await session.get_items()
+    call_count = sum(
+        1
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "call-resume"
+    )
+    output_count = sum(
+        1
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call-resume"
+    )
+
+    assert call_count == 1
+    assert output_count == 1

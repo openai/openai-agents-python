@@ -53,8 +53,6 @@ from ..usage import Usage
 from ..util import _coro, _error_tracing
 from .approvals import (
     append_input_items_excluding_approvals,
-    apply_rewind_offset,
-    collect_approvals_and_rewind,
     filter_tool_approvals,
 )
 from .guardrails import (
@@ -366,15 +364,6 @@ async def start_streaming(
                         tool_use_tracker
                     )
 
-                    pending_approval_items, rewind_count = collect_approvals_and_rewind(
-                        run_state._current_step, run_state._generated_items
-                    )
-
-                    if rewind_count > 0:
-                        streamed_result._current_turn_persisted_item_count = apply_rewind_offset(
-                            streamed_result._current_turn_persisted_item_count, rewind_count
-                        )
-
                     streamed_result.input = turn_result.original_input
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
                     generated_items = turn_result.pre_step_items + turn_result.new_step_items
@@ -408,17 +397,24 @@ async def start_streaming(
                                 store_setting = current_agent.model_settings.resolve(
                                     run_config.model_settings
                                 ).store
-                                await save_result_to_session(
+                                persisted_before_partial = (
+                                    streamed_result._current_turn_persisted_item_count
+                                )
+                                saved_count = await save_result_to_session(
                                     session,
                                     [],
                                     list(session_items_for_turn),
-                                    streamed_result._state,
+                                    None,
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
-                                    streamed_result._state._current_turn_persisted_item_count
+                                    persisted_before_partial + saved_count
                                 )
+                                if run_state is not None:
+                                    run_state._current_turn_persisted_item_count = (
+                                        streamed_result._current_turn_persisted_item_count
+                                    )
                         streamed_result.interruptions = filter_tool_approvals(
                             turn_result.next_step.interruptions
                         )
@@ -468,21 +464,28 @@ async def start_streaming(
                                 await input_guardrail_tripwire_triggered_for_stream(streamed_result)
                             )
                             if should_skip_session_save is False:
+                                persisted_before_partial = (
+                                    streamed_result._current_turn_persisted_item_count
+                                )
                                 items_for_session = (
                                     turn_result.session_step_items
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items
                                 )
-                                await save_result_to_session(
+                                saved_count = await save_result_to_session(
                                     session,
                                     [],
                                     list(items_for_session),
-                                    streamed_result._state,
+                                    None,
                                     response_id=turn_result.model_response.response_id,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
-                                    streamed_result._state._current_turn_persisted_item_count
+                                    persisted_before_partial + saved_count
                                 )
+                                if run_state is not None:
+                                    run_state._current_turn_persisted_item_count = (
+                                        streamed_result._current_turn_persisted_item_count
+                                    )
 
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
@@ -493,21 +496,28 @@ async def start_streaming(
                                 await input_guardrail_tripwire_triggered_for_stream(streamed_result)
                             )
                             if should_skip_session_save is False:
+                                persisted_before_partial = (
+                                    streamed_result._current_turn_persisted_item_count
+                                )
                                 items_for_session = (
                                     turn_result.session_step_items
                                     if turn_result.session_step_items is not None
                                     else turn_result.new_step_items
                                 )
-                                await save_result_to_session(
+                                saved_count = await save_result_to_session(
                                     session,
                                     [],
                                     list(items_for_session),
-                                    streamed_result._state,
+                                    None,
                                     response_id=turn_result.model_response.response_id,
                                 )
                                 streamed_result._current_turn_persisted_item_count = (
-                                    streamed_result._state._current_turn_persisted_item_count
+                                    persisted_before_partial + saved_count
                                 )
+                                if run_state is not None:
+                                    run_state._current_turn_persisted_item_count = (
+                                        streamed_result._current_turn_persisted_item_count
+                                    )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
                         continue
 
