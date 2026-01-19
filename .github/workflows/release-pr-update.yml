@@ -63,13 +63,22 @@ jobs:
           git fetch origin main "$RELEASE_BRANCH"
           git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
           git rebase origin/main
+      - name: Prepare Codex output
+        if: steps.find.outputs.found == 'true'
+        id: codex-output
+        run: |
+          set -euo pipefail
+          output_dir=".tmp/codex/outputs"
+          output_file="${output_dir}/release-review.md"
+          mkdir -p "$output_dir"
+          echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
       - name: Run Codex release review
         if: steps.find.outputs.found == 'true'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
-          output-file: release-review.md
+          output-file: ${{ steps.codex-output.outputs.output_file }}
           safety-strategy: drop-sudo
           sandbox: read-only
       - name: Update PR body and push
@@ -78,10 +87,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.find.outputs.number }}
           RELEASE_BRANCH: ${{ steps.find.outputs.branch }}
+          RELEASE_REVIEW_PATH: ${{ steps.codex-output.outputs.output_file }}
         run: |
           set -euo pipefail
           git push --force-with-lease origin "$RELEASE_BRANCH"
-          gh pr edit "$PR_NUMBER" --body-file release-review.md
+          gh pr edit "$PR_NUMBER" --body-file "$RELEASE_REVIEW_PATH"
           milestone_name="$(python - <<'PY'
           import os
           import re

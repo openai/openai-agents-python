@@ -77,7 +77,7 @@ jobs:
         if: steps.commit.outputs.committed == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
-          commit-message: "Update all translated document pages"
+          commit-message: "Update translated document pages"
           title: "Update all translated document pages"
           body: |
             Automated update of translated documentation.

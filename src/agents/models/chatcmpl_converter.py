@@ -428,15 +428,20 @@ class Converter:
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
+        pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
 
         def flush_assistant_message() -> None:
-            nonlocal current_assistant_msg
+            nonlocal current_assistant_msg, pending_reasoning_content
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
                 if not current_assistant_msg.get("tool_calls"):
                     del current_assistant_msg["tool_calls"]
+                    # prevents stale reasoning_content from contaminating later turns
+                    pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
+            else:
+                pending_reasoning_content = None
 
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
             nonlocal current_assistant_msg, pending_thinking_blocks
@@ -579,6 +584,11 @@ class Converter:
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
 
+                # If we have pending reasoning content for DeepSeek, add it to the assistant message
+                if pending_reasoning_content:
+                    asst["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
+                    pending_reasoning_content = None  # Clear after using
+
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
                 if pending_thinking_blocks:
@@ -686,6 +696,26 @@ class Converter:
                     # Store thinking blocks as pending for the next assistant message
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
+
+                # DeepSeek requires reasoning_content field in assistant messages with tool calls
+                # Items may not all originate from DeepSeek, so need to check for model match.
+                # For backward compatibility, if provider_data is missing, ignore the check.
+                elif (
+                    model
+                    and "deepseek" in model.lower()
+                    and (
+                        (item_model and "deepseek" in item_model.lower())
+                        or item_provider_data == {}
+                    )
+                ):
+                    summary_items = reasoning_item.get("summary", [])
+                    if summary_items:
+                        reasoning_texts = []
+                        for summary_item in summary_items:
+                            if isinstance(summary_item, dict) and summary_item.get("text"):
+                                reasoning_texts.append(summary_item["text"])
+                        if reasoning_texts:
+                            pending_reasoning_content = "\n".join(reasoning_texts)
 
             # 8) compaction items => reject for chat completions
             elif isinstance(item, dict) and item.get("type") == "compaction":
