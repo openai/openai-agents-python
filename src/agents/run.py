@@ -716,6 +716,7 @@ class AgentRunner:
                                     max_turns=max_turns,
                                 )
                                 result._current_turn = current_turn
+                                result._model_input_items = list(generated_items)
                                 if run_state is not None:
                                     result._current_turn_persisted_item_count = (
                                         run_state._current_turn_persisted_item_count
@@ -770,6 +771,7 @@ class AgentRunner:
                                     max_turns=max_turns,
                                 )
                                 result._current_turn = current_turn
+                                result._model_input_items = list(generated_items)
                                 if session_persistence_enabled:
                                     input_items_for_save_1: list[TResponseInputItem] = (
                                         session_input_items_for_persistence
@@ -1115,6 +1117,7 @@ class AgentRunner:
                                 max_turns=max_turns,
                             )
                             result._current_turn = current_turn
+                            result._model_input_items = list(generated_items)
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
@@ -1207,6 +1210,7 @@ class AgentRunner:
                                 max_turns=max_turns,
                             )
                             result._current_turn = current_turn
+                            result._model_input_items = list(generated_items)
                             if run_state is not None:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count

@@ -55,7 +55,11 @@ def _populate_state_from_result(
     auto_previous_response_id: bool = False,
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
-    state._generated_items = result.new_items
+    model_input_items = getattr(result, "_model_input_items", None)
+    if isinstance(model_input_items, list):
+        state._generated_items = list(model_input_items)
+    else:
+        state._generated_items = result.new_items
     state._model_responses = result.raw_responses
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
@@ -199,6 +203,8 @@ class RunResult(RunResultBase):
     current turn."""
     _current_turn: int = 0
     """The current turn number. This is preserved when converting to RunState."""
+    _model_input_items: list[RunItem] = field(default_factory=list, repr=False)
+    """Filtered items used to build model input when resuming runs."""
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
     """The original input from the first turn. Unlike `input`, this is never updated during the run.
     Used by to_state() to preserve the correct originalInput when serializing state."""

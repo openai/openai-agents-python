@@ -15,6 +15,7 @@ from agents import (
     HandoffInputData,
     InputGuardrail,
     InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
@@ -970,6 +971,35 @@ async def test_streaming_hitl_resume_with_approved_tools():
     # Tool should have been called
     assert tool_called is True
     assert result2.final_output == "done"
+
+
+@pytest.mark.asyncio
+async def test_streaming_hitl_resume_enforces_max_turns():
+    """Test that streamed resumes advance turn counts for max_turns enforcement."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({})),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", max_turns=1)
+    await consume_stream(first)
+
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state)
+    with pytest.raises(MaxTurnsExceeded):
+        async for _ in resumed.stream_events():
+            pass
 
 
 @pytest.mark.asyncio

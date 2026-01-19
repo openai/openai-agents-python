@@ -520,16 +520,11 @@ async def start_streaming(
                 tool_names = [t.name for t in all_tools]
                 current_span.span_data.tools = tool_names
 
-            last_model_response_check: ModelResponse | None = None
-            if run_state is not None and run_state._model_responses:
-                last_model_response_check = run_state._model_responses[-1]
-
-            if run_state is None or last_model_response_check is None:
-                current_turn += 1
-                streamed_result.current_turn = current_turn
-                streamed_result._current_turn_persisted_item_count = 0
-                if run_state:
-                    run_state._current_turn_persisted_item_count = 0
+            current_turn += 1
+            streamed_result.current_turn = current_turn
+            streamed_result._current_turn_persisted_item_count = 0
+            if run_state:
+                run_state._current_turn_persisted_item_count = 0
 
             if current_turn > max_turns:
                 _error_tracing.attach_error_to_span(
