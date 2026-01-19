@@ -428,15 +428,20 @@ class Converter:
         result: list[ChatCompletionMessageParam] = []
         current_assistant_msg: ChatCompletionAssistantMessageParam | None = None
         pending_thinking_blocks: list[dict[str, str]] | None = None
+        pending_reasoning_content: str | None = None  # For DeepSeek reasoning_content
 
         def flush_assistant_message() -> None:
-            nonlocal current_assistant_msg
+            nonlocal current_assistant_msg, pending_reasoning_content
             if current_assistant_msg is not None:
                 # The API doesn't support empty arrays for tool_calls
                 if not current_assistant_msg.get("tool_calls"):
                     del current_assistant_msg["tool_calls"]
+                    # prevents stale reasoning_content from contaminating later turns
+                    pending_reasoning_content = None
                 result.append(current_assistant_msg)
                 current_assistant_msg = None
+            else:
+                pending_reasoning_content = None
 
         def ensure_assistant_message() -> ChatCompletionAssistantMessageParam:
             nonlocal current_assistant_msg, pending_thinking_blocks
@@ -535,6 +540,24 @@ class Converter:
                     combined = "\n".join(text_segments)
                     new_asst["content"] = combined
 
+                # If we have pending thinking blocks, prepend them to the content
+                # This is required for Anthropic API with interleaved thinking
+                if pending_thinking_blocks:
+                    # If there is a text content, convert it to a list to prepend thinking blocks
+                    if "content" in new_asst and isinstance(new_asst["content"], str):
+                        text_content = ChatCompletionContentPartTextParam(
+                            text=new_asst["content"], type="text"
+                        )
+                        new_asst["content"] = [text_content]
+
+                    if "content" not in new_asst or new_asst["content"] is None:
+                        new_asst["content"] = []
+
+                    # Thinking blocks MUST come before any other content
+                    # We ignore type errors because pending_thinking_blocks is not openai standard
+                    new_asst["content"] = pending_thinking_blocks + new_asst["content"]  # type: ignore
+                    pending_thinking_blocks = None  # Clear after using
+
                 new_asst["tool_calls"] = []
                 current_assistant_msg = new_asst
 
@@ -560,6 +583,11 @@ class Converter:
 
             elif func_call := cls.maybe_function_tool_call(item):
                 asst = ensure_assistant_message()
+
+                # If we have pending reasoning content for DeepSeek, add it to the assistant message
+                if pending_reasoning_content:
+                    asst["reasoning_content"] = pending_reasoning_content  # type: ignore[typeddict-unknown-key]
+                    pending_reasoning_content = None  # Clear after using
 
                 # If we have pending thinking blocks, use them as the content
                 # This is required for Anthropic API tool calls with interleaved thinking
@@ -669,7 +697,34 @@ class Converter:
                     # This preserves the original behavior
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
-            # 8) If we haven't recognized it => fail or ignore
+                # DeepSeek requires reasoning_content field in assistant messages with tool calls
+                # Items may not all originate from DeepSeek, so need to check for model match.
+                # For backward compatibility, if provider_data is missing, ignore the check.
+                elif (
+                    model
+                    and "deepseek" in model.lower()
+                    and (
+                        (item_model and "deepseek" in item_model.lower())
+                        or item_provider_data == {}
+                    )
+                ):
+                    summary_items = reasoning_item.get("summary", [])
+                    if summary_items:
+                        reasoning_texts = []
+                        for summary_item in summary_items:
+                            if isinstance(summary_item, dict) and summary_item.get("text"):
+                                reasoning_texts.append(summary_item["text"])
+                        if reasoning_texts:
+                            pending_reasoning_content = "\n".join(reasoning_texts)
+
+            # 8) compaction items => reject for chat completions
+            elif isinstance(item, dict) and item.get("type") == "compaction":
+                raise UserError(
+                    "Compaction items are not supported for chat completions. "
+                    "Please use the Responses API to handle compaction."
+                )
+
+            # 9) If we haven't recognized it => fail or ignore
             else:
                 raise UserError(f"Unhandled item type or structure: {item}")
 

@@ -8,14 +8,15 @@ from agents import (
     MCPToolApprovalRequest,
     Runner,
 )
+from examples.auto_mode import confirm_with_fallback
 
 """This example demonstrates how to use the hosted MCP support in the OpenAI Responses API, with
 approval callbacks."""
 
 
 def approval_callback(request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
-    answer = input(f"Approve running the tool `{request.data.name}`? (y/n) ")
-    result: MCPToolApprovalFunctionResult = {"approve": answer == "y"}
+    approve = confirm_with_fallback(f"Approve running the tool `{request.data.name}`? (y/n) ", True)
+    result: MCPToolApprovalFunctionResult = {"approve": approve}
     if not result["approve"]:
         result["reason"] = "User denied"
     return result

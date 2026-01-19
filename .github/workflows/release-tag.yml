@@ -1,0 +1,83 @@
+name: Tag release on merge
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate merge commit
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if [ -z "$MERGE_SHA" ]; then
+            echo "merge_commit_sha is empty; refusing to tag to avoid tagging the wrong commit." >&2
+            exit 1
+          fi
+      - name: Checkout merge commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Fetch tags
+        run: git fetch origin --tags --prune
+      - name: Resolve version
+        id: version
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import sys
+          import tomllib
+
+          path = pathlib.Path("pyproject.toml")
+          data = tomllib.loads(path.read_text())
+          version = data.get("project", {}).get("version")
+          if not version:
+            print("Missing project.version in pyproject.toml.", file=sys.stderr)
+            sys.exit(1)
+
+          head_ref = os.environ.get("HEAD_REF", "")
+          if head_ref.startswith("release/v"):
+            expected = head_ref[len("release/v") :]
+            if expected != version:
+              print(
+                  f"Version mismatch: branch {expected} vs pyproject {version}.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          output_path = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          output_path.write_text(f"version={version}\n")
+          PY
+      - name: Create tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git tag -l "v${VERSION}" | grep -q "v${VERSION}"; then
+            echo "Tag v${VERSION} already exists; skipping."
+            exit 0
+          fi
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
