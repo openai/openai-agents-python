@@ -25,6 +25,7 @@ from ..memory import (
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
+    copy_input_items,
     deduplicate_input_items,
     drop_orphan_function_calls,
     ensure_input_item_format,
@@ -32,11 +33,16 @@ from .items import (
     normalize_input_items_for_api,
 )
 from .oai_conversation import OpenAIServerConversationTracker
+from .run_steps import SingleStepResult
 
 __all__ = [
     "prepare_input_with_session",
     "persist_session_items_for_guardrail_trip",
+    "session_items_for_turn",
+    "resumed_turn_items",
     "save_result_to_session",
+    "save_resumed_turn_items",
+    "update_run_state_after_resume",
     "rewind_session_items",
     "wait_for_session_cleanup",
 ]
@@ -153,6 +159,35 @@ async def persist_session_items_for_guardrail_trip(
     )
     await save_result_to_session(session, input_items_for_save, [], run_state, store=store)
     return updated_session_input_items
+
+
+def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
+    """Return the items to persist for a turn, preferring session_step_items when set."""
+    items = (
+        turn_result.session_step_items
+        if turn_result.session_step_items is not None
+        else turn_result.new_step_items
+    )
+    return list(items)
+
+
+def resumed_turn_items(turn_result: SingleStepResult) -> tuple[list[RunItem], list[RunItem]]:
+    """Return generated and session items for a resumed turn."""
+    generated_items = list(turn_result.pre_step_items) + list(turn_result.new_step_items)
+    turn_session_items = session_items_for_turn(turn_result)
+    return generated_items, turn_session_items
+
+
+def update_run_state_after_resume(
+    run_state: RunState,
+    *,
+    turn_result: SingleStepResult,
+    generated_items: list[RunItem],
+) -> None:
+    """Update run state fields after resolving an interruption."""
+    run_state._original_input = copy_input_items(turn_result.original_input)
+    run_state._generated_items = generated_items
+    run_state._current_step = turn_result.next_step  # type: ignore[assignment]
 
 
 async def save_result_to_session(
@@ -291,6 +326,28 @@ async def save_result_to_session(
         await session.run_compaction(compaction_args)
 
     return saved_run_items_count
+
+
+async def save_resumed_turn_items(
+    *,
+    session: Session | None,
+    items: list[RunItem],
+    persisted_count: int,
+    response_id: str | None,
+    store: bool | None = None,
+) -> int:
+    """Persist resumed turn items and return the updated persisted count."""
+    if session is None or not items:
+        return persisted_count
+    saved_count = await save_result_to_session(
+        session,
+        [],
+        list(items),
+        None,
+        response_id=response_id,
+        store=store,
+    )
+    return persisted_count + saved_count
 
 
 async def rewind_session_items(

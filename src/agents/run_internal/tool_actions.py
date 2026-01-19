@@ -40,11 +40,11 @@ from ..tool import (
     resolve_computer,
 )
 from ..util import _coro
+from ..util._approvals import evaluate_needs_approval_setting
 from .items import apply_patch_rejection_item, shell_rejection_item
 from .tool_execution import (
     coerce_apply_patch_operation,
     coerce_shell_call,
-    evaluate_needs_approval_setting,
     extract_apply_patch_call_id,
     format_shell_error,
     normalize_apply_patch_result,

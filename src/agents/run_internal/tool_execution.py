@@ -62,6 +62,7 @@ from ..tool_guardrails import (
 )
 from ..tracing import SpanError, function_span
 from ..util import _coro, _error_tracing
+from ..util._approvals import evaluate_needs_approval_setting
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
@@ -105,7 +106,6 @@ __all__ = [
     "collect_manual_mcp_approvals",
     "index_approval_items_by_call_id",
     "should_keep_hosted_mcp_item",
-    "evaluate_needs_approval_setting",
     "resolve_approval_status",
     "resolve_approval_interruption",
     "function_needs_approval",
@@ -509,23 +509,6 @@ def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTo
         on_invoke_tool=on_invoke_tool,
         strict_json_schema=True,
         is_enabled=True,
-    )
-
-
-async def evaluate_needs_approval_setting(
-    needs_approval_setting: bool | Callable[..., Any], *args: Any
-) -> bool:
-    """Return bool from a needs_approval setting that may be bool or callable/awaitable."""
-    if isinstance(needs_approval_setting, bool):
-        return needs_approval_setting
-    if callable(needs_approval_setting):
-        maybe_result = needs_approval_setting(*args)
-        if inspect.isawaitable(maybe_result):
-            maybe_result = await maybe_result
-        return bool(maybe_result)
-    raise UserError(
-        f"Invalid needs_approval value: expected a bool or callable, "
-        f"got {type(needs_approval_setting).__name__}."
     )
 
 

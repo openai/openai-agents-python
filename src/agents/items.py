@@ -443,6 +443,11 @@ class ToolApprovalItem(RunItemBase[Any]):
             return self.raw_item.get("call_id") or self.raw_item.get("id")
         return getattr(self.raw_item, "call_id", None) or getattr(self.raw_item, "id", None)
 
+    @property
+    def call_id(self) -> str | None:
+        """Return call identifier from the raw item."""
+        return self._extract_call_id()
+
     def to_input_item(self) -> TResponseInputItem:
         """ToolApprovalItem should never be sent as input; raise to surface misuse."""
         raise AgentsException(

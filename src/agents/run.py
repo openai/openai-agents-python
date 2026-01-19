@@ -22,7 +22,6 @@ from .guardrail import (
 from .items import (
     ItemHelpers,
     RunItem,
-    ToolApprovalItem,
     TResponseInputItem,
 )
 from .lifecycle import RunHooks
@@ -38,11 +37,23 @@ from .run_config import (
     RunOptions,
 )
 from .run_context import RunContextWrapper, TContext
-from .run_internal.approvals import filter_tool_approvals
+from .run_internal.agent_runner_helpers import (
+    append_model_response_if_new,
+    apply_resumed_conversation_settings,
+    build_interruption_result,
+    build_resumed_stream_debug_extra,
+    ensure_context_wrapper,
+    finalize_conversation_tracking,
+    input_guardrails_triggered,
+    resolve_processed_response,
+    resolve_resumed_context,
+    save_turn_items_if_needed,
+    update_run_state_for_interruption,
+)
+from .run_internal.approvals import approvals_from_step
 from .run_internal.items import (
     copy_input_items,
-    drop_orphan_function_calls,
-    normalize_input_items_for_api,
+    normalize_resumed_input,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.run_loop import (
@@ -67,7 +78,11 @@ from .run_internal.run_steps import (
 from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
+    resumed_turn_items,
     save_result_to_session,
+    save_resumed_turn_items,
+    session_items_for_turn,
+    update_run_state_after_resume,
 )
 from .run_internal.tool_use_tracker import (
     AgentToolUseTracker,
@@ -381,32 +396,25 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
-            conversation_id = conversation_id or run_state._conversation_id
-            previous_response_id = previous_response_id or run_state._previous_response_id
-            if auto_previous_response_id is False and run_state._auto_previous_response_id:
-                auto_previous_response_id = True
-            run_state._conversation_id = conversation_id
-            run_state._previous_response_id = previous_response_id
-            run_state._auto_previous_response_id = auto_previous_response_id
+            (
+                conversation_id,
+                previous_response_id,
+                auto_previous_response_id,
+            ) = apply_resumed_conversation_settings(
+                run_state=run_state,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
-            if isinstance(original_user_input, list):
-                normalized = normalize_input_items_for_api(original_user_input)
-                prepared_input: str | list[TResponseInputItem] = drop_orphan_function_calls(
-                    normalized
-                )
-            else:
-                prepared_input = original_user_input
+            prepared_input = normalize_resumed_input(original_user_input)
 
-            if context is not None:
-                context_wrapper = (
-                    context
-                    if isinstance(context, RunContextWrapper)
-                    else RunContextWrapper(context=context)
-                )
-                run_state._context = context_wrapper
-            elif run_state._context is not None:
-                context = run_state._context.context
+            context_wrapper = resolve_resumed_context(
+                run_state=run_state,
+                context=context,
+            )
+            context = context_wrapper.context
 
             max_turns = run_state._max_turns
         else:
@@ -455,23 +463,6 @@ class AgentRunner:
             server_conversation_tracker = None
         session_persistence_enabled = session is not None and server_conversation_tracker is None
 
-        def _finalize_conversation_tracking(result: RunResult) -> RunResult:
-            if server_conversation_tracker is not None:
-                result._conversation_id = server_conversation_tracker.conversation_id
-                result._previous_response_id = server_conversation_tracker.previous_response_id
-                result._auto_previous_response_id = (
-                    server_conversation_tracker.auto_previous_response_id
-                )
-                if run_state is not None:
-                    run_state._conversation_id = server_conversation_tracker.conversation_id
-                    run_state._previous_response_id = (
-                        server_conversation_tracker.previous_response_id
-                    )
-                    run_state._auto_previous_response_id = (
-                        server_conversation_tracker.auto_previous_response_id
-                    )
-            return result
-
         if server_conversation_tracker is not None and is_resumed_state and run_state is not None:
             session_input_items: list[TResponseInputItem] | None = None
             if session is not None:
@@ -501,13 +492,7 @@ class AgentRunner:
             if is_resumed_state and run_state is not None:
                 current_turn = run_state._current_turn
                 raw_original_input = run_state._original_input
-                if isinstance(raw_original_input, list):
-                    normalized = normalize_input_items_for_api(raw_original_input)
-                    original_input: str | list[TResponseInputItem] = drop_orphan_function_calls(
-                        normalized
-                    )
-                else:
-                    original_input = raw_original_input
+                original_input = normalize_resumed_input(raw_original_input)
                 generated_items = run_state._generated_items
                 session_items = list(run_state._generated_items)
                 model_responses = run_state._model_responses
@@ -519,11 +504,7 @@ class AgentRunner:
                 generated_items = []
                 session_items = []
                 model_responses = []
-                context_wrapper = (
-                    context
-                    if isinstance(context, RunContextWrapper)
-                    else RunContextWrapper(context=context)
-                )
+                context_wrapper = ensure_context_wrapper(context)
                 run_state = RunState(
                     context=context_wrapper,
                     original_input=original_input,
@@ -618,42 +599,31 @@ class AgentRunner:
                                 )
 
                             original_input = turn_result.original_input
-                            generated_items = (
-                                turn_result.pre_step_items + turn_result.new_step_items
-                            )
-                            session_items_for_turn = (
-                                turn_result.session_step_items
-                                if turn_result.session_step_items is not None
-                                else turn_result.new_step_items
-                            )
-                            session_items.extend(session_items_for_turn)
-                            run_state._original_input = copy_input_items(original_input)
-                            run_state._generated_items = generated_items
-                            run_state._current_step = turn_result.next_step  # type: ignore[assignment]
+                            generated_items, turn_session_items = resumed_turn_items(turn_result)
+                            session_items.extend(turn_session_items)
+                            if run_state is not None:
+                                update_run_state_after_resume(
+                                    run_state,
+                                    turn_result=turn_result,
+                                    generated_items=generated_items,
+                                )
 
-                            if session_persistence_enabled and turn_result.new_step_items:
-                                persisted_before_partial = (
-                                    run_state._current_turn_persisted_item_count
-                                    if run_state is not None
-                                    else 0
-                                )
-                                items_for_session = (
-                                    turn_result.session_step_items
-                                    if turn_result.session_step_items is not None
-                                    else turn_result.new_step_items
-                                )
-                                saved_count = await save_result_to_session(
-                                    session,
-                                    [],
-                                    list(items_for_session),
-                                    None,
-                                    response_id=turn_result.model_response.response_id,
-                                    store=store_setting,
-                                )
-                                if run_state is not None:
-                                    run_state._current_turn_persisted_item_count = (
-                                        persisted_before_partial + saved_count
+                            if (
+                                session_persistence_enabled
+                                and turn_result.new_step_items
+                                and run_state is not None
+                            ):
+                                run_state._current_turn_persisted_item_count = (
+                                    await save_resumed_turn_items(
+                                        session=session,
+                                        items=turn_session_items,
+                                        persisted_count=(
+                                            run_state._current_turn_persisted_item_count
+                                        ),
+                                        response_id=turn_result.model_response.response_id,
+                                        store=store_setting,
                                     )
+                                )
 
                             # After the resumed turn, treat subsequent turns as fresh so
                             # counters and input saving behave normally.
@@ -663,31 +633,27 @@ class AgentRunner:
                                 interruption_result_input: str | list[TResponseInputItem] = (
                                     normalized_starting_input
                                 )
-                                if not model_responses or (
-                                    model_responses[-1] is not turn_result.model_response
-                                ):
-                                    model_responses.append(turn_result.model_response)
-                                processed_response_for_state = turn_result.processed_response
-                                if processed_response_for_state is None and run_state is not None:
-                                    processed_response_for_state = (
-                                        run_state._last_processed_response
-                                    )
-                                if run_state is not None:
-                                    run_state._model_responses = model_responses
-                                    run_state._last_processed_response = (
-                                        processed_response_for_state
-                                    )
-                                approvals_only = filter_tool_approvals(
-                                    turn_result.next_step.interruptions
+                                append_model_response_if_new(
+                                    model_responses, turn_result.model_response
                                 )
-                                result = RunResult(
-                                    input=interruption_result_input,
-                                    new_items=session_items,
-                                    raw_responses=model_responses,
-                                    final_output=None,
-                                    _last_agent=current_agent,
+                                processed_response_for_state = resolve_processed_response(
+                                    run_state=run_state,
+                                    processed_response=turn_result.processed_response,
+                                )
+                                if run_state is not None:
+                                    update_run_state_for_interruption(
+                                        run_state=run_state,
+                                        model_responses=model_responses,
+                                        processed_response=processed_response_for_state,
+                                        generated_items=generated_items,
+                                        next_step=turn_result.next_step,
+                                    )
+                                result = build_interruption_result(
+                                    result_input=interruption_result_input,
+                                    session_items=session_items,
+                                    model_responses=model_responses,
+                                    current_agent=current_agent,
                                     input_guardrail_results=input_guardrail_results,
-                                    output_guardrail_results=[],
                                     tool_input_guardrail_results=(
                                         turn_result.tool_input_guardrail_results
                                     ),
@@ -695,21 +661,20 @@ class AgentRunner:
                                         turn_result.tool_output_guardrail_results
                                     ),
                                     context_wrapper=context_wrapper,
-                                    interruptions=approvals_only,
-                                    _last_processed_response=processed_response_for_state,
-                                    _tool_use_tracker_snapshot=serialize_tool_use_tracker(
-                                        tool_use_tracker
-                                    ),
+                                    interruptions=approvals_from_step(turn_result.next_step),
+                                    processed_response=processed_response_for_state,
+                                    tool_use_tracker=tool_use_tracker,
                                     max_turns=max_turns,
+                                    current_turn=current_turn,
+                                    generated_items=generated_items,
+                                    run_state=run_state,
+                                    original_input=original_input,
                                 )
-                                result._current_turn = current_turn
-                                result._model_input_items = list(generated_items)
-                                if run_state is not None:
-                                    result._current_turn_persisted_item_count = (
-                                        run_state._current_turn_persisted_item_count
-                                    )
-                                result._original_input = copy_input_items(original_input)
-                                return _finalize_conversation_tracking(result)
+                                return finalize_conversation_tracking(
+                                    result,
+                                    server_conversation_tracker=server_conversation_tracker,
+                                    run_state=run_state,
+                                )
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
                                 continue
@@ -731,15 +696,7 @@ class AgentRunner:
                                     context_wrapper,
                                 )
                                 current_step = getattr(run_state, "_current_step", None)
-                                approvals_from_state: list[ToolApprovalItem] = (
-                                    [
-                                        item
-                                        for item in current_step.interruptions
-                                        if isinstance(item, ToolApprovalItem)
-                                    ]
-                                    if isinstance(current_step, NextStepInterruption)
-                                    else []
-                                )
+                                approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
                                     input=turn_result.original_input,
                                     new_items=session_items,
@@ -768,17 +725,17 @@ class AgentRunner:
                                     await save_result_to_session(
                                         session,
                                         input_items_for_save_1,
-                                        list(
-                                            turn_result.session_step_items
-                                            if turn_result.session_step_items is not None
-                                            else turn_result.new_step_items
-                                        ),
+                                        session_items_for_turn(turn_result),
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
                                 result._original_input = copy_input_items(original_input)
-                                return _finalize_conversation_tracking(result)
+                                return finalize_conversation_tracking(
+                                    result,
+                                    server_conversation_tracker=server_conversation_tracker,
+                                    run_state=run_state,
+                                )
                             elif isinstance(turn_result.next_step, NextStepHandoff):
                                 current_agent = cast(
                                     Agent[TContext], turn_result.next_step.new_agent
@@ -992,12 +949,8 @@ class AgentRunner:
                     # For model input, use new_step_items (filtered on handoffs).
                     generated_items = turn_result.pre_step_items + turn_result.new_step_items
                     # Accumulate unfiltered items for observability.
-                    session_items_for_turn = (
-                        turn_result.session_step_items
-                        if turn_result.session_step_items is not None
-                        else turn_result.new_step_items
-                    )
-                    session_items.extend(session_items_for_turn)
+                    turn_session_items = session_items_for_turn(turn_result)
+                    session_items.extend(turn_session_items)
                     if server_conversation_tracker is not None:
                         pending_server_items = list(turn_result.new_step_items)
                         server_conversation_tracker.track_server_items(turn_result.model_response)
@@ -1005,11 +958,7 @@ class AgentRunner:
                     tool_input_guardrail_results.extend(turn_result.tool_input_guardrail_results)
                     tool_output_guardrail_results.extend(turn_result.tool_output_guardrail_results)
 
-                    items_to_save_turn = list(
-                        turn_result.session_step_items
-                        if turn_result.session_step_items is not None
-                        else turn_result.new_step_items
-                    )
+                    items_to_save_turn = list(turn_session_items)
                     if not isinstance(turn_result.next_step, NextStepInterruption):
                         # When resuming a turn we have already persisted the tool_call items;
                         if (
@@ -1111,37 +1060,24 @@ class AgentRunner:
                                 result._current_turn_persisted_item_count = (
                                     run_state._current_turn_persisted_item_count
                                 )
-                            if not any(
-                                guardrail_result.output.tripwire_triggered
-                                for guardrail_result in input_guardrail_results
-                            ):
-                                already_persisted = (
-                                    session_persistence_enabled
-                                    and run_state is not None
-                                    and run_state._current_turn_persisted_item_count > 0
-                                )
-                                if not already_persisted:
-                                    items_for_session = (
-                                        turn_result.session_step_items
-                                        if turn_result.session_step_items is not None
-                                        else turn_result.new_step_items
-                                    )
-                                    await save_result_to_session(
-                                        session,
-                                        [],
-                                        list(items_for_session),
-                                        run_state,
-                                        response_id=turn_result.model_response.response_id,
-                                        store=store_setting,
-                                    )
+                            await save_turn_items_if_needed(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=input_guardrail_results,
+                                items=session_items_for_turn(turn_result),
+                                response_id=turn_result.model_response.response_id,
+                                store=store_setting,
+                            )
                             result._original_input = copy_input_items(original_input)
-                            return _finalize_conversation_tracking(result)
+                            return finalize_conversation_tracking(
+                                result,
+                                server_conversation_tracker=server_conversation_tracker,
+                                run_state=run_state,
+                            )
                         elif isinstance(turn_result.next_step, NextStepInterruption):
                             if session_persistence_enabled:
-                                if not any(
-                                    guardrail_result.output.tripwire_triggered
-                                    for guardrail_result in input_guardrail_results
-                                ):
+                                if not input_guardrails_triggered(input_guardrail_results):
                                     # Persist session items but skip approval placeholders.
                                     input_items_for_save_interruption: list[TResponseInputItem] = (
                                         session_input_items_for_persistence
@@ -1151,61 +1087,53 @@ class AgentRunner:
                                     await save_result_to_session(
                                         session,
                                         input_items_for_save_interruption,
-                                        list(
-                                            turn_result.session_step_items
-                                            if turn_result.session_step_items is not None
-                                            else turn_result.new_step_items
-                                        ),
+                                        session_items_for_turn(turn_result),
                                         run_state,
                                         response_id=turn_result.model_response.response_id,
                                         store=store_setting,
                                     )
-                            if not model_responses or (
-                                model_responses[-1] is not turn_result.model_response
-                            ):
-                                model_responses.append(turn_result.model_response)
-                            processed_response_for_state = turn_result.processed_response
-                            if processed_response_for_state is None and run_state is not None:
-                                processed_response_for_state = run_state._last_processed_response
+                            append_model_response_if_new(
+                                model_responses, turn_result.model_response
+                            )
+                            processed_response_for_state = resolve_processed_response(
+                                run_state=run_state,
+                                processed_response=turn_result.processed_response,
+                            )
                             if run_state is not None:
-                                run_state._model_responses = model_responses
-                                run_state._last_processed_response = processed_response_for_state
-                                run_state._generated_items = generated_items
-                                run_state._current_step = turn_result.next_step
+                                update_run_state_for_interruption(
+                                    run_state=run_state,
+                                    model_responses=model_responses,
+                                    processed_response=processed_response_for_state,
+                                    generated_items=generated_items,
+                                    next_step=turn_result.next_step,
+                                )
                             # Ensure starting_input is not None and not RunState
                             interruption_result_input2: str | list[TResponseInputItem] = (
                                 normalized_starting_input
                             )
-                            result = RunResult(
-                                input=interruption_result_input2,
-                                new_items=session_items,
-                                raw_responses=model_responses,
-                                final_output=None,
-                                _last_agent=current_agent,
+                            result = build_interruption_result(
+                                result_input=interruption_result_input2,
+                                session_items=session_items,
+                                model_responses=model_responses,
+                                current_agent=current_agent,
                                 input_guardrail_results=input_guardrail_results,
-                                output_guardrail_results=[],
                                 tool_input_guardrail_results=tool_input_guardrail_results,
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
-                                interruptions=[
-                                    item
-                                    for item in turn_result.next_step.interruptions
-                                    if isinstance(item, ToolApprovalItem)
-                                ],
-                                _last_processed_response=processed_response_for_state,
-                                _tool_use_tracker_snapshot=serialize_tool_use_tracker(
-                                    tool_use_tracker
-                                ),
+                                interruptions=approvals_from_step(turn_result.next_step),
+                                processed_response=processed_response_for_state,
+                                tool_use_tracker=tool_use_tracker,
                                 max_turns=max_turns,
+                                current_turn=current_turn,
+                                generated_items=generated_items,
+                                run_state=run_state,
+                                original_input=original_input,
                             )
-                            result._current_turn = current_turn
-                            result._model_input_items = list(generated_items)
-                            if run_state is not None:
-                                result._current_turn_persisted_item_count = (
-                                    run_state._current_turn_persisted_item_count
-                                )
-                            result._original_input = copy_input_items(original_input)
-                            return _finalize_conversation_tracking(result)
+                            return finalize_conversation_tracking(
+                                result,
+                                server_conversation_tracker=server_conversation_tracker,
+                                run_state=run_state,
+                            )
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
                             if run_state is not None:
@@ -1218,29 +1146,15 @@ class AgentRunner:
                             current_span = None
                             should_run_agent_start_hooks = True
                         elif isinstance(turn_result.next_step, NextStepRunAgain):
-                            if not any(
-                                guardrail_result.output.tripwire_triggered
-                                for guardrail_result in input_guardrail_results
-                            ):
-                                already_persisted = (
-                                    session_persistence_enabled
-                                    and run_state is not None
-                                    and run_state._current_turn_persisted_item_count > 0
-                                )
-                                if not already_persisted:
-                                    items_for_session = (
-                                        turn_result.session_step_items
-                                        if turn_result.session_step_items is not None
-                                        else turn_result.new_step_items
-                                    )
-                                    await save_result_to_session(
-                                        session,
-                                        [],
-                                        list(items_for_session),
-                                        run_state,
-                                        response_id=turn_result.model_response.response_id,
-                                        store=store_setting,
-                                    )
+                            await save_turn_items_if_needed(
+                                session=session,
+                                run_state=run_state,
+                                session_persistence_enabled=session_persistence_enabled,
+                                input_guardrail_results=input_guardrail_results,
+                                items=session_items_for_turn(turn_result),
+                                response_id=turn_result.model_response.response_id,
+                                store=store_setting,
+                            )
                             continue
                         else:
                             raise AgentsException(
@@ -1394,94 +1308,46 @@ class AgentRunner:
 
         if is_resumed_state:
             run_state = cast(RunState[TContext], input)
-            conversation_id = conversation_id or run_state._conversation_id
-            previous_response_id = previous_response_id or run_state._previous_response_id
-            if auto_previous_response_id is False and run_state._auto_previous_response_id:
-                auto_previous_response_id = True
-            run_state._conversation_id = conversation_id
-            run_state._previous_response_id = previous_response_id
-            run_state._auto_previous_response_id = auto_previous_response_id
+            (
+                conversation_id,
+                previous_response_id,
+                auto_previous_response_id,
+            ) = apply_resumed_conversation_settings(
+                run_state=run_state,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             starting_input = run_state._original_input
-            current_step_type: str | int | None = None
-            if run_state._current_step:
-                if isinstance(run_state._current_step, NextStepInterruption):
-                    current_step_type = "next_step_interruption"
-                elif isinstance(run_state._current_step, NextStepHandoff):
-                    current_step_type = "next_step_handoff"
-                elif isinstance(run_state._current_step, NextStepFinalOutput):
-                    current_step_type = "next_step_final_output"
-                elif isinstance(run_state._current_step, NextStepRunAgain):
-                    current_step_type = "next_step_run_again"
-                else:
-                    current_step_type = type(run_state._current_step).__name__
-            # Log detailed information about generated_items
-            generated_items_details = []
-            for idx, item in enumerate(run_state._generated_items):
-                item_info = {
-                    "index": idx,
-                    "type": item.type,
-                }
-                if hasattr(item, "raw_item") and isinstance(item.raw_item, dict):
-                    raw_type = item.raw_item.get("type")
-                    name = item.raw_item.get("name")
-                    call_id = item.raw_item.get("call_id")
-                    item_info["raw_type"] = raw_type  # type: ignore[assignment]
-                    item_info["name"] = name  # type: ignore[assignment]
-                    item_info["call_id"] = call_id  # type: ignore[assignment]
-                    if item.type == "tool_call_output_item":
-                        if not _debug.DONT_LOG_TOOL_DATA:
-                            output_str = str(item.raw_item.get("output", ""))[:100]
-                            # First 100 chars
-                            item_info["output"] = output_str  # type: ignore[assignment]
-                generated_items_details.append(item_info)
 
             logger.debug(
                 "Resuming from RunState in run_streaming()",
-                extra={
-                    "current_turn": run_state._current_turn,
-                    "current_agent": run_state._current_agent.name
-                    if run_state._current_agent
-                    else None,
-                    "generated_items_count": len(run_state._generated_items),
-                    "generated_items_types": [item.type for item in run_state._generated_items],
-                    "generated_items_details": generated_items_details,
-                    "current_step_type": current_step_type,
-                },
+                extra=build_resumed_stream_debug_extra(
+                    run_state,
+                    include_tool_output=not _debug.DONT_LOG_TOOL_DATA,
+                ),
             )
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             raw_input_for_result = run_state._original_input
-            if isinstance(raw_input_for_result, list):
-                input_for_result = normalize_input_items_for_api(raw_input_for_result)
-            else:
-                input_for_result = raw_input_for_result
+            input_for_result = normalize_resumed_input(raw_input_for_result)
             # Use context from RunState if not provided, otherwise override it.
-            if context is not None:
-                context_wrapper = (
-                    context
-                    if isinstance(context, RunContextWrapper)
-                    else RunContextWrapper(context=context)
-                )
-                run_state._context = context_wrapper
-            elif run_state._context is not None:
-                context = run_state._context.context
+            context_wrapper = resolve_resumed_context(
+                run_state=run_state,
+                context=context,
+            )
+            context = context_wrapper.context
 
             # Override max_turns with the state's max_turns to preserve it across resumption
             max_turns = run_state._max_turns
 
-            # Use context wrapper from RunState
-            context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
         else:
             # input is already str | list[TResponseInputItem] when not RunState
             # Reuse input_for_result variable from outer scope
             input_for_result = cast(Union[str, list[TResponseInputItem]], input)
-            context_wrapper = (
-                context
-                if isinstance(context, RunContextWrapper)
-                else RunContextWrapper(context=context)
-            )
+            context_wrapper = ensure_context_wrapper(context)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
             run_state = RunState(

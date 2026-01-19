@@ -64,6 +64,7 @@ from ..tool import (
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
+from ..util._approvals import evaluate_needs_approval_setting
 from .items import apply_patch_rejection_item, function_rejection_item, shell_rejection_item
 from .run_steps import (
     NOT_FINAL_OUTPUT,
@@ -87,7 +88,6 @@ from .tool_execution import (
     build_litellm_json_tool_call,
     coerce_apply_patch_operation,
     coerce_shell_call,
-    evaluate_needs_approval_setting,
     extract_apply_patch_call_id,
     extract_shell_call_id,
     extract_tool_call_id,

@@ -16,6 +16,7 @@ from ..logger import logger
 from ..run_context import RunContextWrapper, TContext
 from ..tool import FunctionTool
 from ..tool_context import ToolContext
+from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
 from .config import RealtimeRunConfig, RealtimeSessionModelSettings, RealtimeUserInput
 from .events import (
@@ -398,19 +399,6 @@ class RealtimeSession(RealtimeModelListener):
         """Put an event into the queue."""
         await self._event_queue.put(event)
 
-    async def _evaluate_needs_approval_setting(
-        self, needs_approval_setting: Any, *args: Any
-    ) -> bool:
-        """Return bool from a needs_approval setting that may be bool or callable/awaitable."""
-        if isinstance(needs_approval_setting, bool):
-            return needs_approval_setting
-        if callable(needs_approval_setting):
-            maybe_result = needs_approval_setting(*args)
-            if inspect.isawaitable(maybe_result):
-                maybe_result = await maybe_result
-            return bool(maybe_result)
-        return False
-
     async def _function_needs_approval(
         self, function_tool: FunctionTool, tool_call: RealtimeModelToolCallEvent
     ) -> bool:
@@ -422,11 +410,12 @@ class RealtimeSession(RealtimeModelListener):
                 parsed_args = json.loads(tool_call.arguments or "{}")
             except json.JSONDecodeError:
                 parsed_args = {}
-        return await self._evaluate_needs_approval_setting(
+        return await evaluate_needs_approval_setting(
             needs_setting,
             self._context_wrapper,
             parsed_args,
             tool_call.call_id,
+            strict=False,
         )
 
     def _build_tool_approval_item(

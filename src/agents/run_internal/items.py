@@ -22,6 +22,7 @@ __all__ = [
     "drop_orphan_function_calls",
     "ensure_input_item_format",
     "normalize_input_items_for_api",
+    "normalize_resumed_input",
     "fingerprint_input_item",
     "deduplicate_input_items",
     "function_rejection_item",
@@ -81,6 +82,16 @@ def normalize_input_items_for_api(items: list[TResponseInputItem]) -> list[TResp
         normalized_item = dict(coerced)
         normalized.append(cast(TResponseInputItem, normalized_item))
     return normalized
+
+
+def normalize_resumed_input(
+    raw_input: str | list[TResponseInputItem],
+) -> str | list[TResponseInputItem]:
+    """Normalize resumed list inputs and drop orphan tool calls."""
+    if isinstance(raw_input, list):
+        normalized = normalize_input_items_for_api(raw_input)
+        return drop_orphan_function_calls(normalized)
+    return raw_input
 
 
 def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) -> str | None:
