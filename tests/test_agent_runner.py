@@ -500,6 +500,52 @@ async def test_resume_preserves_filtered_model_input_after_handoff():
     assert resumed.final_output == "done"
 
 
+@pytest.mark.asyncio
+async def test_resumed_state_updates_agent_after_handoff() -> None:
+    model = FakeModel()
+
+    @function_tool(name_override="triage_tool", needs_approval=True)
+    def triage_tool() -> str:
+        return "ok"
+
+    @function_tool(name_override="delegate_tool", needs_approval=True)
+    def delegate_tool() -> str:
+        return "ok"
+
+    delegate = Agent(
+        name="delegate",
+        model=model,
+        tools=[delegate_tool],
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[triage_tool],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("triage_tool", "{}", call_id="triage-1")],
+            [get_text_message("handoff"), get_handoff_tool_call(delegate)],
+            [get_function_tool_call("delegate_tool", "{}", call_id="delegate-1")],
+        ]
+    )
+
+    first = await Runner.run(triage, input="user_message")
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    second = await Runner.run(triage, state)
+    assert second.interruptions
+    assert any(item.tool_name == delegate_tool.name for item in second.interruptions), (
+        "handoff should switch approvals to the delegate agent"
+    )
+    assert state._current_agent is delegate
+
+
 class Foo(TypedDict):
     bar: str
 

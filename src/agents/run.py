@@ -796,6 +796,8 @@ class AgentRunner:
                                 current_agent = cast(
                                     Agent[TContext], turn_result.next_step.new_agent
                                 )
+                                if run_state is not None:
+                                    run_state._current_agent = current_agent
                                 starting_input = turn_result.original_input
                                 original_input = turn_result.original_input
                                 if current_span is not None:
@@ -1219,6 +1221,8 @@ class AgentRunner:
                             return _finalize_conversation_tracking(result)
                         elif isinstance(turn_result.next_step, NextStepHandoff):
                             current_agent = cast(Agent[TContext], turn_result.next_step.new_agent)
+                            if run_state is not None:
+                                run_state._current_agent = current_agent
                             # Next agent starts with the nested/filtered input.
                             # Assign without type annotation to avoid redefinition error
                             starting_input = turn_result.original_input

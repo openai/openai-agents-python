@@ -431,6 +431,8 @@ async def start_streaming(
 
                     if isinstance(turn_result.next_step, NextStepHandoff):
                         current_agent = turn_result.next_step.new_agent
+                        if run_state is not None:
+                            run_state._current_agent = current_agent
                         if current_span:
                             current_span.finish(reset_current=True)
                         current_span = None
