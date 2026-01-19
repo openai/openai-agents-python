@@ -291,14 +291,6 @@ class ToolCallOutputItem(RunItemBase[Any]):
                         outcome = entry.get("outcome")
                         if isinstance(outcome, dict):
                             if outcome.get("type") == "exit":
-                                exit_code = (
-                                    outcome["exit_code"]
-                                    if "exit_code" in outcome
-                                    else outcome.get("exitCode")
-                                )
-                                if exit_code is not None:
-                                    outcome["exit_code"] = exit_code
-                                outcome.pop("exitCode", None)
                                 entry["outcome"] = outcome
             return cast(TResponseInputItem, payload)
 

@@ -101,7 +101,7 @@ def test_shell_output_preserves_zero_exit_code() -> None:
             {
                 "stdout": "ok",
                 "stderr": "",
-                "outcome": {"type": "exit", "exitCode": 0},
+                "outcome": {"type": "exit", "exit_code": 0},
             }
         ],
     }

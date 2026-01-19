@@ -340,10 +340,7 @@ def normalize_shell_output(entry: ShellCommandOutput | Mapping[str, Any]) -> She
             outcome_type = "timeout"
         elif isinstance(type_value, str):
             outcome_type = "exit"
-        if "exit_code" in outcome_value:
-            exit_code_value = outcome_value.get("exit_code")
-        else:
-            exit_code_value = outcome_value.get("exitCode")
+        exit_code_value = outcome_value.get("exit_code")
     else:
         status_str = str(entry.get("status", "completed") or "completed").lower()
         if status_str == "timeout":
@@ -353,11 +350,8 @@ def normalize_shell_output(entry: ShellCommandOutput | Mapping[str, Any]) -> She
                 exit_code_value = 1
             elif outcome_value == "success":
                 exit_code_value = 0
-        if exit_code_value is None:
-            if "exit_code" in entry:
-                exit_code_value = entry.get("exit_code")
-            else:
-                exit_code_value = entry.get("exitCode")
+        if exit_code_value is None and "exit_code" in entry:
+            exit_code_value = entry.get("exit_code")
 
     outcome = ShellCallOutcome(
         type=outcome_type,
