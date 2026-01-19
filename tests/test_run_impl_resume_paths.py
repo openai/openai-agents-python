@@ -1,17 +1,27 @@
+from typing import cast
+
 import pytest
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
 from agents import Agent
 from agents.agent import ToolsToFinalOutputResult
-from agents.items import ModelResponse, ToolCallOutputItem
+from agents.items import MessageOutputItem, ModelResponse, ToolCallItem, ToolCallOutputItem
 from agents.lifecycle import RunHooks
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop, turn_resolution
-from agents.run_internal.run_loop import NextStepFinalOutput, ProcessedResponse, SingleStepResult
+from agents.run_internal.run_loop import (
+    NextStepFinalOutput,
+    NextStepInterruption,
+    NextStepRunAgain,
+    ProcessedResponse,
+    SingleStepResult,
+)
 from agents.run_state import RunState
 from agents.usage import Usage
 from tests.fake_model import FakeModel
+from tests.test_responses import get_function_tool_call, get_text_message
 from tests.utils.hitl import make_agent, make_context_wrapper
 from tests.utils.simple_session import SimpleListSession
 
@@ -119,3 +129,91 @@ async def test_resumed_session_persistence_uses_saved_count(monkeypatch) -> None
 
     assert state._current_turn_persisted_item_count == 1
     assert len(session.saved_items) == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_again_resets_persisted_count(monkeypatch) -> None:
+    agent = Agent(name="resume-agent")
+    context_wrapper: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+    state = RunState(
+        context=context_wrapper,
+        original_input="input",
+        starting_agent=agent,
+        max_turns=2,
+    )
+    session = SimpleListSession()
+
+    state._current_step = NextStepInterruption(interruptions=[])
+    state._model_responses = [
+        ModelResponse(output=[], usage=Usage(), response_id="resp_1"),
+    ]
+    state._last_processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+    state._current_turn_persisted_item_count = 1
+
+    async def fake_resolve_interrupted_turn(**_kwargs):
+        return SingleStepResult(
+            original_input="input",
+            model_response=ModelResponse(output=[], usage=Usage(), response_id="resp_resume"),
+            pre_step_items=[],
+            new_step_items=[],
+            next_step=NextStepRunAgain(),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+        )
+
+    async def fake_run_single_turn(**_kwargs):
+        tool_call = cast(
+            ResponseFunctionToolCall,
+            get_function_tool_call("test_tool", "{}", call_id="call-1"),
+        )
+        tool_call_item = ToolCallItem(agent=agent, raw_item=tool_call)
+        tool_output_item = ToolCallOutputItem(
+            agent=agent,
+            raw_item={
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "ok",
+            },
+            output="ok",
+        )
+        message_item = MessageOutputItem(
+            agent=agent,
+            raw_item=cast(ResponseOutputMessage, get_text_message("final")),
+        )
+        return SingleStepResult(
+            original_input="input",
+            model_response=ModelResponse(
+                output=[get_text_message("final")],
+                usage=Usage(),
+                response_id="resp_final",
+            ),
+            pre_step_items=[],
+            new_step_items=[tool_call_item, tool_output_item, message_item],
+            next_step=NextStepFinalOutput("done"),
+            tool_input_guardrail_results=[],
+            tool_output_guardrail_results=[],
+        )
+
+    monkeypatch.setattr(run_module, "resolve_interrupted_turn", fake_resolve_interrupted_turn)
+    monkeypatch.setattr(run_module, "run_single_turn", fake_run_single_turn)
+
+    runner = run_module.AgentRunner()
+    result = await runner.run(agent, state, session=session, run_config=RunConfig())
+
+    assert result.final_output == "done"
+    saved_types = [
+        item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        for item in session.saved_items
+    ]
+    assert "function_call" in saved_types

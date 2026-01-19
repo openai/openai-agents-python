@@ -661,6 +661,10 @@ class AgentRunner:
                                         persisted_before_partial + saved_count
                                     )
 
+                            # After the resumed turn, treat subsequent turns as fresh so
+                            # counters and input saving behave normally.
+                            is_resumed_state = False
+
                             if isinstance(turn_result.next_step, NextStepInterruption):
                                 interruption_result_input: str | list[TResponseInputItem] = (
                                     normalized_starting_input

@@ -535,9 +535,14 @@ async def resolve_approval_status(
     context_wrapper: RunContextWrapper[Any],
     on_approval: Callable[[RunContextWrapper[Any], ToolApprovalItem], Any] | None = None,
 ) -> tuple[bool | None, ToolApprovalItem]:
-    """Build approval item, run on_approval hook, and return latest approval status."""
+    """Build approval item, run on_approval hook if needed, and return latest approval status."""
     approval_item = ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
-    if on_approval:
+    approval_status = context_wrapper.get_approval_status(
+        tool_name,
+        call_id,
+        existing_pending=approval_item,
+    )
+    if approval_status is None and on_approval:
         decision_result = on_approval(context_wrapper, approval_item)
         if inspect.isawaitable(decision_result):
             decision_result = await decision_result
@@ -546,11 +551,11 @@ async def resolve_approval_status(
                 context_wrapper.approve_tool(approval_item)
             elif decision_result.get("approve") is False:
                 context_wrapper.reject_tool(approval_item)
-    approval_status = context_wrapper.get_approval_status(
-        tool_name,
-        call_id,
-        existing_pending=approval_item,
-    )
+        approval_status = context_wrapper.get_approval_status(
+            tool_name,
+            call_id,
+            existing_pending=approval_item,
+        )
     return approval_status, approval_item
 
 
