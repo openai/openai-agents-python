@@ -698,7 +698,16 @@ class Converter:
                     pending_thinking_blocks = reconstructed_thinking_blocks
 
                 # DeepSeek requires reasoning_content field in assistant messages with tool calls
-                elif model and "deepseek" in model.lower():
+                # Items may not all originate from DeepSeek, so need to check for model match.
+                # For backward compatibility, if provider_data is missing, ignore the check.
+                elif (
+                    model
+                    and "deepseek" in model.lower()
+                    and (
+                        (item_model and "deepseek" in item_model.lower())
+                        or item_provider_data == {}
+                    )
+                ):
                     summary_items = reasoning_item.get("summary", [])
                     if summary_items:
                         reasoning_texts = []
