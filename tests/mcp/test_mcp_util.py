@@ -166,7 +166,10 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
 
     # Verify that the error message matches what default_tool_error_function would return
     # The error gets wrapped in AgentsException by invoke_mcp_tool, so we check for that format
-    wrapped_error = AgentsException("Error invoking MCP tool crashing_tool: Crash!")
+    # The error message now includes the server name
+    wrapped_error = AgentsException(
+        "Error invoking MCP tool crashing_tool on server 'fake_mcp_server': Crash!"
+    )
     expected_error_msg = default_tool_error_function(tool_context, wrapped_error)
     assert result == expected_error_msg
 
