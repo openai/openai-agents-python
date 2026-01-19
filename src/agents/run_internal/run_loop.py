@@ -488,6 +488,26 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
+                        if session is not None and server_conversation_tracker is None:
+                            should_skip_session_save = (
+                                await input_guardrail_tripwire_triggered_for_stream(streamed_result)
+                            )
+                            if should_skip_session_save is False:
+                                items_for_session = (
+                                    turn_result.session_step_items
+                                    if turn_result.session_step_items is not None
+                                    else turn_result.new_step_items
+                                )
+                                await save_result_to_session(
+                                    session,
+                                    [],
+                                    list(items_for_session),
+                                    streamed_result._state,
+                                    response_id=turn_result.model_response.response_id,
+                                )
+                                streamed_result._current_turn_persisted_item_count = (
+                                    streamed_result._state._current_turn_persisted_item_count
+                                )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
                         continue
 

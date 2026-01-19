@@ -974,6 +974,42 @@ async def test_streaming_hitl_resume_with_approved_tools():
 
 
 @pytest.mark.asyncio
+async def test_streaming_resume_persists_tool_outputs_on_run_again():
+    """Approved tool outputs should be persisted before streaming resumes the next turn."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = SimpleListSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+
+    assert first.interruptions
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    saved_items = await session.get_items()
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call-resume"
+        for item in saved_items
+    ), "approved tool outputs should be persisted on resume"
+
+
+@pytest.mark.asyncio
 async def test_streaming_hitl_resume_enforces_max_turns():
     """Test that streamed resumes advance turn counts for max_turns enforcement."""
 
