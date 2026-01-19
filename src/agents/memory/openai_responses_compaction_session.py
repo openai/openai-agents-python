@@ -222,13 +222,21 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
-    async def _defer_compaction(self, response_id: str) -> None:
+    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
+        if store is not None:
+            self._last_store = store
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        resolved_mode = _resolve_compaction_mode(
+            self.compaction_mode,
+            response_id=response_id,
+            store=store if store is not None else self._last_store,
+        )
         should_compact = self.should_trigger_compaction(
             {
                 "response_id": response_id,
+                "compaction_mode": resolved_mode,
                 "compaction_candidate_items": compaction_candidate_items,
                 "session_items": session_items,
             }

@@ -2120,7 +2120,7 @@ class AgentRunner:
             if has_local_tool_outputs:
                 defer_compaction = getattr(session, "_defer_compaction", None)
                 if callable(defer_compaction):
-                    result = defer_compaction(response_id)
+                    result = defer_compaction(response_id, store=store)
                     if inspect.isawaitable(result):
                         await result
                 logger.debug(

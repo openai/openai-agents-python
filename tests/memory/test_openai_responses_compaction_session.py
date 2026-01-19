@@ -451,6 +451,39 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_deferred_compaction_includes_compaction_mode_in_context(self) -> None:
+        underlying = SimpleListSession()
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock()
+        observed = {}
+
+        def should_trigger_compaction(context: dict[str, Any]) -> bool:
+            observed["mode"] = context["compaction_mode"]
+            return False
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="demo",
+            underlying_session=underlying,
+            client=mock_client,
+            compaction_mode="input",
+            should_trigger_compaction=should_trigger_compaction,
+        )
+
+        tool = get_function_tool(name="do_thing", return_value="done")
+        model = FakeModel(initial_output=[get_function_tool_call("do_thing")])
+        agent = Agent(
+            name="assistant",
+            model=model,
+            tools=[tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+
+        await Runner.run(agent, "hello", session=session)
+
+        assert observed["mode"] == "input"
+        mock_client.responses.compact.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_compaction_runs_after_deferred_tool_outputs_when_due(self) -> None:
         underlying = SimpleListSession()
         compacted = SimpleNamespace(
