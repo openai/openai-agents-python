@@ -366,6 +366,56 @@ async def test_nested_agent_tool_interruptions_dont_collide_on_duplicate_call_id
     assert len(nested_interruptions) == 2
 
 
+@pytest.mark.asyncio
+async def test_nested_agent_tool_does_not_inherit_parent_approvals() -> None:
+    """Nested agent tools should request approval even if parent approved the same call ID."""
+
+    @function_tool(needs_approval=True, name_override="shared_tool")
+    async def outer_shared_tool() -> str:
+        return "outer"
+
+    @function_tool(needs_approval=True, name_override="shared_tool")
+    async def inner_shared_tool() -> str:
+        return "inner"
+
+    inner_model = FakeModel()
+    inner_agent = Agent(name="Inner", model=inner_model, tools=[inner_shared_tool])
+    inner_model.add_multiple_turn_outputs(
+        [[make_function_tool_call(inner_shared_tool.name, call_id="dup")]]
+    )
+
+    agent_tool = inner_agent.as_tool(
+        tool_name="inner_agent_tool",
+        tool_description="Inner agent tool",
+        needs_approval=False,
+    )
+
+    outer_model = FakeModel()
+    outer_agent = Agent(name="Outer", model=outer_model, tools=[outer_shared_tool, agent_tool])
+    outer_model.add_multiple_turn_outputs(
+        [
+            [make_function_tool_call(outer_shared_tool.name, call_id="dup")],
+            [
+                make_function_tool_call(
+                    agent_tool.name, call_id="outer-agent", arguments='{"input":"hi"}'
+                )
+            ],
+        ]
+    )
+
+    first = await Runner.run(outer_agent, "start")
+    assert first.interruptions, "parent tool should request approval first"
+
+    approved_state = first.to_state()
+    approved_state.approve(first.interruptions[0])
+
+    second = await Runner.run(outer_agent, approved_state)
+    assert second.interruptions, "nested tool should still require approval"
+    assert any(item.tool_name == inner_shared_tool.name for item in second.interruptions), (
+        "inner tool approvals should not inherit parent approvals"
+    )
+
+
 @pytest.mark.parametrize(
     "setup_fn, output_type",
     [

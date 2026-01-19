@@ -469,7 +469,15 @@ class Agent(AgentBase, Generic[TContext]):
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
             if isinstance(context, ToolContext):
-                nested_context = context
+                # Use a fresh ToolContext to avoid sharing approval state with parent runs.
+                nested_context = ToolContext(
+                    context=context.context,
+                    usage=context.usage,
+                    tool_name=context.tool_name,
+                    tool_call_id=context.tool_call_id,
+                    tool_arguments=context.tool_arguments,
+                    tool_call=context.tool_call,
+                )
             elif isinstance(context, RunContextWrapper):
                 nested_context = context.context
             else:
@@ -495,6 +503,35 @@ class Agent(AgentBase, Generic[TContext]):
                         has_pending = True
                 return "pending" if has_pending else "approved"
 
+            def _apply_nested_approvals(
+                nested_context: RunContextWrapper[Any],
+                parent_context: RunContextWrapper[Any],
+                interruptions: list[ToolApprovalItem],
+            ) -> None:
+                for interruption in interruptions:
+                    call_id = interruption._extract_call_id()
+                    if not call_id:
+                        continue
+                    tool_name = RunContextWrapper._resolve_tool_name(interruption)
+                    status = parent_context.get_approval_status(
+                        tool_name, call_id, existing_pending=interruption
+                    )
+                    if status is None:
+                        continue
+                    approval_record = parent_context._approvals.get(tool_name)
+                    if status is True:
+                        always_approve = bool(approval_record and approval_record.approved is True)
+                        nested_context.approve_tool(
+                            interruption,
+                            always_approve=always_approve,
+                        )
+                    else:
+                        always_reject = bool(approval_record and approval_record.rejected is True)
+                        nested_context.reject_tool(
+                            interruption,
+                            always_reject=always_reject,
+                        )
+
             if isinstance(context, ToolContext) and context.tool_call is not None:
                 pending_run_result = peek_agent_tool_run_result(context.tool_call)
                 if pending_run_result and getattr(pending_run_result, "interruptions", None):
@@ -502,7 +539,12 @@ class Agent(AgentBase, Generic[TContext]):
                     if status == "approved":
                         resume_state = pending_run_result.to_state()
                         if resume_state._context is not None:
-                            resume_state._context._approvals = context._approvals
+                            # Apply only explicit parent approvals to the nested resumed run.
+                            _apply_nested_approvals(
+                                resume_state._context,
+                                context,
+                                pending_run_result.interruptions,
+                            )
                         consume_agent_tool_run_result(context.tool_call)
                     elif status == "rejected":
                         consume_agent_tool_run_result(context.tool_call)
