@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import json
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, Union, cast
@@ -403,20 +404,38 @@ class ToolApprovalItem(RunItemBase[Any]):
     @property
     def name(self) -> str | None:
         """Return the tool name from tool_name or raw_item (backwards compatible)."""
-        return self.tool_name or (
-            getattr(self.raw_item, "name", None)
-            if not isinstance(self.raw_item, dict)
-            else self.raw_item.get("name")
-        )
+        if self.tool_name:
+            return self.tool_name
+        if isinstance(self.raw_item, dict):
+            candidate = self.raw_item.get("name") or self.raw_item.get("tool_name")
+        else:
+            candidate = getattr(self.raw_item, "name", None) or getattr(
+                self.raw_item, "tool_name", None
+            )
+        return str(candidate) if candidate is not None else None
 
     @property
     def arguments(self) -> str | None:
         """Return tool call arguments if present on the raw item."""
+        candidate: Any | None = None
         if isinstance(self.raw_item, dict):
-            return self.raw_item.get("arguments")
+            candidate = self.raw_item.get("arguments")
+            if candidate is None:
+                candidate = self.raw_item.get("params") or self.raw_item.get("input")
         elif hasattr(self.raw_item, "arguments"):
-            return self.raw_item.arguments
-        return None
+            candidate = self.raw_item.arguments
+        elif hasattr(self.raw_item, "params") or hasattr(self.raw_item, "input"):
+            candidate = getattr(self.raw_item, "params", None) or getattr(
+                self.raw_item, "input", None
+            )
+        if candidate is None:
+            return None
+        if isinstance(candidate, str):
+            return candidate
+        try:
+            return json.dumps(candidate)
+        except (TypeError, ValueError):
+            return str(candidate)
 
     def _extract_call_id(self) -> str | None:
         """Return call identifier from the raw item."""
