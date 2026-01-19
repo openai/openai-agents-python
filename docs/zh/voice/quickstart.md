@@ -2,11 +2,11 @@
 search:
   exclude: true
 ---
-# 快速开始
+# 快速入门
 
 ## 先决条件
 
-请确保你已按照 Agents SDK 的基础[快速开始说明](../quickstart.md)完成设置，并创建了虚拟环境。然后从 SDK 安装可选的语音依赖项：
+请确保你已按照 Agents SDK 的基础[快速入门说明](../quickstart.md)进行操作，并设置好虚拟环境。然后，从 SDK 安装可选的语音依赖：
 
 ```bash
 pip install 'openai-agents[voice]'
@@ -14,10 +14,10 @@ pip install 'openai-agents[voice]'
 
 ## 概念
 
-这里的核心概念是一个[`VoicePipeline`][agents.voice.pipeline.VoicePipeline]，它包含 3 个步骤：
+需要了解的主要概念是一个 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]，这是一个三步流程：
 
-1. 运行语音转文本模型，将音频转换为文本。
-2. 运行你的代码（通常是智能体工作流）以生成结果。
+1. 运行语音转文本模型，将音频转为文本。
+2. 运行你的代码（通常是一个智能体式工作流），以生成结果。
 3. 运行文本转语音模型，将结果文本转换回音频。
 
 ```mermaid
@@ -48,7 +48,7 @@ graph LR
 
 ## 智能体
 
-首先，让我们设置一些智能体。如果你已经使用该 SDK 构建过智能体，这部分应该很熟悉。我们将使用几个智能体、一次任务转移，以及一个工具。
+首先，让我们设置一些智能体。如果你曾使用此 SDK 构建过智能体，这部分会很熟悉。我们将有几个智能体、一次任务转移，以及一个工具。
 
 ```python
 import asyncio
@@ -90,16 +90,16 @@ agent = Agent(
 )
 ```
 
-## 语音管线
+## 语音管道
 
-我们将设置一个简单的语音管线，使用[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]作为工作流。
+我们将设置一个简单的语音管道，使用 [`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow] 作为工作流。
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
-## 运行管线
+## 管道运行
 
 ```python
 import numpy as np
@@ -124,7 +124,7 @@ async for event in result.stream():
 
 ```
 
-## 汇总
+## 完整示例
 
 ```python
 import asyncio
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-如果你运行此示例，智能体会对你说话！查看[code examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)中的示例，体验你亲自与智能体对话的演示。
+如果你运行此示例，智能体会和你对话！查看 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static) 中的示例，体验一个你可以亲自与智能体对话的演示。
