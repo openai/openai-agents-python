@@ -187,8 +187,11 @@ class FunctionToolResult:
     output: Any
     """The output of the tool."""
 
-    run_item: RunItem
-    """The run item that was produced as a result of the tool call."""
+    run_item: RunItem | None
+    """The run item that was produced as a result of the tool call.
+
+    This can be None when the tool run is interrupted and no output item should be emitted yet.
+    """
 
     interruptions: list[ToolApprovalItem] = field(default_factory=list)
     """Interruptions from nested agent runs (for agent-as-tool)."""

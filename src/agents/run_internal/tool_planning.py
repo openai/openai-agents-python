@@ -15,6 +15,7 @@ from ..exceptions import UserError
 from ..items import (
     MCPApprovalResponseItem,
     RunItem,
+    RunItemBase,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
@@ -307,7 +308,11 @@ def _build_tool_result_items(
     local_shell_results: Sequence[RunItem] | None = None,
 ) -> list[RunItem]:
     """Build ordered tool result items for inclusion in new step items."""
-    results: list[RunItem] = [result.run_item for result in function_results]
+    results: list[RunItem] = []
+    for result in function_results:
+        run_item = getattr(result, "run_item", None)
+        if isinstance(run_item, RunItemBase):
+            results.append(cast(RunItem, run_item))
     results.extend(computer_results)
     results.extend(shell_results)
     results.extend(apply_patch_results)

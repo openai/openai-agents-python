@@ -949,6 +949,7 @@ async def test_agent_as_tool_with_nested_approvals_propagates() -> None:
     resumed = await Runner.run(orchestrator, state)
     assert resumed.interruptions, "Nested agent tool approval should bubble up"
     assert resumed.interruptions[0].tool_name == "get_current_timestamp"
+    assert isinstance(resumed.to_input_list(), list)
 
     assert not tool_calls, "Nested tool should not execute before approval"
 

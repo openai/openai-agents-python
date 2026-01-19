@@ -122,7 +122,7 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     if isinstance(item_id, str):
         return f"id:{item_type}:{item_id}"
 
-    call_id = payload.get("call_id") or payload.get("callId")
+    call_id = payload.get("call_id")
     if isinstance(call_id, str):
         return f"call_id:{item_type}:{call_id}"
 

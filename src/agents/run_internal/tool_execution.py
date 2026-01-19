@@ -33,6 +33,7 @@ from ..items import (
     ItemHelpers,
     MCPApprovalResponseItem,
     RunItem,
+    RunItemBase,
     ToolApprovalItem,
     ToolCallOutputItem,
 )
@@ -895,15 +896,22 @@ async def execute_function_tool_calls(
                         else []
                     )
 
+            run_item: RunItem | None = None
+            if not nested_interruptions:
+                run_item = ToolCallOutputItem(
+                    output=result,
+                    raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
+                    agent=agent,
+                )
+            else:
+                # Skip tool output until nested interruptions are resolved.
+                run_item = None
+
             function_tool_results.append(
                 FunctionToolResult(
                     tool=tool_run.function_tool,
                     output=result,
-                    run_item=ToolCallOutputItem(
-                        output=result,
-                        raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
-                        agent=agent,
-                    ),
+                    run_item=run_item,
                     interruptions=nested_interruptions,
                     agent_run_result=nested_run_result,
                 )
@@ -1148,7 +1156,8 @@ async def execute_approved_tools(
             config=run_config,
         )
         for result in function_results:
-            generated_items.append(result.run_item)
+            if isinstance(result.run_item, RunItemBase):
+                generated_items.append(result.run_item)
 
 
 # --------------------------
