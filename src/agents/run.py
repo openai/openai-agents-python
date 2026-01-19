@@ -402,7 +402,14 @@ class AgentRunner:
             else:
                 prepared_input = original_user_input
 
-            if context is None and run_state._context is not None:
+            if context is not None:
+                context_wrapper = (
+                    context
+                    if isinstance(context, RunContextWrapper)
+                    else RunContextWrapper(context=context)
+                )
+                run_state._context = context_wrapper
+            elif run_state._context is not None:
                 context = run_state._context.context
 
             max_turns = run_state._max_turns
@@ -519,7 +526,7 @@ class AgentRunner:
                 context_wrapper = (
                     context
                     if isinstance(context, RunContextWrapper)
-                    else RunContextWrapper(context=context)  # type: ignore
+                    else RunContextWrapper(context=context)
                 )
                 run_state = RunState(
                     context=context_wrapper,
@@ -1455,8 +1462,15 @@ class AgentRunner:
                 input_for_result = normalize_input_items_for_api(raw_input_for_result)
             else:
                 input_for_result = raw_input_for_result
-            # Use context from RunState if not provided
-            if context is None and run_state._context is not None:
+            # Use context from RunState if not provided, otherwise override it.
+            if context is not None:
+                context_wrapper = (
+                    context
+                    if isinstance(context, RunContextWrapper)
+                    else RunContextWrapper(context=context)
+                )
+                run_state._context = context_wrapper
+            elif run_state._context is not None:
                 context = run_state._context.context
 
             # Override max_turns with the state's max_turns to preserve it across resumption
@@ -1471,7 +1485,7 @@ class AgentRunner:
             context_wrapper = (
                 context
                 if isinstance(context, RunContextWrapper)
-                else RunContextWrapper(context=context)  # type: ignore
+                else RunContextWrapper(context=context)
             )
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result

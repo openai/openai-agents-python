@@ -1611,13 +1611,16 @@ class TestRunStateResumption:
         # Create RunState from result
         state = result1.to_state()
 
-        # Resume from state with different context (should use state's context)
+        # Resume from state with different context (should use new context)
         context2 = {"key": "value2"}
         model.set_next_output([get_text_message("Second response")])
         result2 = await Runner.run(agent, state, context=context2)
 
-        # State's context should be used, not the new context
+        # New context should be used.
         assert result2.final_output == "Second response"
+        assert result2.context_wrapper.context == context2
+        assert state._context is not None
+        assert state._context.context == context2
 
     @pytest.mark.asyncio
     async def test_resume_from_run_state_with_conversation_id(self):
@@ -1734,6 +1737,26 @@ class TestRunStateResumption:
 
         # Should complete successfully using state's context
         assert result.final_output == "done"
+
+    @pytest.mark.asyncio
+    async def test_resume_from_run_state_streamed_with_context_override(self):
+        """Test that streaming uses provided context override when resuming."""
+
+        model = FakeModel()
+        model.set_next_output([get_text_message("done")])
+        agent = Agent(name="TestAgent", model=model)
+
+        # Create a RunState with context
+        context_wrapper = RunContextWrapper(context={"key": "value1"})
+        state = make_state(agent, context=context_wrapper, original_input="test", max_turns=1)
+
+        override_context = {"key": "value2"}
+        result = Runner.run_streamed(agent, state, context=override_context)
+        async for _ in result.stream_events():
+            pass
+
+        assert result.final_output == "done"
+        assert result.context_wrapper.context == override_context
 
     @pytest.mark.asyncio
     async def test_run_result_streaming_to_state_with_interruptions(self):
