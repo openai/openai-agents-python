@@ -701,7 +701,6 @@ class Converter:
                 elif model and "deepseek" in model.lower():
                     summary_items = reasoning_item.get("summary", [])
                     if summary_items:
-                        
                         reasoning_texts = []
                         for summary_item in summary_items:
                             if isinstance(summary_item, dict) and summary_item.get("text"):

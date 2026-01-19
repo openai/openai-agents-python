@@ -1,6 +1,15 @@
+from typing import Any
+
 import litellm
 import pytest
-from litellm.types.utils import ChatCompletionMessageToolCall, Choices, Function, Message, ModelResponse, Usage
+from litellm.types.utils import (
+    ChatCompletionMessageToolCall,
+    Choices,
+    Function,
+    Message,
+    ModelResponse,
+    Usage,
+)
 
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.model_settings import ModelSettings
@@ -19,7 +28,7 @@ async def test_deepseek_reasoning_content_preserved_in_tool_calls(monkeypatch):
     extracted and added to assistant messages during conversion.
     """
     # Capture the messages sent to the model
-    captured_calls: list[dict] = []
+    captured_calls: list[dict[str, Any]] = []
 
     async def fake_acompletion(model, messages=None, **kwargs):
         captured_calls.append({"model": model, "messages": messages, **kwargs})
@@ -64,7 +73,7 @@ async def test_deepseek_reasoning_content_preserved_in_tool_calls(monkeypatch):
 
     assert len(first_response.output) >= 1
 
-    input_items = []
+    input_items: list[Any] = []
     input_items.append({"role": "user", "content": "What's the weather in Tokyo?"})
 
     for item in first_response.output:
@@ -73,11 +82,13 @@ async def test_deepseek_reasoning_content_preserved_in_tool_calls(monkeypatch):
         else:
             input_items.append(item)
 
-    input_items.append({
-        "type": "function_call_output",
-        "call_id": "call_123",
-        "output": "The weather in Tokyo is sunny.",
-    })
+    input_items.append(
+        {
+            "type": "function_call_output",
+            "call_id": "call_123",
+            "output": "The weather in Tokyo is sunny.",
+        }
+    )
 
     messages = Converter.items_to_messages(
         input_items,
@@ -85,7 +96,8 @@ async def test_deepseek_reasoning_content_preserved_in_tool_calls(monkeypatch):
     )
 
     assistant_messages_with_tool_calls = [
-        m for m in messages
+        m
+        for m in messages
         if isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")
     ]
 
@@ -103,7 +115,7 @@ async def test_deepseek_reasoning_content_in_multi_turn_conversation(monkeypatch
     When DeepSeek returns reasoning_content with tool_calls, subsequent API calls must
     include the reasoning_content field in the assistant message to avoid 400 errors.
     """
-    captured_calls: list[dict] = []
+    captured_calls: list[dict[str, Any]] = []
 
     async def fake_acompletion(model, messages=None, **kwargs):
         captured_calls.append({"model": model, "messages": messages, **kwargs})
@@ -127,7 +139,9 @@ async def test_deepseek_reasoning_content_in_multi_turn_conversation(monkeypatch
 
         # Second call: check if reasoning_content was in the request
         # In real DeepSeek API, this would fail with 400 if reasoning_content is missing
-        msg = Message(role="assistant", content="Based on my findings, the weather in Tokyo is sunny.")
+        msg = Message(
+            role="assistant", content="Based on my findings, the weather in Tokyo is sunny."
+        )
         choice = Choices(index=0, message=msg)
         return ModelResponse(choices=[choice], usage=Usage(100, 50, 150))
 
@@ -146,7 +160,7 @@ async def test_deepseek_reasoning_content_in_multi_turn_conversation(monkeypatch
         tracing=ModelTracing.DISABLED,
     )
 
-    input_items = []
+    input_items: list[Any] = []
     input_items.append({"role": "user", "content": "What's the weather in Tokyo?"})
 
     for item in first_response.output:
@@ -155,11 +169,13 @@ async def test_deepseek_reasoning_content_in_multi_turn_conversation(monkeypatch
         else:
             input_items.append(item)
 
-    input_items.append({
-        "type": "function_call_output",
-        "call_id": "call_weather_123",
-        "output": "The weather in Tokyo is sunny and 22°C.",
-    })
+    input_items.append(
+        {
+            "type": "function_call_output",
+            "call_id": "call_weather_123",
+            "output": "The weather in Tokyo is sunny and 22°C.",
+        }
+    )
 
     await model.get_response(
         system_instructions="You are a helpful assistant.",
@@ -193,7 +209,7 @@ def test_deepseek_reasoning_content_with_openai_chatcompletions_path():
     """
     from agents.models.chatcmpl_converter import Converter
 
-    input_items = [
+    input_items: list[Any] = [
         {"role": "user", "content": "What's the weather in Paris?"},
         {
             "id": "__fake_id__",
@@ -233,4 +249,5 @@ def test_deepseek_reasoning_content_with_openai_chatcompletions_path():
 
     assert assistant_with_tools is not None
     assert "reasoning_content" in assistant_with_tools
-    assert assistant_with_tools["reasoning_content"] == "I need to check the weather in Paris."
+    # Use type: ignore since reasoning_content is a dynamic field not in OpenAI's TypedDict
+    assert assistant_with_tools["reasoning_content"] == "I need to check the weather in Paris."  # type: ignore[typeddict-item]

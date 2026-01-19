@@ -9,9 +9,9 @@ from agents.run import AgentRunner
 
 
 @pytest.fixture
-def fresh_event_loop_policy() -> Generator[asyncio.AbstractEventLoopPolicy, None, None]:
+def fresh_event_loop_policy() -> Generator[Any, None, None]:
     policy_before = asyncio.get_event_loop_policy()
-    new_policy = asyncio.DefaultEventLoopPolicy()
+    new_policy = asyncio.DefaultEventLoopPolicy()  # type: ignore[attr-defined]
     asyncio.set_event_loop_policy(new_policy)
     try:
         yield new_policy
