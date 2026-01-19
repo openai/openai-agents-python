@@ -411,7 +411,9 @@ class AgentRunner:
             original_user_input = raw_input
 
             server_manages_conversation = (
-                conversation_id is not None or previous_response_id is not None
+                conversation_id is not None
+                or previous_response_id is not None
+                or auto_previous_response_id
             )
 
             if server_manages_conversation:

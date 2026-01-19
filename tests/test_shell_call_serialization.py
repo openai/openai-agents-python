@@ -66,7 +66,7 @@ def test_serialize_shell_output_emits_canonical_outcome() -> None:
     assert "exitCode" not in payload["outcome"]
 
 
-def test_shell_rejection_payload_sets_exit_code() -> None:
+def test_shell_rejection_payload_preserves_missing_exit_code() -> None:
     agent = Agent(name="tester", model=FakeModel())
     raw_item = {
         "type": "shell_call_output",
@@ -88,7 +88,8 @@ def test_shell_rejection_payload_sets_exit_code() -> None:
     assert isinstance(first_output, dict)
     outcome = first_output.get("outcome")
     assert isinstance(outcome, dict)
-    assert outcome["exit_code"] == 1
+    assert outcome.get("exit_code") is None
+    assert "exitCode" not in outcome
 
 
 def test_shell_output_preserves_zero_exit_code() -> None:

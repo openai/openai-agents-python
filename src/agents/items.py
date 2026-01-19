@@ -296,7 +296,8 @@ class ToolCallOutputItem(RunItemBase[Any]):
                                     if "exit_code" in outcome
                                     else outcome.get("exitCode")
                                 )
-                                outcome["exit_code"] = 1 if exit_code is None else exit_code
+                                if exit_code is not None:
+                                    outcome["exit_code"] = exit_code
                                 outcome.pop("exitCode", None)
                                 entry["outcome"] = outcome
             return cast(TResponseInputItem, payload)
