@@ -283,6 +283,49 @@ class TestOpenAIResponsesCompactionSession:
         assert "input" not in second_kwargs
 
     @pytest.mark.asyncio
+    async def test_run_compaction_auto_uses_input_when_last_response_unstored(self) -> None:
+        mock_session = self.create_mock_session()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
+            cast(
+                TResponseInputItem,
+                {"type": "message", "role": "assistant", "content": "world"},
+            ),
+        ]
+        mock_session.get_items.return_value = items
+
+        mock_compact_response = MagicMock()
+        mock_compact_response.output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "compacted",
+            }
+        ]
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(return_value=mock_compact_response)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            compaction_mode="auto",
+        )
+
+        await session.run_compaction(
+            {"response_id": "resp-unstored", "store": False, "force": True}
+        )
+        await session.run_compaction({"force": True})
+
+        assert mock_client.responses.compact.call_count == 2
+        first_kwargs = mock_client.responses.compact.call_args_list[0].kwargs
+        second_kwargs = mock_client.responses.compact.call_args_list[1].kwargs
+        assert "previous_response_id" not in first_kwargs
+        assert "previous_response_id" not in second_kwargs
+        assert second_kwargs.get("input") == mock_compact_response.output
+
+    @pytest.mark.asyncio
     async def test_run_compaction_skips_when_below_threshold(self) -> None:
         mock_session = self.create_mock_session()
         # Return fewer than threshold items
