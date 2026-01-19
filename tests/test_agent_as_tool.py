@@ -387,10 +387,10 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_agent_as_tool_rejected_nested_approval_uses_pending_result(
+async def test_agent_as_tool_rejected_nested_approval_resumes_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rejected nested approvals should short-circuit to the pending run result."""
+    """Rejected nested approvals should resume the pending run with rejection applied."""
 
     agent = Agent(name="outer")
     tool_call = make_function_tool_call(
@@ -410,29 +410,49 @@ async def test_agent_as_tool_rejected_nested_approval_uses_pending_result(
     approval_item = ToolApprovalItem(agent=agent, raw_item=inner_call)
 
     class DummyState:
-        def __init__(self) -> None:
-            self._context = None
+        def __init__(self, nested_context: ToolContext) -> None:
+            self._context = nested_context
 
-    class DummyResult:
+    class DummyPendingResult:
         def __init__(self) -> None:
             self.interruptions = [approval_item]
-            self.final_output = "rejected"
+            self.final_output = None
 
         def to_state(self) -> DummyState:
-            return DummyState()
+            return resume_state
 
-    pending_result = DummyResult()
+    class DummyResumedResult:
+        def __init__(self) -> None:
+            self.interruptions: list[ToolApprovalItem] = []
+            self.final_output = "rejected"
+
+    nested_context = ToolContext(
+        context=None,
+        tool_name=tool_call.name,
+        tool_call_id=tool_call.call_id,
+        tool_arguments=tool_call.arguments,
+        tool_call=tool_call,
+    )
+    resume_state = DummyState(nested_context)
+    pending_result = DummyPendingResult()
     record_agent_tool_run_result(tool_call, cast(Any, pending_result))
     tool_context.reject_tool(approval_item)
 
-    async def unexpected_run(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("Runner.run should not be called for rejected nested approvals.")
+    resumed_result = DummyResumedResult()
+    run_inputs: list[Any] = []
 
-    monkeypatch.setattr(Runner, "run", classmethod(unexpected_run))
+    async def run_resume(cls, /, starting_agent, input, **kwargs) -> DummyResumedResult:
+        run_inputs.append(input)
+        assert input is resume_state
+        assert input._context is not None
+        assert input._context.is_tool_approved("inner_tool", "inner-1") is False
+        return resumed_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(run_resume))
 
     async def extractor(result: Any) -> str:
-        assert result is pending_result
-        return "from_pending"
+        assert result is resumed_result
+        return "from_resume"
 
     tool = cast(
         FunctionTool,
@@ -446,7 +466,8 @@ async def test_agent_as_tool_rejected_nested_approval_uses_pending_result(
 
     output = await tool.on_invoke_tool(tool_context, tool_call.arguments)
 
-    assert output == "from_pending"
+    assert output == "from_resume"
+    assert run_inputs == [resume_state]
 
 
 @pytest.mark.asyncio

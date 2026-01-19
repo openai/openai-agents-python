@@ -536,7 +536,7 @@ class Agent(AgentBase, Generic[TContext]):
                 pending_run_result = peek_agent_tool_run_result(context.tool_call)
                 if pending_run_result and getattr(pending_run_result, "interruptions", None):
                     status = _nested_approvals_status(pending_run_result.interruptions)
-                    if status == "approved":
+                    if status in ("approved", "rejected"):
                         resume_state = pending_run_result.to_state()
                         if resume_state._context is not None:
                             # Apply only explicit parent approvals to the nested resumed run.
@@ -546,11 +546,6 @@ class Agent(AgentBase, Generic[TContext]):
                                 pending_run_result.interruptions,
                             )
                         consume_agent_tool_run_result(context.tool_call)
-                    elif status == "rejected":
-                        consume_agent_tool_run_result(context.tool_call)
-                        if custom_output_extractor:
-                            return await custom_output_extractor(pending_run_result)
-                        return pending_run_result.final_output
 
             if on_stream is not None:
                 run_result_streaming = Runner.run_streamed(
