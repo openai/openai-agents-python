@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agents import Agent, ApplyPatchTool, ModelSettings, Runner, apply_diff, trace
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
+from examples.auto_mode import confirm_with_fallback, is_auto_mode
 
 
 class ApprovalTracker:
@@ -89,8 +90,8 @@ class WorkspaceEditor:
         if operation.diff:
             preview = operation.diff if len(operation.diff) < 400 else f"{operation.diff[:400]}…"
             print("- diff preview:\n", preview)
-        answer = input("Proceed? [y/N] ").strip().lower()
-        if answer not in {"y", "yes"}:
+        approved = confirm_with_fallback("Proceed? [y/N] ", default=is_auto_mode())
+        if not approved:
             raise RuntimeError("Apply patch operation rejected by user.")
         self._approvals.remember(fingerprint)
 
@@ -162,7 +163,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model",
-        default="gpt-5.1",
+        default="gpt-5.2",
         help="Model ID to use for the agent.",
     )
     args = parser.parse_args()

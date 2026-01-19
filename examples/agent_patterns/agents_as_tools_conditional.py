@@ -3,6 +3,7 @@ import asyncio
 from pydantic import BaseModel
 
 from agents import Agent, AgentBase, RunContextWrapper, Runner, trace
+from examples.auto_mode import input_with_fallback
 
 """
 This example demonstrates the agents-as-tools pattern with conditional tool enabling.
@@ -81,7 +82,7 @@ async def main():
     print("2. French and Spanish (2 tools)")
     print("3. European languages (3 tools)")
 
-    choice = input("\nSelect option (1-3): ").strip()
+    choice = input_with_fallback("\nSelect option (1-3): ", "2").strip()
     preference_map = {"1": "spanish_only", "2": "french_spanish", "3": "european"}
     language_preference = preference_map.get(choice, "spanish_only")
 
@@ -95,7 +96,10 @@ async def main():
     print(f"The LLM will only see and can use these {len(available_tools)} tools\n")
 
     # Get user request
-    user_request = input("Ask a question and see responses in available languages:\n")
+    user_request = input_with_fallback(
+        "Ask a question and see responses in available languages:\n",
+        "How do you say good morning?",
+    )
 
     # Run with LLM interaction
     print("\nProcessing request...")

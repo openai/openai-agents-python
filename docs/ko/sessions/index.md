@@ -4,9 +4,9 @@ search:
 ---
 # 세션
 
-Agents SDK 는 여러 에이전트 실행 간에 대화 기록을 자동으로 유지하는 기본 세션 메모리를 제공하여, 턴 간에 `.to_input_list()` 를 수동으로 처리할 필요를 없앱니다.
+Agents SDK 는 여러 에이전트 실행(run) 간에 대화 기록을 자동으로 유지하는 내장 세션 메모리를 제공하여, 턴마다 수동으로 `.to_input_list()` 를 처리할 필요를 없앱니다.
 
-세션은 특정 세션에 대한 대화 기록을 저장하여, 에이전트가 명시적인 수동 메모리 관리 없이도 컨텍스트를 유지할 수 있도록 합니다. 이는 에이전트가 이전 상호작용을 기억해야 하는 채팅 애플리케이션이나 멀티 턴 대화를 구축할 때 특히 유용합니다.
+세션은 특정 세션에 대한 대화 기록을 저장하여, 명시적인 수동 메모리 관리 없이도 에이전트가 컨텍스트를 유지하도록 합니다. 이는 에이전트가 이전 상호작용을 기억해야 하는 채팅 애플리케이션이나 멀티 턴 대화 구축에 특히 유용합니다.
 
 ## 빠른 시작
 
@@ -51,11 +51,11 @@ print(result.final_output)  # "Approximately 39 million"
 
 세션 메모리가 활성화되면:
 
-1. **각 실행 전**: 러너가 세션의 대화 기록을 자동으로 가져와 입력 항목 앞에 추가합니다
-2. **각 실행 후**: 실행 중 생성된 모든 새 항목(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 세션에 자동으로 저장됩니다
-3. **컨텍스트 보존**: 동일한 세션으로 이후 실행을 수행하면 전체 대화 기록이 포함되어 에이전트가 컨텍스트를 유지할 수 있습니다
+1. **각 실행 전**: 러너가 해당 세션의 대화 기록을 자동으로 가져와 입력 항목 앞에 추가합니다
+2. **각 실행 후**: 실행 중에 생성된 모든 새 항목(사용자 입력, 어시스턴트 응답, 도구 호출 등)이 자동으로 세션에 저장됩니다
+3. **컨텍스트 유지**: 동일한 세션으로 후속 실행 시 전체 대화 기록이 포함되어 에이전트가 컨텍스트를 유지할 수 있습니다
 
-이를 통해 `.to_input_list()` 를 수동으로 호출하고 실행 간 대화 상태를 관리할 필요가 없습니다.
+이를 통해 실행 간에 `.to_input_list()` 를 수동으로 호출하고 대화 상태를 관리할 필요가 없습니다.
 
 ## 메모리 작업
 
@@ -88,7 +88,7 @@ await session.clear_session()
 
 ### 수정용 pop_item 사용
 
-`pop_item` 메서드는 대화에서 마지막 항목을 되돌리거나 수정하고자 할 때 특히 유용합니다:
+`pop_item` 메서드는 대화에서 마지막 항목을 취소하거나 수정하고자 할 때 특히 유용합니다:
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -123,7 +123,7 @@ SDK 는 다양한 사용 사례를 위한 여러 세션 구현을 제공합니�
 
 ### OpenAI Conversations API 세션
 
-`OpenAIConversationsSession` 을 통해 [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations) 를 사용하세요.
+`OpenAIConversationsSession` 을 통해 [OpenAI's Conversations API](https://platform.openai.com/docs/api-reference/conversations)를 사용하세요.
 
 ```python
 from agents import Agent, Runner, OpenAIConversationsSession
@@ -159,7 +159,7 @@ print(result.final_output)  # "California"
 
 ### SQLite 세션
 
-기본이자 가벼운 SQLite 기반 세션 구현:
+기본 제공되는 경량 SQLite 세션 구현:
 
 ```python
 from agents import SQLiteSession
@@ -180,7 +180,7 @@ result = await Runner.run(
 
 ### SQLAlchemy 세션
 
-SQLAlchemy 가 지원하는 모든 데이터베이스를 사용하는 프로덕션 준비 완료 세션:
+모든 SQLAlchemy 지원 데이터베이스를 사용하는 프로덕션 준비 세션:
 
 ```python
 from agents.extensions.memory import SQLAlchemySession
@@ -198,13 +198,13 @@ engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
 session = SQLAlchemySession("user_123", engine=engine, create_tables=True)
 ```
 
-자세한 문서는 [SQLAlchemy Sessions](sqlalchemy_session.md) 를 참조하세요.
+자세한 문서는 [SQLAlchemy 세션](sqlalchemy_session.md)을 참조하세요.
 
 
 
 ### 고급 SQLite 세션
 
-대화 분기, 사용량 분석, 구조화된 쿼리를 지원하는 향상된 SQLite 세션:
+대화 분기, 사용량 분석, 구조화 쿼리를 제공하는 향상된 SQLite 세션:
 
 ```python
 from agents.extensions.memory import AdvancedSQLiteSession
@@ -224,11 +224,11 @@ await session.store_run_usage(result)  # Track token usage
 await session.create_branch_from_turn(2)  # Branch from turn 2
 ```
 
-자세한 문서는 [Advanced SQLite Sessions](advanced_sqlite_session.md) 를 참조하세요.
+자세한 문서는 [고급 SQLite 세션](advanced_sqlite_session.md)을 참조하세요.
 
-### 암호화 세션
+### 암호화된 세션
 
-모든 세션 구현에 적용 가능한 투명한 암호화 래퍼:
+모든 세션 구현에 대한 투명한 암호화 래퍼:
 
 ```python
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
@@ -251,11 +251,11 @@ session = EncryptedSession(
 result = await Runner.run(agent, "Hello", session=session)
 ```
 
-자세한 문서는 [Encrypted Sessions](encrypted_session.md) 를 참조하세요.
+자세한 문서는 [암호화된 세션](encrypted_session.md)을 참조하세요.
 
 ### 기타 세션 유형
 
-몇 가지 추가 내장 옵션이 있습니다. `examples/memory/` 와 `extensions/memory/` 아래 소스 코드를 참고하세요.
+추가로 몇 가지 내장 옵션이 있습니다. `examples/memory/` 와 `extensions/memory/` 아래의 소스 코드를 참고하세요.
 
 ## 세션 관리
 
@@ -263,19 +263,20 @@ result = await Runner.run(agent, "Hello", session=session)
 
 대화를 체계적으로 구성할 수 있도록 의미 있는 세션 ID 를 사용하세요:
 
-- User-based: `"user_12345"`
-- Thread-based: `"thread_abc123"`
-- Context-based: `"support_ticket_456"`
+- User 기반: `"user_12345"`
+- Thread 기반: `"thread_abc123"`
+- 컨텍스트 기반: `"support_ticket_456"`
 
-### 메모리 영속성
+### 메모리 지속성
 
-- 인메모리 SQLite(`SQLiteSession("session_id")`) 를 사용하여 임시 대화를 처리
-- 파일 기반 SQLite(`SQLiteSession("session_id", "path/to/db.sqlite")`) 를 사용하여 영구 대화를 처리
-- SQLAlchemy 지원 데이터베이스를 사용하는 프로덕션 시스템에는 SQLAlchemy 기반 세션(`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) 사용
-- 클라우드 네이티브 프로덕션 배포에는 Dapr 상태 저장소 세션(`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) 사용 — 기본 제공 텔레메트리, 트레이싱, 데이터 격리를 포함한 30+ 데이터베이스 백엔드 지원
-- 기록을 OpenAI Conversations API 에 저장하고자 할 때는 OpenAI 가 호스팅하는 스토리지(`OpenAIConversationsSession()`) 사용
-- 투명한 암호화 및 TTL 기반 만료를 위해 암호화 세션(`EncryptedSession(session_id, underlying_session, encryption_key)`)으로 모든 세션을 래핑
-- 더 고급 사용 사례를 위해 다른 프로덕션 시스템(Redis, Django 등)에 대한 사용자 지정 세션 백엔드를 구현하는 것을 고려
+- 임시 대화에는 인메모리 SQLite(`SQLiteSession("session_id")`) 사용
+- 지속형 대화에는 파일 기반 SQLite(`SQLiteSession("session_id", "path/to/db.sqlite")`) 사용
+- SQLAlchemy 가 지원하는 기존 데이터베이스를 사용하는 프로덕션 시스템에는 SQLAlchemy 기반 세션(`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) 사용
+- 프로덕션 클라우드 네이티브 배포에서는 Dapr 상태 저장소 세션(`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) 사용. 지원:
+30+ 데이터베이스 백엔드, 내장 텔레메트리, 트레이싱, 데이터 분리
+- OpenAI Conversations API 에 기록을 저장하길 원할 때는 OpenAI 가 호스팅하는 스토리지(`OpenAIConversationsSession()`) 사용
+- 투명한 암호화와 TTL 기반 만료를 위해 암호화된 세션(`EncryptedSession(session_id, underlying_session, encryption_key)`)으로 어떤 세션이든 래핑
+- 더 고급 사용 사례를 위해 다른 프로덕션 시스템(Redis, Django 등)에 대한 커스텀 세션 백엔드를 구현하는 것도 고려
 
 ### 다중 세션
 
@@ -321,9 +322,9 @@ result2 = await Runner.run(
 )
 ```
 
-## 전체 예시
+## 전체 예제
 
-다음은 세션 메모리가 실제로 동작하는 완전한 예시입니다:
+다음은 세션 메모리가 실제로 동작하는 전체 예제입니다:
 
 ```python
 import asyncio
@@ -438,9 +439,9 @@ result = await Runner.run(
 |---------|-------------|
 | [openai-django-sessions](https://pypi.org/project/openai-django-sessions/) | Django 가 지원하는 모든 데이터베이스(PostgreSQL, MySQL, SQLite 등)를 위한 Django ORM 기반 세션 |
 
-세션 구현을 개발하셨다면, 이곳에 추가할 수 있도록 문서 PR 을 자유롭게 제출해 주세요!
+세션 구현을 만드셨다면, 여기에 추가할 수 있도록 문서 PR 을 자유롭게 제출해 주세요!
 
-## API 레퍼런스
+## API 참조
 
 자세한 API 문서는 다음을 참조하세요:
 
@@ -450,4 +451,4 @@ result = await Runner.run(
 - [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy 기반 구현
 - [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr 상태 저장소 구현
 - [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - 분기 및 분석을 지원하는 향상된 SQLite
-- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 모든 세션을 위한 암호화 래퍼
+- [`EncryptedSession`][agents.extensions.memory.encrypt_session.EncryptedSession] - 모든 세션에 대한 암호화 래퍼

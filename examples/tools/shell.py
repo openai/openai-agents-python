@@ -108,7 +108,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model",
-        default="gpt-5.1",
+        default="gpt-5.2",
     )
     args = parser.parse_args()
     asyncio.run(main(args.prompt, args.model))

@@ -1,5 +1,7 @@
 import asyncio
 
+from examples.auto_mode import input_with_fallback
+
 from .manager import FinancialResearchManager
 
 
@@ -8,7 +10,10 @@ from .manager import FinancialResearchManager
 # financial research query, for example:
 # "Write up an analysis of Apple Inc.'s most recent quarter."
 async def main() -> None:
-    query = input("Enter a financial research query: ")
+    query = input_with_fallback(
+        "Enter a financial research query: ",
+        "Write up an analysis of Apple Inc.'s most recent quarter.",
+    )
     mgr = FinancialResearchManager()
     await mgr.run(query)
 

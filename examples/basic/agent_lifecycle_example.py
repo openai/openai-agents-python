@@ -13,6 +13,7 @@ from agents import (
     Tool,
     function_tool,
 )
+from examples.auto_mode import input_with_fallback
 
 
 class CustomAgentHooks(AgentHooks):
@@ -98,7 +99,7 @@ start_agent = Agent(
 
 
 async def main() -> None:
-    user_input = input("Enter a max number: ")
+    user_input = input_with_fallback("Enter a max number: ", "50")
     try:
         max_number = int(user_input)
         await Runner.run(
