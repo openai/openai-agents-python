@@ -85,6 +85,7 @@ jobs:
         if: steps.find.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.find.outputs.number }}
           RELEASE_BRANCH: ${{ steps.find.outputs.branch }}
           RELEASE_REVIEW_PATH: ${{ steps.codex-output.outputs.output_file }}
@@ -92,19 +93,8 @@ jobs:
           set -euo pipefail
           git push --force-with-lease origin "$RELEASE_BRANCH"
           gh pr edit "$PR_NUMBER" --body-file "$RELEASE_REVIEW_PATH"
-          milestone_name="$(python - <<'PY'
-          import os
-          import re
-
-          branch = os.environ.get("RELEASE_BRANCH", "")
-          version = branch.replace("release/v", "", 1)
-          match = re.match(r"^(\d+)\.(\d+)", version)
-          if not match:
-              print("")
-          else:
-              print(f"{match.group(1)}.{match.group(2)}.x")
-          PY
-          )"
+          version="${RELEASE_BRANCH#release/v}"
+          milestone_name="$(python .github/scripts/select-release-milestone.py --version "$version")"
           if [ -n "$milestone_name" ]; then
             if ! gh pr edit "$PR_NUMBER" --add-label "project" --milestone "$milestone_name"; then
               echo "PR label/milestone update failed; continuing without changes." >&2
