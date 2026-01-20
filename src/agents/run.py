@@ -682,7 +682,9 @@ class AgentRunner:
                             if isinstance(turn_result.next_step, NextStepRunAgain):
                                 continue
 
-                            model_responses.append(turn_result.model_response)
+                            append_model_response_if_new(
+                                model_responses, turn_result.model_response
+                            )
                             tool_input_guardrail_results.extend(
                                 turn_result.tool_input_guardrail_results
                             )
