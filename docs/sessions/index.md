@@ -153,6 +153,54 @@ result = await Runner.run(
 print(result.final_output)  # "California"
 ```
 
+### OpenAI Responses compaction sessions
+
+Use `OpenAIResponsesCompactionSession` to compact session history with the Responses API (`responses.compact`). It wraps an underlying session and can automatically compact after each turn based on `should_trigger_compaction`.
+
+#### Typical usage (auto-compaction)
+
+```python
+from agents import Agent, Runner, SQLiteSession
+from agents.memory import OpenAIResponsesCompactionSession
+
+underlying = SQLiteSession("conversation_123")
+session = OpenAIResponsesCompactionSession(
+    session_id="conversation_123",
+    underlying_session=underlying,
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(agent, "Hello", session=session)
+print(result.final_output)
+```
+
+By default, compaction runs after each turn once the candidate threshold is reached.
+
+#### auto-compaction can block streaming
+
+Compaction clears and rewrites the session history, so the SDK waits for compaction to finish before considering the run complete. In streaming mode, this means `run.stream_events()` can stay open for a few seconds after the last output token if compaction is heavy.
+
+If you want low-latency streaming or fast turn-taking, disable auto-compaction and call `run_compaction()` yourself between turns (or during idle time). You can decide when to force compaction based on your own criteria.
+
+```python
+from agents import Agent, Runner, SQLiteSession
+from agents.memory import OpenAIResponsesCompactionSession
+
+underlying = SQLiteSession("conversation_123")
+session = OpenAIResponsesCompactionSession(
+    session_id="conversation_123",
+    underlying_session=underlying,
+    # Disable triggering the auto compaction
+    should_trigger_compaction=lambda _: False,
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(agent, "Hello", session=session)
+
+# Decide when to compact (e.g., on idle, every N turns, or size thresholds).
+await session.run_compaction({"force": True})
+```
+
 ### SQLite sessions
 
 The default, lightweight session implementation using SQLite:
@@ -443,6 +491,7 @@ For detailed API documentation, see:
 
 -   [`Session`][agents.memory.session.Session] - Protocol interface
 -   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API implementation
+-   [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] - Responses API compaction wrapper
 -   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
 -   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr state store implementation
