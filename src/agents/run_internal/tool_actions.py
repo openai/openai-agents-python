@@ -50,10 +50,10 @@ from .tool_execution import (
     normalize_apply_patch_result,
     normalize_max_output_length,
     normalize_shell_output,
+    normalize_shell_output_entries,
     render_shell_outputs,
     resolve_approval_interruption,
     resolve_approval_status,
-    resolve_exit_code,
     serialize_shell_output,
     truncate_shell_outputs,
 )
@@ -331,40 +331,7 @@ class ShellAction:
                 }
             ]
 
-        structured_output: list[dict[str, Any]] = []
-        if raw_entries:
-            for entry in raw_entries:
-                sanitized = dict(entry)
-                status_value = sanitized.pop("status", None)
-                sanitized.pop("provider_data", None)
-                raw_exit_code = sanitized.pop("exit_code", None)
-                sanitized.pop("command", None)
-                outcome_value = sanitized.get("outcome")
-                if isinstance(outcome_value, str):
-                    resolved_type = "exit"
-                    if status_value == "timeout":
-                        resolved_type = "timeout"
-                    outcome_payload: dict[str, Any] = {"type": resolved_type}
-                    if resolved_type == "exit":
-                        outcome_payload["exit_code"] = resolve_exit_code(
-                            raw_exit_code, outcome_value
-                        )
-                    sanitized["outcome"] = outcome_payload
-                elif isinstance(outcome_value, dict):
-                    outcome_payload = dict(outcome_value)
-                    outcome_status = outcome_payload.pop("status", None)
-                    outcome_type = outcome_payload.get("type")
-                    if outcome_type != "timeout":
-                        status_str = outcome_status if isinstance(outcome_status, str) else None
-                        outcome_payload.setdefault(
-                            "exit_code",
-                            resolve_exit_code(
-                                raw_exit_code,
-                                status_str,
-                            ),
-                        )
-                    sanitized["outcome"] = outcome_payload
-                structured_output.append(sanitized)
+        structured_output = normalize_shell_output_entries(raw_entries) if raw_entries else []
 
         raw_item: dict[str, Any] = {
             "type": "shell_call_output",
@@ -444,10 +411,6 @@ class ApplyPatchAction:
         output_text = ""
 
         try:
-            operation = coerce_apply_patch_operation(
-                call.tool_call,
-                context_wrapper=context_wrapper,
-            )
             editor = apply_patch_tool.editor
             if operation.type == "create_file":
                 result = editor.create_file(operation)
@@ -481,7 +444,7 @@ class ApplyPatchAction:
 
         raw_item: dict[str, Any] = {
             "type": "apply_patch_call_output",
-            "call_id": extract_apply_patch_call_id(call.tool_call),
+            "call_id": call_id,
             "status": status,
         }
         if output_text:

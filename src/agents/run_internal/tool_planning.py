@@ -50,6 +50,7 @@ __all__ = [
     "ToolExecutionPlan",
     "_build_plan_for_fresh_turn",
     "_build_plan_for_resume_turn",
+    "_collect_mcp_approval_plan",
     "_collect_tool_interruptions",
     "_build_tool_result_items",
     "_make_unique_item_appender",
@@ -197,15 +198,15 @@ def _partition_mcp_approval_requests(
     return with_callback, manual
 
 
-def _build_plan_for_fresh_turn(
+def _collect_mcp_approval_plan(
     *,
     processed_response,
     agent: Agent[Any],
     context_wrapper: RunContextWrapper[Any],
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
-) -> ToolExecutionPlan:
-    """Build a ToolExecutionPlan for a fresh turn."""
-    pending_interruptions: list[ToolApprovalItem] = []
+    pending_interruption_adder: Callable[[ToolApprovalItem], None],
+) -> tuple[list[ToolRunMCPApprovalRequest], list[RunItem]]:
+    """Return MCP approval callback requests and approved responses."""
     approved_mcp_responses: list[RunItem] = []
     (
         mcp_requests_with_callback,
@@ -217,8 +218,28 @@ def _build_plan_for_fresh_turn(
             requests=mcp_requests_requiring_manual_approval,
             context_wrapper=context_wrapper,
             approval_items_by_call_id=approval_items_by_call_id,
-            pending_interruption_adder=pending_interruptions.append,
+            pending_interruption_adder=pending_interruption_adder,
         )
+
+    return list(mcp_requests_with_callback), approved_mcp_responses
+
+
+def _build_plan_for_fresh_turn(
+    *,
+    processed_response,
+    agent: Agent[Any],
+    context_wrapper: RunContextWrapper[Any],
+    approval_items_by_call_id: Mapping[str, ToolApprovalItem],
+) -> ToolExecutionPlan:
+    """Build a ToolExecutionPlan for a fresh turn."""
+    pending_interruptions: list[ToolApprovalItem] = []
+    mcp_requests_with_callback, approved_mcp_responses = _collect_mcp_approval_plan(
+        processed_response=processed_response,
+        agent=agent,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+        pending_interruption_adder=pending_interruptions.append,
+    )
 
     return ToolExecutionPlan(
         function_runs=processed_response.functions,
@@ -246,19 +267,13 @@ def _build_plan_for_resume_turn(
     apply_patch_calls: list[ToolRunApplyPatchCall],
 ) -> ToolExecutionPlan:
     """Build a ToolExecutionPlan for a resumed turn."""
-    approved_mcp_responses: list[RunItem] = []
-    (
-        mcp_requests_with_callback,
-        mcp_requests_requiring_manual_approval,
-    ) = _partition_mcp_approval_requests(processed_response.mcp_approval_requests)
-    if mcp_requests_requiring_manual_approval:
-        approved_mcp_responses, _ = _apply_manual_mcp_approvals(
-            agent=agent,
-            requests=mcp_requests_requiring_manual_approval,
-            context_wrapper=context_wrapper,
-            approval_items_by_call_id=approval_items_by_call_id,
-            pending_interruption_adder=pending_interruption_adder,
-        )
+    mcp_requests_with_callback, approved_mcp_responses = _collect_mcp_approval_plan(
+        processed_response=processed_response,
+        agent=agent,
+        context_wrapper=context_wrapper,
+        approval_items_by_call_id=approval_items_by_call_id,
+        pending_interruption_adder=pending_interruption_adder,
+    )
 
     return ToolExecutionPlan(
         function_runs=function_runs,

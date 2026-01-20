@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
-from typing import TypeVar, cast
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar, cast
 
 from openai.types.responses import ResponseCompletedEvent, ResponseOutputItemDoneEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -52,6 +53,7 @@ from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
 from ..util import _coro, _error_tracing
+from .agent_runner_helpers import apply_resumed_conversation_settings
 from .approvals import (
     append_input_items_excluding_approvals,
     approvals_from_step,
@@ -286,6 +288,75 @@ async def _save_stream_items(
         )
 
 
+async def _run_output_guardrails_for_stream(
+    *,
+    agent: Agent[TContext],
+    run_config: RunConfig,
+    output: Any,
+    context_wrapper: RunContextWrapper[TContext],
+    streamed_result: RunResultStreaming,
+) -> list[Any]:
+    streamed_result._output_guardrails_task = asyncio.create_task(
+        run_output_guardrails(
+            agent.output_guardrails + (run_config.output_guardrails or []),
+            agent,
+            output,
+            context_wrapper,
+        )
+    )
+
+    try:
+        return cast(list[Any], await streamed_result._output_guardrails_task)
+    except Exception:
+        return []
+
+
+async def _finalize_streamed_final_output(
+    *,
+    streamed_result: RunResultStreaming,
+    agent: Agent[TContext],
+    run_config: RunConfig,
+    output: Any,
+    context_wrapper: RunContextWrapper[TContext],
+    save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
+    items: list[RunItem],
+    response_id: str | None,
+    store_setting: bool | None,
+) -> None:
+    output_guardrail_results = await _run_output_guardrails_for_stream(
+        agent=agent,
+        run_config=run_config,
+        output=output,
+        context_wrapper=context_wrapper,
+        streamed_result=streamed_result,
+    )
+    streamed_result.output_guardrail_results = output_guardrail_results
+    streamed_result.final_output = output
+    streamed_result.is_complete = True
+
+    await save_items(items, response_id, store_setting)
+
+    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+
+
+async def _finalize_streamed_interruption(
+    *,
+    streamed_result: RunResultStreaming,
+    save_items: Callable[[list[RunItem], str | None, bool | None], Awaitable[None]],
+    items: list[RunItem],
+    response_id: str | None,
+    store_setting: bool | None,
+    interruptions: list[ToolApprovalItem],
+    processed_response: ProcessedResponse | None,
+) -> None:
+    await save_items(items, response_id, store_setting)
+    _complete_stream_interruption(
+        streamed_result,
+        interruptions=interruptions,
+        processed_response=processed_response,
+    )
+
+
 T = TypeVar("T")
 
 
@@ -310,10 +381,16 @@ async def start_streaming(
         streamed_result.trace.start(mark_as_current=True)
 
     if is_resumed_state and run_state is not None:
-        conversation_id = conversation_id or run_state._conversation_id
-        previous_response_id = previous_response_id or run_state._previous_response_id
-        if auto_previous_response_id is False and run_state._auto_previous_response_id:
-            auto_previous_response_id = True
+        (
+            conversation_id,
+            previous_response_id,
+            auto_previous_response_id,
+        ) = apply_resumed_conversation_settings(
+            run_state=run_state,
+            conversation_id=conversation_id,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+        )
 
     if conversation_id is not None or previous_response_id is not None or auto_previous_response_id:
         server_conversation_tracker = OpenAIServerConversationTracker(
@@ -421,6 +498,47 @@ async def start_streaming(
             session_input_items_for_persistence = session_items_snapshot
             streamed_result._original_input_for_persistence = session_items_snapshot
 
+    async def _save_resumed_items(
+        items: list[RunItem], response_id: str | None, store_setting: bool | None
+    ) -> None:
+        await _save_resumed_stream_items(
+            session=session,
+            server_conversation_tracker=server_conversation_tracker,
+            streamed_result=streamed_result,
+            run_state=run_state,
+            items=items,
+            response_id=response_id,
+            store=store_setting,
+        )
+
+    async def _save_stream_items_with_count(
+        items: list[RunItem], response_id: str | None, store_setting: bool | None
+    ) -> None:
+        await _save_stream_items(
+            session=session,
+            server_conversation_tracker=server_conversation_tracker,
+            streamed_result=streamed_result,
+            run_state=run_state,
+            items=items,
+            response_id=response_id,
+            update_persisted_count=True,
+            store=store_setting,
+        )
+
+    async def _save_stream_items_without_count(
+        items: list[RunItem], response_id: str | None, store_setting: bool | None
+    ) -> None:
+        await _save_stream_items(
+            session=session,
+            server_conversation_tracker=server_conversation_tracker,
+            streamed_result=streamed_result,
+            run_state=run_state,
+            items=items,
+            response_id=response_id,
+            update_persisted_count=False,
+            store=store_setting,
+        )
+
     try:
         while True:
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
@@ -476,17 +594,12 @@ async def start_streaming(
                     ).store
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
-                        await _save_resumed_stream_items(
-                            session=session,
-                            server_conversation_tracker=server_conversation_tracker,
+                        await _finalize_streamed_interruption(
                             streamed_result=streamed_result,
-                            run_state=run_state,
+                            save_items=_save_resumed_items,
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
-                            store=store_setting,
-                        )
-                        _complete_stream_interruption(
-                            streamed_result,
+                            store_setting=store_setting,
                             interruptions=approvals_from_step(turn_result.next_step),
                             processed_response=run_state._last_processed_response,
                         )
@@ -507,47 +620,24 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
-                        streamed_result._output_guardrails_task = asyncio.create_task(
-                            run_output_guardrails(
-                                current_agent.output_guardrails
-                                + (run_config.output_guardrails or []),
-                                current_agent,
-                                turn_result.next_step.output,
-                                context_wrapper,
-                            )
-                        )
-
-                        try:
-                            output_guardrail_results = await streamed_result._output_guardrails_task
-                        except Exception:
-                            output_guardrail_results = []
-
-                        streamed_result.output_guardrail_results = output_guardrail_results
-                        streamed_result.final_output = turn_result.next_step.output
-                        streamed_result.is_complete = True
-
-                        await _save_resumed_stream_items(
-                            session=session,
-                            server_conversation_tracker=server_conversation_tracker,
+                        await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
-                            run_state=run_state,
+                            agent=current_agent,
+                            run_config=run_config,
+                            output=turn_result.next_step.output,
+                            context_wrapper=context_wrapper,
+                            save_items=_save_resumed_items,
                             items=list(turn_session_items),
                             response_id=turn_result.model_response.response_id,
-                            store=store_setting,
+                            store_setting=store_setting,
                         )
-
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
-                        await _save_resumed_stream_items(
-                            session=session,
-                            server_conversation_tracker=server_conversation_tracker,
-                            streamed_result=streamed_result,
-                            run_state=run_state,
-                            items=list(turn_session_items),
-                            response_id=turn_result.model_response.response_id,
-                            store=store_setting,
+                        await _save_resumed_items(
+                            list(turn_session_items),
+                            turn_result.model_response.response_id,
+                            store_setting,
                         )
                         run_state._current_step = NextStepRunAgain()  # type: ignore[assignment]
                         continue
@@ -704,15 +794,10 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
-                    await _save_stream_items(
-                        session=session,
-                        server_conversation_tracker=server_conversation_tracker,
-                        streamed_result=streamed_result,
-                        run_state=run_state,
-                        items=turn_session_items,
-                        response_id=turn_result.model_response.response_id,
-                        update_persisted_count=False,
-                        store=store_setting,
+                    await _save_stream_items_without_count(
+                        turn_session_items,
+                        turn_result.model_response.response_id,
+                        store_setting,
                     )
                     current_agent = turn_result.next_step.new_agent
                     current_span.finish(reset_current=True)
@@ -729,48 +814,19 @@ async def start_streaming(
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
-                    streamed_result._output_guardrails_task = asyncio.create_task(
-                        run_output_guardrails(
-                            current_agent.output_guardrails + (run_config.output_guardrails or []),
-                            current_agent,
-                            turn_result.next_step.output,
-                            context_wrapper,
-                        )
-                    )
-
-                    try:
-                        output_guardrail_results = await streamed_result._output_guardrails_task
-                    except Exception:
-                        output_guardrail_results = []
-
-                    streamed_result.output_guardrail_results = output_guardrail_results
-                    streamed_result.final_output = turn_result.next_step.output
-                    streamed_result.is_complete = True
-
-                    await _save_stream_items(
-                        session=session,
-                        server_conversation_tracker=server_conversation_tracker,
+                    await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
-                        run_state=streamed_result._state,
+                        agent=current_agent,
+                        run_config=run_config,
+                        output=turn_result.next_step.output,
+                        context_wrapper=context_wrapper,
+                        save_items=_save_stream_items_with_count,
                         items=turn_session_items,
                         response_id=turn_result.model_response.response_id,
-                        update_persisted_count=True,
-                        store=store_setting,
+                        store_setting=store_setting,
                     )
-
-                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                     break
                 elif isinstance(turn_result.next_step, NextStepInterruption):
-                    await _save_stream_items(
-                        session=session,
-                        server_conversation_tracker=server_conversation_tracker,
-                        streamed_result=streamed_result,
-                        run_state=streamed_result._state,
-                        items=turn_session_items,
-                        response_id=turn_result.model_response.response_id,
-                        update_persisted_count=True,
-                        store=store_setting,
-                    )
                     processed_response_for_state = turn_result.processed_response
                     if processed_response_for_state is None and run_state is not None:
                         processed_response_for_state = run_state._last_processed_response
@@ -784,8 +840,12 @@ async def start_streaming(
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
                         )
-                    _complete_stream_interruption(
-                        streamed_result,
+                    await _finalize_streamed_interruption(
+                        streamed_result=streamed_result,
+                        save_items=_save_stream_items_with_count,
+                        items=turn_session_items,
+                        response_id=turn_result.model_response.response_id,
+                        store_setting=store_setting,
                         interruptions=approvals_from_step(turn_result.next_step),
                         processed_response=processed_response_for_state,
                     )
@@ -927,16 +987,9 @@ async def run_single_turn_streamed(
     final_response: ModelResponse | None = None
 
     if server_conversation_tracker is not None:
-        original_input_for_tracking = ItemHelpers.input_to_new_input_list(streamed_result.input)
         items_for_input = (
             pending_server_items if pending_server_items else streamed_result._model_input_items
         )
-        for item in items_for_input:
-            if item.type == "tool_approval_item":
-                continue
-            input_item = item.to_input_item()
-            original_input_for_tracking.append(input_item)
-
         input = server_conversation_tracker.prepare_input(streamed_result.input, items_for_input)
         logger.debug(
             "prepare_input returned %s items; remaining_initial_input=%s",

@@ -5,7 +5,6 @@ tracking and normalization logic for conversation-aware execution, not public-fa
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -26,6 +25,11 @@ def _normalize_server_item_id(value: Any) -> str | None:
         # Fake IDs are placeholders from non-Responses providers; ignore them for dedupe.
         return None
     return value if isinstance(value, str) else None
+
+
+def _fingerprint_for_tracker(item: Any) -> str | None:
+    """Return a stable fingerprint for dedupe, ignoring failures."""
+    return fingerprint_input_item(item)
 
 
 @dataclass
@@ -78,12 +82,9 @@ class OpenAIServerConversationTracker:
             )
             if item_id is not None:
                 self.server_item_ids.add(item_id)
-            if isinstance(item, dict):
-                try:
-                    fp = fingerprint_input_item(item) or ""
-                    self.sent_item_fingerprints.add(fp)
-                except Exception:
-                    pass
+            fp = _fingerprint_for_tracker(item)
+            if fp:
+                self.sent_item_fingerprints.add(fp)
 
         self.sent_initial_input = True
         self.remaining_initial_input = None
@@ -130,12 +131,9 @@ class OpenAIServerConversationTracker:
                 has_output = has_output or hasattr(item, "output")
                 if isinstance(call_id, str) and has_output:
                     self.server_tool_call_ids.add(call_id)
-                if isinstance(item, dict):
-                    try:
-                        fp = json.dumps(item, sort_keys=True)
-                        self.sent_item_fingerprints.add(fp)
-                    except Exception:
-                        pass
+                fp = _fingerprint_for_tracker(item)
+                if fp:
+                    self.sent_item_fingerprints.add(fp)
         for item in generated_items:  # type: ignore[assignment]
             run_item: RunItem = cast(RunItem, item)
             raw_item = run_item.raw_item
@@ -155,11 +153,9 @@ class OpenAIServerConversationTracker:
 
                 raw_item_id = id(raw_item)
                 self.sent_items.add(raw_item_id)
-                try:
-                    fp = json.dumps(raw_item, sort_keys=True)
+                fp = _fingerprint_for_tracker(raw_item)
+                if fp:
                     self.sent_item_fingerprints.add(fp)
-                except Exception:
-                    pass
 
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
@@ -208,24 +204,17 @@ class OpenAIServerConversationTracker:
             has_output_payload = has_output_payload or hasattr(output_item, "output")
             if isinstance(call_id, str) and has_output_payload:
                 self.server_tool_call_ids.add(call_id)
-            if isinstance(output_item, dict):
-                try:
-                    fp = json.dumps(output_item, sort_keys=True)
-                    self.sent_item_fingerprints.add(fp)
-                    server_item_fingerprints.add(fp)
-                except Exception:
-                    pass
+            fp = _fingerprint_for_tracker(output_item)
+            if fp:
+                self.sent_item_fingerprints.add(fp)
+                server_item_fingerprints.add(fp)
 
         if self.remaining_initial_input and server_item_fingerprints:
             remaining: list[TResponseInputItem] = []
             for pending in self.remaining_initial_input:
-                if isinstance(pending, dict):
-                    try:
-                        serialized = json.dumps(pending, sort_keys=True)
-                        if serialized in server_item_fingerprints:
-                            continue
-                    except Exception:
-                        pass
+                pending_fp = _fingerprint_for_tracker(pending)
+                if pending_fp and pending_fp in server_item_fingerprints:
+                    continue
                 remaining.append(pending)
             self.remaining_initial_input = remaining or None
 
@@ -253,23 +242,17 @@ class OpenAIServerConversationTracker:
 
         delivered_by_content: set[str] = set()
         for item in items:
-            if isinstance(item, dict):
-                try:
-                    delivered_by_content.add(json.dumps(item, sort_keys=True))
-                except Exception:
-                    continue
+            fp = _fingerprint_for_tracker(item)
+            if fp:
+                delivered_by_content.add(fp)
 
         remaining: list[TResponseInputItem] = []
         for pending in self.remaining_initial_input:
             if id(pending) in delivered_ids:
                 continue
-            if isinstance(pending, dict):
-                try:
-                    serialized = json.dumps(pending, sort_keys=True)
-                    if serialized in delivered_by_content:
-                        continue
-                except Exception:
-                    pass
+            pending_fp = _fingerprint_for_tracker(pending)
+            if pending_fp and pending_fp in delivered_by_content:
+                continue
             remaining.append(pending)
 
         self.remaining_initial_input = remaining or None
@@ -285,13 +268,9 @@ class OpenAIServerConversationTracker:
                 continue
             rewind_items.append(item)
             self.sent_items.discard(id(item))
-
-            if isinstance(item, dict):
-                try:
-                    fp = json.dumps(item, sort_keys=True)
-                    self.sent_item_fingerprints.discard(fp)
-                except Exception:
-                    pass
+            fp = _fingerprint_for_tracker(item)
+            if fp:
+                self.sent_item_fingerprints.discard(fp)
 
         if not rewind_items:
             return
@@ -357,13 +336,9 @@ class OpenAIServerConversationTracker:
             to_input = getattr(run_item, "to_input_item", None)
             input_item = to_input() if callable(to_input) else cast(TResponseInputItem, raw_item)
 
-            if isinstance(input_item, dict):
-                try:
-                    fp = json.dumps(input_item, sort_keys=True)
-                    if self.primed_from_state and fp in self.sent_item_fingerprints:
-                        continue
-                except Exception:
-                    pass
+            fp = _fingerprint_for_tracker(input_item)
+            if fp and self.primed_from_state and fp in self.sent_item_fingerprints:
+                continue
 
             input_items.append(input_item)
 

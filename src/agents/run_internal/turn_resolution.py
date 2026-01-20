@@ -127,6 +127,48 @@ __all__ = [
 ]
 
 
+async def _maybe_finalize_from_tool_results(
+    *,
+    agent: Agent[TContext],
+    original_input: str | list[TResponseInputItem],
+    new_response: ModelResponse,
+    pre_step_items: list[RunItem],
+    new_step_items: list[RunItem],
+    function_results: list[FunctionToolResult],
+    hooks: RunHooks[TContext],
+    context_wrapper: RunContextWrapper[TContext],
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+) -> SingleStepResult | None:
+    check_tool_use = await check_for_final_output_from_tools(
+        agent, function_results, context_wrapper
+    )
+    if not check_tool_use.is_final_output:
+        return None
+
+    if not agent.output_type or agent.output_type is str:
+        check_tool_use.final_output = str(check_tool_use.final_output)
+
+    if check_tool_use.final_output is None:
+        logger.error(
+            "Model returned a final output of None. Not raising an error because we assume"
+            "you know what you're doing."
+        )
+
+    return await execute_final_output(
+        agent=agent,
+        original_input=original_input,
+        new_response=new_response,
+        pre_step_items=pre_step_items,
+        new_step_items=new_step_items,
+        final_output=check_tool_use.final_output,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+    )
+
+
 async def run_final_output_hooks(
     agent: Agent[TContext],
     hooks: RunHooks[TContext],
@@ -442,7 +484,6 @@ async def execute_tools_and_side_effects(
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
 
-    check_for_final_output = check_for_final_output_from_tools
     execute_final_output_call = execute_final_output
     execute_handoffs_call = execute_handoffs
 
@@ -531,30 +572,20 @@ async def execute_tools_and_side_effects(
             run_config=run_config,
         )
 
-    check_tool_use = await check_for_final_output(agent, function_results, context_wrapper)
-
-    if check_tool_use.is_final_output:
-        if not agent.output_type or agent.output_type is str:
-            check_tool_use.final_output = str(check_tool_use.final_output)
-
-        if check_tool_use.final_output is None:
-            logger.error(
-                "Model returned a final output of None. Not raising an error because we assume"
-                "you know what you're doing."
-            )
-
-        return await execute_final_output_call(
-            agent=agent,
-            original_input=original_input,
-            new_response=new_response,
-            pre_step_items=pre_step_items,
-            new_step_items=new_step_items,
-            final_output=check_tool_use.final_output,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            tool_input_guardrail_results=tool_input_guardrail_results,
-            tool_output_guardrail_results=tool_output_guardrail_results,
-        )
+    tool_final_output = await _maybe_finalize_from_tool_results(
+        agent=agent,
+        original_input=original_input,
+        new_response=new_response,
+        pre_step_items=pre_step_items,
+        new_step_items=new_step_items,
+        function_results=function_results,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+    )
+    if tool_final_output is not None:
+        return tool_final_output
 
     message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
     potential_final_output_text = (
@@ -616,8 +647,6 @@ async def resolve_interrupted_turn(
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
 
-    check_for_final_output = check_for_final_output_from_tools
-    execute_final_output_call = execute_final_output
     execute_handoffs_call = execute_handoffs
 
     def nest_history(data: HandoffInputData, mapper: Any | None = None) -> HandoffInputData:
@@ -1077,30 +1106,20 @@ async def resolve_interrupted_turn(
             nest_handoff_history_fn=nest_history,
         )
 
-    check_tool_use = await check_for_final_output(agent, function_results, context_wrapper)
-
-    if check_tool_use.is_final_output:
-        if not agent.output_type or agent.output_type is str:
-            check_tool_use.final_output = str(check_tool_use.final_output)
-
-        if check_tool_use.final_output is None:
-            logger.error(
-                "Model returned a final output of None. Not raising an error because we assume"
-                "you know what you're doing."
-            )
-
-        return await execute_final_output_call(
-            agent=agent,
-            original_input=original_input,
-            new_response=new_response,
-            pre_step_items=pre_step_items,
-            new_step_items=new_items,
-            final_output=check_tool_use.final_output,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            tool_input_guardrail_results=tool_input_guardrail_results,
-            tool_output_guardrail_results=tool_output_guardrail_results,
-        )
+    tool_final_output = await _maybe_finalize_from_tool_results(
+        agent=agent,
+        original_input=original_input,
+        new_response=new_response,
+        pre_step_items=pre_step_items,
+        new_step_items=new_items,
+        function_results=function_results,
+        hooks=hooks,
+        context_wrapper=context_wrapper,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+    )
+    if tool_final_output is not None:
+        return tool_final_output
 
     return SingleStepResult(
         original_input=original_input,

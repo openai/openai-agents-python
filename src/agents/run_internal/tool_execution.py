@@ -100,6 +100,7 @@ __all__ = [
     "render_shell_outputs",
     "truncate_shell_outputs",
     "normalize_max_output_length",
+    "normalize_shell_output_entries",
     "format_shell_error",
     "build_litellm_json_tool_call",
     "process_hosted_mcp_approvals",
@@ -224,26 +225,25 @@ def coerce_shell_call(tool_call: Any) -> ShellCallData:
     return ShellCallData(call_id=call_id, action=action, status=status_literal, raw=tool_call)
 
 
+def _parse_apply_patch_json(payload: str, *, label: str) -> dict[str, Any]:
+    """Parse apply_patch JSON payloads with consistent error messages."""
+    try:
+        parsed = json.loads(payload or "{}")
+    except json.JSONDecodeError as exc:
+        raise ModelBehaviorError(f"Invalid apply_patch {label} JSON: {exc}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ModelBehaviorError(f"Apply patch {label} must be a JSON object.")
+    return dict(parsed)
+
+
 def parse_apply_patch_custom_input(input_json: str) -> dict[str, Any]:
     """Parse custom apply_patch tool input used when a tool passes raw JSON strings."""
-    try:
-        parsed = json.loads(input_json or "{}")
-    except json.JSONDecodeError as exc:
-        raise ModelBehaviorError(f"Invalid apply_patch input JSON: {exc}") from exc
-    if not isinstance(parsed, Mapping):
-        raise ModelBehaviorError("Apply patch input must be a JSON object.")
-    return dict(parsed)
+    return _parse_apply_patch_json(input_json, label="input")
 
 
 def parse_apply_patch_function_args(arguments: str) -> dict[str, Any]:
     """Parse apply_patch function tool arguments from the model."""
-    try:
-        parsed = json.loads(arguments or "{}")
-    except json.JSONDecodeError as exc:
-        raise ModelBehaviorError(f"Invalid apply_patch arguments JSON: {exc}") from exc
-    if not isinstance(parsed, Mapping):
-        raise ModelBehaviorError("Apply patch arguments must be a JSON object.")
-    return dict(parsed)
+    return _parse_apply_patch_json(arguments, label="arguments")
 
 
 def extract_apply_patch_call_id(tool_call: Any) -> str:
@@ -473,6 +473,41 @@ def truncate_shell_outputs(
         )
 
     return truncated
+
+
+def normalize_shell_output_entries(
+    entries: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize raw shell output entries into the model-facing payload."""
+    structured_output: list[dict[str, Any]] = []
+    for entry in entries:
+        sanitized = dict(entry)
+        status_value = sanitized.pop("status", None)
+        sanitized.pop("provider_data", None)
+        raw_exit_code = sanitized.pop("exit_code", None)
+        sanitized.pop("command", None)
+        outcome_value = sanitized.get("outcome")
+        if isinstance(outcome_value, str):
+            resolved_type = "exit"
+            if status_value == "timeout":
+                resolved_type = "timeout"
+            outcome_payload: dict[str, Any] = {"type": resolved_type}
+            if resolved_type == "exit":
+                outcome_payload["exit_code"] = resolve_exit_code(raw_exit_code, outcome_value)
+            sanitized["outcome"] = outcome_payload
+        elif isinstance(outcome_value, dict):
+            outcome_payload = dict(outcome_value)
+            outcome_status = outcome_payload.pop("status", None)
+            outcome_type = outcome_payload.get("type")
+            if outcome_type != "timeout":
+                status_str = outcome_status if isinstance(outcome_status, str) else None
+                outcome_payload.setdefault(
+                    "exit_code",
+                    resolve_exit_code(raw_exit_code, status_str),
+                )
+            sanitized["outcome"] = outcome_payload
+        structured_output.append(sanitized)
+    return structured_output
 
 
 def normalize_max_output_length(value: int | None) -> int | None:
