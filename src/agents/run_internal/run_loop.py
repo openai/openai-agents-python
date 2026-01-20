@@ -453,7 +453,7 @@ async def start_streaming(
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
                     generated_items, turn_session_items = resumed_turn_items(turn_result)
                     base_session_items = (
-                        list(run_state._generated_items) if run_state is not None else []
+                        list(run_state._session_items) if run_state is not None else []
                     )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
@@ -462,6 +462,7 @@ async def start_streaming(
                             run_state,
                             turn_result=turn_result,
                             generated_items=generated_items,
+                            session_items=streamed_result.new_items,
                         )
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
@@ -777,6 +778,7 @@ async def start_streaming(
                         run_state._model_responses = streamed_result.raw_responses
                         run_state._last_processed_response = processed_response_for_state
                         run_state._generated_items = streamed_result._model_input_items
+                        run_state._session_items = list(streamed_result.new_items)
                         run_state._current_step = turn_result.next_step
                         run_state._current_turn = current_turn
                         run_state._current_turn_persisted_item_count = (

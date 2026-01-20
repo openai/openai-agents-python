@@ -42,7 +42,7 @@ class RequireApprovalObject(TypedDict, total=False):
 RequireApprovalPolicy = Literal["always", "never"]
 RequireApprovalMapping = dict[str, RequireApprovalPolicy]
 RequireApprovalSetting = (
-    RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | None
+    RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
 )
 
 
@@ -68,8 +68,8 @@ class MCPServer(abc.ABC):
                 default will cause duplicate content. You can set this to True if you know the
                 server will not duplicate the structured content in the `tool_result.content`.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
-                a dict of tool names to those values, or an object with always/never tool lists
-                (mirroring TS requireApproval). Normalized into a needs_approval policy.
+                a dict of tool names to those values, a boolean, or an object with always/never
+                tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
@@ -161,9 +161,14 @@ class MCPServer(abc.ABC):
         if isinstance(require_approval, dict):
             tool_mapping: dict[str, bool] = {}
             for name, value in require_approval.items():
-                if isinstance(value, str) and value in ("always", "never"):
+                if isinstance(value, bool):
+                    tool_mapping[str(name)] = value
+                elif isinstance(value, str) and value in ("always", "never"):
                     tool_mapping[str(name)] = _to_bool(value)
             return tool_mapping
+
+        if isinstance(require_approval, bool):
+            return require_approval
 
         return _to_bool(require_approval)
 
@@ -231,7 +236,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             message_handler: Optional handler invoked for session messages as delivered by the
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
-                a dict of tool names to those values, or an object with always/never tool lists.
+                a dict of tool names to those values, a boolean, or an object with always/never
+                tool lists.
         """
         super().__init__(
             use_structured_content=use_structured_content,

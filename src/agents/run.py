@@ -494,7 +494,7 @@ class AgentRunner:
                 raw_original_input = run_state._original_input
                 original_input = normalize_resumed_input(raw_original_input)
                 generated_items = run_state._generated_items
-                session_items = list(run_state._generated_items)
+                session_items = list(run_state._session_items)
                 model_responses = run_state._model_responses
                 # Cast to the correct type since we know this is TContext
                 context_wrapper = cast(RunContextWrapper[TContext], run_state._context)
@@ -606,6 +606,7 @@ class AgentRunner:
                                     run_state,
                                     turn_result=turn_result,
                                     generated_items=generated_items,
+                                    session_items=session_items,
                                 )
 
                             if (
@@ -646,6 +647,7 @@ class AgentRunner:
                                         model_responses=model_responses,
                                         processed_response=processed_response_for_state,
                                         generated_items=generated_items,
+                                        session_items=session_items,
                                         current_turn=current_turn,
                                         next_step=turn_result.next_step,
                                     )
@@ -1106,6 +1108,7 @@ class AgentRunner:
                                     model_responses=model_responses,
                                     processed_response=processed_response_for_state,
                                     generated_items=generated_items,
+                                    session_items=session_items,
                                     current_turn=current_turn,
                                     next_step=turn_result.next_step,
                                 )
@@ -1374,9 +1377,9 @@ class AgentRunner:
         )
         streamed_result = RunResultStreaming(
             input=copy_input_items(streamed_input),
-            # When resuming from RunState, use generated_items from state.
+            # When resuming from RunState, use session_items from state.
             # primeFromState will mark items as sent so prepareInput skips them
-            new_items=run_state._generated_items if run_state else [],
+            new_items=run_state._session_items if run_state else [],
             current_agent=schema_agent,
             raw_responses=run_state._model_responses if run_state else [],
             final_output=None,

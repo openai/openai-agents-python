@@ -188,10 +188,13 @@ def update_run_state_after_resume(
     *,
     turn_result: SingleStepResult,
     generated_items: list[RunItem],
+    session_items: list[RunItem] | None = None,
 ) -> None:
     """Update run state fields after resolving an interruption."""
     run_state._original_input = copy_input_items(turn_result.original_input)
     run_state._generated_items = generated_items
+    if session_items is not None:
+        run_state._session_items = list(session_items)
     run_state._current_step = turn_result.next_step  # type: ignore[assignment]
 
 

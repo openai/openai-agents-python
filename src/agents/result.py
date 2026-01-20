@@ -60,6 +60,7 @@ def _populate_state_from_result(
         state._generated_items = list(model_input_items)
     else:
         state._generated_items = result.new_items
+    state._session_items = list(result.new_items)
     state._model_responses = result.raw_responses
     state._input_guardrail_results = result.input_guardrail_results
     state._output_guardrail_results = result.output_guardrail_results
