@@ -269,8 +269,8 @@ async def test_resuming_skips_approvals_for_non_hitl_tools(tool_kind: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_nested_agent_tool_reuses_rejection_without_reprompt() -> None:
-    """A nested agent tool should not re-request approval after a rejection."""
+async def test_nested_agent_tool_resumes_after_rejection() -> None:
+    """A nested agent tool should resume after a rejection to continue its own flow."""
 
     @function_tool(needs_approval=True)
     async def inner_hitl_tool() -> str:
@@ -317,7 +317,9 @@ async def test_nested_agent_tool_reuses_rejection_without_reprompt() -> None:
     state_after_inner_reject.reject(second.interruptions[0])
 
     third = await Runner.run(outer_agent, state_after_inner_reject)
-    assert not third.interruptions, "rejected inner tool call should not re-prompt on retry"
+    assert third.interruptions, "nested agent should resume and request new approval"
+    assert third.interruptions[0].tool_name == inner_hitl_tool.name
+    assert extract_tool_call_id(third.interruptions[0].raw_item) == "inner-2"
     rejection_outputs = [
         item
         for item in third.new_items
@@ -325,7 +327,7 @@ async def test_nested_agent_tool_reuses_rejection_without_reprompt() -> None:
         and item.output == HITL_REJECTION_MSG
         and extract_tool_call_id(item.raw_item) == "outer-1"
     ]
-    assert rejection_outputs, "Rejected nested approval should yield rejection output"
+    assert not rejection_outputs, "Nested rejection should not short-circuit the agent tool"
 
 
 @pytest.mark.asyncio

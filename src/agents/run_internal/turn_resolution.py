@@ -27,7 +27,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
-from ..agent_tool_state import drop_agent_tool_run_result, peek_agent_tool_run_result
+from ..agent_tool_state import peek_agent_tool_run_result
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff, HandoffInputData, nest_handoff_history
 from ..items import (
@@ -760,13 +760,9 @@ async def resolve_interrupted_turn(
         pending_run_result = peek_agent_tool_run_result(run.tool_call)
         if pending_run_result and getattr(pending_run_result, "interruptions", None):
             status = _nested_interruptions_status(pending_run_result.interruptions)
-            if status == "approved":
+            if status in ("approved", "rejected"):
                 rerun_function_call_ids.add(call_id)
                 return False
-            if status == "rejected":
-                drop_agent_tool_run_result(run.tool_call)
-                _record_function_rejection(call_id, run.tool_call)
-                return True
             return True
 
         return _has_output_item(call_id, "function_call_output")
