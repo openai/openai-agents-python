@@ -1141,6 +1141,60 @@ async def test_rebuild_function_runs_handles_object_pending_and_rejections() -> 
 
 
 @pytest.mark.asyncio
+async def test_resume_keeps_unmatched_pending_approvals_with_function_runs() -> None:
+    """Pending approvals should persist even when resume has other function runs."""
+
+    @function_tool
+    def outer_tool() -> str:
+        return "outer"
+
+    @function_tool(needs_approval=True)
+    def inner_tool() -> str:
+        return "inner"
+
+    _model, agent = make_model_and_agent(tools=[outer_tool, inner_tool])
+    context_wrapper = make_context_wrapper()
+
+    pending_call = make_function_tool_call(inner_tool.name, call_id="call-inner")
+    assert isinstance(pending_call, ResponseFunctionToolCall)
+    pending_item = ToolApprovalItem(agent=agent, raw_item=pending_call)
+
+    run_state = make_state_with_interruptions(agent, [pending_item])
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[
+            ToolRunFunction(
+                tool_call=make_function_tool_call(outer_tool.name, call_id="call-outer"),
+                function_tool=outer_tool,
+            )
+        ],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    result = await run_loop.resolve_interrupted_turn(
+        agent=agent,
+        original_input="resume approvals",
+        original_pre_step_items=[],
+        new_response=ModelResponse(output=[], usage=Usage(), response_id="resp"),
+        processed_response=processed_response,
+        hooks=RunHooks(),
+        context_wrapper=context_wrapper,
+        run_config=RunConfig(),
+        run_state=run_state,
+    )
+
+    assert isinstance(result.next_step, NextStepInterruption)
+    assert pending_item in result.next_step.interruptions
+
+
+@pytest.mark.asyncio
 async def test_resume_executes_non_hitl_function_calls_without_output() -> None:
     """Non-HITL function calls should run on resume when no output exists."""
 

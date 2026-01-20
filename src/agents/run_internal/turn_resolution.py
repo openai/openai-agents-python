@@ -879,8 +879,20 @@ async def resolve_interrupted_turn(
         pending_item_builder=lambda run: ToolApprovalItem(agent=agent, raw_item=run.tool_call),
     )
 
-    if not function_tool_runs:
-        function_tool_runs = await _rebuild_function_runs_from_approvals()
+    rebuilt_function_tool_runs = await _rebuild_function_runs_from_approvals()
+    if rebuilt_function_tool_runs:
+        existing_call_ids: set[str] = set()
+        for run in function_tool_runs:
+            call_id = extract_tool_call_id(run.tool_call)
+            if call_id:
+                existing_call_ids.add(call_id)
+        for run in rebuilt_function_tool_runs:
+            call_id = extract_tool_call_id(run.tool_call)
+            if call_id and call_id in existing_call_ids:
+                continue
+            function_tool_runs.append(run)
+            if call_id:
+                existing_call_ids.add(call_id)
 
     pending_computer_actions: list[ToolRunComputerAction] = []
     for action in processed_response.computer_actions:
