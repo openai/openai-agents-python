@@ -81,6 +81,7 @@ def _tool_call_identity(raw: Any) -> tuple[str | None, str | None, Hashable | No
     name = getattr(raw, "name", None)
     args = getattr(raw, "arguments", None)
     if isinstance(raw, dict):
+        call_id = raw.get("call_id") or raw.get("id") or call_id
         name = raw.get("name", name)
         args = raw.get("arguments", args)
     return call_id, name, _hashable_identity_value(args)
