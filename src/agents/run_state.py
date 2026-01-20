@@ -253,8 +253,9 @@ class RunState(Generic[TContext, TAgent]):
 
         normalized_items = []
         for item in self._original_input:
-            if isinstance(item, dict):
-                normalized_item = dict(item)
+            normalized_item = _serialize_raw_item_value(item)
+            if isinstance(normalized_item, dict):
+                normalized_item = dict(normalized_item)
                 role = normalized_item.get("role")
                 if role == "assistant":
                     content = normalized_item.get("content")
@@ -262,9 +263,7 @@ class RunState(Generic[TContext, TAgent]):
                         normalized_item["content"] = [{"type": "output_text", "text": content}]
                     if "status" not in normalized_item:
                         normalized_item["status"] = "completed"
-                normalized_items.append(normalized_item)
-            else:
-                normalized_items.append(item)
+            normalized_items.append(normalized_item)
         return normalized_items
 
     def _serialize_context_payload(
