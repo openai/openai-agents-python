@@ -247,17 +247,7 @@ async def save_result_to_session(
     ]
 
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
-    ignore_ids_for_matching = is_openai_conversation_session or getattr(
-        session, "_ignore_ids_for_matching", False
-    )
-
-    def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
-        if isinstance(item, dict):
-            clean_item = dict(item)
-            clean_item.pop("id", None)
-            clean_item.pop("provider_data", None)
-            return cast(TResponseInputItem, clean_item)
-        return item
+    ignore_ids_for_matching = _ignore_ids_for_matching(session)
 
     new_items_for_fingerprint = (
         [_sanitize_openai_conversation_item(item) for item in new_items_as_input]
@@ -265,7 +255,7 @@ async def save_result_to_session(
         else new_items_as_input
     )
     serialized_new_items = [
-        fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(item)
+        _fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids_for_matching)
         for item in new_items_for_fingerprint
     ]
 
@@ -275,7 +265,7 @@ async def save_result_to_session(
         items_to_save = [_sanitize_openai_conversation_item(item) for item in items_to_save]
 
     serialized_to_save: list[str] = [
-        fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(item)
+        _fingerprint_or_repr(item, ignore_ids_for_matching=ignore_ids_for_matching)
         for item in items_to_save
     ]
     serialized_to_save_counts: dict[str, int] = {}
@@ -374,9 +364,7 @@ async def rewind_session_items(
     if not callable(pop_item):
         return
 
-    ignore_ids_for_matching = isinstance(session, OpenAIConversationsSession) or getattr(
-        session, "_ignore_ids_for_matching", False
-    )
+    ignore_ids_for_matching = _ignore_ids_for_matching(session)
     target_serializations: list[str] = []
     for item in items:
         serialized = fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching)
@@ -527,6 +515,30 @@ async def wait_for_session_cleanup(
 # --------------------------
 # Private helpers
 # --------------------------
+
+
+def _ignore_ids_for_matching(session: Session) -> bool:
+    """Return whether session fingerprinting should ignore item IDs."""
+    return isinstance(session, OpenAIConversationsSession) or getattr(
+        session, "_ignore_ids_for_matching", False
+    )
+
+
+def _sanitize_openai_conversation_item(item: TResponseInputItem) -> TResponseInputItem:
+    """Remove provider-specific fields before fingerprinting or persistence."""
+    if isinstance(item, dict):
+        clean_item = dict(item)
+        clean_item.pop("id", None)
+        clean_item.pop("provider_data", None)
+        return cast(TResponseInputItem, clean_item)
+    return item
+
+
+def _fingerprint_or_repr(item: TResponseInputItem, *, ignore_ids_for_matching: bool) -> str:
+    """Fingerprint an item or fall back to repr when unavailable."""
+    return fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching) or repr(
+        item
+    )
 
 
 def _session_item_key(item: Any) -> str:
