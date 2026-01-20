@@ -960,60 +960,60 @@ class RunImpl:
                 if config.trace_include_sensitive_data:
                     span_fn.span_data.input = tool_call.arguments
                 try:
-                    parse_error = _validate_tool_arguments_json(tool_call.arguments)
-                    if parse_error is not None:
-                        error_message = (
-                            "An error occurred while parsing tool arguments. "
-                            "Please try again with valid JSON. "
-                            f"Error: {parse_error}"
-                        )
-                        _error_tracing.attach_error_to_current_span(
-                            SpanError(
-                                message="Error running tool",
-                                data={
-                                    "tool_name": func_tool.name,
-                                    "error": str(parse_error),
-                                },
-                            )
-                        )
-                        await asyncio.gather(
-                            hooks.on_tool_start(tool_context, agent, func_tool),
-                            (
-                                agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                                if agent.hooks
-                                else _coro.noop_coroutine()
-                            ),
-                        )
-                        final_result = await cls._execute_output_guardrails(
-                            func_tool=func_tool,
-                            tool_context=tool_context,
-                            agent=agent,
-                            real_result=error_message,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
-                        )
-                        await asyncio.gather(
-                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                            (
-                                agent.hooks.on_tool_end(
-                                    tool_context, agent, func_tool, final_result
-                                )
-                                if agent.hooks
-                                else _coro.noop_coroutine()
-                            ),
-                        )
-                        result = final_result
-                    else:
-                        # 1) Run input tool guardrails, if any
-                        rejected_message = await cls._execute_input_guardrails(
-                            func_tool=func_tool,
-                            tool_context=tool_context,
-                            agent=agent,
-                            tool_input_guardrail_results=tool_input_guardrail_results,
-                        )
+                    # 1) Run input tool guardrails, if any
+                    rejected_message = await cls._execute_input_guardrails(
+                        func_tool=func_tool,
+                        tool_context=tool_context,
+                        agent=agent,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                    )
 
-                        if rejected_message is not None:
-                            # Input guardrail rejected the tool call
-                            final_result = rejected_message
+                    if rejected_message is not None:
+                        # Input guardrail rejected the tool call
+                        result = rejected_message
+                    else:
+                        parse_error = _validate_tool_arguments_json(tool_call.arguments)
+                        if parse_error is not None:
+                            error_message = (
+                                "An error occurred while parsing tool arguments. "
+                                "Please try again with valid JSON. "
+                                f"Error: {parse_error}"
+                            )
+                            _error_tracing.attach_error_to_current_span(
+                                SpanError(
+                                    message="Error running tool",
+                                    data={
+                                        "tool_name": func_tool.name,
+                                        "error": str(parse_error),
+                                    },
+                                )
+                            )
+                            await asyncio.gather(
+                                hooks.on_tool_start(tool_context, agent, func_tool),
+                                (
+                                    agent.hooks.on_tool_start(tool_context, agent, func_tool)
+                                    if agent.hooks
+                                    else _coro.noop_coroutine()
+                                ),
+                            )
+                            final_result = await cls._execute_output_guardrails(
+                                func_tool=func_tool,
+                                tool_context=tool_context,
+                                agent=agent,
+                                real_result=error_message,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                            )
+                            await asyncio.gather(
+                                hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                                (
+                                    agent.hooks.on_tool_end(
+                                        tool_context, agent, func_tool, final_result
+                                    )
+                                    if agent.hooks
+                                    else _coro.noop_coroutine()
+                                ),
+                            )
+                            result = final_result
                         else:
                             # 2) Actually run the tool
                             real_result = await cls._execute_tool_with_hooks(
@@ -1044,7 +1044,7 @@ class RunImpl:
                                     else _coro.noop_coroutine()
                                 ),
                             )
-                        result = final_result
+                            result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
