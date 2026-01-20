@@ -13,7 +13,6 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
-    ModelBehaviorError,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
@@ -143,12 +142,19 @@ async def test_tool_call_error():
         tools=[get_function_tool("foo", "tool_result", hide_errors=True)],
     )
 
-    model.set_next_output(
-        [get_text_message("a_message"), get_function_tool_call("foo", "bad_json")],
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("a_message"), get_function_tool_call("foo", "bad_json")],
+            [get_text_message("done")],
+        ]
     )
 
-    with pytest.raises(ModelBehaviorError):
-        await Runner.run(agent, input="first_test")
+    result = await Runner.run(agent, input="first_test")
+
+    tool_outputs = [item for item in result.new_items if item.type == "tool_call_output_item"]
+    assert tool_outputs, "Expected a tool output item for invalid JSON"
+    assert "An error occurred while parsing tool arguments" in str(tool_outputs[0].output)
+    assert "valid JSON" in str(tool_outputs[0].output)
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -171,11 +177,20 @@ async def test_tool_call_error():
                                     "message": "Error running tool",
                                     "data": {
                                         "tool_name": "foo",
-                                        "error": "Invalid JSON input for tool foo: bad_json",
+                                        "error": "Expecting value: line 1 column 1 (char 0)",
                                     },
                                 },
-                                "data": {"name": "foo", "input": "bad_json"},
+                                "data": {
+                                    "name": "foo",
+                                    "input": "bad_json",
+                                    "output": (
+                                        "An error occurred while parsing tool arguments. "
+                                        "Please try again with valid JSON. Error: Expecting "
+                                        "value: line 1 column 1 (char 0)"
+                                    ),
+                                },
                             },
+                            {"type": "generation"},
                         ],
                     }
                 ],
