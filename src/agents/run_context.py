@@ -133,6 +133,10 @@ class RunContextWrapper(Generic[TContext]):
                 approval_entry.approved = False
             return
 
+        opposite = approval_entry.rejected if approve else approval_entry.approved
+        if isinstance(opposite, list) and call_id in opposite:
+            opposite.remove(call_id)
+
         target = approval_entry.approved if approve else approval_entry.rejected
         if isinstance(target, list) and call_id not in target:
             target.append(call_id)
