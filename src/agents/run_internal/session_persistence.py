@@ -87,6 +87,11 @@ async def prepare_input_with_session(
         )
         appended_items = list(new_input_list)
     else:
+        if not callable(session_input_callback):
+            raise UserError(
+                f"Invalid `session_input_callback` value: {session_input_callback}. "
+                "Choose between `None` or a custom callable function."
+            )
         history_for_callback = copy.deepcopy(converted_history)
         new_items_for_callback = copy.deepcopy(new_input_list)
         combined = session_input_callback(history_for_callback, new_items_for_callback)
