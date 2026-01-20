@@ -101,7 +101,7 @@ jobs:
           mkdir -p "$output_dir"
           echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
       - name: Run Codex release review
-        uses: openai/codex-action@f5c0ca71642badb34c1e66321d8d85685a0fa3dc
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
