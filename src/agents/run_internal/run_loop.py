@@ -39,7 +39,7 @@ from ..logger import logger
 from ..memory import Session
 from ..result import RunResultStreaming
 from ..run_config import RunConfig
-from ..run_context import RunContextWrapper, TContext
+from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_state import RunState
 from ..stream_events import (
     AgentUpdatedStreamEvent,
