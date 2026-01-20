@@ -1,42 +1,42 @@
 """
-Example demonstrating OpenAI responses.compact session functionality.
+Example demonstrating stateless compaction with store=False.
 
-This example shows how to use OpenAIResponsesCompactionSession to automatically
-compact conversation history when it grows too large, reducing token usage
-while preserving context.
+In auto mode, OpenAIResponsesCompactionSession uses input-based compaction when
+responses are not stored on the server.
 """
 
 import asyncio
 
-from agents import Agent, OpenAIResponsesCompactionSession, Runner, SQLiteSession
+from agents import Agent, ModelSettings, OpenAIResponsesCompactionSession, Runner, SQLiteSession
 
 
 async def main():
     # Create an underlying session for storage
     underlying = SQLiteSession(":memory:")
 
-    # Wrap with compaction session - will automatically compact when threshold hit
+    # Wrap with compaction session in auto mode. When store=False, this will
+    # compact using the locally stored input items.
     session = OpenAIResponsesCompactionSession(
         session_id="demo-session",
         underlying_session=underlying,
         model="gpt-4.1",
-        # Custom compaction trigger (default is 10 candidates)
-        should_trigger_compaction=lambda ctx: len(ctx["compaction_candidate_items"]) >= 4,
+        compaction_mode="auto",
+        should_trigger_compaction=lambda ctx: len(ctx["compaction_candidate_items"]) >= 3,
     )
 
     agent = Agent(
         name="Assistant",
         instructions="Reply concisely. Keep answers to 1-2 sentences.",
+        model_settings=ModelSettings(store=False),
     )
 
-    print("=== Compaction Session Example ===\n")
+    print("=== Stateless Compaction Session Example ===\n")
 
     prompts = [
         "What is the tallest mountain in the world?",
         "How tall is it in feet?",
         "When was it first climbed?",
         "Who was on that expedition?",
-        "What country is the mountain in?",
     ]
 
     for i, prompt in enumerate(prompts, 1):
@@ -50,7 +50,6 @@ async def main():
     print("=== Session State (Auto Compaction) ===")
     print(f"Total items: {len(items)}")
     for item in items:
-        # Some inputs are stored as easy messages (only `role` and `content`).
         item_type = item.get("type") or ("message" if "role" in item else "unknown")
         if item_type == "compaction":
             print("  - compaction (encrypted content)")
@@ -61,15 +60,15 @@ async def main():
             print(f"  - {item_type}")
     print()
 
-    # Manual compaction after inspecting the auto-compacted state.
+    # Manual compaction in stateless mode.
     print("=== Manual Compaction ===")
     await session.run_compaction({"force": True})
     print("Done")
     print()
 
-    # Show final session state after manual compaction
+    # Show final session state
     items = await session.get_items()
-    print("=== Session State (Manual Compaction) ===")
+    print("=== Final Session State ===")
     print(f"Total items: {len(items)}")
     for item in items:
         item_type = item.get("type") or ("message" if "role" in item else "unknown")

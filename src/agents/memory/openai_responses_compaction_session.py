@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from openai import AsyncOpenAI
 
@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("openai-agents.openai.compaction")
 
 DEFAULT_COMPACTION_THRESHOLD = 10
+
+OpenAIResponsesCompactionMode = Literal["previous_response_id", "input", "auto"]
 
 
 def select_compaction_candidate_items(
@@ -85,6 +87,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         *,
         client: AsyncOpenAI | None = None,
         model: str = "gpt-4.1",
+        compaction_mode: OpenAIResponsesCompactionMode = "auto",
         should_trigger_compaction: Callable[[dict[str, Any]], bool] | None = None,
     ):
         """Initialize the compaction session.
@@ -97,6 +100,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 get_default_openai_client() or new AsyncOpenAI().
             model: Model to use for responses.compact. Defaults to "gpt-4.1". Must be an
                 OpenAI model name (gpt-*, o*, or ft:gpt-*).
+            compaction_mode: Controls how the compaction request provides conversation
+                history. "auto" (default) uses input when the last response was not
+                stored or no response_id is available.
             should_trigger_compaction: Custom decision hook. Defaults to triggering when
                 10+ compaction candidates exist.
         """
@@ -113,6 +119,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self.underlying_session = underlying_session
         self._client = client
         self.model = model
+        self.compaction_mode = compaction_mode
         self.should_trigger_compaction = (
             should_trigger_compaction or default_should_trigger_compaction
         )
@@ -122,6 +129,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         self._session_items: list[TResponseInputItem] | None = None
         self._response_id: str | None = None
         self._deferred_response_id: str | None = None
+        self._last_unstored_response_id: str | None = None
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -129,14 +137,46 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             self._client = get_default_openai_client() or AsyncOpenAI()
         return self._client
 
+    def _resolve_compaction_mode_for_response(
+        self,
+        *,
+        response_id: str | None,
+        store: bool | None,
+        requested_mode: OpenAIResponsesCompactionMode | None,
+    ) -> _ResolvedCompactionMode:
+        mode = requested_mode or self.compaction_mode
+        if (
+            mode == "auto"
+            and store is None
+            and response_id is not None
+            and response_id == self._last_unstored_response_id
+        ):
+            return "input"
+        return _resolve_compaction_mode(mode, response_id=response_id, store=store)
+
     async def run_compaction(self, args: OpenAIResponsesCompactionArgs | None = None) -> None:
         """Run compaction using responses.compact API."""
         if args and args.get("response_id"):
             self._response_id = args["response_id"]
+        requested_mode = args.get("compaction_mode") if args else None
+        if args and "store" in args:
+            store = args["store"]
+            if store is False and self._response_id:
+                self._last_unstored_response_id = self._response_id
+            elif store is True and self._response_id == self._last_unstored_response_id:
+                self._last_unstored_response_id = None
+        else:
+            store = None
+        resolved_mode = self._resolve_compaction_mode_for_response(
+            response_id=self._response_id,
+            store=store,
+            requested_mode=requested_mode,
+        )
 
-        if not self._response_id:
+        if resolved_mode == "previous_response_id" and not self._response_id:
             raise ValueError(
-                "OpenAIResponsesCompactionSession.run_compaction requires a response_id"
+                "OpenAIResponsesCompactionSession.run_compaction requires a response_id "
+                "when using previous_response_id compaction."
             )
 
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
@@ -145,22 +185,31 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         should_compact = force or self.should_trigger_compaction(
             {
                 "response_id": self._response_id,
+                "compaction_mode": resolved_mode,
                 "compaction_candidate_items": compaction_candidate_items,
                 "session_items": session_items,
             }
         )
 
         if not should_compact:
-            logger.debug(f"skip: decision hook declined compaction for {self._response_id}")
+            logger.debug(
+                f"skip: decision hook declined compaction for {self._response_id} "
+                f"(mode={resolved_mode})"
+            )
             return
 
         self._deferred_response_id = None
-        logger.debug(f"compact: start for {self._response_id} using {self.model}")
-
-        compacted = await self.client.responses.compact(
-            previous_response_id=self._response_id,
-            model=self.model,
+        logger.debug(
+            f"compact: start for {self._response_id} using {self.model} (mode={resolved_mode})"
         )
+
+        compact_kwargs: dict[str, Any] = {"model": self.model}
+        if resolved_mode == "previous_response_id":
+            compact_kwargs["previous_response_id"] = self._response_id
+        else:
+            compact_kwargs["input"] = session_items
+
+        compacted = await self.client.responses.compact(**compact_kwargs)
 
         await self.underlying_session.clear_session()
         output_items: list[TResponseInputItem] = []
@@ -183,19 +232,26 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         logger.debug(
             f"compact: done for {self._response_id} "
-            f"(output={len(output_items)}, candidates={len(self._compaction_candidate_items)})"
+            f"(mode={resolved_mode}, output={len(output_items)}, "
+            f"candidates={len(self._compaction_candidate_items)})"
         )
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
         return await self.underlying_session.get_items(limit)
 
-    async def _defer_compaction(self, response_id: str) -> None:
+    async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
             return
         compaction_candidate_items, session_items = await self._ensure_compaction_candidates()
+        resolved_mode = self._resolve_compaction_mode_for_response(
+            response_id=response_id,
+            store=store,
+            requested_mode=None,
+        )
         should_compact = self.should_trigger_compaction(
             {
                 "response_id": response_id,
+                "compaction_mode": resolved_mode,
                 "compaction_candidate_items": compaction_candidate_items,
                 "session_items": session_items,
             }
@@ -247,3 +303,21 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             f"candidates: initialized (history={len(history)}, candidates={len(candidates)})"
         )
         return (candidates[:], history[:])
+
+
+_ResolvedCompactionMode = Literal["previous_response_id", "input"]
+
+
+def _resolve_compaction_mode(
+    requested_mode: OpenAIResponsesCompactionMode,
+    *,
+    response_id: str | None,
+    store: bool | None,
+) -> _ResolvedCompactionMode:
+    if requested_mode != "auto":
+        return requested_mode
+    if store is False:
+        return "input"
+    if not response_id:
+        return "input"
+    return "previous_response_id"

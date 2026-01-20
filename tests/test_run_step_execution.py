@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     MessageOutputItem,
+    ModelBehaviorError,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
@@ -16,6 +17,8 @@ from agents import (
     RunItem,
     ToolCallItem,
     ToolCallOutputItem,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
     TResponseInputItem,
     Usage,
 )
@@ -286,6 +289,64 @@ async def test_multiple_final_output_leads_to_final_output_next_step():
 
     assert isinstance(result.next_step, NextStepFinalOutput)
     assert result.next_step.output == Foo(bar="456")
+
+
+@pytest.mark.asyncio
+async def test_input_guardrail_runs_on_invalid_json():
+    guardrail_calls: list[str] = []
+
+    def guardrail(data) -> ToolGuardrailFunctionOutput:
+        guardrail_calls.append(data.context.tool_arguments)
+        return ToolGuardrailFunctionOutput.allow(output_info="checked")
+
+    guardrail_obj: ToolInputGuardrail[Any] = ToolInputGuardrail(guardrail_function=guardrail)
+
+    def _echo(value: str) -> str:
+        return value
+
+    tool = function_tool(
+        _echo,
+        name_override="guarded",
+        tool_input_guardrails=[guardrail_obj],
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("guarded", "bad_json")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert guardrail_calls == ["bad_json"]
+    assert result.tool_input_guardrail_results
+    assert result.tool_input_guardrail_results[0].output.output_info == "checked"
+
+    output_item = next(
+        item for item in result.generated_items if isinstance(item, ToolCallOutputItem)
+    )
+    assert "An error occurred while parsing tool arguments" in str(output_item.output)
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_raises_with_failure_error_function_none():
+    def _echo(value: str) -> str:
+        return value
+
+    tool = function_tool(
+        _echo,
+        name_override="guarded",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("guarded", "bad_json")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input for tool"):
+        await get_execute_result(agent, response)
 
 
 # === Helpers ===
