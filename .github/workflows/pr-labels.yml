@@ -98,8 +98,8 @@ jobs:
           mkdir -p "$output_dir"
           echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
       - name: Run Codex labeling
-        if: ${{ github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true' }}
-        uses: openai/codex-action@f5c0ca71642badb34c1e66321d8d85685a0fa3dc
+        if: ${{ (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') && github.actor != 'dependabot[bot]' }}
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/pr-labels.md
@@ -117,10 +117,12 @@ jobs:
           import os
           import pathlib
           import subprocess
+          import re
 
           pr_number = os.environ["PR_NUMBER"]
           codex_output_path = pathlib.Path(os.environ["CODEX_OUTPUT_PATH"])
           changed_files_path = pathlib.Path(".tmp/pr-labels/changed-files.txt")
+          changes_diff_path = pathlib.Path(".tmp/pr-labels/changes.diff")
 
           changed_files = []
           if changed_files_path.exists():
@@ -137,6 +139,20 @@ jobs:
               desired.add("documentation")
           if "uv.lock" in changed_files:
               desired.add("dependencies")
+          if changes_diff_path.exists():
+              diff_text = changes_diff_path.read_text()
+              current_file = None
+              for line in diff_text.splitlines():
+                  if line.startswith("+++ b/"):
+                      current_file = line[len("+++ b/") :].strip()
+                      continue
+                  if not current_file or not current_file.startswith(".github/workflows/"):
+                      continue
+                  if not line.startswith(("+", "-")):
+                      continue
+                  if re.search(r"uses:\s*(?!\./)(?!\.\/)[^@\s]+/[^@\s]+@", line):
+                      desired.add("dependencies")
+                      break
 
           allowed = {
               "documentation",
