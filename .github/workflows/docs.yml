@@ -7,17 +7,12 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
-  workflow_run:
-    workflows: ["Tests"]
-    types:
-      - completed
 
 permissions:
   contents: write # This allows pushing to gh-pages
 
 jobs:
   deploy_docs:
-    if: ${{ github.event_name == 'push' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
