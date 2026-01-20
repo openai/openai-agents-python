@@ -990,7 +990,7 @@ class TestTransportIntegration:
             transport: TransportConfig = {
                 "ping_interval": 0.5,
                 "ping_timeout": 0.5,
-                "connect_timeout": 1.0,
+                "handshake_timeout": 1.0,
             }
 
             config: RealtimeModelConfig = {
@@ -1182,7 +1182,7 @@ class TestTransportIntegration:
         assert captured_kwargs_enabled.get("ping_timeout") == 2.0
 
     @pytest.mark.asyncio
-    async def test_connect_timeout_success_when_server_responds_quickly(self):
+    async def test_handshake_timeout_success_when_server_responds_quickly(self):
         """Test that connection succeeds when server responds within timeout."""
 
         async def quick_handler(websocket):
@@ -1197,9 +1197,9 @@ class TestTransportIntegration:
             port = sockets[0].getsockname()[1]
             url = f"ws://127.0.0.1:{port}/v1/realtime"
 
-            # Client with generous connect timeout - server is fast so this should work
+            # Client with generous handshake timeout - server is fast so this should work
             transport: TransportConfig = {
-                "connect_timeout": 5.0,  # 5 seconds is plenty for local connection
+                "handshake_timeout": 5.0,  # 5 seconds is plenty for local connection
             }
             config: RealtimeModelConfig = {
                 "api_key": "test-key",
@@ -1217,8 +1217,8 @@ class TestTransportIntegration:
             await model.close()
 
     @pytest.mark.asyncio
-    async def test_connect_timeout_with_delayed_server(self):
-        """Test connect timeout behavior with a server that has a defined handshake delay.
+    async def test_handshake_timeout_with_delayed_server(self):
+        """Test handshake timeout behavior with a server that has a defined handshake delay.
 
         Uses the same server with a fixed delay threshold to test both:
         - Success: client timeout > server delay
@@ -1293,7 +1293,7 @@ class TestTransportIntegration:
             # Client gives up before server completes handshake
             model_fail = OpenAIRealtimeWebSocketModel()
             transport_fail: TransportConfig = {
-                "connect_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
+                "handshake_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
             }
             config_fail: RealtimeModelConfig = {
                 "api_key": "test-key",
@@ -1312,7 +1312,7 @@ class TestTransportIntegration:
             # Client waits long enough for server to complete handshake
             model_success = OpenAIRealtimeWebSocketModel()
             transport_success: TransportConfig = {
-                "connect_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
+                "handshake_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
             }
             config_success: RealtimeModelConfig = {
                 "api_key": "test-key",

@@ -349,8 +349,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 connect_kwargs["ping_interval"] = transport_config["ping_interval"]
             if "ping_timeout" in transport_config:
                 connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
-            if "connect_timeout" in transport_config:
-                connect_kwargs["open_timeout"] = transport_config["connect_timeout"]
+            if "handshake_timeout" in transport_config:
+                connect_kwargs["open_timeout"] = transport_config["handshake_timeout"]
 
         return await websockets.connect(url, **connect_kwargs)
 

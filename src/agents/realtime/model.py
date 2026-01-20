@@ -113,9 +113,9 @@ class TransportConfig(TypedDict):
 
     ping_timeout: NotRequired[float | None]
     """Time in seconds to wait for a pong response before disconnecting.
-    Set to None to enable 'Zombie Mode' (ignore network lag)."""
+    Set to None to disable ping timeout and keep an open connection (ignore network lag)."""
 
-    connect_timeout: NotRequired[float]
+    handshake_timeout: NotRequired[float]
     """Time in seconds to wait for the connection handshake to complete."""
 
 
