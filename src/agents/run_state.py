@@ -964,12 +964,42 @@ def _serialize_mcp_approval_requests(requests: Sequence[Any]) -> list[dict[str, 
         serialized_requests.append(
             {
                 "request_item": {"raw_item": request_item_dict},
-                "mcp_tool": request.mcp_tool.to_json()
-                if hasattr(request.mcp_tool, "to_json")
-                else request.mcp_tool,
+                "mcp_tool": _serialize_mcp_tool(request.mcp_tool),
             }
         )
     return serialized_requests
+
+
+def _serialize_mcp_tool(mcp_tool: Any) -> dict[str, Any]:
+    """Serialize an MCP tool into a JSON-friendly mapping."""
+    if mcp_tool is None:
+        return {}
+
+    tool_dict: dict[str, Any] | None = None
+    if hasattr(mcp_tool, "to_json"):
+        try:
+            tool_json = mcp_tool.to_json()
+        except Exception:
+            tool_json = None
+        if isinstance(tool_json, Mapping):
+            tool_dict = dict(tool_json)
+        elif tool_json is not None:
+            tool_dict = {"value": tool_json}
+
+    if tool_dict is None:
+        tool_dict = _serialize_tool_metadata(mcp_tool)
+
+    if tool_dict.get("name") is None:
+        tool_dict["name"] = _get_attr(mcp_tool, "name")
+
+    tool_config = _get_attr(mcp_tool, "tool_config")
+    if tool_config is not None and "tool_config" not in tool_dict:
+        tool_dict["tool_config"] = _serialize_raw_item_value(tool_config)
+
+    normalized = _ensure_json_compatible(tool_dict)
+    if isinstance(normalized, Mapping):
+        return dict(normalized)
+    return {"value": normalized}
 
 
 def _serialize_tool_approval_interruption(

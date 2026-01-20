@@ -2354,6 +2354,10 @@ class TestRunStateSerializationEdgeCases:
         mcp_requests = last_processed.get("mcp_approval_requests", [])
         assert len(mcp_requests) == 1
         assert "request_item" in mcp_requests[0]
+        assert mcp_requests[0]["mcp_tool"]["name"] == "mcp_tool"
+
+        # Ensure serialization is JSON-friendly for hosted MCP approvals.
+        state.to_string()
 
     async def test_serialize_item_with_non_dict_raw_item(self):
         """Test serialization of item with non-dict raw_item."""
