@@ -668,8 +668,32 @@ Tool = Union[
 """A tool that can be used in an agent."""
 
 
+def _extract_json_decode_error(error: BaseException) -> json.JSONDecodeError | None:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, json.JSONDecodeError):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _extract_tool_argument_json_error(error: Exception) -> json.JSONDecodeError | None:
+    if not isinstance(error, ModelBehaviorError):
+        return None
+    if not str(error).startswith("Invalid JSON input for tool"):
+        return None
+    return _extract_json_decode_error(error)
+
+
 def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -> str:
     """The default tool error function, which just returns a generic error message."""
+    json_decode_error = _extract_tool_argument_json_error(error)
+    if json_decode_error is not None:
+        return (
+            "An error occurred while parsing tool arguments. "
+            "Please try again with valid JSON. "
+            f"Error: {json_decode_error}"
+        )
     return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
 
 
@@ -828,12 +852,20 @@ def function_tool(
                 if inspect.isawaitable(result):
                     return await result
 
+                json_decode_error = _extract_tool_argument_json_error(e)
+                if json_decode_error is not None:
+                    span_error_message = "Error running tool"
+                    span_error_detail = str(json_decode_error)
+                else:
+                    span_error_message = "Error running tool (non-fatal)"
+                    span_error_detail = str(e)
+
                 _error_tracing.attach_error_to_current_span(
                     SpanError(
-                        message="Error running tool (non-fatal)",
+                        message=span_error_message,
                         data={
                             "tool_name": schema.name,
-                            "error": str(e),
+                            "error": span_error_detail,
                         },
                     )
                 )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from typing_extensions import TypedDict, TypeGuard
 
@@ -106,6 +106,20 @@ class OpenAIResponsesCompactionArgs(TypedDict, total=False):
 
     response_id: str
     """The ID of the last response to use for compaction."""
+
+    compaction_mode: Literal["previous_response_id", "input", "auto"]
+    """How to provide history for compaction.
+
+    - "auto": Use input when the last response was not stored or no response ID is available.
+    - "previous_response_id": Use server-managed response history.
+    - "input": Send locally stored session items as input.
+    """
+
+    store: bool
+    """Whether the last model response was stored on the server.
+
+    When set to False, compaction should avoid "previous_response_id" unless explicitly requested.
+    """
 
     force: bool
     """Whether to force compaction even if the threshold is not met."""
