@@ -104,21 +104,6 @@ class RealtimeModelListener(abc.ABC):
         pass
 
 
-class TransportConfig(TypedDict):
-    """Low-level network transport configuration."""
-
-    ping_interval: NotRequired[float | None]
-    """Time in seconds between keepalive pings sent by the client.
-    Default is usually 20.0. Set to None to disable."""
-
-    ping_timeout: NotRequired[float | None]
-    """Time in seconds to wait for a pong response before disconnecting.
-    Set to None to disable ping timeout and keep an open connection (ignore network lag)."""
-
-    handshake_timeout: NotRequired[float]
-    """Time in seconds to wait for the connection handshake to complete."""
-
-
 class RealtimeModelConfig(TypedDict):
     """Options for connecting to a realtime model."""
 
@@ -160,9 +145,6 @@ class RealtimeModelConfig(TypedDict):
     When provided, the transport connects using the `call_id` query string parameter rather than a
     model name. This is used for SIP-originated calls that are accepted via the Realtime Calls API.
     """
-
-    transport: NotRequired[TransportConfig]
-    """Low-level network transport configuration for timeouts and TCP socket configuration."""
 
 
 class RealtimeModel(abc.ABC):

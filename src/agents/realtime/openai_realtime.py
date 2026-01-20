@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union, cast
 
+from typing_extensions import NotRequired, TypedDict
+
 import pydantic
 import websockets
 from openai.types.realtime import realtime_audio_config as _rt_audio_config
@@ -107,7 +109,6 @@ from .model import (
     RealtimeModelListener,
     RealtimePlaybackState,
     RealtimePlaybackTracker,
-    TransportConfig,
 )
 from .model_events import (
     RealtimeModelAudioDoneEvent,
@@ -252,10 +253,25 @@ async def _build_model_settings_from_agent(
 # during import on 3.9. We instead inline the union in annotations below.
 
 
+class TransportConfig(TypedDict):
+    """Low-level network transport configuration."""
+
+    ping_interval: NotRequired[float | None]
+    """Time in seconds between keepalive pings sent by the client.
+    Default is usually 20.0. Set to None to disable."""
+
+    ping_timeout: NotRequired[float | None]
+    """Time in seconds to wait for a pong response before disconnecting.
+    Set to None to disable ping timeout and keep an open connection (ignore network lag)."""
+
+    handshake_timeout: NotRequired[float]
+    """Time in seconds to wait for the connection handshake to complete."""
+
+
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
         self.model = "gpt-realtime"  # Default model
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
@@ -268,6 +284,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
         self._call_id: str | None = None
+        self._transport_config: TransportConfig | None = transport_config
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -317,7 +334,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._websocket = await self._create_websocket_connection(
             url=url,
             headers=headers,
-            transport_config=options.get("transport"),
+            transport_config=self._transport_config,
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)

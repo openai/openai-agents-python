@@ -10,7 +10,8 @@ import websockets
 from agents import Agent
 from agents.exceptions import UserError
 from agents.handoffs import handoff
-from agents.realtime.model import RealtimeModelConfig, TransportConfig
+from agents.realtime.model import RealtimeModelConfig
+from agents.realtime.openai_realtime import TransportConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
@@ -302,11 +303,11 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model._websocket_task is None
 
     @pytest.mark.asyncio
-    async def test_connect_with_empty_transport_config(self, model, mock_websocket):
+    async def test_connect_with_empty_transport_config(self, mock_websocket):
         """Test that empty transport configuration works without error."""
+        model = OpenAIRealtimeWebSocketModel(transport_config={})
         config = {
             "api_key": "test-key",
-            "transport": {},
         }
 
         async def async_websocket(*args, **kwargs):
@@ -993,10 +994,10 @@ class TestTransportIntegration:
                 "handshake_timeout": 1.0,
             }
 
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
             config: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": url,
-                "transport": transport,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
 
@@ -1041,10 +1042,10 @@ class TestTransportIntegration:
                 "ping_interval": 0.1,  # Send ping every 100ms
                 "ping_timeout": 1.0,  # Allow 1 second for pong response (generous)
             }
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
             config: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": url,
-                "transport": transport,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
 
@@ -1088,16 +1089,15 @@ class TestTransportIntegration:
             return mock_ws
 
         # Test with short ping_timeout
-        model_short = OpenAIRealtimeWebSocketModel()
+        transport_short: TransportConfig = {
+            "ping_interval": 0.1,
+            "ping_timeout": 0.05,  # Very short timeout
+        }
+        model_short = OpenAIRealtimeWebSocketModel(transport_config=transport_short)
         with patch("websockets.connect", side_effect=capture_connect_short):
-            transport_short: TransportConfig = {
-                "ping_interval": 0.1,
-                "ping_timeout": 0.05,  # Very short timeout
-            }
             config_short: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": "ws://localhost:8080/v1/realtime",
-                "transport": transport_short,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
             await model_short.connect(config_short)
@@ -1106,16 +1106,15 @@ class TestTransportIntegration:
         assert captured_kwargs_short.get("ping_timeout") == 0.05
 
         # Test with longer ping_timeout (use a fresh model)
-        model_long = OpenAIRealtimeWebSocketModel()
+        transport_long: TransportConfig = {
+            "ping_interval": 5.0,
+            "ping_timeout": 10.0,  # Longer timeout
+        }
+        model_long = OpenAIRealtimeWebSocketModel(transport_config=transport_long)
         with patch("websockets.connect", side_effect=capture_connect_long):
-            transport_long: TransportConfig = {
-                "ping_interval": 5.0,
-                "ping_timeout": 10.0,  # Longer timeout
-            }
             config_long: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": "ws://localhost:8080/v1/realtime",
-                "transport": transport_long,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
             await model_long.connect(config_long)
@@ -1146,16 +1145,15 @@ class TestTransportIntegration:
             return mock_ws
 
         # Test with ping disabled
-        model_disabled = OpenAIRealtimeWebSocketModel()
+        transport_disabled: TransportConfig = {
+            "ping_interval": None,  # Disable pings entirely
+            "ping_timeout": None,
+        }
+        model_disabled = OpenAIRealtimeWebSocketModel(transport_config=transport_disabled)
         with patch("websockets.connect", side_effect=capture_connect_disabled):
-            transport_disabled: TransportConfig = {
-                "ping_interval": None,  # Disable pings entirely
-                "ping_timeout": None,
-            }
             config_disabled: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": "ws://localhost:8080/v1/realtime",
-                "transport": transport_disabled,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
             await model_disabled.connect(config_disabled)
@@ -1164,16 +1162,15 @@ class TestTransportIntegration:
         assert captured_kwargs_disabled.get("ping_timeout") is None
 
         # Test with ping enabled (use a fresh model)
-        model_enabled = OpenAIRealtimeWebSocketModel()
+        transport_enabled: TransportConfig = {
+            "ping_interval": 1.0,
+            "ping_timeout": 2.0,
+        }
+        model_enabled = OpenAIRealtimeWebSocketModel(transport_config=transport_enabled)
         with patch("websockets.connect", side_effect=capture_connect_enabled):
-            transport_enabled: TransportConfig = {
-                "ping_interval": 1.0,
-                "ping_timeout": 2.0,
-            }
             config_enabled: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": "ws://localhost:8080/v1/realtime",
-                "transport": transport_enabled,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
             await model_enabled.connect(config_enabled)
@@ -1201,10 +1198,10 @@ class TestTransportIntegration:
             transport: TransportConfig = {
                 "handshake_timeout": 5.0,  # 5 seconds is plenty for local connection
             }
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
             config: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": url,
-                "transport": transport,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
 
@@ -1291,14 +1288,13 @@ class TestTransportIntegration:
         try:
             # Test 1: FAILURE - Client timeout < server delay
             # Client gives up before server completes handshake
-            model_fail = OpenAIRealtimeWebSocketModel()
             transport_fail: TransportConfig = {
                 "handshake_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
             }
+            model_fail = OpenAIRealtimeWebSocketModel(transport_config=transport_fail)
             config_fail: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": url,
-                "transport": transport_fail,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
 
@@ -1310,14 +1306,13 @@ class TestTransportIntegration:
 
             # Test 2: SUCCESS - Client timeout > server delay
             # Client waits long enough for server to complete handshake
-            model_success = OpenAIRealtimeWebSocketModel()
             transport_success: TransportConfig = {
                 "handshake_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
             }
+            model_success = OpenAIRealtimeWebSocketModel(transport_config=transport_success)
             config_success: RealtimeModelConfig = {
                 "api_key": "test-key",
                 "url": url,
-                "transport": transport_success,
                 "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
             }
 
@@ -1346,8 +1341,6 @@ class TestTransportIntegration:
                 pass
 
         async def test_with_ping_interval(interval: float, label: str):
-            model = OpenAIRealtimeWebSocketModel()
-
             async with websockets.serve(handler, "127.0.0.1", 0) as server:
                 sockets = list(server.sockets)
                 port = sockets[0].getsockname()[1]
@@ -1357,10 +1350,10 @@ class TestTransportIntegration:
                     "ping_interval": interval,
                     "ping_timeout": 2.0,  # Same timeout for both
                 }
+                model = OpenAIRealtimeWebSocketModel(transport_config=transport)
                 config: RealtimeModelConfig = {
                     "api_key": "test-key",
                     "url": url,
-                    "transport": transport,
                     "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
                 }
 
