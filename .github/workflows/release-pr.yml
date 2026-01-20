@@ -122,22 +122,12 @@ jobs:
       - name: Create or update PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           head_branch="release/v${RELEASE_VERSION}"
-          milestone_name="$(python - <<'PY'
-          import os
-          import re
-
-          version = os.environ.get("RELEASE_VERSION", "")
-          match = re.match(r"^(\d+)\.(\d+)", version)
-          if not match:
-              print("")
-          else:
-              print(f"{match.group(1)}.{match.group(2)}.x")
-          PY
-          )"
+          milestone_name="$(python .github/scripts/select-release-milestone.py --version "$RELEASE_VERSION")"
           pr_number="$(gh pr list --head "$head_branch" --base "main" --json number --jq '.[0].number // empty')"
           if [ -z "$pr_number" ]; then
             create_args=(
