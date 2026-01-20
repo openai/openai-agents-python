@@ -16,12 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           fetch-depth: 0
           ref: main
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Fetch tags
@@ -101,7 +101,7 @@ jobs:
           mkdir -p "$output_dir"
           echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
       - name: Run Codex release review
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
@@ -122,22 +122,12 @@ jobs:
       - name: Create or update PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           head_branch="release/v${RELEASE_VERSION}"
-          milestone_name="$(python - <<'PY'
-          import os
-          import re
-
-          version = os.environ.get("RELEASE_VERSION", "")
-          match = re.match(r"^(\d+)\.(\d+)", version)
-          if not match:
-              print("")
-          else:
-              print(f"{match.group(1)}.{match.group(2)}.x")
-          PY
-          )"
+          milestone_name="$(python .github/scripts/select-release-milestone.py --version "$RELEASE_VERSION")"
           pr_number="$(gh pr list --head "$head_branch" --base "main" --json number --jq '.[0].number // empty')"
           if [ -z "$pr_number" ]; then
             create_args=(

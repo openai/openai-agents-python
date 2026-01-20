@@ -970,7 +970,7 @@ class RunImpl:
 
                     if rejected_message is not None:
                         # Input guardrail rejected the tool call
-                        final_result = rejected_message
+                        result = rejected_message
                     else:
                         # 2) Actually run the tool
                         real_result = await cls._execute_tool_with_hooks(
@@ -1001,7 +1001,7 @@ class RunImpl:
                                 else _coro.noop_coroutine()
                             ),
                         )
-                    result = final_result
+                        result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(

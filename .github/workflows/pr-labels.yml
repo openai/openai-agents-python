@@ -1,0 +1,374 @@
+name: Auto label PRs
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to label."
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure main workflow
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "This workflow must be dispatched from main."
+          exit 1
+
+      - name: Resolve PR context
+        id: pr
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          MANUAL_PR_NUMBER: ${{ inputs.pr_number || '' }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const isManual = context.eventName === 'workflow_dispatch';
+            let pr;
+            if (isManual) {
+              const prNumber = Number(process.env.MANUAL_PR_NUMBER);
+              if (!prNumber) {
+                core.setFailed('workflow_dispatch requires pr_number input.');
+                return;
+              }
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+              });
+              pr = data;
+            } else {
+              pr = context.payload.pull_request;
+            }
+            if (!pr) {
+              core.setFailed('Missing pull request context.');
+              return;
+            }
+            const headRepo = pr.head.repo.full_name;
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_repo', headRepo);
+            core.setOutput('is_fork', headRepo !== repoFullName);
+
+      - name: Checkout base
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.pr.outputs.base_sha }}
+      - name: Fetch PR head
+        env:
+          PR_HEAD_REPO: ${{ steps.pr.outputs.head_repo }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune --recurse-submodules=no \
+            "https://github.com/${PR_HEAD_REPO}.git" \
+            "${PR_HEAD_SHA}"
+      - name: Collect PR diff
+        env:
+          PR_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/pr-labels
+          git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA" > .tmp/pr-labels/changed-files.txt
+          git diff "$PR_BASE_SHA" "$PR_HEAD_SHA" > .tmp/pr-labels/changes.diff
+      - name: Prepare Codex output
+        id: codex-output
+        run: |
+          set -euo pipefail
+          output_dir=".tmp/codex/outputs"
+          output_file="${output_dir}/pr-labels.json"
+          mkdir -p "$output_dir"
+          echo "output_file=${output_file}" >> "$GITHUB_OUTPUT"
+      - name: Run Codex labeling
+        if: ${{ (github.event_name == 'workflow_dispatch' || steps.pr.outputs.is_fork != 'true') && github.actor != 'dependabot[bot]' }}
+        uses: openai/codex-action@086169432f1d2ab2f4057540b1754d550f6a1189
+        with:
+          openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/pr-labels.md
+          output-file: ${{ steps.codex-output.outputs.output_file }}
+          safety-strategy: drop-sudo
+          sandbox: read-only
+      - name: Apply labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          CODEX_OUTPUT_PATH: ${{ steps.codex-output.outputs.output_file }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import re
+
+          pr_number = os.environ["PR_NUMBER"]
+          pr_base_sha = os.environ.get("PR_BASE_SHA")
+          pr_head_sha = os.environ.get("PR_HEAD_SHA")
+          codex_output_path = pathlib.Path(os.environ["CODEX_OUTPUT_PATH"])
+          changed_files_path = pathlib.Path(".tmp/pr-labels/changed-files.txt")
+          changes_diff_path = pathlib.Path(".tmp/pr-labels/changes.diff")
+
+          def read_file_at(commit, path):
+              if not commit:
+                  return None
+              try:
+                  return subprocess.check_output(
+                      ["git", "show", f"{commit}:{path}"],
+                      text=True,
+                  )
+              except subprocess.CalledProcessError:
+                  return None
+
+          def dependency_lines_for_pyproject(text: str) -> set[int]:
+              dependency_lines: set[int] = set()
+              current_section = None
+              in_project_dependencies = False
+
+              for line_number, raw_line in enumerate(text.splitlines(), start=1):
+                  stripped = raw_line.strip()
+                  if stripped.startswith("[") and stripped.endswith("]"):
+                      if stripped.startswith("[[") and stripped.endswith("]]"):
+                          current_section = stripped[2:-2].strip()
+                      else:
+                          current_section = stripped[1:-1].strip()
+                      in_project_dependencies = False
+                      if current_section in ("project.optional-dependencies", "dependency-groups"):
+                          dependency_lines.add(line_number)
+                      continue
+
+                  if current_section in ("project.optional-dependencies", "dependency-groups"):
+                      dependency_lines.add(line_number)
+                      continue
+
+                  if current_section != "project":
+                      continue
+
+                  if in_project_dependencies:
+                      dependency_lines.add(line_number)
+                      if "]" in stripped:
+                          in_project_dependencies = False
+                      continue
+
+                  if stripped.startswith("dependencies") and "=" in stripped:
+                      dependency_lines.add(line_number)
+                      if "[" in stripped and "]" not in stripped:
+                          in_project_dependencies = True
+
+              return dependency_lines
+
+          def pyproject_dependency_changed(diff_text: str) -> bool:
+              base_text = read_file_at(pr_base_sha, "pyproject.toml")
+              head_text = read_file_at(pr_head_sha, "pyproject.toml")
+              if base_text is None and head_text is None:
+                  return False
+
+              base_dependency_lines = (
+                  dependency_lines_for_pyproject(base_text) if base_text else set()
+              )
+              head_dependency_lines = (
+                  dependency_lines_for_pyproject(head_text) if head_text else set()
+              )
+
+              in_pyproject = False
+              base_line = None
+              head_line = None
+              hunk_re = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+              for line in diff_text.splitlines():
+                  if line.startswith("+++ b/"):
+                      current_file = line[len("+++ b/") :].strip()
+                      in_pyproject = current_file == "pyproject.toml"
+                      base_line = None
+                      head_line = None
+                      continue
+
+                  if not in_pyproject:
+                      continue
+
+                  if line.startswith("@@ "):
+                      match = hunk_re.match(line)
+                      if not match:
+                          continue
+                      base_line = int(match.group(1))
+                      head_line = int(match.group(2))
+                      continue
+
+                  if base_line is None or head_line is None:
+                      continue
+
+                  if line.startswith(" "):
+                      base_line += 1
+                      head_line += 1
+                      continue
+
+                  if line.startswith("-"):
+                      if base_line in base_dependency_lines:
+                          return True
+                      base_line += 1
+                      continue
+
+                  if line.startswith("+"):
+                      if head_line in head_dependency_lines:
+                          return True
+                      head_line += 1
+                      continue
+
+              return False
+
+          changed_files = []
+          if changed_files_path.exists():
+              changed_files = [
+                  line.strip()
+                  for line in changed_files_path.read_text().splitlines()
+                  if line.strip()
+              ]
+
+          desired = set()
+          if "pyproject.toml" in changed_files:
+              desired.add("project")
+          if any(path.startswith("docs/") for path in changed_files):
+              desired.add("documentation")
+          dependencies_allowed = "uv.lock" in changed_files
+          diff_text = None
+          if changes_diff_path.exists():
+              diff_text = changes_diff_path.read_text()
+              if "pyproject.toml" in changed_files and pyproject_dependency_changed(diff_text):
+                  dependencies_allowed = True
+
+          if dependencies_allowed:
+              desired.add("dependencies")
+
+          allowed = {
+              "documentation",
+              "project",
+              "bug",
+              "enhancement",
+              "dependencies",
+              "feature:chat-completions",
+              "feature:core",
+              "feature:lite-llm",
+              "feature:mcp",
+              "feature:realtime",
+              "feature:sessions",
+              "feature:tracing",
+              "feature:voice",
+          }
+
+          codex_labels = []
+          if codex_output_path.exists():
+              raw = codex_output_path.read_text().strip()
+              if raw:
+                  try:
+                      payload = json.loads(raw)
+                      if isinstance(payload, dict):
+                          labels = payload.get("labels", [])
+                          if isinstance(labels, list):
+                              codex_labels = [label for label in labels if isinstance(label, str)]
+                  except json.JSONDecodeError:
+                      pass
+
+          for label in codex_labels:
+              if label == "dependencies" and not dependencies_allowed:
+                  continue
+              if label in allowed:
+                  desired.add(label)
+
+          result = subprocess.check_output(
+              ["gh", "pr", "view", pr_number, "--json", "labels", "--jq", ".labels[].name"],
+              text=True,
+          ).strip()
+          existing = {label for label in result.splitlines() if label}
+
+          managed = set(allowed)
+          to_add = sorted(desired - existing)
+          to_remove = sorted((existing & managed) - desired)
+
+          if not to_add and not to_remove:
+              print("Labels already up to date.")
+              raise SystemExit(0)
+
+          cmd = ["gh", "pr", "edit", pr_number]
+          if to_add:
+              cmd += ["--add-label", ",".join(to_add)]
+          if to_remove:
+              cmd += ["--remove-label", ",".join(to_remove)]
+
+          subprocess.check_call(cmd)
+          PY
+
+      - name: Comment on manual run failure
+        if: ${{ github.event_name == 'workflow_dispatch' && always() }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CODEX_CONCLUSION: ${{ steps.run_codex.conclusion }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- pr-labels-manual-run -->';
+            const jobStatus = process.env.JOB_STATUS;
+            if (jobStatus === 'success') {
+              return;
+            }
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!prNumber) {
+              core.setFailed('Missing PR number for manual run comment.');
+              return;
+            }
+            const body = [
+              marker,
+              'Manual PR labeling failed.',
+              `Job status: ${jobStatus}.`,
+              `Run: ${process.env.RUN_URL}.`,
+              `Codex labeling: ${process.env.CODEX_CONCLUSION}.`,
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated existing comment ${existing.id}`);
+              return;
+            }
+            const { data: created } = await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+            core.info(`Created comment ${created.id}`);
