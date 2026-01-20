@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import abc
 import contextvars
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..logger import logger
@@ -129,6 +131,92 @@ class Trace(abc.ABC):
     def tracing_api_key(self) -> str | None:
         """The API key to use when exporting this trace and its spans."""
         pass
+
+    def to_json(self, *, include_tracing_api_key: bool = False) -> dict[str, Any] | None:
+        """Serialize trace metadata for persistence or transport.
+
+        Args:
+            include_tracing_api_key: When True, include the tracing API key. Defaults to False
+                to avoid persisting secrets unintentionally.
+        """
+        exported = self.export()
+        if exported is None:
+            return None
+        payload = dict(exported)
+        if include_tracing_api_key and self.tracing_api_key:
+            payload["tracing_api_key"] = self.tracing_api_key
+        return payload
+
+
+@dataclass
+class TraceState:
+    """Serializable trace metadata for run state persistence."""
+
+    trace_id: str | None = None
+    workflow_name: str | None = None
+    group_id: str | None = None
+    metadata: dict[str, Any] | None = None
+    tracing_api_key: str | None = None
+    object_type: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_trace(cls, trace: Trace | None) -> TraceState | None:
+        if trace is None:
+            return None
+        payload = trace.to_json(include_tracing_api_key=True)
+        return cls.from_json(payload)
+
+    @classmethod
+    def from_json(cls, payload: Mapping[str, Any] | None) -> TraceState | None:
+        if not payload:
+            return None
+        data = dict(payload)
+        object_type = data.pop("object", None)
+        trace_id = data.pop("id", None) or data.pop("trace_id", None)
+        workflow_name = data.pop("workflow_name", None)
+        group_id = data.pop("group_id", None)
+        metadata_value = data.pop("metadata", None)
+        metadata = metadata_value if isinstance(metadata_value, dict) else None
+        tracing_api_key = data.pop("tracing_api_key", None)
+        return cls(
+            trace_id=trace_id if isinstance(trace_id, str) else None,
+            workflow_name=workflow_name if isinstance(workflow_name, str) else None,
+            group_id=group_id if isinstance(group_id, str) else None,
+            metadata=metadata,
+            tracing_api_key=tracing_api_key if isinstance(tracing_api_key, str) else None,
+            object_type=object_type if isinstance(object_type, str) else None,
+            extra=data,
+        )
+
+    def to_json(self, *, include_tracing_api_key: bool = False) -> dict[str, Any] | None:
+        if (
+            self.trace_id is None
+            and self.workflow_name is None
+            and self.group_id is None
+            and self.metadata is None
+            and self.tracing_api_key is None
+            and self.object_type is None
+            and not self.extra
+        ):
+            return None
+        payload: dict[str, Any] = {}
+        if self.object_type:
+            payload["object"] = self.object_type
+        if self.trace_id:
+            payload["id"] = self.trace_id
+        if self.workflow_name is not None:
+            payload["workflow_name"] = self.workflow_name
+        if self.group_id is not None:
+            payload["group_id"] = self.group_id
+        if self.metadata is not None:
+            payload["metadata"] = dict(self.metadata)
+        if include_tracing_api_key and self.tracing_api_key:
+            payload["tracing_api_key"] = self.tracing_api_key
+        for key, value in self.extra.items():
+            if key not in payload:
+                payload[key] = value
+        return payload
 
 
 class NoOpTrace(Trace):

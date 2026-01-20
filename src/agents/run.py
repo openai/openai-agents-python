@@ -47,6 +47,7 @@ from .run_internal.agent_runner_helpers import (
     input_guardrails_triggered,
     resolve_processed_response,
     resolve_resumed_context,
+    resolve_trace_settings,
     save_turn_items_if_needed,
     update_run_state_for_interruption,
 )
@@ -481,15 +482,24 @@ class AgentRunner:
         if is_resumed_state and run_state is not None:
             hydrate_tool_use_tracker(tool_use_tracker, run_state, starting_agent)
 
+        (
+            trace_workflow_name,
+            trace_id,
+            trace_group_id,
+            trace_metadata,
+            trace_config,
+        ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
+
         with TraceCtxManager(
-            workflow_name=run_config.workflow_name,
-            trace_id=run_config.trace_id,
-            group_id=run_config.group_id,
-            metadata=run_config.trace_metadata,
-            tracing=run_config.tracing,
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
             disabled=run_config.tracing_disabled,
         ):
             if is_resumed_state and run_state is not None:
+                run_state.set_trace(get_current_trace())
                 current_turn = run_state._current_turn
                 raw_original_input = run_state._original_input
                 original_input = normalize_resumed_input(raw_original_input)
@@ -514,6 +524,7 @@ class AgentRunner:
                     previous_response_id=previous_response_id,
                     auto_previous_response_id=auto_previous_response_id,
                 )
+                run_state.set_trace(get_current_trace())
 
             pending_server_items: list[RunItem] | None = None
             input_guardrail_results: list[InputGuardrailResult] = (
@@ -721,6 +732,8 @@ class AgentRunner:
                                 )
                                 result._current_turn = current_turn
                                 result._model_input_items = list(generated_items)
+                                if run_state is not None:
+                                    result._trace_state = run_state._trace_state
                                 if session_persistence_enabled:
                                     input_items_for_save_1: list[TResponseInputItem] = (
                                         session_input_items_for_persistence
@@ -1292,21 +1305,6 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
-        # If there's already a trace, we don't create a new one. In addition, we can't end the
-        # trace here, because the actual work is done in `stream_events` and this method ends
-        # before that.
-        new_trace = (
-            None
-            if get_current_trace()
-            else trace(
-                workflow_name=run_config.workflow_name,
-                trace_id=run_config.trace_id,
-                group_id=run_config.group_id,
-                metadata=run_config.trace_metadata,
-                disabled=run_config.tracing_disabled,
-            )
-        )
-
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = None
@@ -1367,6 +1365,32 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
 
+        (
+            trace_workflow_name,
+            trace_id,
+            trace_group_id,
+            trace_metadata,
+            trace_config,
+        ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
+
+        # If there's already a trace, we don't create a new one. In addition, we can't end the
+        # trace here, because the actual work is done in `stream_events` and this method ends
+        # before that.
+        new_trace = (
+            None
+            if get_current_trace()
+            else trace(
+                workflow_name=trace_workflow_name,
+                trace_id=trace_id,
+                group_id=trace_group_id,
+                metadata=trace_metadata,
+                tracing=trace_config,
+                disabled=run_config.tracing_disabled,
+            )
+        )
+        if run_state is not None:
+            run_state.set_trace(new_trace or get_current_trace())
+
         schema_agent = (
             run_state._current_agent if run_state and run_state._current_agent else starting_agent
         )
@@ -1419,6 +1443,8 @@ class AgentRunner:
         streamed_result._model_input_items = (
             list(run_state._generated_items) if run_state is not None else []
         )
+        if run_state is not None:
+            streamed_result._trace_state = run_state._trace_state
         # Store run_state in streamed_result._state so it's accessible throughout streaming
         # Now that we create run_state for both fresh and resumed runs, always set it
         streamed_result._conversation_id = conversation_id

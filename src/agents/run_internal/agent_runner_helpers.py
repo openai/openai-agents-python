@@ -9,9 +9,12 @@ from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..result import RunResult
+from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
 from ..run_state import RunState
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
+from ..tracing.config import TracingConfig
+from ..tracing.traces import TraceState
 from .items import copy_input_items
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import (
@@ -34,6 +37,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "resolve_trace_settings",
     "resolve_processed_response",
     "resolve_resumed_context",
     "save_turn_items_if_needed",
@@ -57,6 +61,36 @@ def apply_resumed_conversation_settings(
     run_state._previous_response_id = previous_response_id
     run_state._auto_previous_response_id = auto_previous_response_id
     return conversation_id, previous_response_id, auto_previous_response_id
+
+
+def resolve_trace_settings(
+    *,
+    run_state: RunState[TContext] | None,
+    run_config: RunConfig,
+) -> tuple[str, str | None, str | None, dict[str, Any] | None, TracingConfig | None]:
+    """Resolve tracing settings, preferring explicit run_config overrides."""
+    trace_state: TraceState | None = run_state._trace_state if run_state is not None else None
+    default_workflow_name = RunConfig().workflow_name
+    workflow_name = run_config.workflow_name
+
+    trace_id: str | None = run_config.trace_id
+    group_id: str | None = run_config.group_id
+    metadata: dict[str, Any] | None = run_config.trace_metadata
+    tracing: TracingConfig | None = run_config.tracing
+
+    if trace_state:
+        if workflow_name == default_workflow_name and trace_state.workflow_name:
+            workflow_name = trace_state.workflow_name
+        if trace_id is None:
+            trace_id = trace_state.trace_id
+        if group_id is None:
+            group_id = trace_state.group_id
+        if metadata is None and trace_state.metadata is not None:
+            metadata = dict(trace_state.metadata)
+        if tracing is None and trace_state.tracing_api_key:
+            tracing = {"api_key": trace_state.tracing_api_key}
+
+    return workflow_name, trace_id, group_id, metadata, tracing
 
 
 def resolve_resumed_context(
@@ -196,6 +230,7 @@ def build_interruption_result(
     result._model_input_items = list(generated_items)
     if run_state is not None:
         result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
+        result._trace_state = run_state._trace_state
     result._original_input = copy_input_items(original_input)
     return result
 

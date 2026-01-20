@@ -23,7 +23,7 @@ from openai.types.responses.response_output_item import LocalShellCall, McpAppro
 from openai.types.responses.tool_param import Mcp
 from pydantic import BaseModel
 
-from agents import Agent, Runner, handoff
+from agents import Agent, Runner, handoff, trace
 from agents.computer import Computer
 from agents.exceptions import UserError
 from agents.guardrail import (
@@ -230,6 +230,33 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    async def test_trace_api_key_serialization_is_opt_in(self):
+        """Trace API keys are only serialized when explicitly requested."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="Agent1")
+        state = make_state(agent, context=context, original_input="input1", max_turns=2)
+
+        with trace(workflow_name="test", tracing={"api_key": "trace-key"}) as tr:
+            state.set_trace(tr)
+
+        default_json = state.to_json()
+        assert default_json["trace"] is not None
+        assert "tracing_api_key" not in default_json["trace"]
+
+        opt_in_json = state.to_json(include_tracing_api_key=True)
+        assert opt_in_json["trace"] is not None
+        assert opt_in_json["trace"]["tracing_api_key"] == "trace-key"
+
+        restored_with_key = await RunState.from_string(
+            agent, state.to_string(include_tracing_api_key=True)
+        )
+        assert restored_with_key._trace_state is not None
+        assert restored_with_key._trace_state.tracing_api_key == "trace-key"
+
+        restored_without_key = await RunState.from_string(agent, state.to_string())
+        assert restored_without_key._trace_state is not None
+        assert restored_without_key._trace_state.tracing_api_key is None
 
     async def test_throws_error_if_schema_version_is_missing_or_invalid(self):
         """Test that deserialization fails with missing or invalid schema version."""

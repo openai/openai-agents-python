@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import copy
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from .run_state import RunState
 from .stream_events import StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
+from .tracing.traces import TraceState
 from .util._pretty_print import (
     pretty_print_result,
     pretty_print_run_result_streaming,
@@ -77,6 +79,11 @@ def _populate_state_from_result(
     if result.interruptions:
         state._current_step = NextStepInterruption(interruptions=result.interruptions)
 
+    trace_state = getattr(result, "_trace_state", None)
+    if trace_state is None:
+        trace_state = TraceState.from_trace(getattr(result, "trace", None))
+    state._trace_state = copy.deepcopy(trace_state) if trace_state else None
+
     return state
 
 
@@ -115,6 +122,9 @@ class RunResultBase(abc.ABC):
 
     interruptions: list[ToolApprovalItem]
     """Pending tool approval requests (interruptions) for this run."""
+
+    _trace_state: TraceState | None = field(default=None, init=False, repr=False)
+    """Serialized trace metadata captured during the run."""
 
     @property
     @abc.abstractmethod

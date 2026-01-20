@@ -408,3 +408,14 @@ def test_trace_and_spans_use_tracing_config_key():
         assert tr.tracing_api_key == "tracing-key"
         with custom_span(name="span_with_key") as span:
             assert span.tracing_api_key == "tracing-key"
+
+
+def test_trace_to_json_only_includes_tracing_api_key_when_requested():
+    with trace(workflow_name="test", tracing={"api_key": "secret-key"}) as tr:
+        default_json = tr.to_json()
+        assert default_json is not None
+        assert "tracing_api_key" not in default_json
+
+        with_key = tr.to_json(include_tracing_api_key=True)
+        assert with_key is not None
+        assert with_key["tracing_api_key"] == "secret-key"

@@ -74,6 +74,7 @@ from .tool_guardrails import (
     ToolOutputGuardrail,
     ToolOutputGuardrailResult,
 )
+from .tracing.traces import Trace, TraceState
 from .usage import deserialize_usage, serialize_usage
 
 if TYPE_CHECKING:
@@ -166,6 +167,9 @@ class RunState(Generic[TContext, TAgent]):
     _tool_use_tracker_snapshot: dict[str, list[str]] = field(default_factory=dict)
     """Serialized snapshot of the AgentToolUseTracker (agent name -> tools used)."""
 
+    _trace_state: TraceState | None = field(default=None, repr=False)
+    """Serialized trace metadata for resuming tracing context."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -197,6 +201,7 @@ class RunState(Generic[TContext, TAgent]):
         self._last_processed_response = None
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
+        self._trace_state = None
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
@@ -447,6 +452,7 @@ class RunState(Generic[TContext, TAgent]):
         *,
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
+        include_tracing_api_key: bool = False,
     ) -> dict[str, Any]:
         """Serializes the run state to a JSON-compatible dictionary.
 
@@ -456,6 +462,7 @@ class RunState(Generic[TContext, TAgent]):
         Args:
             context_serializer: Optional function to serialize non-mapping context values.
             strict_context: When True, require mapping contexts or a context_serializer.
+            include_tracing_api_key: When True, include the tracing API key in the trace payload.
 
         Returns:
             A dictionary representation of the run state.
@@ -518,7 +525,9 @@ class RunState(Generic[TContext, TAgent]):
             else None
         )
         result["current_turn_persisted_item_count"] = self._current_turn_persisted_item_count
-        result["trace"] = None
+        result["trace"] = self._serialize_trace_data(
+            include_tracing_api_key=include_tracing_api_key
+        )
 
         return result
 
@@ -657,8 +666,12 @@ class RunState(Generic[TContext, TAgent]):
         *,
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
+        include_tracing_api_key: bool = False,
     ) -> str:
         """Serializes the run state to a JSON string.
+
+        Args:
+            include_tracing_api_key: When True, include the tracing API key in the trace payload.
 
         Returns:
             JSON string representation of the run state.
@@ -667,9 +680,19 @@ class RunState(Generic[TContext, TAgent]):
             self.to_json(
                 context_serializer=context_serializer,
                 strict_context=strict_context,
+                include_tracing_api_key=include_tracing_api_key,
             ),
             indent=2,
         )
+
+    def set_trace(self, trace: Trace | None) -> None:
+        """Capture trace metadata for serialization/resumption."""
+        self._trace_state = TraceState.from_trace(trace)
+
+    def _serialize_trace_data(self, *, include_tracing_api_key: bool) -> dict[str, Any] | None:
+        if not self._trace_state:
+            return None
+        return self._trace_state.to_json(include_tracing_api_key=include_tracing_api_key)
 
     def set_tool_use_tracker_snapshot(self, snapshot: Mapping[str, Sequence[str]] | None) -> None:
         """Store a copy of the serialized tool-use tracker data."""
@@ -1810,6 +1833,11 @@ async def _build_run_state_from_json(
         "current_turn_persisted_item_count", 0
     )
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
+    trace_data = state_json.get("trace")
+    if isinstance(trace_data, Mapping):
+        state._trace_state = TraceState.from_json(trace_data)
+    else:
+        state._trace_state = None
 
     return state
 

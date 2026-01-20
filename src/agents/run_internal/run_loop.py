@@ -48,7 +48,7 @@ from ..stream_events import (
     RunItemStreamEvent,
 )
 from ..tool import Tool, dispose_resolved_computers
-from ..tracing import Span, SpanError, agent_span
+from ..tracing import Span, SpanError, agent_span, get_current_trace
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
 from ..usage import Usage
@@ -379,6 +379,9 @@ async def start_streaming(
     """Run the streaming loop for a run result."""
     if streamed_result.trace:
         streamed_result.trace.start(mark_as_current=True)
+    if run_state is not None:
+        run_state.set_trace(get_current_trace() or streamed_result.trace)
+        streamed_result._trace_state = run_state._trace_state
 
     if is_resumed_state and run_state is not None:
         (
