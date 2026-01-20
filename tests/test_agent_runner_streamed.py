@@ -974,6 +974,84 @@ async def test_streaming_hitl_resume_with_approved_tools():
 
 
 @pytest.mark.asyncio
+async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
+    model = FakeModel()
+
+    @function_tool(name_override="approval_tool", needs_approval=True)
+    def approval_tool() -> str:
+        return "ok"
+
+    delegate = Agent(
+        name="delegate",
+        model=model,
+        tools=[approval_tool],
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                get_function_tool_call(
+                    "some_function", json.dumps({"a": "b"}), call_id="triage-call"
+                )
+            ],
+            [get_text_message("a_message"), get_handoff_tool_call(delegate)],
+            [get_function_tool_call("approval_tool", json.dumps({}), call_id="delegate-call")],
+            [get_text_message("done")],
+        ]
+    )
+
+    model_input_call_ids: list[set[str]] = []
+    model_input_output_call_ids: list[set[str]] = []
+
+    def capture_model_input(data):
+        call_ids: set[str] = set()
+        output_call_ids: set[str] = set()
+        for item in data.model_data.input:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str):
+                continue
+            if item_type == "function_call":
+                call_ids.add(call_id)
+            elif item_type == "function_call_output":
+                output_call_ids.add(call_id)
+        model_input_call_ids.append(call_ids)
+        model_input_output_call_ids.append(output_call_ids)
+        return data.model_data
+
+    run_config = RunConfig(
+        nest_handoff_history=True,
+        call_model_input_filter=capture_model_input,
+    )
+
+    first = Runner.run_streamed(triage, input="user_message", run_config=run_config)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(triage, state, run_config=run_config)
+    await consume_stream(resumed)
+
+    last_call_ids = model_input_call_ids[-1]
+    last_output_call_ids = model_input_output_call_ids[-1]
+    assert "triage-call" not in last_call_ids
+    assert "triage-call" not in last_output_call_ids
+    assert "delegate-call" in last_call_ids
+    assert "delegate-call" in last_output_call_ids
+    assert resumed.final_output == "done"
+
+
+@pytest.mark.asyncio
 async def test_streaming_resume_persists_tool_outputs_on_run_again():
     """Approved tool outputs should be persisted before streaming resumes the next turn."""
 

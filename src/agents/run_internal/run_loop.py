@@ -679,6 +679,10 @@ async def start_streaming(
                     turn_result.model_response
                 ]
                 streamed_result.input = turn_result.original_input
+                if isinstance(turn_result.next_step, NextStepHandoff):
+                    streamed_result._original_input = copy_input_items(turn_result.original_input)
+                    if run_state is not None:
+                        run_state._original_input = copy_input_items(turn_result.original_input)
                 streamed_result._model_input_items = (
                     turn_result.pre_step_items + turn_result.new_step_items
                 )

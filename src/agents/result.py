@@ -206,8 +206,9 @@ class RunResult(RunResultBase):
     _model_input_items: list[RunItem] = field(default_factory=list, repr=False)
     """Filtered items used to build model input when resuming runs."""
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
-    """The original input from the first turn. Unlike `input`, this is never updated during the run.
-    Used by to_state() to preserve the correct originalInput when serializing state."""
+    """The original input for the current run segment.
+    This is updated when handoffs or resume logic replace the input history, and used by to_state()
+    to preserve the correct originalInput when serializing state."""
     _conversation_id: str | None = field(default=None, repr=False)
     """Conversation identifier for server-managed runs."""
     _previous_response_id: str | None = field(default=None, repr=False)
@@ -649,8 +650,8 @@ class RunResultStreaming(RunResultBase):
             ```
         """
         # Create a RunState from the current result
-        # Use _original_input (the input from the first turn) instead of input
-        # (which may have been updated during the run)
+        # Use _original_input (updated on handoffs/resume when input history changes).
+        # This avoids serializing a mutated view of input history.
         state = RunState(
             context=self.context_wrapper,
             original_input=self._original_input if self._original_input is not None else self.input,
