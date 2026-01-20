@@ -7,6 +7,7 @@ from agents import Agent, Runner, gen_trace_id, trace
 from agents.mcp import MCPServer, MCPServerStdio
 from agents.mcp.util import MCPUtil, create_static_tool_filter
 from agents.run_context import RunContextWrapper
+from examples.auto_mode import confirm_with_fallback, is_auto_mode
 
 
 async def list_tools(server: MCPServer, *, convert_to_strict: bool) -> list[Any]:
@@ -25,6 +26,11 @@ async def list_tools(server: MCPServer, *, convert_to_strict: bool) -> list[Any]
 
 def prompt_user_approval(interruption_name: str) -> bool:
     """Ask the user to approve a tool call and return the decision."""
+    if is_auto_mode():
+        return confirm_with_fallback(
+            f"Approve tool call '{interruption_name}'? (y/n): ",
+            default=True,
+        )
     while True:
         user_input = input(f"Approve tool call '{interruption_name}'? (y/n): ").strip().lower()
         if user_input == "y":

@@ -16,6 +16,7 @@ from agents import (
     trace,
 )
 from agents.items import ToolApprovalItem
+from examples.auto_mode import confirm_with_fallback, is_auto_mode
 
 
 class ShellExecutor:
@@ -75,10 +76,14 @@ async def prompt_shell_approval(commands: Sequence[str]) -> tuple[bool, bool]:
     print("Shell command approval required:")
     for entry in commands:
         print(f"  {entry}")
-    decision = input("Approve? [y/N]: ").strip().lower() in {"y", "yes"}
+    auto_mode = is_auto_mode()
+    decision = confirm_with_fallback("Approve? [y/N]: ", default=auto_mode)
     always = False
     if decision:
-        always = input("Approve all future shell calls? [y/N]: ").strip().lower() in {"y", "yes"}
+        always = confirm_with_fallback(
+            "Approve all future shell calls? [y/N]: ",
+            default=auto_mode,
+        )
     return decision, always
 
 

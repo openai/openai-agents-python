@@ -4,6 +4,7 @@ import json
 from typing import Literal
 
 from agents import Agent, HostedMCPTool, ModelSettings, Runner, RunResult, RunResultStreaming
+from examples.auto_mode import confirm_with_fallback
 
 
 def prompt_for_interruption(
@@ -19,12 +20,12 @@ def prompt_for_interruption(
         else:
             params = arguments
     try:
-        answer = input(
-            f"Approve running tool (mcp: {tool_name or 'unknown'}, params: {json.dumps(params)})? (y/n) "
+        return confirm_with_fallback(
+            f"Approve running tool (mcp: {tool_name or 'unknown'}, params: {json.dumps(params)})? (y/n) ",
+            default=True,
         )
     except (EOFError, KeyboardInterrupt):
         return False
-    return answer.lower().strip() == "y"
 
 
 async def _drain_stream(

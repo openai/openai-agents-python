@@ -12,14 +12,15 @@ from agents import (
     RunResult,
     RunResultStreaming,
 )
+from examples.auto_mode import confirm_with_fallback
 
 
 def prompt_approval(request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
     params: object = request.data.arguments or {}
-    answer = input(
-        f"Approve running tool (mcp: {request.data.name}, params: {json.dumps(params)})? (y/n) "
+    approved = confirm_with_fallback(
+        f"Approve running tool (mcp: {request.data.name}, params: {json.dumps(params)})? (y/n) ",
+        default=True,
     )
-    approved = answer.lower().strip() == "y"
     result: MCPToolApprovalFunctionResult = {"approve": approved}
     if not approved:
         result["reason"] = "User denied"

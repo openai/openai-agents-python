@@ -9,6 +9,7 @@ requiring approval for specific tool calls.
 import asyncio
 
 from agents import Agent, Runner, SQLiteSession, function_tool
+from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
 
 
 async def _needs_approval(_ctx, _params, _call_id) -> bool:
@@ -49,11 +50,7 @@ async def prompt_yes_no(question: str) -> bool:
     Returns:
         True if user answered yes, False otherwise
     """
-    print(f"\n{question} (y/n): ", end="", flush=True)
-    loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(None, input)
-    normalized = answer.strip().lower()
-    return normalized in ("y", "yes")
+    return confirm_with_fallback(f"\n{question} (y/n): ", default=True)
 
 
 async def main():
@@ -73,11 +70,16 @@ async def main():
     print("Enter a message to chat with the agent. Submit an empty line to exit.")
     print("The agent will ask for approval before using tools.\n")
 
+    auto_mode = is_auto_mode()
+
     while True:
         # Get user input
-        print("You: ", end="", flush=True)
-        loop = asyncio.get_event_loop()
-        user_message = await loop.run_in_executor(None, input)
+        if auto_mode:
+            user_message = input_with_fallback("You: ", "What's the weather in Oakland?")
+        else:
+            print("You: ", end="", flush=True)
+            loop = asyncio.get_event_loop()
+            user_message = await loop.run_in_executor(None, input)
 
         if not user_message.strip():
             break
@@ -111,6 +113,8 @@ async def main():
         # Display the response
         reply = result.final_output or "[No final output produced]"
         print(f"Assistant: {reply}\n")
+        if auto_mode:
+            break
 
 
 if __name__ == "__main__":

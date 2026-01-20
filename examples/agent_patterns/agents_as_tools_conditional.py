@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from agents import Agent, AgentBase, ModelSettings, RunContextWrapper, Runner, trace
 from agents.tool import function_tool
-from examples.auto_mode import input_with_fallback
+from examples.auto_mode import confirm_with_fallback, input_with_fallback
 
 """
 This example demonstrates the agents-as-tools pattern with conditional tool enabling.
@@ -122,10 +122,7 @@ async def main():
         while result.interruptions:
 
             async def confirm(question: str) -> bool:
-                loop = asyncio.get_event_loop()
-                answer = await loop.run_in_executor(None, input, f"{question} (y/n): ")
-                normalized = answer.strip().lower()
-                return normalized in ("y", "yes")
+                return confirm_with_fallback(f"{question} (y/n): ", default=True)
 
             state = result.to_state()
             for interruption in result.interruptions:

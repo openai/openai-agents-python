@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from agents import Agent, Runner, RunState, function_tool
+from examples.auto_mode import confirm_with_fallback
 
 
 @function_tool
@@ -70,12 +71,7 @@ async def confirm(question: str) -> bool:
     Returns:
         True if user confirms, False otherwise.
     """
-    # Note: In a real application, you would use proper async input
-    # For now, using synchronous input with run_in_executor
-    loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(None, input, f"{question} (y/n): ")
-    normalized = answer.strip().lower()
-    return normalized in ("y", "yes")
+    return confirm_with_fallback(f"{question} (y/n): ", default=True)
 
 
 async def main():

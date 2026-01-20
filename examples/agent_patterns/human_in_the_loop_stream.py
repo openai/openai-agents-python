@@ -11,6 +11,7 @@ the request, then pauses for approval when needed.
 import asyncio
 
 from agents import Agent, Runner, function_tool
+from examples.auto_mode import confirm_with_fallback
 
 
 async def _needs_temperature_approval(_ctx, params, _call_id) -> bool:
@@ -56,9 +57,7 @@ async def confirm(question: str) -> bool:
     Returns:
         True if user confirms, False otherwise.
     """
-    loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(None, input, f"{question} (y/n): ")
-    return answer.strip().lower() in ["y", "yes"]
+    return confirm_with_fallback(f"{question} (y/n): ", default=True)
 
 
 async def main():

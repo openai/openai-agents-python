@@ -14,6 +14,7 @@ from typing import Any
 from agents import Agent, Runner, function_tool
 from agents.run_context import RunContextWrapper
 from agents.run_state import RunState
+from examples.auto_mode import confirm_with_fallback, input_with_fallback, is_auto_mode
 
 from .file_session import FileSession
 
@@ -54,6 +55,7 @@ async def main() -> None:
     session_id = await session.get_session_id()
     print(f"Session id: {session_id}")
     print("Enter a message to chat with the agent. Submit an empty line to exit.")
+    auto_mode = is_auto_mode()
 
     saved_state = await session.load_state_json()
     if saved_state:
@@ -82,9 +84,12 @@ async def main() -> None:
             print(f"Failed to resume saved state: {exc}. Starting a new session.")
 
     while True:
-        print("You: ", end="", flush=True)
-        loop = asyncio.get_event_loop()
-        user_message = await loop.run_in_executor(None, input)
+        if auto_mode:
+            user_message = input_with_fallback("You: ", "Summarize the customer profile.")
+        else:
+            print("You: ", end="", flush=True)
+            loop = asyncio.get_event_loop()
+            user_message = await loop.run_in_executor(None, input)
         if not user_message.strip():
             break
 
@@ -107,6 +112,8 @@ async def main() -> None:
 
         reply = result.final_output or "[No final output produced]"
         print(f"Assistant: {reply}\n")
+        if auto_mode:
+            break
 
 
 def create_lookup_customer_profile_tool(
@@ -138,11 +145,7 @@ def format_tool_arguments(interruption: Any) -> str:
 
 
 async def prompt_yes_no(question: str) -> bool:
-    print(f"{question} (y/n): ", end="", flush=True)
-    loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(None, input)
-    normalized = answer.strip().lower()
-    return normalized in {"y", "yes"}
+    return confirm_with_fallback(f"{question} (y/n): ", default=True)
 
 
 if __name__ == "__main__":
