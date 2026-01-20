@@ -646,6 +646,7 @@ class AgentRunner:
                                         model_responses=model_responses,
                                         processed_response=processed_response_for_state,
                                         generated_items=generated_items,
+                                        current_turn=current_turn,
                                         next_step=turn_result.next_step,
                                     )
                                 result = build_interruption_result(
@@ -1105,6 +1106,7 @@ class AgentRunner:
                                     model_responses=model_responses,
                                     processed_response=processed_response_for_state,
                                     generated_items=generated_items,
+                                    current_turn=current_turn,
                                     next_step=turn_result.next_step,
                                 )
                             # Ensure starting_input is not None and not RunState

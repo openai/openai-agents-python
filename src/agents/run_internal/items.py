@@ -15,6 +15,13 @@ from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
 
 REJECTION_MESSAGE = "Tool execution was not approved."
+_TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
+    "function_call": "function_call_output",
+    "shell_call": "shell_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+    "computer_call": "computer_call_output",
+    "local_shell_call": "local_shell_call_output",
+}
 
 __all__ = [
     "REJECTION_MESSAGE",
@@ -40,22 +47,27 @@ def copy_input_items(value: str | list[TResponseInputItem]) -> str | list[TRespo
 
 def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TResponseInputItem]:
     """
-    Remove function_call items that do not have corresponding outputs so resumptions or retries do
-    not replay stale tool calls.
+    Remove tool call items that do not have corresponding outputs so resumptions or retries do not
+    replay stale tool calls.
     """
 
-    completed_call_ids = _completed_call_ids(items)
+    completed_call_ids = _completed_call_ids_by_type(items)
 
     filtered: list[TResponseInputItem] = []
     for entry in items:
         if not isinstance(entry, dict):
             filtered.append(entry)
             continue
-        if entry.get("type") != "function_call":
+        entry_type = entry.get("type")
+        if not isinstance(entry_type, str):
+            filtered.append(entry)
+            continue
+        output_type = _TOOL_CALL_TO_OUTPUT_TYPE.get(entry_type)
+        if output_type is None:
             filtered.append(entry)
             continue
         call_id = entry.get("call_id")
-        if call_id and call_id in completed_call_ids:
+        if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
             filtered.append(entry)
     return filtered
 
@@ -226,18 +238,20 @@ def extract_mcp_request_id_from_run(mcp_run: Any) -> str | None:
 # --------------------------
 
 
-def _completed_call_ids(payload: list[TResponseInputItem]) -> set[str]:
-    """Return the call ids that already have outputs."""
-    completed: set[str] = set()
+def _completed_call_ids_by_type(payload: list[TResponseInputItem]) -> dict[str, set[str]]:
+    """Return call ids that already have outputs, grouped by output type."""
+    completed: dict[str, set[str]] = {
+        output_type: set() for output_type in _TOOL_CALL_TO_OUTPUT_TYPE.values()
+    }
     for entry in payload:
         if not isinstance(entry, dict):
             continue
         item_type = entry.get("type")
-        if item_type != "function_call_output":
+        if not isinstance(item_type, str) or item_type not in completed:
             continue
         call_id = entry.get("call_id")
-        if call_id and isinstance(call_id, str):
-            completed.add(call_id)
+        if isinstance(call_id, str):
+            completed[item_type].add(call_id)
     return completed
 
 

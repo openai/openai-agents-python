@@ -220,6 +220,7 @@ def update_run_state_for_interruption(
     model_responses: list[ModelResponse],
     processed_response: ProcessedResponse | None,
     generated_items: list[RunItem],
+    current_turn: int,
     next_step: NextStepInterruption,
 ) -> None:
     """Sync run-state fields needed to resume after an interruption."""
@@ -227,6 +228,7 @@ def update_run_state_for_interruption(
     run_state._last_processed_response = processed_response
     run_state._generated_items = generated_items
     run_state._current_step = next_step
+    run_state._current_turn = current_turn
 
 
 async def save_turn_items_if_needed(

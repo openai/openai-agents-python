@@ -167,13 +167,61 @@ def testdrop_orphan_function_calls_removes_orphans():
             TResponseInputItem,
             {"type": "function_call_output", "call_id": "call_keep", "output": "done"},
         ),
+        cast(TResponseInputItem, {"type": "shell_call", "call_id": "shell_orphan"}),
+        cast(TResponseInputItem, {"type": "shell_call", "call_id": "shell_keep"}),
+        cast(
+            TResponseInputItem,
+            {"type": "shell_call_output", "call_id": "shell_keep", "output": []},
+        ),
+        cast(TResponseInputItem, {"type": "apply_patch_call", "call_id": "patch_orphan"}),
+        cast(TResponseInputItem, {"type": "apply_patch_call", "call_id": "patch_keep"}),
+        cast(
+            TResponseInputItem,
+            {"type": "apply_patch_call_output", "call_id": "patch_keep", "output": "done"},
+        ),
+        cast(TResponseInputItem, {"type": "computer_call", "call_id": "computer_orphan"}),
+        cast(TResponseInputItem, {"type": "computer_call", "call_id": "computer_keep"}),
+        cast(
+            TResponseInputItem,
+            {"type": "computer_call_output", "call_id": "computer_keep", "output": {}},
+        ),
+        cast(TResponseInputItem, {"type": "local_shell_call", "call_id": "local_shell_orphan"}),
+        cast(TResponseInputItem, {"type": "local_shell_call", "call_id": "local_shell_keep"}),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "local_shell_call_output",
+                "call_id": "local_shell_keep",
+                "output": {"stdout": "", "stderr": "", "outcome": {}},
+            },
+        ),
     ]
 
     filtered = drop_orphan_function_calls(items)
-    assert len(filtered) == 3
+    orphan_call_ids = {
+        "call_orphan",
+        "shell_orphan",
+        "patch_orphan",
+        "computer_orphan",
+        "local_shell_orphan",
+    }
     for entry in filtered:
         if isinstance(entry, dict):
-            assert entry.get("call_id") != "call_orphan"
+            assert entry.get("call_id") not in orphan_call_ids
+
+    def _has_call(call_type: str, call_id: str) -> bool:
+        return any(
+            isinstance(entry, dict)
+            and entry.get("type") == call_type
+            and entry.get("call_id") == call_id
+            for entry in filtered
+        )
+
+    assert _has_call("function_call", "call_keep")
+    assert _has_call("shell_call", "shell_keep")
+    assert _has_call("apply_patch_call", "patch_keep")
+    assert _has_call("computer_call", "computer_keep")
+    assert _has_call("local_shell_call", "local_shell_keep")
 
 
 def testnormalize_input_items_for_api_preserves_provider_data():
