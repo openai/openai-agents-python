@@ -139,7 +139,7 @@ async def test_tool_call_error():
     agent = Agent(
         name="test_agent",
         model=model,
-        tools=[get_function_tool("foo", "tool_result", hide_errors=True)],
+        tools=[get_function_tool("foo", "tool_result")],
     )
 
     model.add_multiple_turn_outputs(

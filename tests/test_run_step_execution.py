@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     MessageOutputItem,
+    ModelBehaviorError,
     ModelResponse,
     RunConfig,
     RunContextWrapper,
@@ -306,7 +307,6 @@ async def test_input_guardrail_runs_on_invalid_json():
     tool = function_tool(
         _echo,
         name_override="guarded",
-        failure_error_function=None,
         tool_input_guardrails=[guardrail_obj],
     )
     agent = Agent(name="test", tools=[tool])
@@ -326,6 +326,27 @@ async def test_input_guardrail_runs_on_invalid_json():
         item for item in result.generated_items if isinstance(item, ToolCallOutputItem)
     )
     assert "An error occurred while parsing tool arguments" in str(output_item.output)
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_raises_with_failure_error_function_none():
+    def _echo(value: str) -> str:
+        return value
+
+    tool = function_tool(
+        _echo,
+        name_override="guarded",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("guarded", "bad_json")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input for tool"):
+        await get_execute_result(agent, response)
 
 
 # === Helpers ===

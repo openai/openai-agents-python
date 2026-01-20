@@ -972,79 +972,36 @@ class RunImpl:
                         # Input guardrail rejected the tool call
                         result = rejected_message
                     else:
-                        parse_error = _validate_tool_arguments_json(tool_call.arguments)
-                        if parse_error is not None:
-                            error_message = (
-                                "An error occurred while parsing tool arguments. "
-                                "Please try again with valid JSON. "
-                                f"Error: {parse_error}"
-                            )
-                            _error_tracing.attach_error_to_current_span(
-                                SpanError(
-                                    message="Error running tool",
-                                    data={
-                                        "tool_name": func_tool.name,
-                                        "error": str(parse_error),
-                                    },
+                        # 2) Actually run the tool
+                        real_result = await cls._execute_tool_with_hooks(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            hooks=hooks,
+                            tool_call=tool_call,
+                        )
+
+                        # 3) Run output tool guardrails, if any
+                        final_result = await cls._execute_output_guardrails(
+                            func_tool=func_tool,
+                            tool_context=tool_context,
+                            agent=agent,
+                            real_result=real_result,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                        )
+
+                        # 4) Tool end hooks (with final result, which may have been overridden)
+                        await asyncio.gather(
+                            hooks.on_tool_end(tool_context, agent, func_tool, final_result),
+                            (
+                                agent.hooks.on_tool_end(
+                                    tool_context, agent, func_tool, final_result
                                 )
-                            )
-                            await asyncio.gather(
-                                hooks.on_tool_start(tool_context, agent, func_tool),
-                                (
-                                    agent.hooks.on_tool_start(tool_context, agent, func_tool)
-                                    if agent.hooks
-                                    else _coro.noop_coroutine()
-                                ),
-                            )
-                            final_result = await cls._execute_output_guardrails(
-                                func_tool=func_tool,
-                                tool_context=tool_context,
-                                agent=agent,
-                                real_result=error_message,
-                                tool_output_guardrail_results=tool_output_guardrail_results,
-                            )
-                            await asyncio.gather(
-                                hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                                (
-                                    agent.hooks.on_tool_end(
-                                        tool_context, agent, func_tool, final_result
-                                    )
-                                    if agent.hooks
-                                    else _coro.noop_coroutine()
-                                ),
-                            )
-                            result = final_result
-                        else:
-                            # 2) Actually run the tool
-                            real_result = await cls._execute_tool_with_hooks(
-                                func_tool=func_tool,
-                                tool_context=tool_context,
-                                agent=agent,
-                                hooks=hooks,
-                                tool_call=tool_call,
-                            )
-
-                            # 3) Run output tool guardrails, if any
-                            final_result = await cls._execute_output_guardrails(
-                                func_tool=func_tool,
-                                tool_context=tool_context,
-                                agent=agent,
-                                real_result=real_result,
-                                tool_output_guardrail_results=tool_output_guardrail_results,
-                            )
-
-                            # 4) Tool end hooks (with final result, which may have been overridden)
-                            await asyncio.gather(
-                                hooks.on_tool_end(tool_context, agent, func_tool, final_result),
-                                (
-                                    agent.hooks.on_tool_end(
-                                        tool_context, agent, func_tool, final_result
-                                    )
-                                    if agent.hooks
-                                    else _coro.noop_coroutine()
-                                ),
-                            )
-                            result = final_result
+                                if agent.hooks
+                                else _coro.noop_coroutine()
+                            ),
+                        )
+                        result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
@@ -2230,18 +2187,6 @@ def _coerce_shell_call(tool_call: Any) -> ShellCallData:
             status_literal = cast(Literal["in_progress", "completed"], lowered)
 
     return ShellCallData(call_id=call_id, action=action, status=status_literal, raw=tool_call)
-
-
-def _validate_tool_arguments_json(arguments: Any) -> Exception | None:
-    if arguments is None or arguments == "":
-        return None
-    if not isinstance(arguments, str):
-        return None
-    try:
-        json.loads(arguments)
-    except Exception as exc:
-        return exc
-    return None
 
 
 def _parse_apply_patch_custom_input(input_json: str) -> dict[str, Any]:
