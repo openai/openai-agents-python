@@ -9,8 +9,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union, cast
 
-from typing_extensions import NotRequired, TypedDict
-
 import pydantic
 import websockets
 from openai.types.realtime import realtime_audio_config as _rt_audio_config
@@ -81,7 +79,7 @@ from openai.types.realtime.session_update_event import (
 )
 from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
-from typing_extensions import TypeAlias, assert_never
+from typing_extensions import NotRequired, TypeAlias, TypedDict, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff

@@ -11,7 +11,6 @@ from agents import Agent
 from agents.exceptions import UserError
 from agents.handoffs import handoff
 from agents.realtime.model import RealtimeModelConfig
-from agents.realtime.openai_realtime import TransportConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
@@ -24,7 +23,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
+from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -306,7 +305,7 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
     async def test_connect_with_empty_transport_config(self, mock_websocket):
         """Test that empty transport configuration works without error."""
         model = OpenAIRealtimeWebSocketModel(transport_config={})
-        config = {
+        config: RealtimeModelConfig = {
             "api_key": "test-key",
         }
 
