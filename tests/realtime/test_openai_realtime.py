@@ -1077,14 +1077,12 @@ class TestTransportIntegration:
             captured_kwargs_short.update(kwargs)
             mock_ws = AsyncMock()
             mock_ws.close_code = None
-            mock_ws.__aiter__ = AsyncMock(return_value=iter([]))
             return mock_ws
 
         async def capture_connect_long(*args, **kwargs):
             captured_kwargs_long.update(kwargs)
             mock_ws = AsyncMock()
             mock_ws.close_code = None
-            mock_ws.__aiter__ = AsyncMock(return_value=iter([]))
             return mock_ws
 
         # Test with short ping_timeout
@@ -1094,12 +1092,21 @@ class TestTransportIntegration:
         }
         model_short = OpenAIRealtimeWebSocketModel(transport_config=transport_short)
         with patch("websockets.connect", side_effect=capture_connect_short):
-            config_short: RealtimeModelConfig = {
-                "api_key": "test-key",
-                "url": "ws://localhost:8080/v1/realtime",
-                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
-            }
-            await model_short.connect(config_short)
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_short: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_short.connect(config_short)
 
         assert captured_kwargs_short.get("ping_interval") == 0.1
         assert captured_kwargs_short.get("ping_timeout") == 0.05
@@ -1111,12 +1118,21 @@ class TestTransportIntegration:
         }
         model_long = OpenAIRealtimeWebSocketModel(transport_config=transport_long)
         with patch("websockets.connect", side_effect=capture_connect_long):
-            config_long: RealtimeModelConfig = {
-                "api_key": "test-key",
-                "url": "ws://localhost:8080/v1/realtime",
-                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
-            }
-            await model_long.connect(config_long)
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_long: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_long.connect(config_long)
 
         assert captured_kwargs_long.get("ping_interval") == 5.0
         assert captured_kwargs_long.get("ping_timeout") == 10.0
@@ -1133,14 +1149,12 @@ class TestTransportIntegration:
             captured_kwargs_disabled.update(kwargs)
             mock_ws = AsyncMock()
             mock_ws.close_code = None
-            mock_ws.__aiter__ = AsyncMock(return_value=iter([]))
             return mock_ws
 
         async def capture_connect_enabled(*args, **kwargs):
             captured_kwargs_enabled.update(kwargs)
             mock_ws = AsyncMock()
             mock_ws.close_code = None
-            mock_ws.__aiter__ = AsyncMock(return_value=iter([]))
             return mock_ws
 
         # Test with ping disabled
@@ -1150,12 +1164,21 @@ class TestTransportIntegration:
         }
         model_disabled = OpenAIRealtimeWebSocketModel(transport_config=transport_disabled)
         with patch("websockets.connect", side_effect=capture_connect_disabled):
-            config_disabled: RealtimeModelConfig = {
-                "api_key": "test-key",
-                "url": "ws://localhost:8080/v1/realtime",
-                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
-            }
-            await model_disabled.connect(config_disabled)
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_disabled: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_disabled.connect(config_disabled)
 
         assert captured_kwargs_disabled.get("ping_interval") is None
         assert captured_kwargs_disabled.get("ping_timeout") is None
@@ -1167,12 +1190,21 @@ class TestTransportIntegration:
         }
         model_enabled = OpenAIRealtimeWebSocketModel(transport_config=transport_enabled)
         with patch("websockets.connect", side_effect=capture_connect_enabled):
-            config_enabled: RealtimeModelConfig = {
-                "api_key": "test-key",
-                "url": "ws://localhost:8080/v1/realtime",
-                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
-            }
-            await model_enabled.connect(config_enabled)
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_enabled: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_enabled.connect(config_enabled)
 
         assert captured_kwargs_enabled.get("ping_interval") == 1.0
         assert captured_kwargs_enabled.get("ping_timeout") == 2.0
