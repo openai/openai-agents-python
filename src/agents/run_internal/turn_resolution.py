@@ -808,6 +808,14 @@ async def resolve_interrupted_turn(
         pending_interruption_keys.add(key)
         pending_interruptions.append(item)
 
+    def _approval_matches_agent(approval: ToolApprovalItem) -> bool:
+        approval_agent = approval.agent
+        if approval_agent is None:
+            return False
+        if approval_agent is agent:
+            return True
+        return getattr(approval_agent, "name", None) == agent.name
+
     async def _rebuild_function_runs_from_approvals() -> list[ToolRunFunction]:
         if not pending_approval_items:
             return []
@@ -837,6 +845,9 @@ async def resolve_interrupted_turn(
 
         for approval in pending_approval_items:
             if not isinstance(approval, ToolApprovalItem):
+                continue
+            if not _approval_matches_agent(approval):
+                _add_unmatched_pending(approval)
                 continue
             raw = approval.raw_item
             raw_type = get_mapping_or_attr(raw, "type")

@@ -1191,6 +1191,27 @@ async def test_prepare_input_with_session_awaits_async_callback():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_rejects_non_callable_callback():
+    session = SimpleListSession()
+
+    with pytest.raises(UserError, match="session_input_callback"):
+        await prepare_input_with_session("hello", session, cast(Any, "bad_callback"))
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_rejects_non_list_callback_result():
+    session = SimpleListSession()
+
+    def callback(history: list[TResponseInputItem], new_input: list[TResponseInputItem]) -> str:
+        _ = history
+        _ = new_input
+        return "not-a-list"
+
+    with pytest.raises(UserError, match="Session input callback must return a list"):
+        await prepare_input_with_session("hello", session, cast(Any, callback))
+
+
+@pytest.mark.asyncio
 async def test_conversation_lock_rewind_skips_when_no_snapshot() -> None:
     history_item = cast(TResponseInputItem, {"id": "old", "type": "message"})
     new_item = cast(TResponseInputItem, {"id": "new", "type": "message"})
@@ -2592,6 +2613,47 @@ async def test_execute_approved_tools_with_missing_tool():
     assert len(generated_items) == 1
     assert isinstance(generated_items[0], ToolCallOutputItem)
     assert "not found" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_missing_call_id():
+    """Test _execute_approved_tools handles tool approvals without call IDs."""
+    _, agent = make_model_and_agent()
+    tool_call = {"type": "function_call", "name": "test_tool"}
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "missing call id" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_invalid_raw_item_type():
+    """Test _execute_approved_tools handles approvals with unsupported raw_item types."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+    tool_call = {"type": "function_call", "name": "test_tool", "call_id": "call-1"}
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "invalid raw_item type" in generated_items[0].output.lower()
 
 
 @pytest.mark.asyncio

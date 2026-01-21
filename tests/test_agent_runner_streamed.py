@@ -974,6 +974,54 @@ async def test_streaming_hitl_resume_with_approved_tools():
 
 
 @pytest.mark.asyncio
+async def test_streaming_resume_with_session_does_not_duplicate_items():
+    """Ensure session persistence does not duplicate tool items after streaming resume."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = SimpleListSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+    assert resumed.final_output == "done"
+
+    saved_items = await session.get_items()
+    call_count = sum(
+        1
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "call-resume"
+    )
+    output_count = sum(
+        1
+        for item in saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call-resume"
+    )
+
+    assert call_count == 1
+    assert output_count == 1
+
+
+@pytest.mark.asyncio
 async def test_streaming_resume_preserves_filtered_model_input_after_handoff():
     model = FakeModel()
 
@@ -1085,6 +1133,64 @@ async def test_streaming_resume_persists_tool_outputs_on_run_again():
         and item.get("call_id") == "call-resume"
         for item in saved_items
     ), "approved tool outputs should be persisted on resume"
+
+
+@pytest.mark.asyncio
+async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure resumed streaming preserves the persisted count for session saves."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool", needs_approval=True)
+    model, agent = make_model_and_agent(name="test", tools=[tool])
+    session = SimpleListSession()
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("test_tool", json.dumps({}), call_id="call-resume"),
+        followup=[get_text_message("done")],
+    )
+
+    first = Runner.run_streamed(agent, input="Use test_tool", session=session)
+    await consume_stream(first)
+    assert first.interruptions
+
+    persisted_count = first._current_turn_persisted_item_count
+    assert persisted_count > 0
+
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+
+    observed_counts: list[int] = []
+    run_loop_any = cast(Any, run_loop)
+    real_save_resumed = run_loop_any.save_resumed_turn_items
+
+    async def save_wrapper(
+        *,
+        session: Any,
+        items: list[RunItem],
+        persisted_count: int,
+        response_id: str | None,
+        store: bool | None = None,
+    ) -> int:
+        observed_counts.append(persisted_count)
+        result = await real_save_resumed(
+            session=session,
+            items=items,
+            persisted_count=persisted_count,
+            response_id=response_id,
+            store=store,
+        )
+        return int(result)
+
+    monkeypatch.setattr(run_loop_any, "save_resumed_turn_items", save_wrapper)
+
+    resumed = Runner.run_streamed(agent, state, session=session)
+    await consume_stream(resumed)
+
+    assert observed_counts, "expected resumed save to capture persisted count"
+    assert all(count == persisted_count for count in observed_counts)
 
 
 @pytest.mark.asyncio
