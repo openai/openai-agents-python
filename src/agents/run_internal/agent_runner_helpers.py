@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from ..agent import Agent
+from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
@@ -37,6 +38,7 @@ __all__ = [
     "ensure_context_wrapper",
     "finalize_conversation_tracking",
     "input_guardrails_triggered",
+    "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
     "resolve_resumed_context",
@@ -61,6 +63,23 @@ def apply_resumed_conversation_settings(
     run_state._previous_response_id = previous_response_id
     run_state._auto_previous_response_id = auto_previous_response_id
     return conversation_id, previous_response_id, auto_previous_response_id
+
+
+def validate_session_conversation_settings(
+    session: Session | None,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    if session is None:
+        return
+    if conversation_id is None and previous_response_id is None and not auto_previous_response_id:
+        return
+    raise UserError(
+        "Session persistence cannot be combined with conversation_id, "
+        "previous_response_id, or auto_previous_response_id."
+    )
 
 
 def resolve_trace_settings(

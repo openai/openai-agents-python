@@ -1668,6 +1668,80 @@ async def test_previous_response_id_passed_between_runs():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_kwargs",
+    [
+        {"conversation_id": "conv-test"},
+        {"previous_response_id": "resp-test"},
+        {"auto_previous_response_id": True},
+    ],
+)
+async def test_run_rejects_session_with_server_managed_conversation(run_kwargs: dict[str, Any]):
+    model = FakeModel()
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(name="test", model=model)
+    session = SimpleListSession()
+
+    with pytest.raises(UserError, match="Session persistence"):
+        await Runner.run(agent, input="test", session=session, **run_kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_session_with_resumed_conversation_state():
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    session = SimpleListSession()
+    context_wrapper = RunContextWrapper(context=None)
+    state = RunState(
+        context=context_wrapper,
+        original_input="hello",
+        starting_agent=agent,
+        conversation_id="conv-test",
+    )
+
+    with pytest.raises(UserError, match="Session persistence"):
+        await Runner.run(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "run_kwargs",
+    [
+        {"conversation_id": "conv-test"},
+        {"previous_response_id": "resp-test"},
+        {"auto_previous_response_id": True},
+    ],
+)
+async def test_run_streamed_rejects_session_with_server_managed_conversation(
+    run_kwargs: dict[str, Any],
+):
+    model = FakeModel()
+    model.set_next_output([get_text_message("done")])
+    agent = Agent(name="test", model=model)
+    session = SimpleListSession()
+
+    with pytest.raises(UserError, match="Session persistence"):
+        Runner.run_streamed(agent, input="test", session=session, **run_kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_streamed_rejects_session_with_resumed_conversation_state():
+    model = FakeModel()
+    agent = Agent(name="test", model=model)
+    session = SimpleListSession()
+    context_wrapper = RunContextWrapper(context=None)
+    state = RunState(
+        context=context_wrapper,
+        original_input="hello",
+        starting_agent=agent,
+        conversation_id="conv-test",
+    )
+
+    with pytest.raises(UserError, match="Session persistence"):
+        Runner.run_streamed(agent, state, session=session)
+
+
+@pytest.mark.asyncio
 async def test_multi_turn_previous_response_id_passed_between_runs():
     """Test that previous_response_id is passed to the model on subsequent runs."""
 

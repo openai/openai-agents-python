@@ -50,6 +50,7 @@ from .run_internal.agent_runner_helpers import (
     resolve_trace_settings,
     save_turn_items_if_needed,
     update_run_state_for_interruption,
+    validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
 from .run_internal.items import (
@@ -407,6 +408,12 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
             prepared_input = normalize_resumed_input(original_user_input)
@@ -421,6 +428,13 @@ class AgentRunner:
         else:
             raw_input = cast(Union[str, list[TResponseInputItem]], input)
             original_user_input = raw_input
+
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
 
             server_manages_conversation = (
                 conversation_id is not None
@@ -1323,6 +1337,12 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             starting_input = run_state._original_input
@@ -1352,6 +1372,12 @@ class AgentRunner:
             # input is already str | list[TResponseInputItem] when not RunState
             # Reuse input_for_result variable from outer scope
             input_for_result = cast(Union[str, list[TResponseInputItem]], input)
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             context_wrapper = ensure_context_wrapper(context)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result

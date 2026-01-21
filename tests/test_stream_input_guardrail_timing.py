@@ -31,6 +31,40 @@ def make_input_guardrail(delay_seconds: float, *, trip: bool) -> InputGuardrail[
 
 
 @pytest.mark.asyncio
+async def test_input_guardrail_results_follow_completion_order():
+    async def fast_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0)
+        return GuardrailFunctionOutput(output_info={"delay": 0.0}, tripwire_triggered=False)
+
+    async def slow_guardrail(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.sleep(0.05)
+        return GuardrailFunctionOutput(output_info={"delay": 0.05}, tripwire_triggered=False)
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("Final response")])
+
+    agent = Agent(
+        name="TimingAgentOrder",
+        model=model,
+        input_guardrails=[
+            InputGuardrail(guardrail_function=slow_guardrail, name="slow_guardrail"),
+            InputGuardrail(guardrail_function=fast_guardrail, name="fast_guardrail"),
+        ],
+    )
+
+    result = Runner.run_streamed(agent, input="Hello")
+    async for _ in result.stream_events():
+        pass
+
+    delays = [res.output.output_info["delay"] for res in result.input_guardrail_results]
+    assert delays == [0.0, 0.05]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guardrail_delay", [0.0, 0.2])
 async def test_run_streamed_input_guardrail_timing_is_consistent(guardrail_delay: float):
     """Ensure streaming behavior matches when input guardrail finishes before and after LLM stream.

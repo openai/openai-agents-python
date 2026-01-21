@@ -482,8 +482,9 @@ class Agent(AgentBase, Generic[TContext]):
                 nested_context = context.context
             else:
                 nested_context = context
-            run_result: RunResult | RunResultStreaming
+            run_result: RunResult | RunResultStreaming | None = None
             resume_state: RunState | None = None
+            should_record_run_result = True
 
             def _nested_approvals_status(
                 interruptions: list[ToolApprovalItem],
@@ -536,7 +537,10 @@ class Agent(AgentBase, Generic[TContext]):
                 pending_run_result = peek_agent_tool_run_result(context.tool_call)
                 if pending_run_result and getattr(pending_run_result, "interruptions", None):
                     status = _nested_approvals_status(pending_run_result.interruptions)
-                    if status in ("approved", "rejected"):
+                    if status == "pending":
+                        run_result = pending_run_result
+                        should_record_run_result = False
+                    elif status in ("approved", "rejected"):
                         resume_state = pending_run_result.to_state()
                         if resume_state._context is not None:
                             # Apply only explicit parent approvals to the nested resumed run.
@@ -547,85 +551,92 @@ class Agent(AgentBase, Generic[TContext]):
                             )
                         consume_agent_tool_run_result(context.tool_call)
 
-            if on_stream is not None:
-                run_result_streaming = Runner.run_streamed(
-                    starting_agent=cast(Agent[Any], self),
-                    input=resume_state or input,
-                    context=None if resume_state is not None else cast(Any, nested_context),
-                    run_config=run_config,
-                    max_turns=resolved_max_turns,
-                    hooks=hooks,
-                    previous_response_id=None if resume_state is not None else previous_response_id,
-                    conversation_id=None if resume_state is not None else conversation_id,
-                    session=session,
-                )
-                # Dispatch callbacks in the background so slow handlers do not block
-                # event consumption.
-                event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue()
+            if run_result is None:
+                if on_stream is not None:
+                    run_result_streaming = Runner.run_streamed(
+                        starting_agent=cast(Agent[Any], self),
+                        input=resume_state or input,
+                        context=None if resume_state is not None else cast(Any, nested_context),
+                        run_config=run_config,
+                        max_turns=resolved_max_turns,
+                        hooks=hooks,
+                        previous_response_id=None
+                        if resume_state is not None
+                        else previous_response_id,
+                        conversation_id=None if resume_state is not None else conversation_id,
+                        session=session,
+                    )
+                    # Dispatch callbacks in the background so slow handlers do not block
+                    # event consumption.
+                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue()
 
-                async def _run_handler(payload: AgentToolStreamEvent) -> None:
-                    """Execute the user callback while capturing exceptions."""
-                    try:
-                        maybe_result = on_stream(payload)
-                        if inspect.isawaitable(maybe_result):
-                            await maybe_result
-                    except Exception:
-                        logger.exception(
-                            "Error while handling on_stream event for agent tool %s.",
-                            self.name,
-                        )
-
-                async def dispatch_stream_events() -> None:
-                    while True:
-                        payload = await event_queue.get()
-                        is_sentinel = payload is None  # None marks the end of the stream.
+                    async def _run_handler(payload: AgentToolStreamEvent) -> None:
+                        """Execute the user callback while capturing exceptions."""
                         try:
-                            if payload is not None:
-                                await _run_handler(payload)
-                        finally:
-                            event_queue.task_done()
+                            maybe_result = on_stream(payload)
+                            if inspect.isawaitable(maybe_result):
+                                await maybe_result
+                        except Exception:
+                            logger.exception(
+                                "Error while handling on_stream event for agent tool %s.",
+                                self.name,
+                            )
 
-                        if is_sentinel:
-                            break
+                    async def dispatch_stream_events() -> None:
+                        while True:
+                            payload = await event_queue.get()
+                            is_sentinel = payload is None  # None marks the end of the stream.
+                            try:
+                                if payload is not None:
+                                    await _run_handler(payload)
+                            finally:
+                                event_queue.task_done()
 
-                dispatch_task = asyncio.create_task(dispatch_stream_events())
+                            if is_sentinel:
+                                break
 
-                try:
-                    from .stream_events import AgentUpdatedStreamEvent
+                    dispatch_task = asyncio.create_task(dispatch_stream_events())
 
-                    current_agent = run_result_streaming.current_agent
-                    async for event in run_result_streaming.stream_events():
-                        if isinstance(event, AgentUpdatedStreamEvent):
-                            current_agent = event.new_agent
+                    try:
+                        from .stream_events import AgentUpdatedStreamEvent
 
-                        payload: AgentToolStreamEvent = {
-                            "event": event,
-                            "agent": current_agent,
-                            "tool_call": context.tool_call,
-                        }
-                        await event_queue.put(payload)
-                finally:
-                    await event_queue.put(None)
-                    await event_queue.join()
-                    await dispatch_task
-                run_result = run_result_streaming
-            else:
-                run_result = await Runner.run(
-                    starting_agent=cast(Agent[Any], self),
-                    input=resume_state or input,
-                    context=None if resume_state is not None else cast(Any, nested_context),
-                    run_config=run_config,
-                    max_turns=resolved_max_turns,
-                    hooks=hooks,
-                    previous_response_id=None if resume_state is not None else previous_response_id,
-                    conversation_id=None if resume_state is not None else conversation_id,
-                    session=session,
-                )
+                        current_agent = run_result_streaming.current_agent
+                        async for event in run_result_streaming.stream_events():
+                            if isinstance(event, AgentUpdatedStreamEvent):
+                                current_agent = event.new_agent
+
+                            payload: AgentToolStreamEvent = {
+                                "event": event,
+                                "agent": current_agent,
+                                "tool_call": context.tool_call,
+                            }
+                            await event_queue.put(payload)
+                    finally:
+                        await event_queue.put(None)
+                        await event_queue.join()
+                        await dispatch_task
+                    run_result = run_result_streaming
+                else:
+                    run_result = await Runner.run(
+                        starting_agent=cast(Agent[Any], self),
+                        input=resume_state or input,
+                        context=None if resume_state is not None else cast(Any, nested_context),
+                        run_config=run_config,
+                        max_turns=resolved_max_turns,
+                        hooks=hooks,
+                        previous_response_id=None
+                        if resume_state is not None
+                        else previous_response_id,
+                        conversation_id=None if resume_state is not None else conversation_id,
+                        session=session,
+                    )
+            assert run_result is not None
 
             # Store the run result by tool call identity so nested interruptions can be read later.
             interruptions = getattr(run_result, "interruptions", None)
             if isinstance(context, ToolContext) and context.tool_call is not None and interruptions:
-                record_agent_tool_run_result(context.tool_call, run_result)
+                if should_record_run_result:
+                    record_agent_tool_run_result(context.tool_call, run_result)
 
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)

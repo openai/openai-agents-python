@@ -9,8 +9,10 @@ import json
 from collections.abc import Sequence
 from typing import Any, cast
 
+from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
+from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
 
@@ -174,6 +176,8 @@ def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TRespon
 
 def function_rejection_item(agent: Any, tool_call: Any) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
+    if isinstance(tool_call, ResponseFunctionToolCall):
+        drop_agent_tool_run_result(tool_call)
     return ToolCallOutputItem(
         output=REJECTION_MESSAGE,
         raw_item=ItemHelpers.tool_call_output_item(tool_call, REJECTION_MESSAGE),
