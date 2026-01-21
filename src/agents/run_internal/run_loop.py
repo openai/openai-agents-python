@@ -92,6 +92,7 @@ from .run_steps import (
     ToolRunShellCall,
 )
 from .session_persistence import (
+    persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     resumed_turn_items,
     rewind_session_items,
@@ -712,6 +713,18 @@ async def start_streaming(
                     for result in streamed_result.input_guardrail_results:
                         if result.output.tripwire_triggered:
                             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                            session_input_items_for_persistence = (
+                                await persist_session_items_for_guardrail_trip(
+                                    session,
+                                    server_conversation_tracker,
+                                    session_input_items_for_persistence,
+                                    starting_input,
+                                    run_state,
+                                    store=current_agent.model_settings.resolve(
+                                        run_config.model_settings
+                                    ).store,
+                                )
+                            )
                             raise InputGuardrailTripwireTriggered(result)
 
                 if parallel_guardrails:
