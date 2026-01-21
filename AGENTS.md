@@ -55,6 +55,24 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 - `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`: Pull request template to use when opening PRs.
 - `site/`: Built documentation output.
 
+### Agents Core Runtime Guidelines
+
+- `src/agents/run.py` is the runtime entrypoint (`Runner`, `AgentRunner`). Keep it focused on orchestration and public flow control. Put new runtime logic under `src/agents/run_internal/` and import it into `run.py`.
+- When `run.py` grows, refactor helpers into `run_internal/` modules (for example `run_loop.py`, `turn_resolution.py`, `tool_execution.py`, `session_persistence.py`) and leave only wiring and composition in `run.py`.
+- Keep streaming and non-streaming paths behaviorally aligned. Changes to `run_internal/run_loop.py` (`run_single_turn`, `run_single_turn_streamed`, `get_new_response`, `start_streaming`) should be mirrored, and any new streaming item types must be reflected in `src/agents/stream_events.py`.
+- Input guardrails run only on the first turn and only for the starting agent. Resuming an interruption from `RunState` must not increment the turn counter; only actual model calls advance turns.
+- Server-managed conversation (`conversation_id`, `previous_response_id`, `auto_previous_response_id`) uses `OpenAIServerConversationTracker` in `run_internal/oai_conversation.py`. Only deltas should be sent. If `call_model_input_filter` is used, it must return `ModelInputData` with a list input and the tracker must be updated with the filtered input (`mark_input_as_sent`). Session persistence is disabled when server-managed conversation is active.
+- Adding new tool/output/approval item types requires coordinated updates across:
+  - `src/agents/items.py` (RunItem types and conversions)
+  - `src/agents/run_internal/run_steps.py` (ProcessedResponse and tool run structs)
+  - `src/agents/run_internal/turn_resolution.py` (model output processing, run item extraction)
+  - `src/agents/run_internal/tool_execution.py` and `src/agents/run_internal/tool_planning.py`
+  - `src/agents/run_internal/items.py` (normalization, dedupe, approval filtering)
+  - `src/agents/stream_events.py` (stream event names)
+  - `src/agents/run_state.py` (RunState serialization/deserialization)
+  - `src/agents/run_internal/session_persistence.py` (session save/rewind)
+- If the serialized RunState shape changes, bump `CURRENT_SCHEMA_VERSION` in `src/agents/run_state.py` and update serialization/deserialization accordingly.
+
 ## Operation Guide
 
 ### Prerequisites
