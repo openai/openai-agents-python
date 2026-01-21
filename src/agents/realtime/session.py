@@ -440,6 +440,10 @@ class RealtimeSession(RealtimeModelListener):
         """Return True/False when approved/rejected, or None when awaiting approval."""
         approval_item = self._build_tool_approval_item(function_tool, tool_call, agent)
 
+        needs_approval = await self._function_needs_approval(function_tool, tool_call)
+        if not needs_approval:
+            return True
+
         approval_status = self._context_wrapper.is_tool_approved(
             function_tool.name, tool_call.call_id
         )
@@ -447,10 +451,6 @@ class RealtimeSession(RealtimeModelListener):
             return True
         if approval_status is False:
             return False
-
-        needs_approval = await self._function_needs_approval(function_tool, tool_call)
-        if not needs_approval:
-            return True
 
         self._pending_tool_calls[tool_call.call_id] = (
             tool_call,
