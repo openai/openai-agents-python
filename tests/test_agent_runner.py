@@ -1253,6 +1253,30 @@ async def test_prepare_input_with_session_callback_accepts_extra_items():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_ignores_callback_without_history():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        _ = history
+        _ = new_input
+        return []
+
+    prepared, session_items = await prepare_input_with_session(
+        "new",
+        session,
+        callback,
+        include_history_in_prepared_input=False,
+        preserve_dropped_new_items=True,
+    )
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == ["new"]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == ["new"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_rejects_non_callable_callback():
     session = SimpleListSession()
 

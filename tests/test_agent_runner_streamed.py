@@ -570,6 +570,39 @@ async def test_input_guardrail_streamed_does_not_save_assistant_message_to_sessi
 
 
 @pytest.mark.asyncio
+async def test_input_guardrail_streamed_persists_user_input_for_sequential_guardrail():
+    def guardrail_function(
+        context: RunContextWrapper[Any], agent: Agent[Any], input: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    session = SimpleListSession()
+
+    model = FakeModel()
+    model.set_next_output([get_text_message("should_not_be_saved")])
+
+    agent = Agent(
+        name="test",
+        model=model,
+        input_guardrails=[
+            InputGuardrail(guardrail_function=guardrail_function, run_in_parallel=False)
+        ],
+    )
+
+    with pytest.raises(InputGuardrailTripwireTriggered):
+        result = Runner.run_streamed(agent, input="user_message", session=session)
+        async for _ in result.stream_events():
+            pass
+
+    items = await session.get_items()
+
+    assert len(items) == 1
+    first_item = cast(dict[str, Any], items[0])
+    assert "role" in first_item
+    assert first_item["role"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_stream_input_persistence_strips_ids_for_openai_conversation_session():
     class DummyOpenAIConversationsSession(OpenAIConversationsSession):
         def __init__(self) -> None:
