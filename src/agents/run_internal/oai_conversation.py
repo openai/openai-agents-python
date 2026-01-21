@@ -139,14 +139,16 @@ class OpenAIServerConversationTracker:
             raw_item = run_item.raw_item
             if raw_item is None:
                 continue
+            is_tool_call_item = run_item.type in {"tool_call_item", "handoff_call_item"}
 
             if isinstance(raw_item, dict):
                 item_id = _normalize_server_item_id(raw_item.get("id"))
                 call_id = raw_item.get("call_id")
                 has_output_payload = "output" in raw_item
                 has_output_payload = has_output_payload or hasattr(raw_item, "output")
+                has_call_id = isinstance(call_id, str)
                 should_mark = item_id is not None or (
-                    isinstance(call_id, str) and has_output_payload
+                    has_call_id and (has_output_payload or is_tool_call_item)
                 )
                 if not should_mark:
                     continue
@@ -165,13 +167,17 @@ class OpenAIServerConversationTracker:
                 item_id = _normalize_server_item_id(getattr(raw_item, "id", None))
                 call_id = getattr(raw_item, "call_id", None)
                 has_output_payload = hasattr(raw_item, "output")
+                has_call_id = isinstance(call_id, str)
                 should_mark = item_id is not None or (
-                    isinstance(call_id, str) and has_output_payload
+                    has_call_id and (has_output_payload or is_tool_call_item)
                 )
                 if not should_mark:
                     continue
 
                 self.sent_items.add(id(raw_item))
+                fp = _fingerprint_for_tracker(raw_item)
+                if fp:
+                    self.sent_item_fingerprints.add(fp)
                 if item_id is not None:
                     self.server_item_ids.add(item_id)
                 if isinstance(call_id, str) and has_output_payload:
