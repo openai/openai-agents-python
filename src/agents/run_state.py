@@ -104,6 +104,7 @@ _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
 _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
 _HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
+_MISSING_CONTEXT_SENTINEL = object()
 
 
 @dataclass
@@ -276,10 +277,10 @@ class RunState(Generic[TContext, TAgent]):
         *,
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """Validate and serialize the stored run context."""
         if self._context is None:
-            return {}, _build_context_meta(
+            return None, _build_context_meta(
                 None,
                 serialized_via="none",
                 requires_deserializer=False,
@@ -288,7 +289,7 @@ class RunState(Generic[TContext, TAgent]):
 
         raw_context_payload = self._context.context
         if raw_context_payload is None:
-            return {}, _build_context_meta(
+            return None, _build_context_meta(
                 raw_context_payload,
                 serialized_via="none",
                 requires_deserializer=False,
@@ -1716,7 +1717,9 @@ async def _build_run_state_from_json(
     context_data = state_json["context"]
     usage = deserialize_usage(context_data.get("usage", {}))
 
-    serialized_context = context_data.get("context", {})
+    serialized_context: Any = context_data.get("context", _MISSING_CONTEXT_SENTINEL)
+    if serialized_context is _MISSING_CONTEXT_SENTINEL:
+        serialized_context = {}
     context_meta_raw = context_data.get("context_meta")
     context_meta = context_meta_raw if isinstance(context_meta_raw, Mapping) else None
 
@@ -1736,6 +1739,8 @@ async def _build_run_state_from_json(
         context = context_override
     elif context_override is not None:
         context = RunContextWrapper(context=context_override)
+    elif serialized_context is None:
+        context = RunContextWrapper(context=None)
     elif context_deserializer is not None:
         if not isinstance(serialized_context, Mapping):
             raise UserError(
