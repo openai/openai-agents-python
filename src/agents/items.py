@@ -383,23 +383,12 @@ class ToolApprovalItem(RunItemBase[Any]):
                 self.tool_name = None
 
     def __hash__(self) -> int:
-        """Hash by call_id and tool_name so items can live in sets."""
-        # Extract call_id or id from raw_item for hashing
-        call_id = self._extract_call_id()
-
-        # Hash using call_id and tool_name for uniqueness
-        return hash((call_id, self.tool_name))
+        """Hash by object identity to keep distinct approvals separate."""
+        return object.__hash__(self)
 
     def __eq__(self, other: object) -> bool:
-        """Equality based on call_id and tool_name."""
-        if not isinstance(other, ToolApprovalItem):
-            return False
-
-        # Extract call_id from both items
-        self_call_id = self._extract_call_id()
-        other_call_id = other._extract_call_id()
-
-        return self_call_id == other_call_id and self.tool_name == other.tool_name
+        """Equality is based on object identity."""
+        return self is other
 
     @property
     def name(self) -> str | None:
