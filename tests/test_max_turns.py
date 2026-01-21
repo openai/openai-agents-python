@@ -155,6 +155,26 @@ async def test_structured_output_max_turns_handler_invalid_output():
 
 
 @pytest.mark.asyncio
+async def test_structured_output_max_turns_handler_list_output():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=list[str],
+    )
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        max_turns=0,
+        error_handlers={"max_turns": lambda data: ["a", "b"]},
+    )
+
+    assert result.final_output == ["a", "b"]
+    assert ItemHelpers.text_message_outputs(result.new_items) == '["a", "b"]'
+
+
+@pytest.mark.asyncio
 async def test_non_streamed_max_turns_handler_returns_output():
     model = FakeModel()
     agent = Agent(name="test_1", model=model)
@@ -247,3 +267,29 @@ async def test_streamed_max_turns_handler_returns_output():
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
     assert ItemHelpers.text_message_output(run_item_events[0].item) == "summary"
+
+
+@pytest.mark.asyncio
+async def test_streamed_max_turns_handler_list_output():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=list[str],
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        error_handlers={"max_turns": lambda data: ["a", "b"]},
+    )
+
+    events = [event async for event in result.stream_events()]
+    run_item_events = [event for event in events if isinstance(event, RunItemStreamEvent)]
+
+    assert result.final_output == ["a", "b"]
+    assert len(run_item_events) == 1
+    assert run_item_events[0].name == "message_output_created"
+    assert isinstance(run_item_events[0].item, MessageOutputItem)
+    assert ItemHelpers.text_message_output(run_item_events[0].item) == '["a", "b"]'

@@ -7,6 +7,7 @@ from typing import Any
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
 from ..agent import Agent
+from ..agent_output import _WRAPPER_DICT_KEY, AgentOutputSchema
 from ..exceptions import MaxTurnsExceeded, ModelBehaviorError, UserError
 from ..items import (
     ItemHelpers,
@@ -66,7 +67,13 @@ def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
     if output_schema is None or output_schema.is_plain_text():
         return final_output
     try:
-        payload = json.dumps(final_output, ensure_ascii=False)
+        payload_value = final_output
+        if isinstance(output_schema, AgentOutputSchema) and output_schema._is_wrapped:
+            if isinstance(final_output, dict) and _WRAPPER_DICT_KEY in final_output:
+                payload_value = final_output
+            else:
+                payload_value = {_WRAPPER_DICT_KEY: final_output}
+        payload = json.dumps(payload_value, ensure_ascii=False)
     except TypeError as exc:
         raise UserError("Invalid run error handler final_output for structured output.") from exc
     try:
