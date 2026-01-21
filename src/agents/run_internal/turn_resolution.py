@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal, cast
 
 from openai.types.responses import (
+    ResponseCompactionItem,
     ResponseComputerToolCall,
     ResponseCustomToolCall,
     ResponseFileSearchToolCall,
@@ -31,6 +32,7 @@ from ..agent_tool_state import peek_agent_tool_run_result
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff, HandoffInputData, nest_handoff_history
 from ..items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -1208,6 +1210,19 @@ def process_model_response(
                 raise ModelBehaviorError(
                     "Model produced apply_patch call without an apply_patch tool."
                 )
+            continue
+        if output_type == "compaction":
+            if isinstance(output, dict):
+                compaction_raw = dict(output)
+            elif isinstance(output, ResponseCompactionItem):
+                compaction_raw = output.model_dump(exclude_unset=True)
+            else:
+                logger.warning("Unexpected compaction output type, ignoring: %s", type(output))
+                continue
+            compaction_raw.pop("created_by", None)
+            items.append(
+                CompactionItem(agent=agent, raw_item=cast(TResponseInputItem, compaction_raw))
+            )
             continue
         if isinstance(output, ResponseOutputMessage):
             items.append(MessageOutputItem(raw_item=output, agent=agent))

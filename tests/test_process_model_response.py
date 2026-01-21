@@ -1,6 +1,7 @@
 import pytest
+from openai.types.responses import ResponseCompactionItem
 
-from agents import Agent, ApplyPatchTool
+from agents import Agent, ApplyPatchTool, CompactionItem
 from agents.exceptions import ModelBehaviorError
 from agents.items import ModelResponse
 from agents.run_internal import run_loop
@@ -66,3 +67,29 @@ def test_process_model_response_converts_custom_apply_patch_call() -> None:
     converted_call = processed.apply_patch_calls[0].tool_call
     assert isinstance(converted_call, dict)
     assert converted_call.get("type") == "apply_patch_call"
+
+
+def test_process_model_response_handles_compaction_item() -> None:
+    agent = Agent(name="compaction-agent", model=FakeModel())
+    compaction_item = ResponseCompactionItem(
+        id="comp-1",
+        encrypted_content="enc",
+        type="compaction",
+        created_by="server",
+    )
+
+    processed = run_loop.process_model_response(
+        agent=agent,
+        all_tools=[],
+        response=_response([compaction_item]),
+        output_schema=None,
+        handoffs=[],
+    )
+
+    assert len(processed.new_items) == 1
+    item = processed.new_items[0]
+    assert isinstance(item, CompactionItem)
+    assert isinstance(item.raw_item, dict)
+    assert item.raw_item["type"] == "compaction"
+    assert item.raw_item["encrypted_content"] == "enc"
+    assert "created_by" not in item.raw_item
