@@ -177,6 +177,7 @@ async def test_structured_output_max_turns_handler_pydantic_output():
 
     assert isinstance(result.final_output, FooModel)
     assert result.final_output.summary == "ok"
+    assert ItemHelpers.text_message_outputs(result.new_items) == '{"summary":"ok"}'
 
 
 @pytest.mark.asyncio
@@ -196,7 +197,7 @@ async def test_structured_output_max_turns_handler_list_output():
     )
 
     assert result.final_output == ["a", "b"]
-    assert ItemHelpers.text_message_outputs(result.new_items) == '["a", "b"]'
+    assert ItemHelpers.text_message_outputs(result.new_items) == '{"response":["a","b"]}'
 
 
 @pytest.mark.asyncio
@@ -318,6 +319,7 @@ async def test_streamed_max_turns_handler_pydantic_output():
     assert len(run_item_events) == 1
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
+    assert ItemHelpers.text_message_output(run_item_events[0].item) == '{"summary":"ok"}'
 
 
 @pytest.mark.asyncio
@@ -343,4 +345,4 @@ async def test_streamed_max_turns_handler_list_output():
     assert len(run_item_events) == 1
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
-    assert ItemHelpers.text_message_output(run_item_events[0].item) == '["a", "b"]'
+    assert ItemHelpers.text_message_output(run_item_events[0].item) == '{"response":["a","b"]}'

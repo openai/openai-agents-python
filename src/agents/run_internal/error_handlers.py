@@ -56,9 +56,22 @@ def format_final_output_text(agent: Agent[Any], final_output: Any) -> str:
     output_schema = get_output_schema(agent)
     if output_schema is None or output_schema.is_plain_text():
         return str(final_output)
+    payload_value = final_output
+    if isinstance(output_schema, AgentOutputSchema) and output_schema._is_wrapped:
+        if isinstance(final_output, dict) and _WRAPPER_DICT_KEY in final_output:
+            payload_value = final_output
+        else:
+            payload_value = {_WRAPPER_DICT_KEY: final_output}
     try:
-        return json.dumps(final_output, ensure_ascii=False, default=str)
-    except TypeError:
+        if isinstance(output_schema, AgentOutputSchema):
+            payload_bytes = output_schema._type_adapter.dump_json(payload_value)
+            return (
+                payload_bytes.decode()
+                if isinstance(payload_bytes, (bytes, bytearray))
+                else str(payload_bytes)
+            )
+        return json.dumps(payload_value, ensure_ascii=False)
+    except (TypeError, ValueError):
         return str(final_output)
 
 
