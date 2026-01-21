@@ -1191,6 +1191,68 @@ async def test_prepare_input_with_session_awaits_async_callback():
 
 
 @pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_drops_new_items():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        _ = new_input
+        return history
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+    assert prepared == [history_item]
+    assert session_items == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_reorders_new_items():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [new_input[1], history[0], new_input[0]]
+
+    new_input = [get_text_input_item("first"), get_text_input_item("second")]
+    prepared, session_items = await prepare_input_with_session(new_input, session, callback)
+
+    assert cast(dict[str, Any], prepared[0]).get("content") == "second"
+    assert cast(dict[str, Any], prepared[1]).get("content") == "history"
+    assert cast(dict[str, Any], prepared[2]).get("content") == "first"
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "second",
+        "first",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_callback_accepts_extra_items():
+    history_item = cast(TResponseInputItem, {"role": "user", "content": "history"})
+    session = SimpleListSession(history=[history_item])
+    extra_item = cast(TResponseInputItem, {"role": "assistant", "content": "extra"})
+
+    def callback(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        return [extra_item, history[0], new_input[0]]
+
+    prepared, session_items = await prepare_input_with_session("new", session, callback)
+
+    assert [cast(dict[str, Any], item).get("content") for item in prepared] == [
+        "extra",
+        "history",
+        "new",
+    ]
+    assert [cast(dict[str, Any], item).get("content") for item in session_items] == [
+        "extra",
+        "new",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_input_with_session_rejects_non_callable_callback():
     session = SimpleListSession()
 
