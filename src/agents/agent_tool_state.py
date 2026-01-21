@@ -47,29 +47,33 @@ def _index_agent_tool_run_result(
 
 def _drop_agent_tool_run_result(tool_call_obj_id: int) -> None:
     """Remove a tool call object from the fallback index."""
-    if isinstance(_agent_tool_call_refs_by_obj, dict):
-        _agent_tool_call_refs_by_obj.pop(tool_call_obj_id, None)
-    if not isinstance(_agent_tool_run_result_signature_by_obj, dict):
+    tool_call_refs = _agent_tool_call_refs_by_obj
+    if isinstance(tool_call_refs, dict):
+        tool_call_refs.pop(tool_call_obj_id, None)
+    signature_by_obj = _agent_tool_run_result_signature_by_obj
+    if not isinstance(signature_by_obj, dict):
         return
-    signature = _agent_tool_run_result_signature_by_obj.pop(tool_call_obj_id, None)
+    signature = signature_by_obj.pop(tool_call_obj_id, None)
     if signature is None:
         return
-    if not isinstance(_agent_tool_run_results_by_signature, dict):
+    results_by_signature = _agent_tool_run_results_by_signature
+    if not isinstance(results_by_signature, dict):
         return
-    candidate_ids = _agent_tool_run_results_by_signature.get(signature)
+    candidate_ids = results_by_signature.get(signature)
     if not candidate_ids:
         return
     candidate_ids.discard(tool_call_obj_id)
     if not candidate_ids:
-        _agent_tool_run_results_by_signature.pop(signature, None)
+        results_by_signature.pop(signature, None)
 
 
 def _register_tool_call_ref(tool_call: ResponseFunctionToolCall, tool_call_obj_id: int) -> None:
     """Tie cached nested run results to the tool call lifetime to avoid leaks."""
 
     def _on_tool_call_gc(_ref: weakref.ReferenceType[ResponseFunctionToolCall]) -> None:
-        if isinstance(_agent_tool_run_results_by_obj, dict):
-            _agent_tool_run_results_by_obj.pop(tool_call_obj_id, None)
+        run_results = _agent_tool_run_results_by_obj
+        if isinstance(run_results, dict):
+            run_results.pop(tool_call_obj_id, None)
         _drop_agent_tool_run_result(tool_call_obj_id)
 
     _agent_tool_call_refs_by_obj[tool_call_obj_id] = weakref.ref(tool_call, _on_tool_call_gc)
