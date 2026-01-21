@@ -151,7 +151,8 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
     if isinstance(call_id, str):
         return f"call_id:{item_type}:{call_id}"
 
-    approval_request_id = payload.get("approval_request_id") or payload.get("approvalRequestId")
+    # points back to the originating approval request ID on hosted MCP responses
+    approval_request_id = payload.get("approval_request_id")
     if isinstance(approval_request_id, str):
         return f"approval_request_id:{item_type}:{approval_request_id}"
 
@@ -218,10 +219,23 @@ def apply_patch_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
 def extract_mcp_request_id(raw_item: Any) -> str | None:
     """Pull the request id from hosted MCP approval payloads."""
     if isinstance(raw_item, dict):
-        candidate = raw_item.get("id")
+        provider_data = raw_item.get("provider_data")
+        if isinstance(provider_data, dict):
+            candidate = provider_data.get("id")
+            if isinstance(candidate, str):
+                return candidate
+        candidate = raw_item.get("id") or raw_item.get("call_id")
         return candidate if isinstance(candidate, str) else None
     try:
-        candidate = getattr(raw_item, "id", None)
+        provider_data = getattr(raw_item, "provider_data", None)
+    except Exception:
+        provider_data = None
+    if isinstance(provider_data, dict):
+        candidate = provider_data.get("id")
+        if isinstance(candidate, str):
+            return candidate
+    try:
+        candidate = getattr(raw_item, "id", None) or getattr(raw_item, "call_id", None)
     except Exception:
         candidate = None
     return candidate if isinstance(candidate, str) else None
@@ -231,9 +245,19 @@ def extract_mcp_request_id_from_run(mcp_run: Any) -> str | None:
     """Extract the hosted MCP request id from a streaming run item."""
     request_item = getattr(mcp_run, "request_item", None) or getattr(mcp_run, "requestItem", None)
     if isinstance(request_item, dict):
-        candidate = request_item.get("id")
+        provider_data = request_item.get("provider_data")
+        if isinstance(provider_data, dict):
+            candidate = provider_data.get("id")
+            if isinstance(candidate, str):
+                return candidate
+        candidate = request_item.get("id") or request_item.get("call_id")
     else:
-        candidate = getattr(request_item, "id", None)
+        provider_data = getattr(request_item, "provider_data", None)
+        if isinstance(provider_data, dict):
+            candidate = provider_data.get("id")
+            if isinstance(candidate, str):
+                return candidate
+        candidate = getattr(request_item, "id", None) or getattr(request_item, "call_id", None)
     return candidate if isinstance(candidate, str) else None
 
 
