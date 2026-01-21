@@ -66,15 +66,25 @@ def validate_handler_final_output(agent: Agent[Any], final_output: Any) -> Any:
     output_schema = get_output_schema(agent)
     if output_schema is None or output_schema.is_plain_text():
         return final_output
+    payload_value = final_output
+    if isinstance(output_schema, AgentOutputSchema) and output_schema._is_wrapped:
+        if isinstance(final_output, dict) and _WRAPPER_DICT_KEY in final_output:
+            payload_value = final_output
+        else:
+            payload_value = {_WRAPPER_DICT_KEY: final_output}
     try:
-        payload_value = final_output
-        if isinstance(output_schema, AgentOutputSchema) and output_schema._is_wrapped:
-            if isinstance(final_output, dict) and _WRAPPER_DICT_KEY in final_output:
-                payload_value = final_output
-            else:
-                payload_value = {_WRAPPER_DICT_KEY: final_output}
-        payload = json.dumps(payload_value, ensure_ascii=False)
+        if isinstance(output_schema, AgentOutputSchema):
+            payload_bytes = output_schema._type_adapter.dump_json(payload_value)
+            payload = (
+                payload_bytes.decode()
+                if isinstance(payload_bytes, (bytes, bytearray))
+                else str(payload_bytes)
+            )
+        else:
+            payload = json.dumps(payload_value, ensure_ascii=False)
     except TypeError as exc:
+        raise UserError("Invalid run error handler final_output for structured output.") from exc
+    except ValueError as exc:
         raise UserError("Invalid run error handler final_output for structured output.") from exc
     try:
         return output_schema.validate_json(payload)

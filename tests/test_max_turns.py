@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from agents import (
@@ -88,6 +89,10 @@ class Foo(TypedDict):
     a: str
 
 
+class FooModel(BaseModel):
+    summary: str
+
+
 @pytest.mark.asyncio
 async def test_structured_output_non_streamed_max_turns():
     model = FakeModel()
@@ -152,6 +157,26 @@ async def test_structured_output_max_turns_handler_invalid_output():
             max_turns=0,
             error_handlers={"max_turns": lambda data: {"summary": "nope"}},
         )
+
+
+@pytest.mark.asyncio
+async def test_structured_output_max_turns_handler_pydantic_output():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=FooModel,
+    )
+
+    result = await Runner.run(
+        agent,
+        input="user_message",
+        max_turns=0,
+        error_handlers={"max_turns": lambda data: FooModel(summary="ok")},
+    )
+
+    assert isinstance(result.final_output, FooModel)
+    assert result.final_output.summary == "ok"
 
 
 @pytest.mark.asyncio
@@ -267,6 +292,32 @@ async def test_streamed_max_turns_handler_returns_output():
     assert run_item_events[0].name == "message_output_created"
     assert isinstance(run_item_events[0].item, MessageOutputItem)
     assert ItemHelpers.text_message_output(run_item_events[0].item) == "summary"
+
+
+@pytest.mark.asyncio
+async def test_streamed_max_turns_handler_pydantic_output():
+    model = FakeModel()
+    agent = Agent(
+        name="test_1",
+        model=model,
+        output_type=FooModel,
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="user_message",
+        max_turns=0,
+        error_handlers={"max_turns": lambda data: FooModel(summary="ok")},
+    )
+
+    events = [event async for event in result.stream_events()]
+    run_item_events = [event for event in events if isinstance(event, RunItemStreamEvent)]
+
+    assert isinstance(result.final_output, FooModel)
+    assert result.final_output.summary == "ok"
+    assert len(run_item_events) == 1
+    assert run_item_events[0].name == "message_output_created"
+    assert isinstance(run_item_events[0].item, MessageOutputItem)
 
 
 @pytest.mark.asyncio
