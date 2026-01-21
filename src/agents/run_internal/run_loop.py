@@ -1020,7 +1020,6 @@ async def run_single_turn_streamed(
 
     if isinstance(input, list):
         input = normalize_input_items_for_api(input)
-        input = deduplicate_input_items(input)
 
     filtered = await maybe_filter_model_input(
         agent=agent,
