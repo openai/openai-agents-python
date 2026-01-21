@@ -623,7 +623,8 @@ class Agent(AgentBase, Generic[TContext]):
                 )
 
             # Store the run result by tool call identity so nested interruptions can be read later.
-            if isinstance(context, ToolContext) and context.tool_call is not None:
+            interruptions = getattr(run_result, "interruptions", None)
+            if isinstance(context, ToolContext) and context.tool_call is not None and interruptions:
                 record_agent_tool_run_result(context.tool_call, run_result)
 
             if custom_output_extractor:
