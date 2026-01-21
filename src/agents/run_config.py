@@ -15,6 +15,7 @@ from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .run_context import TContext
+from .run_error_handlers import RunErrorHandlers
 from .tracing import TracingConfig
 from .util._types import MaybeAwaitable
 
@@ -176,6 +177,9 @@ class RunOptions(TypedDict, Generic[TContext]):
 
     session: NotRequired[Session | None]
     """The session for the run."""
+
+    error_handlers: NotRequired[RunErrorHandlers[TContext] | None]
+    """Error handlers keyed by error kind. Currently supports max_turns."""
 
 
 __all__ = [

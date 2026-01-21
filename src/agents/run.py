@@ -37,6 +37,7 @@ from .run_config import (
     RunOptions,
 )
 from .run_context import RunContextWrapper, TContext
+from .run_error_handlers import RunErrorHandlers
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
     apply_resumed_conversation_settings,
@@ -53,6 +54,13 @@ from .run_internal.agent_runner_helpers import (
     validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
+from .run_internal.error_handlers import (
+    build_run_error_data,
+    create_message_output_item,
+    format_final_output_text,
+    resolve_run_error_handler_result,
+    validate_handler_final_output,
+)
 from .run_internal.items import (
     copy_input_items,
     normalize_resumed_input,
@@ -64,6 +72,7 @@ from .run_internal.run_loop import (
     get_output_schema,
     initialize_computer_tools,
     resolve_interrupted_turn,
+    run_final_output_hooks,
     run_input_guardrails,
     run_output_guardrails,
     run_single_turn,
@@ -147,6 +156,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
@@ -165,7 +175,7 @@ class Runner:
 
         In two cases, the agent may raise an exception:
 
-          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
           2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
              exception is raised.
 
@@ -181,6 +191,7 @@ class Runner:
                 defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
             previous_response_id: The ID of the previous response. If using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
@@ -208,6 +219,7 @@ class Runner:
             max_turns=max_turns,
             hooks=hooks,
             run_config=run_config,
+            error_handlers=error_handlers,
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
@@ -224,6 +236,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
@@ -247,7 +260,7 @@ class Runner:
 
         In two cases, the agent may raise an exception:
 
-          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
           2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
              exception is raised.
 
@@ -263,6 +276,7 @@ class Runner:
                 defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
@@ -283,6 +297,7 @@ class Runner:
             max_turns=max_turns,
             hooks=hooks,
             run_config=run_config,
+            error_handlers=error_handlers,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,
             session=session,
@@ -298,6 +313,7 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
@@ -319,7 +335,7 @@ class Runner:
 
         In two cases, the agent may raise an exception:
 
-          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised.
+          1. If the max_turns is exceeded, a MaxTurnsExceeded exception is raised unless handled.
           2. If a guardrail tripwire is triggered, a GuardrailTripwireTriggered
              exception is raised.
 
@@ -335,6 +351,7 @@ class Runner:
                 defined as one AI invocation (including any tool calls that might occur).
             hooks: An object that receives callbacks on various lifecycle events.
             run_config: Global settings for the entire agent run.
+            error_handlers: Error handlers keyed by error kind. Currently supports max_turns.
             previous_response_id: The ID of the previous response, if using OpenAI
                 models via the Responses API, this allows you to skip passing in input
                 from the previous turn.
@@ -354,6 +371,7 @@ class Runner:
             max_turns=max_turns,
             hooks=hooks,
             run_config=run_config,
+            error_handlers=error_handlers,
             previous_response_id=previous_response_id,
             auto_previous_response_id=auto_previous_response_id,
             conversation_id=conversation_id,
@@ -377,6 +395,7 @@ class AgentRunner:
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
@@ -820,7 +839,85 @@ class AgentRunner:
                                 data={"max_turns": max_turns},
                             ),
                         )
-                        raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+                        max_turns_error = MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+                        run_error_data = build_run_error_data(
+                            input=original_input,
+                            new_items=session_items,
+                            raw_responses=model_responses,
+                            last_agent=current_agent,
+                        )
+                        handler_result = await resolve_run_error_handler_result(
+                            error_handlers=error_handlers,
+                            error=max_turns_error,
+                            context_wrapper=context_wrapper,
+                            run_data=run_error_data,
+                        )
+                        if handler_result is None:
+                            raise max_turns_error
+
+                        validated_output = validate_handler_final_output(
+                            current_agent, handler_result.final_output
+                        )
+                        output_text = format_final_output_text(current_agent, validated_output)
+                        synthesized_item = create_message_output_item(current_agent, output_text)
+                        include_in_history = handler_result.include_in_history
+                        if include_in_history:
+                            generated_items.append(synthesized_item)
+                            session_items.append(synthesized_item)
+
+                        await run_final_output_hooks(
+                            current_agent,
+                            hooks,
+                            context_wrapper,
+                            validated_output,
+                        )
+                        output_guardrail_results = await run_output_guardrails(
+                            current_agent.output_guardrails + (run_config.output_guardrails or []),
+                            current_agent,
+                            validated_output,
+                            context_wrapper,
+                        )
+                        current_step = getattr(run_state, "_current_step", None)
+                        approvals_from_state = approvals_from_step(current_step)
+                        result = RunResult(
+                            input=original_input,
+                            new_items=session_items,
+                            raw_responses=model_responses,
+                            final_output=validated_output,
+                            _last_agent=current_agent,
+                            input_guardrail_results=input_guardrail_results,
+                            output_guardrail_results=output_guardrail_results,
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            context_wrapper=context_wrapper,
+                            interruptions=approvals_from_state,
+                            _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
+                            max_turns=max_turns,
+                        )
+                        result._current_turn = current_turn
+                        result._model_input_items = list(generated_items)
+                        if run_state is not None:
+                            result._trace_state = run_state._trace_state
+                        if session_persistence_enabled and include_in_history:
+                            handler_input_items_for_save: list[TResponseInputItem] = (
+                                session_input_items_for_persistence
+                                if session_input_items_for_persistence is not None
+                                else []
+                            )
+                            await save_result_to_session(
+                                session,
+                                handler_input_items_for_save,
+                                [synthesized_item],
+                                run_state,
+                                response_id=None,
+                                store=store_setting,
+                            )
+                        result._original_input = copy_input_items(original_input)
+                        return finalize_conversation_tracking(
+                            result,
+                            server_conversation_tracker=server_conversation_tracker,
+                            run_state=run_state,
+                        )
 
                     if run_state is not None and not resuming_turn:
                         run_state._current_turn_persisted_item_count = 0
@@ -1232,6 +1329,7 @@ class AgentRunner:
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = kwargs.get("hooks")
         run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
@@ -1279,6 +1377,7 @@ class AgentRunner:
                 max_turns=max_turns,
                 hooks=hooks,
                 run_config=run_config,
+                error_handlers=error_handlers,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,
@@ -1313,6 +1412,7 @@ class AgentRunner:
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
         run_config = kwargs.get("run_config")
+        error_handlers = kwargs.get("error_handlers")
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
@@ -1492,6 +1592,7 @@ class AgentRunner:
                 hooks=hooks,
                 context_wrapper=context_wrapper,
                 run_config=run_config,
+                error_handlers=error_handlers,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
                 conversation_id=conversation_id,

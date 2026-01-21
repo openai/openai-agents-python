@@ -372,6 +372,8 @@ class RunResultStreaming(RunResultBase):
     # Soft cancel state
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
 
+    _max_turns_handled: bool = field(default=False, repr=False)
+
     _original_input: str | list[TResponseInputItem] | None = field(default=None, repr=False)
     """The original input from the first turn. Unlike `input`, this is never updated during the run.
     Used by to_state() to preserve the correct originalInput when serializing state."""
@@ -542,7 +544,7 @@ class RunResultStreaming(RunResultBase):
         )
 
     def _check_errors(self):
-        if self.current_turn > self.max_turns:
+        if self.current_turn > self.max_turns and not self._max_turns_handled:
             max_turns_exc = MaxTurnsExceeded(f"Max turns ({self.max_turns}) exceeded")
             max_turns_exc.run_data = self._create_error_details()
             self._stored_exception = max_turns_exc

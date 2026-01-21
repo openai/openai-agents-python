@@ -19,6 +19,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
+    MaxTurnsExceeded,
     ModelBehaviorError,
     RunErrorDetails,
     UserError,
@@ -41,6 +42,7 @@ from ..memory import Session
 from ..result import RunResultStreaming
 from ..run_config import RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
 from ..stream_events import (
     AgentUpdatedStreamEvent,
@@ -57,6 +59,13 @@ from .agent_runner_helpers import apply_resumed_conversation_settings
 from .approvals import (
     append_input_items_excluding_approvals,
     approvals_from_step,
+)
+from .error_handlers import (
+    build_run_error_data,
+    create_message_output_item,
+    format_final_output_text,
+    resolve_run_error_handler_result,
+    validate_handler_final_output,
 )
 from .guardrails import (
     input_guardrail_tripwire_triggered_for_stream,
@@ -369,6 +378,7 @@ async def start_streaming(
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
+    error_handlers: RunErrorHandlers[TContext] | None,
     previous_response_id: str | None,
     auto_previous_response_id: bool,
     conversation_id: str | None,
@@ -691,6 +701,70 @@ async def start_streaming(
                         data={"max_turns": max_turns},
                     ),
                 )
+                max_turns_error = MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
+                handler_configured = bool(
+                    error_handlers and error_handlers.get("max_turns") is not None
+                )
+                if handler_configured:
+                    streamed_result._max_turns_handled = True
+                run_error_data = build_run_error_data(
+                    input=streamed_result.input,
+                    new_items=streamed_result.new_items,
+                    raw_responses=streamed_result.raw_responses,
+                    last_agent=current_agent,
+                )
+                handler_result = await resolve_run_error_handler_result(
+                    error_handlers=error_handlers,
+                    error=max_turns_error,
+                    context_wrapper=context_wrapper,
+                    run_data=run_error_data,
+                )
+                if handler_result is None:
+                    if handler_configured:
+                        streamed_result._max_turns_handled = False
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    break
+
+                validated_output = validate_handler_final_output(
+                    current_agent, handler_result.final_output
+                )
+                output_text = format_final_output_text(current_agent, validated_output)
+                synthesized_item = create_message_output_item(current_agent, output_text)
+                include_in_history = handler_result.include_in_history
+                if include_in_history:
+                    streamed_result._model_input_items.append(synthesized_item)
+                    streamed_result.new_items.append(synthesized_item)
+                    if run_state is not None:
+                        run_state._generated_items = list(streamed_result._model_input_items)
+                        run_state._session_items = list(streamed_result.new_items)
+                    stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
+                    store_setting = current_agent.model_settings.resolve(
+                        run_config.model_settings
+                    ).store
+                    if is_resumed_state:
+                        await _save_resumed_items([synthesized_item], None, store_setting)
+                    else:
+                        await _save_stream_items_with_count([synthesized_item], None, store_setting)
+
+                await run_final_output_hooks(
+                    current_agent, hooks, context_wrapper, validated_output
+                )
+                output_guardrail_results = await _run_output_guardrails_for_stream(
+                    agent=current_agent,
+                    run_config=run_config,
+                    output=validated_output,
+                    context_wrapper=context_wrapper,
+                    streamed_result=streamed_result,
+                )
+                streamed_result.output_guardrail_results = output_guardrail_results
+                streamed_result.final_output = validated_output
+                streamed_result.is_complete = True
+                streamed_result._stored_exception = None
+                streamed_result._max_turns_handled = True
+                streamed_result.current_turn = max_turns
+                if run_state is not None:
+                    run_state._current_turn = max_turns
+                    run_state._current_step = None
                 streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
                 break
 
