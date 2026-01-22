@@ -437,6 +437,22 @@ async def test_manager_parallel_propagates_base_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_parallel_prefers_cancelled_error_when_unsuppressed() -> None:
+    cancelled_server = CancelledServer()
+    fatal_server = FatalTaskBoundServer()
+    manager = MCPServerManager(
+        [fatal_server, cancelled_server],
+        connect_in_parallel=True,
+        suppress_cancelled_error=False,
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await manager.connect_all()
+    finally:
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
 async def test_manager_cleanup_runs_on_cancelled_error_during_connect() -> None:
     server = CleanupAwareServer()
     cancelled_server = CancelledServer()

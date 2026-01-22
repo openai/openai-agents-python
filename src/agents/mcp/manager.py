@@ -349,13 +349,13 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             for server in servers
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
-                raise result
         if not self.suppress_cancelled_error:
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     raise result
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
         if self.strict and self.failed_servers:
             first_failure = None
             if self.suppress_cancelled_error:
