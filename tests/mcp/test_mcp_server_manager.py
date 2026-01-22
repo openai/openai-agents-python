@@ -154,6 +154,20 @@ class FailingTaskBoundServer(TaskBoundServer):
         raise RuntimeError("connect failed")
 
 
+class FatalError(BaseException):
+    pass
+
+
+class FatalTaskBoundServer(TaskBoundServer):
+    @property
+    def name(self) -> str:
+        return "fatal-task-bound"
+
+    async def connect(self) -> None:
+        await super().connect()
+        raise FatalError("fatal connect failed")
+
+
 class CleanupFailingServer(TaskBoundServer):
     @property
     def name(self) -> str:
@@ -408,6 +422,18 @@ async def test_manager_parallel_propagates_cancelled_error_when_unsuppressed() -
             await manager.connect_all()
     finally:
         await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_parallel_propagates_base_exception() -> None:
+    server = FatalTaskBoundServer()
+    manager = MCPServerManager([server], connect_in_parallel=True)
+
+    with pytest.raises(FatalError, match="fatal connect failed"):
+        await manager.connect_all()
+
+    assert server.cleaned is True
+    assert manager._workers == {}
 
 
 @pytest.mark.asyncio
