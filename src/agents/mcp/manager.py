@@ -207,7 +207,8 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 connected_servers = [
                     server for server in servers_to_connect if server not in self._failed_server_set
                 ]
-            await self._cleanup_connected_servers(connected_servers)
+            servers_to_cleanup = self._unique_servers([*connected_servers, *self.failed_servers])
+            await self._cleanup_connected_servers(servers_to_cleanup)
             self._active_servers = []
             raise
 

@@ -81,6 +81,16 @@ class FlakyServer(MCPServer):
         raise NotImplementedError
 
 
+class FailingTaskBoundServer(TaskBoundServer):
+    @property
+    def name(self) -> str:
+        return "failing-task-bound"
+
+    async def connect(self) -> None:
+        await super().connect()
+        raise RuntimeError("connect failed")
+
+
 @pytest.mark.asyncio
 async def test_manager_keeps_connect_and_cleanup_in_same_task() -> None:
     server = TaskBoundServer()
@@ -176,3 +186,25 @@ async def test_manager_strict_connect_cleans_up_connected_servers() -> None:
 
     assert connected_server.cleaned is True
     assert manager.active_servers == []
+
+
+@pytest.mark.asyncio
+async def test_manager_strict_connect_cleans_up_failed_server() -> None:
+    failing_server = FailingTaskBoundServer()
+    manager = MCPServerManager([failing_server], strict=True)
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await manager.connect_all()
+
+    assert failing_server.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_manager_strict_connect_parallel_cleans_up_failed_server() -> None:
+    failing_server = FailingTaskBoundServer()
+    manager = MCPServerManager([failing_server], strict=True, connect_in_parallel=True)
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await manager.connect_all()
+
+    assert failing_server.cleaned is True
