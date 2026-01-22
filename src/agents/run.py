@@ -657,7 +657,7 @@ class AgentRunner:
 
                             if isinstance(turn_result.next_step, NextStepInterruption):
                                 interruption_result_input: str | list[TResponseInputItem] = (
-                                    normalized_starting_input
+                                    original_input
                                 )
                                 append_model_response_if_new(
                                     model_responses, turn_result.model_response
