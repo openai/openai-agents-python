@@ -425,6 +425,18 @@ async def test_manager_parallel_propagates_cancelled_error_when_unsuppressed() -
 
 
 @pytest.mark.asyncio
+async def test_manager_sequential_propagates_base_exception() -> None:
+    server = FatalTaskBoundServer()
+    manager = MCPServerManager([server])
+
+    with pytest.raises(FatalError, match="fatal connect failed"):
+        await manager.connect_all()
+
+    assert server.cleaned is True
+    assert manager.failed_servers == [server]
+
+
+@pytest.mark.asyncio
 async def test_manager_parallel_propagates_base_exception() -> None:
     server = FatalTaskBoundServer()
     manager = MCPServerManager([server], connect_in_parallel=True)

@@ -290,6 +290,9 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             self._record_failure(server, exc, phase="connect")
             if raise_on_error:
                 raise
+        except BaseException as exc:
+            self._record_failure(server, exc, phase="connect")
+            raise
 
     def _refresh_active_servers(self) -> None:
         if self.drop_failed_servers:
