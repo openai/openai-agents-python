@@ -166,6 +166,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
         self.failed_servers: list[MCPServer] = []
         self._failed_server_set: set[MCPServer] = set()
+        self._connected_servers: set[MCPServer] = set()
         self.errors: dict[MCPServer, BaseException] = {}
 
     @property
@@ -192,7 +193,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         self._failed_server_set = set()
         self.errors = {}
 
-        servers_to_connect = list(self._all_servers)
+        servers_to_connect = self._servers_to_connect(self._all_servers)
         connected_servers: list[MCPServer] = []
         try:
             if self.connect_in_parallel:
@@ -204,11 +205,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                         connected_servers.append(server)
         except Exception:
             if self.connect_in_parallel:
-                connected_servers = [
-                    server for server in servers_to_connect if server not in self._failed_server_set
-                ]
-            servers_to_cleanup = self._unique_servers([*connected_servers, *self.failed_servers])
-            await self._cleanup_connected_servers(servers_to_cleanup)
+                await self._cleanup_servers(servers_to_connect)
+            else:
+                servers_to_cleanup = self._unique_servers(
+                    [*connected_servers, *self.failed_servers]
+                )
+                await self._cleanup_servers(servers_to_cleanup)
             self._active_servers = []
             raise
 
@@ -221,23 +223,26 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
         Args:
             failed_only: If True, only retry servers that previously failed.
-                If False, retry all servers.
+                If False, cleanup and retry all servers.
         """
         if failed_only:
             servers_to_retry = self._unique_servers(self.failed_servers)
         else:
+            await self.cleanup_all()
             servers_to_retry = list(self._all_servers)
             self.failed_servers = []
             self._failed_server_set = set()
             self.errors = {}
 
-        if self.connect_in_parallel:
-            await self._connect_all_parallel(servers_to_retry)
-        else:
-            for server in servers_to_retry:
-                await self._attempt_connect(server)
-
-        self._refresh_active_servers()
+        servers_to_retry = self._servers_to_connect(servers_to_retry)
+        try:
+            if self.connect_in_parallel:
+                await self._connect_all_parallel(servers_to_retry)
+            else:
+                for server in servers_to_retry:
+                    await self._attempt_connect(server)
+        finally:
+            self._refresh_active_servers()
         return self._active_servers
 
     async def cleanup_all(self) -> None:
@@ -266,6 +271,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             raise_on_error = self.strict
         try:
             await self._run_connect(server)
+            self._connected_servers.add(server)
             if server in self.failed_servers:
                 self._remove_failed_server(server)
                 self.errors.pop(server, None)
@@ -305,10 +311,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             await worker.cleanup()
             if worker.is_done:
                 self._workers.pop(server, None)
+            self._connected_servers.discard(server)
             return
         await self._run_with_timeout(server.cleanup, self.cleanup_timeout_seconds)
+        self._connected_servers.discard(server)
 
-    async def _cleanup_connected_servers(self, servers: Iterable[MCPServer]) -> None:
+    async def _cleanup_servers(self, servers: Iterable[MCPServer]) -> None:
         for server in reversed(list(servers)):
             try:
                 await self._cleanup_server(server)
@@ -326,7 +334,11 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
             asyncio.create_task(self._attempt_connect(server, raise_on_error=False))
             for server in servers
         ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if not self.suppress_cancelled_error:
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
         if self.strict and self.failed_servers:
             first_failure = self.failed_servers[0]
             error = self.errors.get(first_failure)
@@ -351,6 +363,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         self.failed_servers = [
             failed_server for failed_server in self.failed_servers if failed_server != server
         ]
+
+    def _servers_to_connect(self, servers: Iterable[MCPServer]) -> list[MCPServer]:
+        unique = self._unique_servers(servers)
+        if not self._connected_servers:
+            return unique
+        return [server for server in unique if server not in self._connected_servers]
 
     @staticmethod
     def _unique_servers(servers: Iterable[MCPServer]) -> list[MCPServer]:

@@ -81,6 +81,69 @@ class FlakyServer(MCPServer):
         raise NotImplementedError
 
 
+class CleanupAwareServer(MCPServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.connect_calls = 0
+        self.cleanup_calls = 0
+
+    @property
+    def name(self) -> str:
+        return "cleanup-aware"
+
+    async def connect(self) -> None:
+        if self.connect_calls > self.cleanup_calls:
+            raise RuntimeError("connect called without cleanup")
+        self.connect_calls += 1
+
+    async def cleanup(self) -> None:
+        self.cleanup_calls += 1
+
+    async def list_tools(
+        self, run_context: RunContextWrapper[Any] | None = None, agent: Any | None = None
+    ) -> list[MCPTool]:
+        raise NotImplementedError
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+        raise NotImplementedError
+
+    async def list_prompts(self) -> ListPromptsResult:
+        raise NotImplementedError
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        raise NotImplementedError
+
+
+class CancelledServer(MCPServer):
+    @property
+    def name(self) -> str:
+        return "cancelled"
+
+    async def connect(self) -> None:
+        raise asyncio.CancelledError()
+
+    async def cleanup(self) -> None:
+        return None
+
+    async def list_tools(
+        self, run_context: RunContextWrapper[Any] | None = None, agent: Any | None = None
+    ) -> list[MCPTool]:
+        raise NotImplementedError
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+        raise NotImplementedError
+
+    async def list_prompts(self) -> ListPromptsResult:
+        raise NotImplementedError
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> GetPromptResult:
+        raise NotImplementedError
+
+
 class FailingTaskBoundServer(TaskBoundServer):
     @property
     def name(self) -> str:
@@ -176,6 +239,40 @@ async def test_manager_connect_all_retries_all_servers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_connect_all_is_idempotent() -> None:
+    server = CleanupAwareServer()
+
+    async with MCPServerManager([server]) as manager:
+        assert server.connect_calls == 1
+        await manager.connect_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_reconnect_all_avoids_duplicate_connections() -> None:
+    server = CleanupAwareServer()
+
+    async with MCPServerManager([server]) as manager:
+        assert server.connect_calls == 1
+        await manager.reconnect(failed_only=False)
+
+
+@pytest.mark.asyncio
+async def test_manager_strict_reconnect_refreshes_active_servers() -> None:
+    server_a = FlakyServer(failures=1)
+    server_b = FlakyServer(failures=2)
+
+    async with MCPServerManager([server_a, server_b]) as manager:
+        assert manager.active_servers == []
+
+        manager.strict = True
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await manager.reconnect()
+
+        assert manager.active_servers == [server_a]
+        assert manager.failed_servers == [server_b]
+
+
+@pytest.mark.asyncio
 async def test_manager_strict_connect_cleans_up_connected_servers() -> None:
     connected_server = TaskBoundServer()
     failing_server = FlakyServer(failures=1)
@@ -208,3 +305,30 @@ async def test_manager_strict_connect_parallel_cleans_up_failed_server() -> None
         await manager.connect_all()
 
     assert failing_server.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_manager_strict_connect_parallel_cleans_up_workers() -> None:
+    connected_server = TaskBoundServer()
+    failing_server = FailingTaskBoundServer()
+    manager = MCPServerManager(
+        [connected_server, failing_server], strict=True, connect_in_parallel=True
+    )
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await manager.connect_all()
+
+    assert connected_server.cleaned is True
+    assert failing_server.cleaned is True
+    assert manager._workers == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_parallel_propagates_cancelled_error_when_unsuppressed() -> None:
+    server = CancelledServer()
+    manager = MCPServerManager([server], connect_in_parallel=True, suppress_cancelled_error=False)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await manager.connect_all()
+    finally:
+        await manager.cleanup_all()
