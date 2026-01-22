@@ -118,7 +118,8 @@ class AgentBase(Generic[TContext]):
 
     NOTE: You are expected to manage the lifecycle of these servers. Specifically, you must call
     `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
-    longer needed.
+    longer needed. Consider using `MCPServerManager` from `agents.mcp` to keep connect/cleanup
+    in the same task.
     """
 
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())

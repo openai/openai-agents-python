@@ -451,6 +451,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
 
             try:
                 await self.exit_stack.aclose()
+            except asyncio.CancelledError as e:
+                logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
             except BaseExceptionGroup as eg:
                 # Extract HTTP errors from ExceptionGroup raised during cleanup
                 # This happens when background tasks fail (e.g., HTTP errors)
