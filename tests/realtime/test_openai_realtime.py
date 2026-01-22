@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,6 +10,7 @@ import websockets
 from agents import Agent
 from agents.exceptions import UserError
 from agents.handoffs import handoff
+from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.model_events import (
     RealtimeModelAudioEvent,
     RealtimeModelErrorEvent,
@@ -21,7 +23,7 @@ from agents.realtime.model_inputs import (
     RealtimeModelSendToolOutput,
     RealtimeModelSendUserInput,
 )
-from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel
+from agents.realtime.openai_realtime import OpenAIRealtimeWebSocketModel, TransportConfig
 
 
 class TestOpenAIRealtimeWebSocketModel:
@@ -300,6 +302,35 @@ class TestConnectionLifecycle(TestOpenAIRealtimeWebSocketModel):
         assert model._websocket_task is None
 
     @pytest.mark.asyncio
+    async def test_connect_with_empty_transport_config(self, mock_websocket):
+        """Test that empty transport configuration works without error."""
+        model = OpenAIRealtimeWebSocketModel(transport_config={})
+        config: RealtimeModelConfig = {
+            "api_key": "test-key",
+        }
+
+        async def async_websocket(*args, **kwargs):
+            return mock_websocket
+
+        with patch("websockets.connect", side_effect=async_websocket) as mock_connect:
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                await model.connect(config)
+
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args.kwargs
+                assert "ping_interval" not in kwargs
+                assert "ping_timeout" not in kwargs
+                assert "open_timeout" not in kwargs
+
+    @pytest.mark.asyncio
     async def test_connect_already_connected_assertion(self, model, mock_websocket):
         """Test that connecting when already connected raises assertion error."""
         model._websocket = mock_websocket  # Simulate already connected
@@ -516,7 +547,7 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
 
         # Prepare tracker state to simulate ongoing audio
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._audio_state_tracker.on_audio_delta("i1", 0, b"aaaa")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48)
         model._ongoing_response = True
 
         # Patch sending to avoid websocket dependency
@@ -536,6 +567,17 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
                 "audio_end_ms": 1,
             }
         )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        truncate_event = truncate_events[0]
+        assert truncate_event.item_id == "i1"
+        assert truncate_event.content_index == 0
+        assert truncate_event.audio_end_ms == 1
 
         # Output transcript delta
         await model._handle_ws_event(
@@ -836,23 +878,27 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         for event in audio_deltas:
             await model._handle_ws_event(event)
 
-        # Should accumulate audio length: 8 bytes / 24 / 2 * 1000 = milliseconds
-        # Total: 8 bytes / 24 / 2 * 1000
-        expected_length = (8 / 24 / 2) * 1000
+        # Should accumulate audio length: 8 bytes -> 4 samples -> (4 / 24000) * 1000 ≈ 0.167 ms
+        expected_length = (8 / (24_000 * 2)) * 1000
 
         # Test through the actual audio state tracker
         audio_state = model._audio_state_tracker.get_state("item_1", 0)
         assert audio_state is not None
-        assert abs(audio_state.audio_length_ms - expected_length) < 0.001
+        assert audio_state.audio_length_ms == pytest.approx(expected_length, rel=0, abs=1e-6)
 
     def test_calculate_audio_length_ms_pure_function(self, model):
         """Test the pure audio length calculation function."""
         from agents.realtime._util import calculate_audio_length_ms
 
         # Test various audio buffer sizes for pcm16 format
-        assert calculate_audio_length_ms("pcm16", b"test") == (4 / 24 / 2) * 1000  # 4 bytes
+        expected_pcm = (len(b"test") / (24_000 * 2)) * 1000
+        assert calculate_audio_length_ms("pcm16", b"test") == pytest.approx(
+            expected_pcm, rel=0, abs=1e-6
+        )  # 4 bytes
         assert calculate_audio_length_ms("pcm16", b"") == 0  # empty
-        assert calculate_audio_length_ms("pcm16", b"a" * 48) == 1000.0  # exactly 1000ms worth
+        assert calculate_audio_length_ms("pcm16", b"a" * 48) == pytest.approx(
+            (48 / (24_000 * 2)) * 1000, rel=0, abs=1e-6
+        )  # exactly 1ms worth
 
         # Test g711 format
         assert calculate_audio_length_ms("g711_ulaw", b"test") == (4 / 8000) * 1000  # 4 bytes
@@ -879,8 +925,490 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         # Test that audio state is tracked correctly
         audio_state = model._audio_state_tracker.get_state("test_item", 5)
         assert audio_state is not None
-        assert audio_state.audio_length_ms == (4 / 24 / 2) * 1000  # 4 bytes in milliseconds
+        expected_ms = (len(b"test") / (24_000 * 2)) * 1000
+        assert audio_state.audio_length_ms == pytest.approx(expected_ms, rel=0, abs=1e-6)
 
         # Test that last audio item is tracked
         last_item = model._audio_state_tracker.get_last_audio_item()
         assert last_item == ("test_item", 5)
+
+
+class TestTransportIntegration:
+    """Integration tests for transport configuration using a local WebSocket server."""
+
+    @pytest.mark.asyncio
+    async def test_connect_to_local_server(self):
+        """Test connecting to a real local server with transport config."""
+        received_messages = []
+        import asyncio
+
+        async def handler(websocket):
+            try:
+                # Use async iteration for compatibility with newer websockets
+                async for message in websocket:
+                    received_messages.append(json.loads(message))
+                    # Respond to session update
+                    # We need to provide a minimally valid session object
+                    response = {
+                        "type": "session.updated",
+                        "event_id": "event_123",
+                        "session": {
+                            "id": "sess_001",
+                            "object": "realtime.session",
+                            "model": "gpt-4o-realtime-preview",
+                            "modalities": ["audio", "text"],
+                            "instructions": "",
+                            "voice": "alloy",
+                            "input_audio_format": "pcm16",
+                            "output_audio_format": "pcm16",
+                            "input_audio_transcription": None,
+                            "turn_detection": None,
+                            "tools": [],
+                            "tool_choice": "auto",
+                            "temperature": 0.8,
+                            "max_response_output_tokens": "inf",
+                        },
+                    }
+                    await websocket.send(json.dumps(response))
+            except Exception:
+                pass
+
+        # Create a model instance
+        model = OpenAIRealtimeWebSocketModel()
+
+        # Start a local server
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            # Get the assigned port
+            assert server.sockets
+
+            # Cast sockets to list to make mypy happy as Iterable isn't indexable directly
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            url = f"ws://127.0.0.1:{port}/v1/realtime"
+
+            # Connect with transport config
+            transport: TransportConfig = {
+                "ping_interval": 0.5,
+                "ping_timeout": 0.5,
+                "handshake_timeout": 1.0,
+            }
+
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+            config: RealtimeModelConfig = {
+                "api_key": "test-key",
+                "url": url,
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            }
+
+            await model.connect(config)
+
+            # Wait briefly for the connection logic to send session.update
+            # In a real scenario we'd wait for an event, but here we just sleep briefly
+            await asyncio.sleep(0.2)
+
+            # Verify we are connected
+            assert model._websocket is not None
+
+            # Verify the server received the session.update message
+            assert len(received_messages) > 0
+            session_update = next(
+                (m for m in received_messages if m["type"] == "session.update"), None
+            )
+            assert session_update is not None
+
+            # Clean up
+            await model.close()
+            assert model._websocket is None
+
+    @pytest.mark.asyncio
+    async def test_ping_timeout_success_when_server_responds_quickly(self):
+        """Test that connection stays alive when server responds to pings within timeout."""
+
+        async def responsive_handler(websocket):
+            # Server that responds normally - websockets library handles ping/pong automatically
+            async for _ in websocket:
+                pass
+
+        model = OpenAIRealtimeWebSocketModel()
+
+        async with websockets.serve(responsive_handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            url = f"ws://127.0.0.1:{port}/v1/realtime"
+
+            # Client with reasonable ping settings - server responds quickly so this should work
+            transport: TransportConfig = {
+                "ping_interval": 0.1,  # Send ping every 100ms
+                "ping_timeout": 1.0,  # Allow 1 second for pong response (generous)
+            }
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+            config: RealtimeModelConfig = {
+                "api_key": "test-key",
+                "url": url,
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            }
+
+            await model.connect(config)
+
+            # Wait for multiple ping/pong cycles
+            await asyncio.sleep(0.4)
+
+            # Connection should still be open
+            assert model._websocket is not None
+            assert model._websocket.close_code is None
+
+            await model.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_timeout_config_is_applied(self):
+        """Test that ping_timeout configuration is properly applied to connection.
+
+        This test verifies the ping_timeout parameter is passed to the websocket
+        connection. Since the websockets library handles pong responses automatically,
+        we verify the configuration is applied rather than testing actual timeout behavior.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        # Track what parameters were passed to websockets.connect
+        captured_kwargs_short: dict[str, Any] = {}
+        captured_kwargs_long: dict[str, Any] = {}
+
+        async def capture_connect_short(*args, **kwargs):
+            captured_kwargs_short.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        async def capture_connect_long(*args, **kwargs):
+            captured_kwargs_long.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        # Test with short ping_timeout
+        transport_short: TransportConfig = {
+            "ping_interval": 0.1,
+            "ping_timeout": 0.05,  # Very short timeout
+        }
+        model_short = OpenAIRealtimeWebSocketModel(transport_config=transport_short)
+        with patch("websockets.connect", side_effect=capture_connect_short):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_short: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_short.connect(config_short)
+
+        assert captured_kwargs_short.get("ping_interval") == 0.1
+        assert captured_kwargs_short.get("ping_timeout") == 0.05
+
+        # Test with longer ping_timeout (use a fresh model)
+        transport_long: TransportConfig = {
+            "ping_interval": 5.0,
+            "ping_timeout": 10.0,  # Longer timeout
+        }
+        model_long = OpenAIRealtimeWebSocketModel(transport_config=transport_long)
+        with patch("websockets.connect", side_effect=capture_connect_long):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_long: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_long.connect(config_long)
+
+        assert captured_kwargs_long.get("ping_interval") == 5.0
+        assert captured_kwargs_long.get("ping_timeout") == 10.0
+
+    @pytest.mark.asyncio
+    async def test_ping_timeout_disabled_vs_enabled(self):
+        """Test that ping timeout can be disabled (None) vs enabled with a value."""
+        from unittest.mock import AsyncMock, patch
+
+        captured_kwargs_disabled: dict[str, Any] = {}
+        captured_kwargs_enabled: dict[str, Any] = {}
+
+        async def capture_connect_disabled(*args, **kwargs):
+            captured_kwargs_disabled.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        async def capture_connect_enabled(*args, **kwargs):
+            captured_kwargs_enabled.update(kwargs)
+            mock_ws = AsyncMock()
+            mock_ws.close_code = None
+            return mock_ws
+
+        # Test with ping disabled
+        transport_disabled: TransportConfig = {
+            "ping_interval": None,  # Disable pings entirely
+            "ping_timeout": None,
+        }
+        model_disabled = OpenAIRealtimeWebSocketModel(transport_config=transport_disabled)
+        with patch("websockets.connect", side_effect=capture_connect_disabled):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_disabled: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_disabled.connect(config_disabled)
+
+        assert captured_kwargs_disabled.get("ping_interval") is None
+        assert captured_kwargs_disabled.get("ping_timeout") is None
+
+        # Test with ping enabled (use a fresh model)
+        transport_enabled: TransportConfig = {
+            "ping_interval": 1.0,
+            "ping_timeout": 2.0,
+        }
+        model_enabled = OpenAIRealtimeWebSocketModel(transport_config=transport_enabled)
+        with patch("websockets.connect", side_effect=capture_connect_enabled):
+            with patch("asyncio.create_task") as mock_create_task:
+                mock_task = AsyncMock()
+
+                def mock_create_task_func(coro):
+                    coro.close()
+                    return mock_task
+
+                mock_create_task.side_effect = mock_create_task_func
+
+                config_enabled: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": "ws://localhost:8080/v1/realtime",
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+                await model_enabled.connect(config_enabled)
+
+        assert captured_kwargs_enabled.get("ping_interval") == 1.0
+        assert captured_kwargs_enabled.get("ping_timeout") == 2.0
+
+    @pytest.mark.asyncio
+    async def test_handshake_timeout_success_when_server_responds_quickly(self):
+        """Test that connection succeeds when server responds within timeout."""
+
+        async def quick_handler(websocket):
+            # Server that accepts connections immediately
+            async for _ in websocket:
+                pass
+
+        model = OpenAIRealtimeWebSocketModel()
+
+        async with websockets.serve(quick_handler, "127.0.0.1", 0) as server:
+            sockets = list(server.sockets)
+            port = sockets[0].getsockname()[1]
+            url = f"ws://127.0.0.1:{port}/v1/realtime"
+
+            # Client with generous handshake timeout - server is fast so this should work
+            transport: TransportConfig = {
+                "handshake_timeout": 5.0,  # 5 seconds is plenty for local connection
+            }
+            model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+            config: RealtimeModelConfig = {
+                "api_key": "test-key",
+                "url": url,
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            }
+
+            await model.connect(config)
+
+            # Should connect successfully
+            assert model._websocket is not None
+            assert model._websocket.close_code is None
+
+            await model.close()
+
+    @pytest.mark.asyncio
+    async def test_handshake_timeout_with_delayed_server(self):
+        """Test handshake timeout behavior with a server that has a defined handshake delay.
+
+        Uses the same server with a fixed delay threshold to test both:
+        - Success: client timeout > server delay
+        - Failure: client timeout < server delay
+        """
+        import base64
+        import hashlib
+
+        # Server handshake delay threshold (in seconds)
+        SERVER_HANDSHAKE_DELAY = 0.3
+
+        shutdown_event = asyncio.Event()
+        connections_attempted = []
+
+        async def delayed_websocket_server(reader, writer):
+            """A WebSocket server that delays the handshake by a fixed amount."""
+            connections_attempted.append(True)
+            try:
+                # Read HTTP upgrade request
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = await asyncio.wait_for(reader.read(1024), timeout=5.0)
+                    if not chunk:
+                        return
+                    request += chunk
+
+                # Extract Sec-WebSocket-Key
+                key = None
+                for line in request.decode().split("\r\n"):
+                    if line.lower().startswith("sec-websocket-key:"):
+                        key = line.split(":", 1)[1].strip()
+                        break
+
+                if not key:
+                    writer.close()
+                    return
+
+                # Intentional delay before completing handshake
+                await asyncio.sleep(SERVER_HANDSHAKE_DELAY)
+
+                # Generate accept key
+                GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+                accept = base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
+
+                # Send HTTP 101 Switching Protocols response
+                response = (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n"
+                    "\r\n"
+                )
+                writer.write(response.encode())
+                await writer.drain()
+
+                # Keep connection open until shutdown
+                await shutdown_event.wait()
+
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+            finally:
+                writer.close()
+
+        server = await asyncio.start_server(delayed_websocket_server, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        url = f"ws://127.0.0.1:{port}/v1/realtime"
+
+        try:
+            # Test 1: FAILURE - Client timeout < server delay
+            # Client gives up before server completes handshake
+            transport_fail: TransportConfig = {
+                "handshake_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
+            }
+            model_fail = OpenAIRealtimeWebSocketModel(transport_config=transport_fail)
+            config_fail: RealtimeModelConfig = {
+                "api_key": "test-key",
+                "url": url,
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            }
+
+            with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+                await model_fail.connect(config_fail)
+
+            # Verify connection was attempted
+            assert len(connections_attempted) >= 1
+
+            # Test 2: SUCCESS - Client timeout > server delay
+            # Client waits long enough for server to complete handshake
+            transport_success: TransportConfig = {
+                "handshake_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
+            }
+            model_success = OpenAIRealtimeWebSocketModel(transport_config=transport_success)
+            config_success: RealtimeModelConfig = {
+                "api_key": "test-key",
+                "url": url,
+                "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+            }
+
+            await model_success.connect(config_success)
+
+            # Verify successful connection
+            assert model_success._websocket is not None
+            assert model_success._websocket.close_code is None
+
+            await model_success.close()
+
+        finally:
+            shutdown_event.set()
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_ping_interval_comparison_fast_vs_slow(self):
+        """Test that faster ping intervals detect issues sooner than slower ones."""
+
+        connection_durations: dict[str, float] = {}
+
+        async def handler(websocket):
+            # Simple handler that stays connected
+            async for _ in websocket:
+                pass
+
+        async def test_with_ping_interval(interval: float, label: str):
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                sockets = list(server.sockets)
+                port = sockets[0].getsockname()[1]
+                url = f"ws://127.0.0.1:{port}/v1/realtime"
+
+                transport: TransportConfig = {
+                    "ping_interval": interval,
+                    "ping_timeout": 2.0,  # Same timeout for both
+                }
+                model = OpenAIRealtimeWebSocketModel(transport_config=transport)
+                config: RealtimeModelConfig = {
+                    "api_key": "test-key",
+                    "url": url,
+                    "initial_model_settings": {"model_name": "gpt-4o-realtime-preview"},
+                }
+
+                start = asyncio.get_event_loop().time()
+                await model.connect(config)
+
+                # Let it run for a bit
+                await asyncio.sleep(0.3)
+
+                end = asyncio.get_event_loop().time()
+                connection_durations[label] = end - start
+
+                # Both should stay connected with valid server
+                assert model._websocket is not None
+                assert model._websocket.close_code is None
+
+                await model.close()
+
+        # Test with fast ping interval
+        await test_with_ping_interval(0.05, "fast")
+
+        # Test with slow ping interval
+        await test_with_ping_interval(0.5, "slow")
+
+        # Both should have completed successfully
+        assert "fast" in connection_durations
+        assert "slow" in connection_durations

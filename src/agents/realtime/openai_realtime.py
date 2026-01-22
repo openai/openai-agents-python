@@ -79,7 +79,7 @@ from openai.types.realtime.session_update_event import (
 )
 from openai.types.responses.response_prompt import ResponsePrompt
 from pydantic import Field, TypeAdapter
-from typing_extensions import TypeAlias, assert_never
+from typing_extensions import NotRequired, TypeAlias, TypedDict, assert_never
 from websockets.asyncio.client import ClientConnection
 
 from agents.handoffs import Handoff
@@ -251,10 +251,25 @@ async def _build_model_settings_from_agent(
 # during import on 3.9. We instead inline the union in annotations below.
 
 
+class TransportConfig(TypedDict):
+    """Low-level network transport configuration."""
+
+    ping_interval: NotRequired[float | None]
+    """Time in seconds between keepalive pings sent by the client.
+    Default is usually 20.0. Set to None to disable."""
+
+    ping_timeout: NotRequired[float | None]
+    """Time in seconds to wait for a pong response before disconnecting.
+    Set to None to disable ping timeout and keep an open connection (ignore network lag)."""
+
+    handshake_timeout: NotRequired[float]
+    """Time in seconds to wait for the connection handshake to complete."""
+
+
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
     """A model that uses OpenAI's WebSocket API."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, transport_config: TransportConfig | None = None) -> None:
         self.model = "gpt-realtime"  # Default model
         self._websocket: ClientConnection | None = None
         self._websocket_task: asyncio.Task[None] | None = None
@@ -267,6 +282,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         self._created_session: OpenAISessionCreateRequest | None = None
         self._server_event_type_adapter = get_server_event_type_adapter()
         self._call_id: str | None = None
+        self._transport_config: TransportConfig | None = transport_config
 
     async def connect(self, options: RealtimeModelConfig) -> None:
         """Establish a connection to the model and keep it alive."""
@@ -312,14 +328,46 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 raise UserError("API key is required but was not provided.")
 
             headers.update({"Authorization": f"Bearer {api_key}"})
-        self._websocket = await websockets.connect(
-            url,
-            user_agent_header=_USER_AGENT,
-            additional_headers=headers,
-            max_size=None,  # Allow any size of message
+
+        self._websocket = await self._create_websocket_connection(
+            url=url,
+            headers=headers,
+            transport_config=self._transport_config,
         )
         self._websocket_task = asyncio.create_task(self._listen_for_messages())
         await self._update_session_config(model_settings)
+
+    async def _create_websocket_connection(
+        self,
+        url: str,
+        headers: dict[str, str],
+        transport_config: TransportConfig | None = None,
+    ) -> ClientConnection:
+        """Create a WebSocket connection with the given configuration.
+
+        Args:
+            url: The WebSocket URL to connect to.
+            headers: HTTP headers to include in the connection request.
+            transport_config: Optional low-level transport configuration.
+
+        Returns:
+            A connected WebSocket client connection.
+        """
+        connect_kwargs: dict[str, Any] = {
+            "user_agent_header": _USER_AGENT,
+            "additional_headers": headers,
+            "max_size": None,  # Allow any size of message
+        }
+
+        if transport_config:
+            if "ping_interval" in transport_config:
+                connect_kwargs["ping_interval"] = transport_config["ping_interval"]
+            if "ping_timeout" in transport_config:
+                connect_kwargs["ping_timeout"] = transport_config["ping_timeout"]
+            if "handshake_timeout" in transport_config:
+                connect_kwargs["open_timeout"] = transport_config["handshake_timeout"]
+
+        return await websockets.connect(url, **connect_kwargs)
 
     async def _send_tracing_config(
         self, tracing_config: RealtimeModelTracingConfig | Literal["auto"] | None
@@ -691,9 +739,29 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             last_audio = self._audio_state_tracker.get_last_audio_item()
             if last_audio is not None:
                 item_id, content_index = last_audio
+                playback_state = self._get_playback_state()
+                playback_item_id = playback_state.get("current_item_id")
+                playback_content_index = playback_state.get("current_item_content_index") or 0
+                playback_elapsed_ms = playback_state.get("elapsed_ms")
                 await self._emit_event(
                     RealtimeModelAudioInterruptedEvent(item_id=item_id, content_index=content_index)
                 )
+
+                elapsed_override = getattr(parsed, "audio_end_ms", None)
+                if elapsed_override is None or elapsed_override <= 0:
+                    effective_elapsed_ms = playback_elapsed_ms
+                else:
+                    effective_elapsed_ms = float(elapsed_override)
+
+                if playback_item_id and effective_elapsed_ms is not None:
+                    truncated_ms = max(int(round(effective_elapsed_ms)), 0)
+                    await self._send_raw_message(
+                        _ConversionHelper.convert_interrupt(
+                            playback_item_id,
+                            playback_content_index,
+                            truncated_ms,
+                        )
+                    )
 
                 # Reset trackers so subsequent playback state queries don't
                 # reference audio that has been interrupted client‑side.
@@ -713,9 +781,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 )
                 if not automatic_response_cancellation_enabled:
                     await self._cancel_response()
-            # Avoid sending conversation.item.truncate here. When the session's
-            # turn_detection.interrupt_response is enabled (GA default), the server emits
-            # conversation.item.truncated after the VAD start and takes care of history updates.
         elif parsed.type == "response.created":
             self._ongoing_response = True
             await self._emit_event(RealtimeModelTurnStartedEvent())

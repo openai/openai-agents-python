@@ -29,6 +29,7 @@ from agents import (
     handoff,
 )
 from agents.agent import ToolsToFinalOutputResult
+from agents.items import HandoffOutputItem, ToolCallOutputItem
 from agents.tool import FunctionToolResult, function_tool
 
 from .fake_model import FakeModel
@@ -179,6 +180,71 @@ async def test_handoffs():
     assert result.last_agent == agent_1, "should have handed off to agent_1"
 
 
+@pytest.mark.asyncio
+async def test_nested_handoff_filters_model_input_but_preserves_session_items():
+    model = FakeModel()
+    delegate = Agent(
+        name="delegate",
+        model=model,
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            # First turn: a tool call.
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            # Second turn: a message and a handoff.
+            [get_text_message("a_message"), get_handoff_tool_call(delegate)],
+            # Third turn: final message.
+            [get_text_message("done")],
+        ]
+    )
+
+    model_input_types: list[list[str]] = []
+
+    def capture_model_input(data):
+        types: list[str] = []
+        for item in data.model_data.input:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if isinstance(item_type, str):
+                    types.append(item_type)
+        model_input_types.append(types)
+        return data.model_data
+
+    session = SimpleListSession()
+    result = await Runner.run(
+        triage,
+        input="user_message",
+        run_config=RunConfig(
+            nest_handoff_history=True,
+            call_model_input_filter=capture_model_input,
+        ),
+        session=session,
+    )
+
+    assert result.final_output == "done"
+    assert len(model_input_types) >= 3
+    handoff_input_types = model_input_types[2]
+    assert "function_call" not in handoff_input_types
+    assert "function_call_output" not in handoff_input_types
+
+    assert any(isinstance(item, ToolCallOutputItem) for item in result.new_items)
+    assert any(isinstance(item, HandoffOutputItem) for item in result.new_items)
+
+    session_items = await session.get_items()
+    has_function_call_output = any(
+        isinstance(item, dict) and item.get("type") == "function_call_output"
+        for item in session_items
+    )
+    assert has_function_call_output
+
+
 class Foo(TypedDict):
     bar: str
 
@@ -222,6 +288,7 @@ async def test_structured_output():
             get_text_input_item("user_message"),
             get_text_input_item("another_message"),
         ],
+        run_config=RunConfig(nest_handoff_history=True),
     )
 
     assert result.final_output == Foo(bar="baz")
@@ -279,7 +346,36 @@ async def test_handoff_filters():
 
 
 @pytest.mark.asyncio
-async def test_default_handoff_history_nested_and_filters_respected():
+async def test_handoff_history_not_nested_by_default():
+    triage_model = FakeModel()
+    delegate_model = FakeModel()
+
+    delegate = Agent(name="delegate", model=delegate_model)
+    triage = Agent(name="triage", model=triage_model, handoffs=[delegate])
+
+    triage_model.add_multiple_turn_outputs(
+        [[get_text_message("triage summary"), get_handoff_tool_call(delegate)]]
+    )
+    delegate_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
+
+    result = await Runner.run(triage, input="user_message")
+
+    assert result.final_output == "resolution"
+    assert delegate_model.first_turn_args is not None
+    delegate_input = delegate_model.first_turn_args["input"]
+    assert isinstance(delegate_input, list)
+    delegate_messages = [item for item in delegate_input if isinstance(item, dict)]
+    assert delegate_messages
+    assert _as_message(delegate_messages[0])["role"] == "user"
+    assert not any(
+        "<CONVERSATION HISTORY>" in str(item.get("content", ""))
+        for item in delegate_messages
+        if isinstance(item.get("content"), str)
+    )
+
+
+@pytest.mark.asyncio
+async def test_handoff_history_nested_and_filters_respected_when_enabled():
     model = FakeModel()
     agent_1 = Agent(
         name="delegate",
@@ -298,7 +394,9 @@ async def test_default_handoff_history_nested_and_filters_respected():
         ]
     )
 
-    result = await Runner.run(agent_2, input="user_message")
+    result = await Runner.run(
+        agent_2, input="user_message", run_config=RunConfig(nest_handoff_history=True)
+    )
 
     assert isinstance(result.input, list)
     assert len(result.input) == 1
@@ -329,14 +427,16 @@ async def test_default_handoff_history_nested_and_filters_respected():
         ]
     )
 
-    filtered_result = await Runner.run(triage_with_filter, input="user_message")
+    filtered_result = await Runner.run(
+        triage_with_filter, input="user_message", run_config=RunConfig(nest_handoff_history=True)
+    )
 
     assert isinstance(filtered_result.input, str)
     assert filtered_result.input == "user_message"
 
 
 @pytest.mark.asyncio
-async def test_default_handoff_history_accumulates_across_multiple_handoffs():
+async def test_handoff_history_accumulates_across_multiple_handoffs_when_enabled():
     triage_model = FakeModel()
     delegate_model = FakeModel()
     closer_model = FakeModel()
@@ -353,7 +453,9 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     )
     closer_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
 
-    result = await Runner.run(triage, input="user_question")
+    result = await Runner.run(
+        triage, input="user_question", run_config=RunConfig(nest_handoff_history=True)
+    )
 
     assert result.final_output == "resolution"
     assert closer_model.first_turn_args is not None

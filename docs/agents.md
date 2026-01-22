@@ -10,6 +10,8 @@ The most common properties of an agent you'll configure are:
 -   `instructions`: also known as a developer message or system prompt.
 -   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
 -   `tools`: Tools that the agent can use to achieve its tasks.
+-   `mcp_servers`: MCP servers that provide tools to the agent. See the [MCP guide](mcp.md).
+-   `reset_tool_choice`: Whether to reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use).
 
 ```python
 from agents import Agent, ModelSettings, function_tool

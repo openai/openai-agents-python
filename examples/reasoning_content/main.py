@@ -20,7 +20,7 @@ from agents import ModelSettings
 from agents.models.interface import ModelTracing
 from agents.models.openai_provider import OpenAIProvider
 
-MODEL_NAME = os.getenv("EXAMPLE_MODEL_NAME") or "gpt-5"
+MODEL_NAME = os.getenv("REASONING_MODEL_NAME") or "gpt-5.2"
 
 
 async def stream_with_reasoning_content():
