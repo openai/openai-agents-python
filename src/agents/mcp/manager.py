@@ -205,7 +205,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     await self._attempt_connect(server)
                     if server not in self._failed_server_set:
                         connected_servers.append(server)
-        except Exception:
+        except BaseException:
             if self.connect_in_parallel:
                 await self._cleanup_servers(servers_to_connect)
             else:

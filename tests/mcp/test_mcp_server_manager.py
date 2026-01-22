@@ -408,3 +408,19 @@ async def test_manager_parallel_propagates_cancelled_error_when_unsuppressed() -
             await manager.connect_all()
     finally:
         await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_cleanup_runs_on_cancelled_error_during_connect() -> None:
+    server = CleanupAwareServer()
+    cancelled_server = CancelledServer()
+    manager = MCPServerManager(
+        [server, cancelled_server],
+        suppress_cancelled_error=False,
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await manager.connect_all()
+        assert server.cleanup_calls == 1
+    finally:
+        await manager.cleanup_all()
