@@ -154,6 +154,16 @@ class FailingTaskBoundServer(TaskBoundServer):
         raise RuntimeError("connect failed")
 
 
+class CleanupFailingServer(TaskBoundServer):
+    @property
+    def name(self) -> str:
+        return "cleanup-failing"
+
+    async def cleanup(self) -> None:
+        await super().cleanup()
+        raise RuntimeError("cleanup failed")
+
+
 @pytest.mark.asyncio
 async def test_manager_keeps_connect_and_cleanup_in_same_task() -> None:
     server = TaskBoundServer()
@@ -341,6 +351,17 @@ async def test_manager_strict_connect_parallel_cleans_up_workers() -> None:
     assert connected_server.cleaned is True
     assert failing_server.cleaned is True
     assert manager._workers == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_parallel_cleanup_clears_worker_on_failure() -> None:
+    server = CleanupFailingServer()
+    manager = MCPServerManager([server], connect_in_parallel=True)
+    await manager.connect_all()
+    await manager.cleanup_all()
+
+    assert server not in manager._workers
+    assert server not in manager._connected_servers
 
 
 @pytest.mark.asyncio
