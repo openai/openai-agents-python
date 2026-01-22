@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, Tool as MCPTool
@@ -362,6 +362,29 @@ async def test_manager_parallel_cleanup_clears_worker_on_failure() -> None:
 
     assert server not in manager._workers
     assert server not in manager._connected_servers
+
+
+@pytest.mark.asyncio
+async def test_manager_parallel_cleanup_drops_worker_after_error() -> None:
+    class HangingCleanupWorker:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        @property
+        def is_done(self) -> bool:
+            return False
+
+        async def cleanup(self) -> None:
+            self.cleanup_calls += 1
+            raise RuntimeError("cleanup failed")
+
+    server = FlakyServer(failures=0)
+    manager = MCPServerManager([server], connect_in_parallel=True)
+    manager._workers[server] = cast(Any, HangingCleanupWorker())
+
+    await manager.cleanup_all()
+
+    assert manager._workers == {}
 
 
 @pytest.mark.asyncio

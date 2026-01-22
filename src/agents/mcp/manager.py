@@ -315,11 +315,14 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     async def _cleanup_server(self, server: MCPServer) -> None:
         if self.connect_in_parallel and server in self._workers:
             worker = self._workers[server]
+            if worker.is_done:
+                self._workers.pop(server, None)
+                self._connected_servers.discard(server)
+                return
             try:
                 await worker.cleanup()
             finally:
-                if worker.is_done:
-                    self._workers.pop(server, None)
+                self._workers.pop(server, None)
                 self._connected_servers.discard(server)
             return
         try:
