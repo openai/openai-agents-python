@@ -189,6 +189,8 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
 
     async def connect_all(self) -> list[MCPServer]:
         """Connect all servers in order and return the active list."""
+        previous_connected_servers = set(self._connected_servers)
+        previous_active_servers = list(self._active_servers)
         self.failed_servers = []
         self._failed_server_set = set()
         self.errors = {}
@@ -211,7 +213,12 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                     [*connected_servers, *self.failed_servers]
                 )
                 await self._cleanup_servers(servers_to_cleanup)
-            self._active_servers = []
+            if self.drop_failed_servers:
+                self._active_servers = [
+                    server for server in self._all_servers if server in previous_connected_servers
+                ]
+            else:
+                self._active_servers = previous_active_servers
             raise
 
         self._refresh_active_servers()
@@ -340,11 +347,21 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
         if self.strict and self.failed_servers:
-            first_failure = self.failed_servers[0]
-            error = self.errors.get(first_failure)
-            if error is not None:
-                raise error
-            raise RuntimeError(f"Failed to connect MCP server '{first_failure.name}'")
+            first_failure = None
+            if self.suppress_cancelled_error:
+                for server in self.failed_servers:
+                    error = self.errors.get(server)
+                    if error is None or isinstance(error, asyncio.CancelledError):
+                        continue
+                    first_failure = server
+                    break
+            else:
+                first_failure = self.failed_servers[0]
+            if first_failure is not None:
+                error = self.errors.get(first_failure)
+                if error is not None:
+                    raise error
+                raise RuntimeError(f"Failed to connect MCP server '{first_failure.name}'")
 
     def _get_worker(self, server: MCPServer) -> _ServerWorker:
         worker = self._workers.get(server)

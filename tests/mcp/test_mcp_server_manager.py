@@ -273,6 +273,26 @@ async def test_manager_strict_reconnect_refreshes_active_servers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_strict_connect_preserves_existing_active_servers() -> None:
+    connected_server = TaskBoundServer()
+    failing_server = FlakyServer(failures=2)
+    manager = MCPServerManager([connected_server, failing_server])
+    try:
+        await manager.connect_all()
+        assert manager.active_servers == [connected_server]
+        assert manager.failed_servers == [failing_server]
+
+        manager.strict = True
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await manager.connect_all()
+
+        assert manager.active_servers == [connected_server]
+        assert manager.failed_servers == [failing_server]
+    finally:
+        await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
 async def test_manager_strict_connect_cleans_up_connected_servers() -> None:
     connected_server = TaskBoundServer()
     failing_server = FlakyServer(failures=1)
@@ -321,6 +341,18 @@ async def test_manager_strict_connect_parallel_cleans_up_workers() -> None:
     assert connected_server.cleaned is True
     assert failing_server.cleaned is True
     assert manager._workers == {}
+
+
+@pytest.mark.asyncio
+async def test_manager_parallel_suppresses_cancelled_error_in_strict_mode() -> None:
+    server = CancelledServer()
+    manager = MCPServerManager([server], connect_in_parallel=True, strict=True)
+    try:
+        await manager.connect_all()
+        assert manager.active_servers == []
+        assert manager.failed_servers == [server]
+    finally:
+        await manager.cleanup_all()
 
 
 @pytest.mark.asyncio
