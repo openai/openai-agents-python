@@ -490,6 +490,7 @@ class Agent(AgentBase, Generic[TContext]):
                 interruptions: list[ToolApprovalItem],
             ) -> Literal["approved", "pending", "rejected"]:
                 has_pending = False
+                has_decision = False
                 for interruption in interruptions:
                     call_id = interruption.call_id
                     if not call_id:
@@ -500,9 +501,15 @@ class Agent(AgentBase, Generic[TContext]):
                     )
                     if status is False:
                         return "rejected"
+                    if status is True:
+                        has_decision = True
                     if status is None:
                         has_pending = True
-                return "pending" if has_pending else "approved"
+                if has_decision:
+                    return "approved"
+                if has_pending:
+                    return "pending"
+                return "approved"
 
             def _apply_nested_approvals(
                 nested_context: RunContextWrapper[Any],
