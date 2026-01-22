@@ -54,9 +54,9 @@ class _ServerWorker:
             should_exit = command.action == "cleanup"
             try:
                 if command.action == "connect":
-                    await self._run_with_timeout(self._server.connect, command.timeout_seconds)
+                    await _run_with_timeout_in_task(self._server.connect, command.timeout_seconds)
                 elif command.action == "cleanup":
-                    await self._run_with_timeout(self._server.cleanup, command.timeout_seconds)
+                    await _run_with_timeout_in_task(self._server.cleanup, command.timeout_seconds)
                 else:
                     raise ValueError(f"Unknown command: {command.action}")
                 if not command.future.cancelled():
@@ -67,13 +67,42 @@ class _ServerWorker:
             if should_exit:
                 return
 
-    async def _run_with_timeout(
-        self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
-    ) -> None:
-        if timeout_seconds is None:
+
+async def _run_with_timeout_in_task(
+    func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
+) -> None:
+    # Use an in-task timeout to preserve task affinity for MCP cleanup.
+    # asyncio.wait_for creates a new Task on Python < 3.11, which breaks
+    # libraries that require connect/cleanup in the same task (e.g. AnyIO cancel scopes).
+    if timeout_seconds is None:
+        await func()
+        return
+    timeout_context = getattr(asyncio, "timeout", None)
+    if timeout_context is not None:
+        async with timeout_context(timeout_seconds):
             await func()
-            return
+        return
+    task = asyncio.current_task()
+    if task is None:
         await asyncio.wait_for(func(), timeout=timeout_seconds)
+        return
+    timed_out = False
+    loop = asyncio.get_running_loop()
+
+    def _cancel() -> None:
+        nonlocal timed_out
+        timed_out = True
+        task.cancel()
+
+    handle = loop.call_later(timeout_seconds, _cancel)
+    try:
+        await func()
+    except asyncio.CancelledError as exc:
+        if timed_out:
+            raise asyncio.TimeoutError() from exc
+        raise
+    finally:
+        handle.cancel()
 
 
 class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
@@ -214,10 +243,7 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
     async def _run_with_timeout(
         self, func: Callable[[], Awaitable[Any]], timeout_seconds: float | None
     ) -> None:
-        if timeout_seconds is None:
-            await func()
-            return
-        await asyncio.wait_for(func(), timeout=timeout_seconds)
+        await _run_with_timeout_in_task(func, timeout_seconds)
 
     async def _attempt_connect(
         self, server: MCPServer, *, raise_on_error: bool | None = None
