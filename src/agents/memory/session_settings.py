@@ -47,16 +47,6 @@ class SessionSettings:
 
         return replace(self, **changes)
 
-    def to_json_dict(self) -> dict[str, Any]:
-        """Convert settings to a JSON-serializable dictionary."""
-        dataclass_dict = dataclasses.asdict(self)
-
-        json_dict: dict[str, Any] = {}
-
-        for field_name, value in dataclass_dict.items():
-            if isinstance(value, BaseModel):
-                json_dict[field_name] = value.model_dump(mode="json")
-            else:
-                json_dict[field_name] = value
-
-        return json_dict
+    def to_dict(self) -> dict[str, Any]:
+        """Convert settings to a dictionary."""
+        return dataclasses.asdict(self)
