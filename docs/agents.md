@@ -282,6 +282,8 @@ agent = Agent(
 )
 ```
 
+When using `tool_use_behavior` to stop early, you can set `output_type` to preserve the tool's return type. Without it, the SDK will convert the output to a string.
+
 !!! note
 
     To prevent infinite loops, the framework automatically resets `tool_choice` to "auto" after a tool call. This behavior is configurable via [`agent.reset_tool_choice`][agents.agent.Agent.reset_tool_choice]. The infinite loop is because tool results are sent to the LLM, which then generates another tool call because of `tool_choice`, ad infinitum.
