@@ -6,7 +6,6 @@ import dataclasses
 from dataclasses import fields, replace
 from typing import Any
 
-from pydantic import BaseModel
 from pydantic.dataclasses import dataclass
 
 
