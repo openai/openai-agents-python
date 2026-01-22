@@ -1,26 +1,47 @@
 name: Deploy docs
 
 on:
-  workflow_run:
-    workflows: ["Tests"]
-    types:
-      - completed
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
 
 permissions:
   contents: write # This allows pushing to gh-pages
 
 jobs:
   deploy_docs:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Determine docs-only push
+        id: docs-only
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          sha="${{ github.sha }}"
+          changed_files=$(git diff --name-only "$before" "$sha" || true)
+          non_docs=$(echo "$changed_files" | grep -vE '^(docs/|mkdocs.yml$)' || true)
+          if [ -n "$non_docs" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.docs-only.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Install dependencies
+        if: steps.docs-only.outputs.skip != 'true'
         run: make sync
       - name: Deploy docs
+        if: steps.docs-only.outputs.skip != 'true'
         run: make deploy-docs

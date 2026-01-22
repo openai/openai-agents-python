@@ -22,7 +22,7 @@ from agents import (
     function_tool,
     handoff,
 )
-from agents.items import RunItem
+from agents.items import HandoffOutputItem, RunItem, ToolCallOutputItem
 from agents.run import RunConfig
 from agents.stream_events import AgentUpdatedStreamEvent
 
@@ -187,6 +187,70 @@ class Foo(TypedDict):
 
 
 @pytest.mark.asyncio
+async def test_nested_handoff_filters_model_input_streamed():
+    model = FakeModel()
+    delegate = Agent(
+        name="delegate",
+        model=model,
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+        tools=[get_function_tool("some_function", "result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("some_function", json.dumps({"a": "b"}))],
+            [get_text_message("a_message"), get_handoff_tool_call(delegate)],
+            [get_text_message("done")],
+        ]
+    )
+
+    model_input_types: list[list[str]] = []
+
+    def capture_model_input(data):
+        types: list[str] = []
+        for item in data.model_data.input:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if isinstance(item_type, str):
+                    types.append(item_type)
+        model_input_types.append(types)
+        return data.model_data
+
+    session = SimpleListSession()
+    result = Runner.run_streamed(
+        triage,
+        input="user_message",
+        run_config=RunConfig(
+            nest_handoff_history=True,
+            call_model_input_filter=capture_model_input,
+        ),
+        session=session,
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    assert len(model_input_types) >= 3
+    handoff_input_types = model_input_types[2]
+    assert "function_call" not in handoff_input_types
+    assert "function_call_output" not in handoff_input_types
+
+    assert any(isinstance(item, ToolCallOutputItem) for item in result.new_items)
+    assert any(isinstance(item, HandoffOutputItem) for item in result.new_items)
+
+    session_items = await session.get_items()
+    has_function_call_output = any(
+        isinstance(item, dict) and item.get("type") == "function_call_output"
+        for item in session_items
+    )
+    assert has_function_call_output
+
+
+@pytest.mark.asyncio
 async def test_structured_output():
     model = FakeModel()
     agent_1 = Agent(
@@ -225,6 +289,7 @@ async def test_structured_output():
             get_text_input_item("user_message"),
             get_text_input_item("another_message"),
         ],
+        run_config=RunConfig(nest_handoff_history=True),
     )
     async for _ in result.stream_events():
         pass
@@ -707,6 +772,7 @@ async def test_streaming_events():
             get_text_input_item("user_message"),
             get_text_input_item("another_message"),
         ],
+        run_config=RunConfig(nest_handoff_history=True),
     )
     async for event in result.stream_events():
         event_counts[event.type] = event_counts.get(event.type, 0) + 1
@@ -737,7 +803,8 @@ async def test_streaming_events():
         "tool_call_output": 2,
         "message": 2,  # get_text_message("a_message") + get_final_output_message(...)
         "handoff": 1,  # get_handoff_tool_call(agent_1)
-        "handoff_output": 1,  # handoff_output_item
+        # Handoff output is now emitted as a streamed item for observability.
+        "handoff_output": 1,
     }
 
     total_expected_item_count = sum(expected_item_type_map.values())

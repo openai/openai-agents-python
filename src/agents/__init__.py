@@ -49,6 +49,7 @@ from .handoffs import (
     set_conversation_history_wrappers,
 )
 from .items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -63,10 +64,14 @@ from .items import (
 from .lifecycle import AgentHooks, RunHooks
 from .memory import (
     OpenAIConversationsSession,
+    OpenAIResponsesCompactionArgs,
+    OpenAIResponsesCompactionAwareSession,
+    OpenAIResponsesCompactionSession,
     Session,
     SessionABC,
     SessionSettings,
     SQLiteSession,
+    is_openai_responses_compaction_aware_session,
 )
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
@@ -293,6 +298,11 @@ __all__ = [
     "SessionSettings",
     "SQLiteSession",
     "OpenAIConversationsSession",
+    "OpenAIResponsesCompactionSession",
+    "OpenAIResponsesCompactionArgs",
+    "OpenAIResponsesCompactionAwareSession",
+    "is_openai_responses_compaction_aware_session",
+    "CompactionItem",
     "AgentHookContext",
     "RunContextWrapper",
     "TContext",

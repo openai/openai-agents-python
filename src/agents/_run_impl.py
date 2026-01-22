@@ -57,6 +57,7 @@ from .exceptions import (
 from .guardrail import InputGuardrail, InputGuardrailResult, OutputGuardrail, OutputGuardrailResult
 from .handoffs import Handoff, HandoffInputData, nest_handoff_history
 from .items import (
+    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -244,7 +245,8 @@ class SingleStepResult:
     """Items generated before the current step."""
 
     new_step_items: list[RunItem]
-    """Items generated during this current step."""
+    """Items generated during this current step. May be filtered during handoffs to avoid
+    duplication in model input."""
 
     next_step: NextStepHandoff | NextStepFinalOutput | NextStepRunAgain
     """The next step to take."""
@@ -255,11 +257,18 @@ class SingleStepResult:
     tool_output_guardrail_results: list[ToolOutputGuardrailResult]
     """Tool output guardrail results from this step."""
 
+    session_step_items: list[RunItem] | None = None
+    """Full unfiltered items for session history. When set, these are used instead of
+    new_step_items for session saving and generated_items property."""
+
     @property
     def generated_items(self) -> list[RunItem]:
         """Items generated during the agent run (i.e. everything generated after
-        `original_input`)."""
-        return self.pre_step_items + self.new_step_items
+        `original_input`). Uses session_step_items when available for full observability."""
+        items = (
+            self.session_step_items if self.session_step_items is not None else self.new_step_items
+        )
+        return self.pre_step_items + items
 
 
 def get_model_tracing_impl(
@@ -539,6 +548,9 @@ class RunImpl:
                 )
                 logger.debug("Queuing shell_call %s", call_identifier)
                 shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
+                continue
+            if output_type == "compaction":
+                items.append(CompactionItem(raw_item=cast(TResponseInputItem, output), agent=agent))
                 continue
             if output_type == "apply_patch_call":
                 items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
@@ -958,7 +970,7 @@ class RunImpl:
 
                     if rejected_message is not None:
                         # Input guardrail rejected the tool call
-                        final_result = rejected_message
+                        result = rejected_message
                     else:
                         # 2) Actually run the tool
                         real_result = await cls._execute_tool_with_hooks(
@@ -989,7 +1001,7 @@ class RunImpl:
                                 else _coro.noop_coroutine()
                             ),
                         )
-                    result = final_result
+                        result = final_result
                 except Exception as e:
                     _error_tracing.attach_error_to_current_span(
                         SpanError(
@@ -1286,6 +1298,12 @@ class RunImpl:
                 )
                 pre_step_items = list(filtered.pre_handoff_items)
                 new_step_items = list(filtered.new_items)
+                # For custom input filters, use input_items if available, otherwise new_items
+                if filtered.input_items is not None:
+                    session_step_items = list(filtered.new_items)
+                    new_step_items = list(filtered.input_items)
+                else:
+                    session_step_items = None
             elif should_nest_history and handoff_input_data is not None:
                 nested = nest_handoff_history(
                     handoff_input_data,
@@ -1297,7 +1315,16 @@ class RunImpl:
                     else list(nested.input_history)
                 )
                 pre_step_items = list(nested.pre_handoff_items)
-                new_step_items = list(nested.new_items)
+                # Keep full new_items for session history.
+                session_step_items = list(nested.new_items)
+                # Use input_items (filtered) for model input if available.
+                if nested.input_items is not None:
+                    new_step_items = list(nested.input_items)
+                else:
+                    new_step_items = session_step_items
+            else:
+                # No filtering or nesting - session_step_items not needed
+                session_step_items = None
 
         return SingleStepResult(
             original_input=original_input,
@@ -1307,6 +1334,7 @@ class RunImpl:
             next_step=NextStepHandoff(new_agent),
             tool_input_guardrail_results=[],
             tool_output_guardrail_results=[],
+            session_step_items=session_step_items,
         )
 
     @classmethod
@@ -1735,6 +1763,9 @@ class ShellAction:
         shell_output_payload: list[dict[str, Any]] | None = None
         provider_meta: dict[str, Any] | None = None
         max_output_length: int | None = None
+        requested_max_output_length = _normalize_max_output_length(
+            shell_call.action.max_output_length
+        )
 
         try:
             executor_result = call.shell_tool.executor(request)
@@ -1744,15 +1775,31 @@ class ShellAction:
 
             if isinstance(result, ShellResult):
                 normalized = [_normalize_shell_output(entry) for entry in result.output]
+                result_max_output_length = _normalize_max_output_length(result.max_output_length)
+                if result_max_output_length is None:
+                    max_output_length = requested_max_output_length
+                elif requested_max_output_length is None:
+                    max_output_length = result_max_output_length
+                else:
+                    max_output_length = min(result_max_output_length, requested_max_output_length)
+                if max_output_length is not None:
+                    normalized = _truncate_shell_outputs(normalized, max_output_length)
                 output_text = _render_shell_outputs(normalized)
+                if max_output_length is not None:
+                    output_text = output_text[:max_output_length]
                 shell_output_payload = [_serialize_shell_output(entry) for entry in normalized]
                 provider_meta = dict(result.provider_data or {})
-                max_output_length = result.max_output_length
             else:
                 output_text = str(result)
+                if requested_max_output_length is not None:
+                    max_output_length = requested_max_output_length
+                    output_text = output_text[:max_output_length]
         except Exception as exc:
             status = "failed"
             output_text = _format_shell_error(exc)
+            if requested_max_output_length is not None:
+                max_output_length = requested_max_output_length
+                output_text = output_text[:max_output_length]
             logger.error("Shell executor failed: %s", exc, exc_info=True)
 
         await asyncio.gather(
@@ -2025,6 +2072,51 @@ def _render_shell_outputs(outputs: Sequence[ShellCommandOutput]) -> str:
     return "\n\n".join(rendered_chunks)
 
 
+def _truncate_shell_outputs(
+    outputs: Sequence[ShellCommandOutput], max_length: int
+) -> list[ShellCommandOutput]:
+    if max_length <= 0:
+        return [
+            ShellCommandOutput(
+                stdout="",
+                stderr="",
+                outcome=output.outcome,
+                command=output.command,
+                provider_data=output.provider_data,
+            )
+            for output in outputs
+        ]
+
+    remaining = max_length
+    truncated: list[ShellCommandOutput] = []
+    for output in outputs:
+        stdout = ""
+        stderr = ""
+        if remaining > 0 and output.stdout:
+            stdout = output.stdout[:remaining]
+            remaining -= len(stdout)
+        if remaining > 0 and output.stderr:
+            stderr = output.stderr[:remaining]
+            remaining -= len(stderr)
+        truncated.append(
+            ShellCommandOutput(
+                stdout=stdout,
+                stderr=stderr,
+                outcome=output.outcome,
+                command=output.command,
+                provider_data=output.provider_data,
+            )
+        )
+
+    return truncated
+
+
+def _normalize_max_output_length(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(0, value)
+
+
 def _format_shell_error(error: Exception | BaseException | Any) -> str:
     if isinstance(error, Exception):
         message = str(error)
@@ -2074,9 +2166,9 @@ def _coerce_shell_call(tool_call: Any) -> ShellCallData:
     )
     timeout_ms = int(timeout_value) if isinstance(timeout_value, (int, float)) else None
 
-    max_length_value = _get_mapping_or_attr(
-        action_payload, "max_output_length"
-    ) or _get_mapping_or_attr(action_payload, "maxOutputLength")
+    max_length_value = _get_mapping_or_attr(action_payload, "max_output_length")
+    if max_length_value is None:
+        max_length_value = _get_mapping_or_attr(action_payload, "maxOutputLength")
     max_output_length = (
         int(max_length_value) if isinstance(max_length_value, (int, float)) else None
     )

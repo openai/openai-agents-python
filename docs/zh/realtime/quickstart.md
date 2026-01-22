@@ -2,18 +2,18 @@
 search:
   exclude: true
 ---
-# 快速开始
+# 快速入门
 
-实时智能体使你的 AI 智能体能够通过 OpenAI 的 Realtime API 进行语音对话。本指南将带你创建第一个实时语音智能体。
+实时智能体通过 OpenAI 的 Realtime API 让你的 AI 智能体具备语音对话能力。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "测试版功能"
-Realtime agents 处于测试阶段。随着实现的改进，可能会有不兼容的变更。
+实时智能体处于测试版。在我们改进实现的过程中，可能会有不兼容的变更。
 
 ## 先决条件
 
 - Python 3.9 或更高版本
 - OpenAI API key
-- 对 OpenAI Agents SDK 有基本了解
+- 对 OpenAI Agents SDK 的基本了解
 
 ## 安装
 
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 完整示例
 
-以下是一个可运行的完整示例：
+下面是一个完整可运行示例：
 
 ```python
 import asyncio
@@ -193,39 +193,39 @@ if __name__ == "__main__":
 ### 模型设置
 
 - `model_name`: 从可用的实时模型中选择（例如，`gpt-realtime`）
-- `voice`: 选择音色（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+- `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 - `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
 
 - `input_audio_format`: 输入音频格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
 - `output_audio_format`: 输出音频格式
-- `input_audio_transcription`: 转写配置
+- `input_audio_transcription`: 转录配置
 
-### 回合检测
+### 轮次检测
 
 - `type`: 检测方法（`server_vad`、`semantic_vad`）
 - `threshold`: 语音活动阈值（0.0-1.0）
-- `silence_duration_ms`: 判定回合结束的静音时长
+- `silence_duration_ms`: 用于检测轮次结束的静音时长
 - `prefix_padding_ms`: 语音前的音频填充
 
 ## 后续步骤
 
-- [深入了解实时智能体](guide.md)
-- 在 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹查看可运行的示例
+- [进一步了解实时智能体](guide.md)
+- 查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的可运行示例
 - 为你的智能体添加工具
-- 在智能体之间实现任务转移
-- 设置安全防护措施以保障安全
+- 实现智能体之间的任务转移
+- 设置安全防护措施以确保安全
 
-## 认证
+## 身份验证
 
-请确保在你的环境中设置了 OpenAI API key：
+确保在环境中设置了 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-或者在创建会话时直接传入：
+或在创建会话时直接传入：
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})

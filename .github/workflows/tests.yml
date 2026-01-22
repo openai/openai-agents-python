@@ -7,6 +7,9 @@ on:
   pull_request:
     # All PRs, including stacked PRs
 
+permissions:
+  contents: read
+
 env:
   UV_FROZEN: "1"
 
@@ -15,31 +18,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Verify formatting
+        if: steps.changes.outputs.run == 'true'
         run: make format-check
       - name: Run lint
+        if: steps.changes.outputs.run == 'true'
         run: make lint
+      - name: Skip lint
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping lint for non-code changes."
 
   typecheck:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run typecheck
+        if: steps.changes.outputs.run == 'true'
         run: make mypy
+      - name: Skip typecheck
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping typecheck for non-code changes."
 
   tests:
     runs-on: ubuntu-latest
@@ -56,16 +78,25 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run tests with coverage
+        if: steps.changes.outputs.run == 'true'
         run: make coverage
+      - name: Skip tests
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping tests for non-code changes."
 
   build-docs:
     runs-on: ubuntu-latest
@@ -73,15 +104,24 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Detect docs changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh docs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Build docs
+        if: steps.changes.outputs.run == 'true'
         run: make build-docs
+      - name: Skip docs build
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping docs build for non-docs changes."
 
   old_version_tests:
     runs-on: ubuntu-latest
@@ -89,12 +129,21 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
           enable-cache: true
       - name: Install dependencies
+        if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run tests
+        if: steps.changes.outputs.run == 'true'
         run: make old_version_tests
+      - name: Skip old version tests
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping old version tests for non-code changes."

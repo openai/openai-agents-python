@@ -2,6 +2,8 @@
 import os
 import sys
 import argparse
+import subprocess
+from pathlib import Path
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 # logging.basicConfig(level=logging.INFO)
 # logging.getLogger("openai").setLevel(logging.DEBUG)
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.2")
 
 ENABLE_CODE_SNIPPET_EXCLUSION = True
 # gpt-4.5 needed this for better quality
@@ -24,6 +26,7 @@ search:
 
 # Define the source and target directories
 source_dir = "docs"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 languages = {
     "ja": "Japanese",
     "ko": "Korean",
@@ -53,6 +56,8 @@ do_not_translate = [
     "Playground",
     "Realtime API",
     "Sora",
+    "Agents as tools",
+    "Agents-as-tools",
     # Add more terms here
 ]
 
@@ -330,7 +335,7 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
                 model=OPENAI_MODEL,
                 instructions=instructions,
                 input=chunk,
-                reasoning={"effort": "low"},
+                reasoning={"effort": "none"},
                 text={"verbosity": "low"},
             )
             translated_content.append(response.output_text)
@@ -361,9 +366,45 @@ def translate_file(file_path: str, target_path: str, lang_code: str) -> None:
         f.write(translated_text)
 
 
-def translate_single_source_file(file_path: str) -> None:
+def git_last_commit_timestamp(path: str) -> int:
+    try:
+        relative_path = os.path.relpath(path, REPO_ROOT)
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "log", "-1", "--format=%ct", "--", relative_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return 0
+        output = result.stdout.strip()
+        if not output:
+            return 0
+        return int(output)
+    except Exception:
+        return 0
+
+
+def should_translate_based_on_translation(file_path: str) -> bool:
+    relative_path = os.path.relpath(file_path, source_dir)
+    ja_path = os.path.join(source_dir, "ja", relative_path)
+    en_timestamp = git_last_commit_timestamp(file_path)
+    if en_timestamp == 0:
+        return True
+    ja_timestamp = git_last_commit_timestamp(ja_path)
+    if ja_timestamp == 0:
+        return True
+    return ja_timestamp < en_timestamp
+
+
+def translate_single_source_file(
+    file_path: str, *, check_translation_outdated: bool = True
+) -> None:
     relative_path = os.path.relpath(file_path, source_dir)
     if "ref/" in relative_path or not file_path.endswith(".md"):
+        return
+    if check_translation_outdated and not should_translate_based_on_translation(file_path):
+        print(f"Skipping {file_path}: The translated one is up-to-date.")
         return
 
     for lang_code in languages:
@@ -377,29 +418,82 @@ def translate_single_source_file(file_path: str) -> None:
         translate_file(file_path, target_path, lang_code)
 
 
+def normalize_source_file_arg(file_arg: str) -> str:
+    if file_arg.startswith(f"{source_dir}/"):
+        return file_arg[len(source_dir) + 1 :]
+    if os.path.isabs(file_arg):
+        return os.path.relpath(file_arg, source_dir)
+    return file_arg
+
+
+def translate_source_files(
+    file_paths: list[str], *, check_translation_outdated: bool = True
+) -> None:
+    unique_paths = list(dict.fromkeys(file_paths))
+    if not unique_paths:
+        return
+    concurrency = min(6, len(unique_paths))
+    if concurrency <= 1:
+        translate_single_source_file(
+            unique_paths[0], check_translation_outdated=check_translation_outdated
+        )
+        return
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [
+            executor.submit(
+                translate_single_source_file,
+                path,
+                check_translation_outdated=check_translation_outdated,
+            )
+            for path in unique_paths
+        ]
+        for future in futures:
+            future.result()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Translate documentation files")
     parser.add_argument(
-        "--file", type=str, help="Specific file to translate (relative to docs directory)"
+        "--file",
+        action="append",
+        type=str,
+        help="Specific file to translate (relative to docs directory).",
+    )
+    parser.add_argument(
+        "--file-list",
+        type=str,
+        help="Path to a newline-delimited file list to translate.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["only-changes", "full"],
+        default="only-changes",
+        help="Translation mode. 'only-changes' translates only when the Japanese file is older than the English source.",
     )
     args = parser.parse_args()
 
-    if args.file:
-        # Translate a single file
-        # Handle both "foo.md" and "docs/foo.md" formats
-        if args.file.startswith("docs/"):
-            # Remove "docs/" prefix if present
-            relative_file = args.file[5:]
-        else:
-            relative_file = args.file
+    check_translation_outdated = args.mode == "only-changes"
 
-        file_path = os.path.join(source_dir, relative_file)
-        if os.path.exists(file_path):
-            translate_single_source_file(file_path)
-            print(f"Translation completed for {relative_file}")
-        else:
-            print(f"Error: File {file_path} does not exist")
+    if args.file or args.file_list:
+        file_args: list[str] = []
+        if args.file:
+            file_args.extend(args.file)
+        if args.file_list:
+            with open(args.file_list, encoding="utf-8") as f:
+                file_args.extend([line.strip() for line in f.read().splitlines() if line.strip()])
+        file_paths: list[str] = []
+        for file_arg in file_args:
+            relative_file = normalize_source_file_arg(file_arg)
+            file_path = os.path.join(source_dir, relative_file)
+            if os.path.exists(file_path):
+                file_paths.append(file_path)
+            else:
+                print(f"Warning: File {file_path} does not exist; skipping.")
+        if not file_paths:
+            print("Error: No valid files found to translate")
             sys.exit(1)
+        translate_source_files(file_paths, check_translation_outdated=check_translation_outdated)
+        print("Translation completed for requested file(s)")
     else:
         # Traverse the source directory (original behavior)
         for root, _, file_names in os.walk(source_dir):
@@ -412,7 +506,13 @@ def main():
                 futures = []
                 for file_name in file_names:
                     filepath = os.path.join(root, file_name)
-                    futures.append(executor.submit(translate_single_source_file, filepath))
+                    futures.append(
+                        executor.submit(
+                            translate_single_source_file,
+                            filepath,
+                            check_translation_outdated=check_translation_outdated,
+                        )
+                    )
                     if len(futures) >= concurrency:
                         for future in futures:
                             future.result()

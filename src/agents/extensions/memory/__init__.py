@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .advanced_sqlite_session import AdvancedSQLiteSession
+    from .async_sqlite_session import AsyncSQLiteSession
     from .dapr_session import (
         DAPR_CONSISTENCY_EVENTUAL,
         DAPR_CONSISTENCY_STRONG,
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "AdvancedSQLiteSession",
+    "AsyncSQLiteSession",
     "DAPR_CONSISTENCY_EVENTUAL",
     "DAPR_CONSISTENCY_STRONG",
     "DaprSession",
@@ -73,6 +75,14 @@ def __getattr__(name: str) -> Any:
             return AdvancedSQLiteSession
         except ModuleNotFoundError as e:
             raise ImportError(f"Failed to import AdvancedSQLiteSession: {e}") from e
+
+    if name == "AsyncSQLiteSession":
+        try:
+            from .async_sqlite_session import AsyncSQLiteSession  # noqa: F401
+
+            return AsyncSQLiteSession
+        except ModuleNotFoundError as e:
+            raise ImportError(f"Failed to import AsyncSQLiteSession: {e}") from e
 
     if name == "DaprSession":
         try:
