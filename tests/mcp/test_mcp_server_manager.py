@@ -145,3 +145,21 @@ async def test_manager_reconnect_deduplicates_failures() -> None:
         assert manager.active_servers == [server]
         assert manager.failed_servers == []
         assert server.connect_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_manager_connect_all_retries_all_servers() -> None:
+    server = FlakyServer(failures=1)
+    manager = MCPServerManager([server])
+    try:
+        await manager.connect_all()
+        assert manager.active_servers == []
+        assert manager.failed_servers == [server]
+        assert server.connect_calls == 1
+
+        await manager.connect_all()
+        assert manager.active_servers == [server]
+        assert manager.failed_servers == []
+        assert server.connect_calls == 2
+    finally:
+        await manager.cleanup_all()

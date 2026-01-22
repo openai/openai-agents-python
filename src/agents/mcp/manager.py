@@ -192,10 +192,11 @@ class MCPServerManager(AbstractAsyncContextManager["MCPServerManager"]):
         self._failed_server_set = set()
         self.errors = {}
 
+        servers_to_connect = list(self._all_servers)
         if self.connect_in_parallel:
-            await self._connect_all_parallel(self._active_servers)
+            await self._connect_all_parallel(servers_to_connect)
         else:
-            for server in self._active_servers:
+            for server in servers_to_connect:
                 await self._attempt_connect(server)
 
         self._refresh_active_servers()
