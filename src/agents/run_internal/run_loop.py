@@ -816,6 +816,8 @@ async def start_streaming(
                         store_setting,
                     )
                     current_agent = turn_result.next_step.new_agent
+                    if run_state is not None:
+                        run_state._current_agent = current_agent
                     current_span.finish(reset_current=True)
                     current_span = None
                     should_run_agent_start_hooks = True
