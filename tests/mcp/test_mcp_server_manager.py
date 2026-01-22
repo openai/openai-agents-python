@@ -163,3 +163,16 @@ async def test_manager_connect_all_retries_all_servers() -> None:
         assert server.connect_calls == 2
     finally:
         await manager.cleanup_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_strict_connect_cleans_up_connected_servers() -> None:
+    connected_server = TaskBoundServer()
+    failing_server = FlakyServer(failures=1)
+    manager = MCPServerManager([connected_server, failing_server], strict=True)
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await manager.connect_all()
+
+    assert connected_server.cleaned is True
+    assert manager.active_servers == []
