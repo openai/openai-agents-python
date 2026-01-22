@@ -75,8 +75,24 @@ class RunContextWrapper(Generic[TContext]):
     def _resolve_call_id(approval_item: ToolApprovalItem) -> str | None:
         raw = approval_item.raw_item
         if isinstance(raw, dict):
+            provider_data = raw.get("provider_data")
+            if (
+                isinstance(provider_data, dict)
+                and provider_data.get("type") == "mcp_approval_request"
+            ):
+                candidate = provider_data.get("id")
+                if isinstance(candidate, str):
+                    return candidate
             candidate = raw.get("call_id") or raw.get("id")
         else:
+            provider_data = getattr(raw, "provider_data", None)
+            if (
+                isinstance(provider_data, dict)
+                and provider_data.get("type") == "mcp_approval_request"
+            ):
+                candidate = provider_data.get("id")
+                if isinstance(candidate, str):
+                    return candidate
             candidate = getattr(raw, "call_id", None) or getattr(raw, "id", None)
         return RunContextWrapper._to_str_or_none(candidate)
 
