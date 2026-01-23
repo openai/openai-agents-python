@@ -38,6 +38,13 @@ from agents import set_tracing_export_api_key
 set_tracing_export_api_key("sk-...")
 ```
 
+If you need to attribute traces to a specific organization or project when using the default exporter, set these environment variables before your app starts:
+
+```bash
+export OPENAI_ORG_ID="org_..."
+export OPENAI_PROJECT_ID="proj_..."
+```
+
 You can also set a tracing API key per run without changing the global exporter.
 
 ```python

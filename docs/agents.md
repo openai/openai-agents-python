@@ -9,6 +9,7 @@ The most common properties of an agent you'll configure are:
 -   `name`: A required string that identifies your agent.
 -   `instructions`: also known as a developer message or system prompt.
 -   `model`: which LLM to use, and optional `model_settings` to configure model tuning parameters like temperature, top_p, etc.
+-   `prompt`: Reference a prompt template by id (and variables) when using OpenAI's Responses API.
 -   `tools`: Tools that the agent can use to achieve its tasks.
 -   `mcp_servers`: MCP servers that provide tools to the agent. See the [MCP guide](mcp.md).
 -   `reset_tool_choice`: Whether to reset `tool_choice` after a tool call (default: `True`) to avoid tool-use loops. See [Forcing tool use](#forcing-tool-use).
@@ -26,6 +27,65 @@ agent = Agent(
     instructions="Always respond in haiku form",
     model="gpt-5-nano",
     tools=[get_weather],
+)
+```
+
+## Prompt templates
+
+You can reference a prompt template created in the OpenAI platform by setting `prompt`. This works with OpenAI models using the Responses API.
+
+To use it, please:
+
+1. Go to https://platform.openai.com/playground/prompts
+2. Create a new prompt variable, `poem_style`.
+3. Create a system prompt with the content:
+
+    ```
+    Write a poem in {{poem_style}}
+    ```
+
+4. Run the example with the `--prompt-id` flag.
+
+```python
+from agents import Agent
+
+agent = Agent(
+    name="Prompted assistant",
+    prompt={
+        "id": "pmpt_123",
+        "version": "1",
+        "variables": {"poem_style": "haiku"},
+    },
+)
+```
+
+You can also generate the prompt dynamically at run time:
+
+```python
+from dataclasses import dataclass
+
+from agents import Agent, GenerateDynamicPromptData, Runner
+
+@dataclass
+class PromptContext:
+    prompt_id: str
+    poem_style: str
+
+
+async def build_prompt(data: GenerateDynamicPromptData):
+    ctx: PromptContext = data.context.context
+    return {
+        "id": ctx.prompt_id,
+        "version": "1",
+        "variables": {"poem_style": ctx.poem_style},
+    }
+
+
+agent = Agent(name="Prompted assistant", prompt=build_prompt)
+result = await Runner.run(
+    agent,
+    "Say hello",
+    context=PromptContext(prompt_id="pmpt_123", poem_style="limerick"),
 )
 ```
 

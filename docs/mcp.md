@@ -243,6 +243,37 @@ async with MCPServerStdio(
     print(result.final_output)
 ```
 
+## 5. MCP server manager
+
+When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents.
+
+```python
+from agents import Agent, Runner
+from agents.mcp import MCPServerManager, MCPServerStreamableHttp
+
+servers = [
+    MCPServerStreamableHttp(name="calendar", params={"url": "http://localhost:8000/mcp"}),
+    MCPServerStreamableHttp(name="docs", params={"url": "http://localhost:8001/mcp"}),
+]
+
+async with MCPServerManager(servers) as manager:
+    agent = Agent(
+        name="Assistant",
+        instructions="Use MCP tools when they help.",
+        mcp_servers=manager.active_servers,
+    )
+    result = await Runner.run(agent, "Which MCP tools are available?")
+    print(result.final_output)
+```
+
+Key behaviors:
+
+- `active_servers` includes only successfully connected servers when `drop_failed_servers=True` (the default).
+- Failures are tracked in `failed_servers` and `errors`.
+- Set `strict=True` to raise on the first connection failure.
+- Call `reconnect(failed_only=True)` to retry failed servers, or `reconnect(failed_only=False)` to restart all servers.
+- Use `connect_timeout_seconds`, `cleanup_timeout_seconds`, and `connect_in_parallel` to tune lifecycle behavior.
+
 ## Tool filtering
 
 Each MCP server supports tool filters so that you can expose only the functions that your agent needs. Filtering can happen at
