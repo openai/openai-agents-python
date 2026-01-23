@@ -2,25 +2,25 @@
 search:
   exclude: true
 ---
-# 도구
+# Tools
 
-도구는 에이전트가 동작을 수행하도록 합니다. 예: 데이터 가져오기, 코드 실행, 외부 API 호출, 심지어 컴퓨터 사용. SDK는 다섯 가지 카테고리를 지원합니다:
+Tools 는 에이전트가 작업을 수행할 수 있게 해줍니다. 예를 들어 데이터를 가져오거나, 코드를 실행하거나, 외부 API 를 호출하거나, 심지어 컴퓨터를 사용하는 것까지 포함합니다. SDK 는 다섯 가지 카테고리를 지원합니다:
 
--   호스티드 OpenAI 도구: OpenAI 서버에서 모델과 함께 실행
--   로컬 런타임 도구: 사용자의 환경에서 실행(컴퓨터 사용, 셸, 패치 적용)
--   함수 호출: 임의의 Python 함수를 도구로 감싸기
--   도구로서의 에이전트: 전체 핸드오프 없이 에이전트를 호출 가능한 도구로 노출
--   실험적: Codex 도구: 도구 호출에서 작업공간 범위의 Codex 작업 실행
+-   OpenAI 호스트하는 도구: OpenAI 서버에서 모델과 함께 실행됩니다
+-   로컬 런타임 도구: 사용자의 환경에서 실행됩니다(컴퓨터 사용, shell, apply patch)
+-   함수 호출: 어떤 Python 함수든 도구로 래핑합니다
+-   Agents as tools: 전체 핸드오프 없이 에이전트를 호출 가능한 도구로 노출합니다
+-   실험적: Codex tool: 도구 호출로 워크스페이스 범위의 Codex 작업을 실행합니다
 
-## 호스티드 도구
+## 호스티드 툴
 
-[`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 사용 시 OpenAI는 몇 가지 기본 제공 도구를 제공합니다:
+OpenAI 는 [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel] 을 사용할 때 몇 가지 내장 도구를 제공합니다:
 
--   [`WebSearchTool`][agents.tool.WebSearchTool]: 에이전트가 웹 검색을 수행할 수 있게 합니다
--   [`FileSearchTool`][agents.tool.FileSearchTool]: OpenAI 벡터 스토어에서 정보를 검색할 수 있게 합니다
--   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool]: LLM이 샌드박스 환경에서 코드를 실행할 수 있게 합니다
--   [`HostedMCPTool`][agents.tool.HostedMCPTool]: 원격 MCP 서버의 도구를 모델에 노출합니다
--   [`ImageGenerationTool`][agents.tool.ImageGenerationTool]: 프롬프트로부터 이미지를 생성합니다
+-   [`WebSearchTool`][agents.tool.WebSearchTool] 은 에이전트가 웹 검색을 할 수 있게 해줍니다
+-   [`FileSearchTool`][agents.tool.FileSearchTool] 은 OpenAI 벡터 스토어에서 정보를 가져올 수 있게 해줍니다
+-   [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] 은 LLM 이 샌드박스 환경에서 코드를 실행할 수 있게 해줍니다
+-   [`HostedMCPTool`][agents.tool.HostedMCPTool] 은 원격 MCP 서버의 도구를 모델에 노출합니다
+-   [`ImageGenerationTool`][agents.tool.ImageGenerationTool] 은 프롬프트로부터 이미지를 생성합니다
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -43,11 +43,11 @@ async def main():
 
 ## 로컬 런타임 도구
 
-로컬 런타임 도구는 사용자의 환경에서 실행되며, 구현을 직접 제공해야 합니다:
+로컬 런타임 도구는 사용자의 환경에서 실행되며, 사용자가 구현을 제공해야 합니다:
 
--   [`ComputerTool`][agents.tool.ComputerTool]: GUI/브라우저 자동화를 위해 [`Computer`][agents.computer.Computer] 또는 [`AsyncComputer`][agents.computer.AsyncComputer] 인터페이스를 구현
--   [`ShellTool`][agents.tool.ShellTool] 또는 [`LocalShellTool`][agents.tool.LocalShellTool]: 명령을 실행할 셸 실행기를 제공
--   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: 로컬에서 diff를 적용하기 위해 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 구현
+-   [`ComputerTool`][agents.tool.ComputerTool]: GUI/브라우저 자동화를 활성화하려면 [`Computer`][agents.computer.Computer] 또는 [`AsyncComputer`][agents.computer.AsyncComputer] 인터페이스를 구현합니다
+-   [`ShellTool`][agents.tool.ShellTool] 또는 [`LocalShellTool`][agents.tool.LocalShellTool]: 명령을 실행할 수 있도록 셸 실행기를 제공합니다
+-   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: 로컬에서 diff 를 적용하려면 [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] 를 구현합니다
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -91,14 +91,14 @@ agent = Agent(
 
 ## 함수 도구
 
-임의의 Python 함수를 도구로 사용할 수 있습니다. Agents SDK가 도구를 자동으로 설정합니다:
+어떤 Python 함수든 도구로 사용할 수 있습니다. Agents SDK 가 도구를 자동으로 설정합니다:
 
--   도구 이름은 Python 함수 이름이 됩니다(또는 이름을 직접 제공할 수 있음)
--   도구 설명은 함수의 독스트링에서 가져옵니다(또는 설명을 직접 제공할 수 있음)
+-   도구 이름은 Python 함수의 이름이 됩니다(또는 이름을 제공할 수 있습니다)
+-   도구 설명은 함수의 docstring 에서 가져옵니다(또는 설명을 제공할 수 있습니다)
 -   함수 입력에 대한 스키마는 함수의 인자에서 자동으로 생성됩니다
--   각 입력에 대한 설명은 비활성화하지 않는 한 함수의 독스트링에서 가져옵니다
+-   각 입력에 대한 설명은 비활성화하지 않는 한 함수의 docstring 에서 가져옵니다
 
-Python의 `inspect` 모듈로 함수 시그니처를 추출하고, 독스트링 파싱에는 [`griffe`](https://mkdocstrings.github.io/griffe/), 스키마 생성에는 `pydantic`을 사용합니다.
+함수 시그니처를 추출하기 위해 Python 의 `inspect` 모듈을 사용하며, docstring 파싱에는 [`griffe`](https://mkdocstrings.github.io/griffe/) 를, 스키마 생성에는 `pydantic` 를 사용합니다.
 
 ```python
 import json
@@ -150,12 +150,12 @@ for tool in agent.tools:
 
 ```
 
-1.  함수 인자로 임의의 Python 타입을 사용할 수 있으며, 함수는 동기 또는 비동기일 수 있습니다
-2.  독스트링이 있는 경우, 전반 설명과 인자 설명을 추출하는 데 사용합니다
-3.  선택적으로 `context`를 받을 수 있습니다(반드시 첫 번째 인자). 또한 도구 이름, 설명, 사용할 독스트링 스타일 등 오버라이드를 설정할 수 있습니다
-4.  데코레이트된 함수를 도구 목록에 전달할 수 있습니다
+1.  함수 인자에는 어떤 Python 타입이든 사용할 수 있으며, 함수는 sync 또는 async 일 수 있습니다
+2.  docstring 이 존재하면, 설명과 인자 설명을 캡처하는 데 사용됩니다
+3.  함수는 선택적으로 `context` 를 받을 수 있습니다(반드시 첫 번째 인자여야 합니다). 또한 도구 이름, 설명, 사용할 docstring 스타일 등과 같은 오버라이드를 설정할 수 있습니다
+4.  데코레이트된 함수를 tools 목록에 전달할 수 있습니다
 
-??? note "출력을 보려면 확장하세요"
+??? note "출력 보기로 확장"
 
     ```
     fetch_weather
@@ -227,20 +227,20 @@ for tool in agent.tools:
 
 ### 함수 도구에서 이미지 또는 파일 반환
 
-텍스트 출력 외에도, 함수 도구의 출력으로 하나 이상의 이미지 또는 파일을 반환할 수 있습니다. 다음 중 아무 것이나 반환할 수 있습니다:
+텍스트 출력 외에도, 함수 도구의 출력으로 하나 또는 여러 개의 이미지나 파일을 반환할 수 있습니다. 이를 위해 다음 중 무엇이든 반환할 수 있습니다:
 
--   이미지: [`ToolOutputImage`][agents.tool.ToolOutputImage] (또는 TypedDict 버전, [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
--   파일: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (또는 TypedDict 버전, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
--   텍스트: 문자열 또는 문자열로 변환 가능한 객체, 또는 [`ToolOutputText`][agents.tool.ToolOutputText] (또는 TypedDict 버전, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
+-   이미지: [`ToolOutputImage`][agents.tool.ToolOutputImage] (또는 TypedDict 버전인 [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
+-   파일: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (또는 TypedDict 버전인 [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
+-   텍스트: 문자열 또는 문자열로 변환 가능한 객체, 또는 [`ToolOutputText`][agents.tool.ToolOutputText] (또는 TypedDict 버전인 [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
 
 ### 커스텀 함수 도구
 
-때로는 Python 함수를 도구로 사용하고 싶지 않을 수 있습니다. 원한다면 직접 [`FunctionTool`][agents.tool.FunctionTool]을 생성할 수 있습니다. 다음을 제공해야 합니다:
+때로는 Python 함수를 도구로 사용하고 싶지 않을 수 있습니다. 원한다면 [`FunctionTool`][agents.tool.FunctionTool] 을 직접 만들 수 있습니다. 다음을 제공해야 합니다:
 
 -   `name`
 -   `description`
--   `params_json_schema` — 인자를 위한 JSON 스키마
--   `on_invoke_tool` — [`ToolContext`][agents.tool_context.ToolContext]와 인자(JSON 문자열)를 받아 문자열로 된 도구 출력을 반환해야 하는 비동기 함수
+-   `params_json_schema`: 인자에 대한 JSON schema
+-   `on_invoke_tool`: [`ToolContext`][agents.tool_context.ToolContext] 와 인자를 JSON 문자열로 받아, 도구 출력을 문자열로 반환해야 하는 async 함수
 
 ```python
 from typing import Any
@@ -273,18 +273,18 @@ tool = FunctionTool(
 )
 ```
 
-### 인자 및 독스트링 자동 파싱
+### 자동 인자 및 docstring 파싱
 
-앞서 언급했듯이, 도구의 스키마를 추출하기 위해 함수 시그니처를 자동으로 파싱하고, 도구 및 개별 인자에 대한 설명을 추출하기 위해 독스트링을 파싱합니다. 참고 사항:
+앞서 언급했듯이, 도구의 스키마를 추출하기 위해 함수 시그니처를 자동으로 파싱하고, 도구와 개별 인자의 설명을 추출하기 위해 docstring 을 파싱합니다. 참고 사항은 다음과 같습니다:
 
-1. 시그니처 파싱은 `inspect` 모듈을 통해 수행합니다. 타입 주석을 사용해 인자의 타입을 파악하고, 전체 스키마를 표현하는 Pydantic 모델을 동적으로 빌드합니다. Python 기본 타입, Pydantic 모델, TypedDict 등 대부분의 타입을 지원합니다
-2. 독스트링 파싱에는 `griffe`를 사용합니다. 지원하는 독스트링 형식은 `google`, `sphinx`, `numpy`입니다. 독스트링 형식을 자동 감지하려 시도하지만 최선의 노력 수준이므로, `function_tool` 호출 시 명시적으로 설정할 수 있습니다. `use_docstring_info`를 `False`로 설정해 독스트링 파싱을 비활성화할 수도 있습니다
+1. 시그니처 파싱은 `inspect` 모듈로 수행됩니다. 인자의 타입을 이해하기 위해 타입 어노테이션을 사용하고, 전체 스키마를 표현하기 위한 Pydantic 모델을 동적으로 빌드합니다. Python 기본 타입, Pydantic 모델, TypedDict 등 대부분의 타입을 지원합니다
+2. docstring 파싱에는 `griffe` 를 사용합니다. 지원하는 docstring 형식은 `google`, `sphinx`, `numpy` 입니다. docstring 형식을 자동으로 감지하려고 시도하지만 best-effort 이며, `function_tool` 호출 시 명시적으로 설정할 수 있습니다. `use_docstring_info` 를 `False` 로 설정해 docstring 파싱을 비활성화할 수도 있습니다
 
-스키마 추출 코드는 [`agents.function_schema`][]에 있습니다.
+스키마 추출 코드는 [`agents.function_schema`][] 에 있습니다.
 
-## 도구로서의 에이전트
+## Agents as tools
 
-일부 워크플로에서는 제어를 넘기지 않고, 중앙 에이전트가 특화된 에이전트 네트워크를 오케스트레이션하기를 원할 수 있습니다. 에이전트를 도구로 모델링하여 이를 구현할 수 있습니다.
+일부 워크플로에서는 제어를 핸드오프하는 대신, 중앙 에이전트가 전문화된 에이전트 네트워크를 멀티 에이전트 오케스트레이션 하도록 하고 싶을 수 있습니다. 이를 위해 에이전트를 도구로 모델링할 수 있습니다.
 
 ```python
 from agents import Agent, Runner
@@ -325,7 +325,7 @@ async def main():
 
 ### 도구-에이전트 커스터마이징
 
-`agent.as_tool` 함수는 에이전트를 도구로 손쉽게 바꾸기 위한 편의 메서드입니다. 다만 모든 구성을 지원하지는 않습니다. 예를 들어, `max_turns`를 설정할 수 없습니다. 고급 사용 사례의 경우, 도구 구현 내에서 `Runner.run`을 직접 사용하세요:
+`agent.as_tool` 함수는 에이전트를 도구로 쉽게 바꾸기 위한 편의 메서드입니다. 다만 모든 구성을 지원하지는 않습니다. 예를 들어 `max_turns` 를 설정할 수 없습니다. 고급 사용 사례에서는 도구 구현에서 `Runner.run` 을 직접 사용하세요:
 
 ```python
 @function_tool
@@ -346,13 +346,13 @@ async def run_my_agent() -> str:
 
 ### 커스텀 출력 추출
 
-경우에 따라 중앙 에이전트에 반환하기 전에 도구-에이전트의 출력을 수정하고자 할 수 있습니다. 다음과 같은 상황에서 유용합니다:
+특정 경우에는 도구-에이전트의 출력을 중앙 에이전트에 반환하기 전에 수정하고 싶을 수 있습니다. 이는 다음과 같은 경우에 유용할 수 있습니다:
 
--   하위 에이전트의 대화 기록에서 특정 정보(예: JSON 페이로드)를 추출
--   에이전트의 최종 답변을 변환 또는 재포맷(예: Markdown을 일반 텍스트 또는 CSV로 변환)
--   에이전트의 응답이 없거나 형식이 올바르지 않은 경우 출력을 검증하거나 폴백 값을 제공
+-   서브 에이전트의 채팅 기록에서 특정 정보(예: JSON 페이로드)를 추출하는 경우
+-   에이전트의 최종 답변을 변환하거나 재포맷하는 경우(예: Markdown 을 일반 텍스트 또는 CSV 로 변환)
+-   출력의 유효성을 검사하거나, 에이전트 응답이 누락되었거나 형식이 잘못된 경우 대체 값을 제공하는 경우
 
-이를 위해 `as_tool` 메서드에 `custom_output_extractor` 인자를 제공하면 됩니다:
+`as_tool` 메서드에 `custom_output_extractor` 인자를 제공하면 이를 수행할 수 있습니다:
 
 ```python
 async def extract_json_payload(run_result: RunResult) -> str:
@@ -373,7 +373,7 @@ json_tool = data_agent.as_tool(
 
 ### 중첩 에이전트 실행 스트리밍
 
-중첩된 에이전트가 내보내는 스트리밍 이벤트를 청취할 수 있도록 `as_tool`에 `on_stream` 콜백을 전달하세요. 스트림이 완료된 후에도 최종 출력을 반환합니다.
+`as_tool` 에 `on_stream` 콜백을 전달하면, 스트림이 완료된 후 최종 출력을 반환하면서도 중첩된 에이전트가 내보내는 스트리밍 이벤트를 수신할 수 있습니다.
 
 ```python
 from agents import AgentToolStreamEvent
@@ -391,17 +391,17 @@ billing_agent_tool = billing_agent.as_tool(
 )
 ```
 
-예상할 수 있는 것:
+기대할 사항:
 
-- 이벤트 타입은 `StreamEvent["type"]`와 동일합니다: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`
-- `on_stream`을 제공하면 중첩 에이전트가 자동으로 스트리밍 모드로 실행되고 최종 출력을 반환하기 전에 스트림이 소모됩니다
-- 핸들러는 동기 또는 비동기일 수 있으며, 각 이벤트는 도착 순서대로 전달됩니다
-- 도구가 모델의 도구 호출을 통해 호출된 경우 `tool_call_id`가 존재하며, 직접 호출의 경우 `None`일 수 있습니다
-- 전체 실행 가능한 샘플은 `examples/agent_patterns/agents_as_tools_streaming.py`를 참고하세요
+- 이벤트 타입은 `StreamEvent["type"]` 와 동일합니다: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`
+- `on_stream` 을 제공하면 중첩 에이전트는 자동으로 스트리밍 모드로 실행되며, 최종 출력을 반환하기 전에 스트림을 모두 소비합니다
+- 핸들러는 동기 또는 비동기일 수 있으며, 각 이벤트는 도착하는 순서대로 전달됩니다
+- `tool_call_id` 는 모델 도구 호출을 통해 도구가 호출될 때 존재합니다. 직접 호출에서는 `None` 일 수 있습니다
+- 전체 실행 가능한 샘플은 `examples/agent_patterns/agents_as_tools_streaming.py` 를 참고하세요
 
 ### 조건부 도구 활성화
 
-런타임에 `is_enabled` 매개변수를 사용하여 에이전트 도구를 조건부로 활성화하거나 비활성화할 수 있습니다. 이를 통해 컨텍스트, 사용자 선호도, 런타임 조건에 따라 LLM에 제공할 도구를 동적으로 필터링할 수 있습니다.
+`is_enabled` 매개변수를 사용하면 런타임에 에이전트 도구를 조건부로 활성화하거나 비활성화할 수 있습니다. 이를 통해 컨텍스트, 사용자 선호도, 런타임 조건에 따라 LLM 에서 사용 가능한 도구를 동적으로 필터링할 수 있습니다.
 
 ```python
 import asyncio
@@ -458,20 +458,21 @@ asyncio.run(main())
 
 `is_enabled` 매개변수는 다음을 허용합니다:
 
--   **불리언 값**: `True`(항상 활성) 또는 `False`(항상 비활성)
--   **호출 가능한 함수**: `(context, agent)`를 받아 불리언을 반환하는 함수
--   **비동기 함수**: 복잡한 조건 로직을 위한 비동기 함수
+-   **불리언 값**: `True` (항상 활성화) 또는 `False` (항상 비활성화)
+-   **호출 가능한 함수**: `(context, agent)` 를 받아 불리언을 반환하는 함수
+-   **비동기 함수**: 복잡한 조건부 로직을 위한 async 함수
 
-비활성화된 도구는 런타임에 LLM에서 완전히 숨겨지므로 다음에 유용합니다:
+비활성화된 도구는 런타임에서 LLM 에 완전히 숨겨지므로, 다음과 같은 용도에 유용합니다:
 
--   사용자 권한 기반 기능 게이팅
+-   사용자 권한에 따른 기능 게이팅
 -   환경별 도구 가용성(dev vs prod)
--   도구 구성에 대한 A/B 테스트
--   런타임 상태 기반 동적 도구 필터링
+-   서로 다른 도구 구성을 A/B 테스트
+-   런타임 상태에 따른 동적 도구 필터링
 
-## 실험적: Codex 도구
+## 실험적: Codex tool
 
-`codex_tool`은 Codex CLI를 래핑하여 에이전트가 도구 호출 중에 작업공간 범위의 작업(셸, 파일 편집, MCP 도구)을 실행할 수 있도록 합니다. 이 표면은 실험적이며 변경될 수 있습니다.
+`codex_tool` 은 Codex CLI 를 래핑하여 에이전트가 도구 호출 중에 워크스페이스 범위의 작업(shell, 파일 편집, MCP 도구)을 실행할 수 있게 합니다.
+이 표면은 실험적이며 변경될 수 있습니다.
 
 ```python
 from agents import Agent
@@ -495,24 +496,26 @@ agent = Agent(
 )
 ```
 
-알아둘 점:
+알아둘 사항:
 
--   인증: `CODEX_API_KEY`(권장) 또는 `OPENAI_API_KEY`를 설정하거나 `codex_options={"api_key": "..."}`를 전달
--   입력: 도구 호출에는 최소 하나의 `inputs` 항목이 필요하며 `{ "type": "text", "text": ... }` 또는 `{ "type": "local_image", "path": ... }` 형태여야 함
--   안전: `sandbox_mode`를 `working_directory`와 함께 사용하고, Git 리포지토리 외부에서는 `skip_git_repo_check=True` 설정
--   동작: `persist_session=True`는 단일 Codex 스레드를 재사용하고 해당 `thread_id`를 반환
--   스트리밍: `on_stream`은 Codex 이벤트(추론, 명령 실행, MCP 도구 호출, 파일 변경, 웹 검색)를 수신
--   출력: 결과에는 `response`, `usage`, `thread_id`가 포함되며, usage는 `RunContextWrapper.usage`에 추가됨
--   구조: `output_schema`는 타입이 있는 출력이 필요할 때 구조화된 Codex 응답을 강제
--   전체 실행 가능한 샘플은 `examples/tools/codex.py`를 참고
+-   인증: `CODEX_API_KEY` (권장) 또는 `OPENAI_API_KEY` 를 설정하거나, `codex_options={"api_key": "..."}` 를 전달하세요
+-   런타임: `codex_options.base_url` 이 CLI base URL 을 오버라이드하며, `codex_options.codex_path_override` (또는 `CODEX_PATH`) 가 바이너리를 선택합니다
+-   환경: `codex_options.env` 가 서브프로세스 환경을 완전히 제어합니다. 제공되면 서브프로세스는 `os.environ` 을 상속하지 않습니다
+-   입력: 도구 호출에는 `inputs` 에 최소 1개 항목이 포함되어야 하며, `{ "type": "text", "text": ... }` 또는 `{ "type": "local_image", "path": ... }` 여야 합니다
+-   안전: `sandbox_mode` 를 `working_directory` 와 함께 사용하세요. Git repo 밖에서는 `skip_git_repo_check=True` 를 설정하세요
+-   동작: `persist_session=True` 는 단일 Codex 스레드를 재사용하고 `thread_id` 를 반환합니다
+-   스트리밍: `on_stream` 은 Codex 이벤트(reasoning, 명령 실행, MCP 도구 호출, 파일 변경, 웹 검색)를 수신합니다
+-   출력: 결과에는 `response`, `usage`, `thread_id` 가 포함되며, usage 는 `RunContextWrapper.usage` 에 추가됩니다
+-   구조: `output_schema` 는 typed 출력이 필요할 때 구조화된 Codex 응답을 강제합니다
+-   전체 실행 가능한 샘플은 `examples/tools/codex.py` 를 참고하세요
 
-## 함수 도구에서의 오류 처리
+## 함수 도구에서 오류 처리
 
-`@function_tool`로 함수 도구를 만들 때 `failure_error_function`을 전달할 수 있습니다. 이는 도구 호출이 크래시된 경우 LLM에 오류 응답을 제공하는 함수입니다.
+`@function_tool` 로 함수 도구를 만들 때 `failure_error_function` 을 전달할 수 있습니다. 이는 도구 호출이 크래시했을 때 LLM 에 오류 응답을 제공하는 함수입니다.
 
--   기본적으로(아무것도 전달하지 않으면) 오류가 발생했음을 LLM에 알리는 `default_tool_error_function`이 실행됩니다
--   자체 오류 함수를 전달하면 그 함수가 대신 실행되어 해당 응답이 LLM에 전송됩니다
--   명시적으로 `None`을 전달하면, 도구 호출 오류가 재발생되어 직접 처리해야 합니다. 모델이 잘못된 JSON을 생성한 경우 `ModelBehaviorError`, 코드가 크래시한 경우 `UserError` 등이 될 수 있습니다
+-   기본값(즉, 아무것도 전달하지 않으면)으로는 오류가 발생했음을 LLM 에 알리는 `default_tool_error_function` 을 실행합니다
+-   자체 오류 함수를 전달하면, 대신 그것을 실행하고 응답을 LLM 에 보냅니다
+-   명시적으로 `None` 을 전달하면, 모든 도구 호출 오류가 사용자가 처리할 수 있도록 다시 raise 됩니다. 이는 모델이 잘못된 JSON 을 생성한 경우 `ModelBehaviorError` 일 수도 있고, 코드가 크래시한 경우 `UserError` 일 수도 있습니다
 
 ```python
 from agents import function_tool, RunContextWrapper
@@ -535,4 +538,4 @@ def get_user_profile(user_id: str) -> str:
 
 ```
 
-`FunctionTool` 객체를 수동으로 생성하는 경우, `on_invoke_tool` 함수 내부에서 오류를 처리해야 합니다.
+`FunctionTool` 객체를 수동으로 만드는 경우에는 `on_invoke_tool` 함수 내부에서 오류를 처리해야 합니다.
