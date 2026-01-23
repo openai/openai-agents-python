@@ -2068,16 +2068,6 @@ class AgentRunner:
 
         session_input_callback: SessionInputCallback | None = run_config.session_input_callback
 
-        # If the user doesn't specify an input callback and pass a list as input
-        if isinstance(input, list) and not session_input_callback:
-            raise UserError(
-                "When using session memory, list inputs require a "
-                "`RunConfig.session_input_callback` to define how they should be merged "
-                "with the conversation history. If you don't want to use a callback, "
-                "provide your input as a string instead, or disable session memory "
-                "(session=None) and pass a list to manage the history manually."
-            )
-
         # Get previous conversation history
         # Resolve session settings: session defaults + run config overrides
         session_settings = session.session_settings or SessionSettings()
