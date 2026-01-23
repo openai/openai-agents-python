@@ -1,4 +1,5 @@
 try:
+    from .manager import MCPServerManager
     from .server import (
         MCPServer,
         MCPServerSse,
@@ -28,6 +29,7 @@ __all__ = [
     "MCPServerStdioParams",
     "MCPServerStreamableHttp",
     "MCPServerStreamableHttpParams",
+    "MCPServerManager",
     "MCPUtil",
     "ToolFilter",
     "ToolFilterCallable",
