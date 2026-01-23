@@ -2070,7 +2070,7 @@ class AgentRunner:
 
         # Get previous conversation history
         # Resolve session settings: session defaults + run config overrides
-        session_settings = session.session_settings or SessionSettings()
+        session_settings = getattr(session, "session_settings", None) or SessionSettings()
         if run_config.session_settings is not None:
             session_settings = session_settings.resolve(run_config.session_settings)
 
