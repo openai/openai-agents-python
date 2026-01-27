@@ -63,7 +63,12 @@ class FakeMCPPromptServer(MCPServer):
     async def list_tools(self, run_context=None, agent=None):
         return []
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
         raise NotImplementedError("This fake server doesn't support tools")
 
     @property

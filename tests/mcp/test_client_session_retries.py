@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from mcp import ClientSession, Tool as MCPTool
@@ -13,9 +13,20 @@ class DummySession:
         self.fail_list_tools = fail_list_tools
         self.call_tool_attempts = 0
         self.list_tools_attempts = 0
+        self.last_call_tool_name: str | None = None
+        self.last_call_arguments: dict[str, Any] | None = None
+        self.last_call_meta: dict[str, Any] | None = None
 
-    async def call_tool(self, tool_name, arguments):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
         self.call_tool_attempts += 1
+        self.last_call_tool_name = tool_name
+        self.last_call_arguments = arguments
+        self.last_call_meta = meta
         if self.call_tool_attempts <= self.fail_call_tool:
             raise RuntimeError("call_tool failure")
         return CallToolResult(content=[])
@@ -62,3 +73,48 @@ async def test_list_tools_unlimited_retries():
     assert len(tools) == 1
     assert tools[0].name == "tool"
     assert session.list_tools_attempts == 4
+
+
+@pytest.mark.asyncio
+async def test_call_tool_passes_meta_to_session():
+    """Test that meta parameter is correctly passed to session.call_tool."""
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+
+    meta = {"user_id": "123", "locale": "en-US"}
+    arguments = {"arg1": "value1"}
+
+    result = await server.call_tool("my_tool", arguments, meta=meta)
+
+    assert isinstance(result, CallToolResult)
+    assert session.last_call_tool_name == "my_tool"
+    assert session.last_call_arguments == arguments
+    assert session.last_call_meta == meta
+
+
+@pytest.mark.asyncio
+async def test_call_tool_passes_none_meta_to_session():
+    """Test that None meta is correctly passed to session.call_tool."""
+    session = DummySession()
+    server = DummyServer(session=session, retries=0)
+
+    result = await server.call_tool("my_tool", {"arg": "val"})
+
+    assert isinstance(result, CallToolResult)
+    assert session.last_call_tool_name == "my_tool"
+    assert session.last_call_meta is None
+
+
+@pytest.mark.asyncio
+async def test_call_tool_with_meta_retries_preserves_meta():
+    """Test that meta is preserved across retries."""
+    session = DummySession(fail_call_tool=2)
+    server = DummyServer(session=session, retries=2)
+
+    meta = {"retry_context": "important"}
+    result = await server.call_tool("tool", None, meta=meta)
+
+    assert isinstance(result, CallToolResult)
+    assert session.call_tool_attempts == 3
+    # Meta should be preserved on the successful call.
+    assert session.last_call_meta == meta

@@ -79,7 +79,12 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         pass
 
@@ -402,7 +407,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"The server may have disconnected."
             ) from e
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
@@ -410,7 +420,9 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
 
         try:
-            return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+            return await self._run_with_retries(
+                lambda: session.call_tool(tool_name, arguments, meta=meta)
+            )
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(

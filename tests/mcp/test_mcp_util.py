@@ -109,7 +109,12 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
 
 
 class CrashingFakeMCPServer(FakeMCPServer):
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
         raise Exception("Crash!")
 
 
@@ -367,7 +372,12 @@ class StructuredContentTestServer(FakeMCPServer):
         self._test_content = content
         self._test_structured_content = structured_content
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Return test result with specified content and structured content."""
         self.tool_calls.append(tool_name)
 
