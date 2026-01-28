@@ -142,9 +142,18 @@ class MCPServer(abc.ABC):
         def _to_bool(value: str) -> bool:
             return value == "always"
 
-        if isinstance(require_approval, dict) and (
-            "always" in require_approval or "never" in require_approval
-        ):
+        def _is_tool_list_schema(value: object) -> bool:
+            if not isinstance(value, dict):
+                return False
+            for key in ("always", "never"):
+                if key not in value:
+                    continue
+                entry = value.get(key)
+                if isinstance(entry, dict) and "tool_names" in entry:
+                    return True
+            return False
+
+        if isinstance(require_approval, dict) and _is_tool_list_schema(require_approval):
             always_entry: RequireApprovalToolList | Any = require_approval.get("always", {})
             never_entry: RequireApprovalToolList | Any = require_approval.get("never", {})
             always_names = (

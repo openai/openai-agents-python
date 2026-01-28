@@ -87,3 +87,38 @@ async def test_mcp_require_approval_tool_mapping():
     resumed = await resume_after_first_approval(agent, first, always_approve=True)
     assert resumed.final_output == "done"
     assert server.tool_calls == ["add"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_require_approval_mapping_allows_policy_keyword_tool_names():
+    """Tool-name mappings should treat literal 'always'/'never' as tool names."""
+
+    require_approval = {"always": "always", "never": "never"}
+    server = FakeMCPServer(require_approval=require_approval)
+    server.add_tool("always", {"type": "object", "properties": {}})
+    server.add_tool("never", {"type": "object", "properties": {}})
+
+    model = FakeModel()
+    agent = Agent(name="TestAgent", model=model, mcp_servers=[server])
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("always", "{}"),
+        followup=[get_text_message("done")],
+    )
+
+    first = await Runner.run(agent, "call always")
+    assert first.interruptions, "tool named 'always' should require approval"
+    assert first.interruptions[0].tool_name == "always"
+
+    resumed = await resume_after_first_approval(agent, first, always_approve=True)
+    assert resumed.final_output == "done"
+
+    queue_function_call_and_text(
+        model,
+        get_function_tool_call("never", "{}"),
+        followup=[get_text_message("done")],
+    )
+
+    second = await Runner.run(agent, "call never")
+    assert not second.interruptions, "tool named 'never' should not require approval"
