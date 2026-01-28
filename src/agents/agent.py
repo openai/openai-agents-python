@@ -29,6 +29,8 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     default_tool_error_function,
     function_tool,
 )
@@ -536,6 +538,11 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
+        # Set origin tracking on run_agent (the FunctionTool returned by @function_tool)
+        run_agent._tool_origin = ToolOrigin(
+            type=ToolOriginType.AGENT_AS_TOOL,
+            agent_as_tool=self,
+        )
         return run_agent
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:

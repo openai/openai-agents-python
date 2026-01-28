@@ -11,7 +11,7 @@ from ..exceptions import AgentsException, ModelBehaviorError, UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import ensure_strict_json_schema
-from ..tool import FunctionTool, Tool
+from ..tool import FunctionTool, Tool, ToolOrigin, ToolOriginType
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._types import MaybeAwaitable
 
@@ -170,13 +170,18 @@ class MCPUtil:
             except Exception as e:
                 logger.info(f"Error converting MCP schema to strict mode: {e}")
 
-        return FunctionTool(
+        function_tool = FunctionTool(
             name=tool.name,
             description=tool.description or "",
             params_json_schema=schema,
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
         )
+        function_tool._tool_origin = ToolOrigin(
+            type=ToolOriginType.MCP,
+            mcp_server=server,
+        )
+        return function_tool
 
     @classmethod
     async def invoke_mcp_tool(
