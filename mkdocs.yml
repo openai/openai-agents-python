@@ -154,6 +154,7 @@ plugins:
                     - ref/extensions/memory/sqlalchemy_session.md
                     - ref/extensions/memory/encrypt_session.md
                     - ref/extensions/memory/advanced_sqlite_session.md
+                    - ref/extensions/tracing/opentelemetry_processor.md
         - locale: ja
           name: 日本語
           build: true
