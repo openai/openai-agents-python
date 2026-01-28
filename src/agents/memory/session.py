@@ -141,4 +141,10 @@ def is_openai_responses_compaction_aware_session(
     session: Session | None,
 ) -> TypeGuard[OpenAIResponsesCompactionAwareSession]:
     """Check if a session supports responses compaction."""
-    return isinstance(session, OpenAIResponsesCompactionAwareSession)
+    if session is None:
+        return False
+    try:
+        run_compaction = getattr(session, "run_compaction", None)
+    except Exception:
+        return False
+    return callable(run_compaction)
