@@ -1556,7 +1556,12 @@ class AgentRunner:
                     usage=usage,
                     response_id=event.response.id,
                 )
-                context_wrapper.usage.add(usage)
+                context_wrapper.usage.add(
+                    usage,
+                    model_name=model.model,
+                    agent_name=agent.name,
+                    response_id=event.response.id,
+                )
 
             if isinstance(event, ResponseOutputItemDoneEvent):
                 output_item = event.item
@@ -1991,7 +1996,12 @@ class AgentRunner:
             prompt=prompt_config,
         )
 
-        context_wrapper.usage.add(new_response.usage)
+        context_wrapper.usage.add(
+            new_response.usage,
+            model_name=model.model,
+            agent_name=agent.name,
+            response_id=new_response.response_id,
+        )
 
         # If we have run hooks, or if the agent has hooks, we need to call them after the LLM call
         await asyncio.gather(
