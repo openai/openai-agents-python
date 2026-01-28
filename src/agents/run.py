@@ -447,6 +447,7 @@ class AgentRunner:
                     raw_input,
                     session,
                     run_config.session_input_callback,
+                    run_config.session_settings,
                     include_history_in_prepared_input=False,
                     preserve_dropped_new_items=True,
                 )
@@ -460,6 +461,7 @@ class AgentRunner:
                     raw_input,
                     session,
                     run_config.session_input_callback,
+                    run_config.session_settings,
                 )
                 original_input_for_state = prepared_input
 

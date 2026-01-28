@@ -147,7 +147,10 @@ async def test_mcp_tool_graceful_error_handling(caplog: pytest.LogCaptureFixture
 
     # Convert MCP tool to FunctionTool (this wraps invoke_mcp_tool with error handling)
     mcp_tool = MCPTool(name="crashing_tool", inputSchema={})
-    function_tool = MCPUtil.to_function_tool(mcp_tool, server, convert_schemas_to_strict=False)
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
 
     # Create tool context
     tool_context = ToolContext(
@@ -200,7 +203,10 @@ async def test_mcp_tool_timeout_handling():
 
     # Convert MCP tool to FunctionTool
     mcp_tool = MCPTool(name="timeout_tool", inputSchema={})
-    function_tool = MCPUtil.to_function_tool(mcp_tool, server, convert_schemas_to_strict=False)
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool, server, convert_schemas_to_strict=False, agent=agent
+    )
 
     # Create tool context
     tool_context = ToolContext(
