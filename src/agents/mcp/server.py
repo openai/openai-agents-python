@@ -8,7 +8,7 @@ from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, cast
 
 import httpx
 
@@ -26,6 +26,7 @@ from typing_extensions import NotRequired, TypedDict
 from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
+from ..tool import ToolErrorFunction
 from ..util._types import MaybeAwaitable
 from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
 
@@ -48,6 +49,13 @@ RequireApprovalSetting = (
 
 T = TypeVar("T")
 
+
+class _UnsetType:
+    pass
+
+
+_UNSET = _UnsetType()
+
 if TYPE_CHECKING:
     from ..agent import AgentBase
 
@@ -59,6 +67,7 @@ class MCPServer(abc.ABC):
         self,
         use_structured_content: bool = False,
         require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         """
         Args:
@@ -70,11 +79,16 @@ class MCPServer(abc.ABC):
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, a boolean, or an object with always/never
                 tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
             require_approval=require_approval
         )
+        self._failure_error_function = failure_error_function
 
     @abc.abstractmethod
     async def connect(self):
@@ -207,6 +221,14 @@ class MCPServer(abc.ABC):
 
         return bool(policy)
 
+    def _get_failure_error_function(
+        self, agent_failure_error_function: ToolErrorFunction | None
+    ) -> ToolErrorFunction | None:
+        """Return the effective error handler for MCP tool failures."""
+        if self._failure_error_function is _UNSET:
+            return agent_failure_error_function
+        return cast(ToolErrorFunction | None, self._failure_error_function)
+
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
@@ -221,6 +243,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         """
         Args:
@@ -247,10 +270,15 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, a boolean, or an object with always/never
                 tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
         """
         super().__init__(
             use_structured_content=use_structured_content,
             require_approval=require_approval,
+            failure_error_function=failure_error_function,
         )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -682,6 +710,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -713,6 +742,10 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
         """
         super().__init__(
             cache_tools_list,
@@ -723,6 +756,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
             retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            failure_error_function=failure_error_function,
         )
 
         self.params = StdioServerParameters(
@@ -788,6 +822,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -821,6 +856,10 @@ class MCPServerSse(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
         """
         super().__init__(
             cache_tools_list,
@@ -831,6 +870,7 @@ class MCPServerSse(_MCPServerWithClientSession):
             retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            failure_error_function=failure_error_function,
         )
 
         self.params = params
@@ -899,6 +939,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -933,6 +974,10 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            failure_error_function: Optional function used to convert MCP tool failures into
+                a model-visible error message. If explicitly set to None, tool errors will be
+                raised instead of converted. If left unset, the agent-level configuration (or
+                SDK default) will be used.
         """
         super().__init__(
             cache_tools_list,
@@ -943,6 +988,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
             retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            failure_error_function=failure_error_function,
         )
 
         self.params = params

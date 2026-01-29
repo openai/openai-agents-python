@@ -226,6 +226,99 @@ async def test_mcp_tool_timeout_handling():
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_agent_default():
+    """Agent-level failure_error_function should handle MCP tool failures."""
+
+    def custom_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "custom_mcp_failure"
+
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": custom_failure},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_1",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert result == "custom_mcp_failure"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_server_override():
+    """Server-level failure_error_function should override agent defaults."""
+
+    def agent_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "agent_failure"
+
+    def server_failure(_ctx: RunContextWrapper[Any], _exc: Exception) -> str:
+        return "server_failure"
+
+    server = CrashingFakeMCPServer(failure_error_function=server_failure)
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": agent_failure},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_2",
+        tool_arguments="{}",
+    )
+
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+    assert result == "server_failure"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_error_function_server_none_raises():
+    """Server-level None should re-raise MCP tool failures."""
+
+    server = CrashingFakeMCPServer(failure_error_function=None)
+    server.add_tool("crashing_tool", {})
+
+    agent = Agent(
+        name="test-agent",
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": default_tool_error_function},
+    )
+    run_context = RunContextWrapper(context=None)
+    tools = await agent.get_mcp_tools(run_context)
+    function_tool = next(tool for tool in tools if tool.name == "crashing_tool")
+    assert isinstance(function_tool, FunctionTool)
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="crashing_tool",
+        tool_call_id="test_call_custom_3",
+        tool_arguments="{}",
+    )
+
+    with pytest.raises(AgentsException):
+        await function_tool.on_invoke_tool(tool_context, "{}")
+
+
+@pytest.mark.asyncio
 async def test_agent_convert_schemas_true():
     """Test that setting convert_schemas_to_strict to True converts non-strict schemas to strict.
     - 'foo' tool is already strict and remains strict.

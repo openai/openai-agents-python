@@ -16,8 +16,9 @@ from mcp.types import (
 )
 
 from agents.mcp import MCPServer
-from agents.mcp.server import _MCPServerWithClientSession
+from agents.mcp.server import _UNSET, _MCPServerWithClientSession, _UnsetType
 from agents.mcp.util import ToolFilter
+from agents.tool import ToolErrorFunction
 
 tee = shutil.which("tee") or ""
 assert tee, "tee not found"
@@ -70,10 +71,12 @@ class FakeMCPServer(MCPServer):
         tool_filter: ToolFilter = None,
         server_name: str = "fake_mcp_server",
         require_approval: object | None = None,
+        failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
     ):
         super().__init__(
             use_structured_content=False,
             require_approval=require_approval,  # type: ignore[arg-type]
+            failure_error_function=failure_error_function,
         )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []

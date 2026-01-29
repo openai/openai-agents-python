@@ -102,6 +102,12 @@ class MCPConfig(TypedDict):
     best-effort conversion, so some schemas may not be convertible. Defaults to False.
     """
 
+    failure_error_function: NotRequired[ToolErrorFunction | None]
+    """Optional function to convert MCP tool failures into model-visible messages. If explicitly
+    set to None, tool errors will be raised instead. If unset, defaults to
+    default_tool_error_function.
+    """
+
 
 @dataclass
 class AgentBase(Generic[TContext]):
@@ -135,8 +141,15 @@ class AgentBase(Generic[TContext]):
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
+        failure_error_function = self.mcp_config.get(
+            "failure_error_function", default_tool_error_function
+        )
         return await MCPUtil.get_all_function_tools(
-            self.mcp_servers, convert_schemas_to_strict, run_context, self
+            self.mcp_servers,
+            convert_schemas_to_strict,
+            run_context,
+            self,
+            failure_error_function=failure_error_function,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
