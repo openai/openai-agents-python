@@ -4,7 +4,7 @@ import functools
 import inspect
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
@@ -27,8 +27,12 @@ from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_s
 from ..util import _error_tracing
 from ..util._types import MaybeAwaitable
 
-ToolOutputItem = ToolOutputTextDict | ToolOutputImageDict
-ToolOutput = str | ToolOutputItem | list[ToolOutputItem]
+if TYPE_CHECKING:
+    ToolOutputItem = ToolOutputTextDict | ToolOutputImageDict
+    ToolOutput = str | ToolOutputItem | list[ToolOutputItem]
+else:
+    ToolOutputItem = Union[ToolOutputTextDict, ToolOutputImageDict]  # noqa: UP007
+    ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
@@ -93,7 +97,10 @@ class ToolFilterStatic(TypedDict):
     If set, these tools will be filtered out."""
 
 
-ToolFilter = ToolFilterCallable | ToolFilterStatic | None
+if TYPE_CHECKING:
+    ToolFilter = ToolFilterCallable | ToolFilterStatic | None
+else:
+    ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]  # noqa: UP007
 """A tool filter that can be either a function, static configuration, or None (no filtering)."""
 
 
