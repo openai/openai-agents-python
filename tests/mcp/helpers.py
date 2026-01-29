@@ -17,7 +17,7 @@ from mcp.types import (
 
 from agents.mcp import MCPServer
 from agents.mcp.server import _UNSET, _MCPServerWithClientSession, _UnsetType
-from agents.mcp.util import ToolFilter
+from agents.mcp.util import MCPToolMetaResolver, ToolFilter
 from agents.tool import ToolErrorFunction
 
 tee = shutil.which("tee") or ""
@@ -72,15 +72,18 @@ class FakeMCPServer(MCPServer):
         server_name: str = "fake_mcp_server",
         require_approval: object | None = None,
         failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         super().__init__(
             use_structured_content=False,
             require_approval=require_approval,  # type: ignore[arg-type]
             failure_error_function=failure_error_function,
+            tool_meta_resolver=tool_meta_resolver,
         )
         self.tools: list[MCPTool] = tools or []
         self.tool_calls: list[str] = []
         self.tool_results: list[str] = []
+        self.tool_metas: list[dict[str, Any] | None] = []
         self.tool_filter = tool_filter
         self._server_name = server_name
         self._custom_content: list[Content] | None = None
@@ -105,9 +108,15 @@ class FakeMCPServer(MCPServer):
 
         return tools
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         self.tool_calls.append(tool_name)
         self.tool_results.append(f"result_{tool_name}_{json.dumps(arguments)}")
+        self.tool_metas.append(meta)
 
         # Allow testing custom content scenarios
         if self._custom_content is not None:

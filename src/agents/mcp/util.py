@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 import json
@@ -102,6 +103,40 @@ if TYPE_CHECKING:
 else:
     ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]  # noqa: UP007
 """A tool filter that can be either a function, static configuration, or None (no filtering)."""
+
+
+@dataclass
+class MCPToolMetaContext:
+    """Context information available to MCP tool meta resolver functions."""
+
+    run_context: RunContextWrapper[Any]
+    """The current run context."""
+
+    server_name: str
+    """The name of the MCP server."""
+
+    tool_name: str
+    """The name of the tool being invoked."""
+
+    arguments: dict[str, Any] | None
+    """The parsed tool arguments."""
+
+
+if TYPE_CHECKING:
+    MCPToolMetaResolver = Callable[
+        [MCPToolMetaContext],
+        MaybeAwaitable[dict[str, Any] | None],
+    ]
+else:
+    MCPToolMetaResolver = Callable[..., Any]
+"""A function that produces MCP request metadata for tool calls.
+
+Args:
+    context: Context information about the tool invocation.
+
+Returns:
+    A dict to send as MCP `_meta`, or None to omit metadata.
+"""
 
 
 def create_static_tool_filter(
@@ -264,9 +299,57 @@ class MCPUtil:
             needs_approval=server._get_needs_approval_for_tool(tool, agent),
         )
 
+    @staticmethod
+    def _merge_mcp_meta(
+        resolved_meta: dict[str, Any] | None,
+        explicit_meta: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if resolved_meta is None and explicit_meta is None:
+            return None
+        merged: dict[str, Any] = {}
+        if resolved_meta is not None:
+            merged.update(resolved_meta)
+        if explicit_meta is not None:
+            merged.update(explicit_meta)
+        return merged
+
+    @classmethod
+    async def _resolve_meta(
+        cls,
+        server: MCPServer,
+        context: RunContextWrapper[Any],
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        meta_resolver = getattr(server, "tool_meta_resolver", None)
+        if meta_resolver is None:
+            return None
+
+        arguments_copy = copy.deepcopy(arguments) if arguments is not None else None
+        resolver_context = MCPToolMetaContext(
+            run_context=context,
+            server_name=server.name,
+            tool_name=tool_name,
+            arguments=arguments_copy,
+        )
+        result = meta_resolver(resolver_context)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is None:
+            return None
+        if not isinstance(result, dict):
+            raise TypeError("MCP meta resolver must return a dict or None.")
+        return result
+
     @classmethod
     async def invoke_mcp_tool(
-        cls, server: MCPServer, tool: MCPTool, context: RunContextWrapper[Any], input_json: str
+        cls,
+        server: MCPServer,
+        tool: MCPTool,
+        context: RunContextWrapper[Any],
+        input_json: str,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as a string."""
         try:
@@ -286,7 +369,12 @@ class MCPUtil:
             logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
 
         try:
-            result = await server.call_tool(tool.name, json_data)
+            resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
+            merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
+            if merged_meta is None:
+                result = await server.call_tool(tool.name, json_data)
+            else:
+                result = await server.call_tool(tool.name, json_data, meta=merged_meta)
         except UserError:
             # Re-raise UserError as-is (it already has a good message)
             raise

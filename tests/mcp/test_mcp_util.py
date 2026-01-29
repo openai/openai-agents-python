@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -93,6 +94,60 @@ async def test_invoke_mcp_tool():
 
 
 @pytest.mark.asyncio
+async def test_mcp_meta_resolver_merges_and_passes():
+    captured: dict[str, Any] = {}
+
+    def resolve_meta(context):
+        captured["run_context"] = context.run_context
+        captured["server_name"] = context.server_name
+        captured["tool_name"] = context.tool_name
+        captured["arguments"] = context.arguments
+        return {"request_id": "req-123", "locale": "ja"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context={"request_id": "req-123"})
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(
+        server,
+        tool,
+        ctx,
+        "{}",
+        meta={"locale": "en", "extra": "value"},
+    )
+
+    assert server.tool_metas[-1] == {"request_id": "req-123", "locale": "en", "extra": "value"}
+    assert captured["run_context"] is ctx
+    assert captured["server_name"] == server.name
+    assert captured["tool_name"] == "test_tool_1"
+    assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_meta_resolver_does_not_mutate_arguments():
+    def resolve_meta(context):
+        if context.arguments is not None:
+            context.arguments["mutated"] = "yes"
+        return {"meta": "ok"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, '{"foo": "bar"}')
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    assert result.startswith(prefix)
+    args = json.loads(result[len(prefix) :])
+    assert args == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.DEBUG)
 
@@ -110,7 +165,12 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
 
 
 class CrashingFakeMCPServer(FakeMCPServer):
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ):
         raise Exception("Crash!")
 
 
@@ -191,7 +251,12 @@ async def test_mcp_tool_timeout_handling():
     """
 
     class TimeoutFakeMCPServer(FakeMCPServer):
-        async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None):
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ):
             # Simulate a timeout error - this would normally be wrapped in AgentsException
             # by invoke_mcp_tool
             raise Exception(
@@ -561,7 +626,12 @@ class StructuredContentTestServer(FakeMCPServer):
         self._test_content = content
         self._test_structured_content = structured_content
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Return test result with specified content and structured content."""
         self.tool_calls.append(tool_name)
 
