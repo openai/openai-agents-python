@@ -552,20 +552,20 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                         content_index=current_item_content_index,
                     )
                 )
-                should_send_truncate = True
-                max_audio_ms: int | None = None
-                audio_limits = self._get_audio_limits(current_item_id, current_item_content_index)
-                if audio_limits is not None:
-                    audio_length_ms, max_audio_ms = audio_limits
-                    if max_audio_ms <= 0:
-                        should_send_truncate = False
-                        logger.debug(
-                            "Skipping truncate because no audio has been received yet. "
-                            f"Item id: {current_item_id}, "
-                            f"elapsed ms: {elapsed_ms}, "
-                            f"audio length ms: {audio_length_ms}"
-                        )
-                if should_send_truncate:
+                if not self._ongoing_response:
+                    logger.debug(
+                        "Skipping truncate because no response is in progress. "
+                        f"Item id: {current_item_id}, "
+                        f"elapsed ms: {elapsed_ms}, "
+                        f"content index: {current_item_content_index}"
+                    )
+                else:
+                    max_audio_ms: int | None = None
+                    audio_limits = self._get_audio_limits(
+                        current_item_id, current_item_content_index
+                    )
+                    if audio_limits is not None:
+                        _, max_audio_ms = audio_limits
                     truncated_ms = max(int(elapsed_ms), 0)
                     if max_audio_ms is not None:
                         truncated_ms = min(truncated_ms, max_audio_ms)
@@ -779,21 +779,20 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     effective_elapsed_ms = float(elapsed_override)
 
                 if playback_item_id and effective_elapsed_ms is not None:
-                    should_send_truncate = True
-                    max_audio_ms: int | None = None
-                    audio_limits = self._get_audio_limits(playback_item_id, playback_content_index)
-                    if audio_limits is not None:
-                        audio_length_ms, max_audio_ms = audio_limits
-                        if audio_length_ms <= 0:
-                            should_send_truncate = False
-                            logger.debug(
-                                "Skipping truncate because no audio has been received yet. "
-                                f"Item id: {playback_item_id}, "
-                                f"elapsed ms: {effective_elapsed_ms}, "
-                                f"audio length ms: {audio_length_ms}"
-                            )
-
-                    if should_send_truncate:
+                    if not self._ongoing_response:
+                        logger.debug(
+                            "Skipping truncate because no response is in progress. "
+                            f"Item id: {playback_item_id}, "
+                            f"elapsed ms: {effective_elapsed_ms}, "
+                            f"content index: {playback_content_index}"
+                        )
+                    else:
+                        max_audio_ms: int | None = None
+                        audio_limits = self._get_audio_limits(
+                            playback_item_id, playback_content_index
+                        )
+                        if audio_limits is not None:
+                            _, max_audio_ms = audio_limits
                         truncated_ms = max(int(round(effective_elapsed_ms)), 0)
                         if max_audio_ms is not None:
                             truncated_ms = min(truncated_ms, max_audio_ms)
