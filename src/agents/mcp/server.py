@@ -111,6 +111,16 @@ class MCPServer(abc.ABC):
         """Invoke a tool on the server."""
         pass
 
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        """Return the most recently fetched tools list, if available.
+
+        Implementations may return `None` when tools have not been fetched yet or caching is
+        disabled.
+        """
+
+        return None
+
     @abc.abstractmethod
     async def list_prompts(
         self,
@@ -210,6 +220,10 @@ class MCPServer(abc.ABC):
 
 class _MCPServerWithClientSession(MCPServer, abc.ABC):
     """Base class for MCP servers that use a `ClientSession` to communicate with the server."""
+
+    @property
+    def cached_tools(self) -> list[MCPTool] | None:
+        return self._tools_list
 
     def __init__(
         self,

@@ -949,7 +949,7 @@ class TestSerializationRoundTrip:
         )
         state._generated_items.append(MessageOutputItem(agent=agent, raw_item=msg))
 
-        # 2. Tool call item
+        # 2. Tool call item with description
         tool_call = ResponseFunctionToolCall(
             type="function_call",
             name="my_tool",
@@ -957,9 +957,21 @@ class TestSerializationRoundTrip:
             status="completed",
             arguments='{"arg": "val"}',
         )
-        state._generated_items.append(ToolCallItem(agent=agent, raw_item=tool_call))
+        state._generated_items.append(
+            ToolCallItem(agent=agent, raw_item=tool_call, description="My tool description")
+        )
 
-        # 3. Tool call output item
+        # 3. Tool call item without description
+        tool_call_no_desc = ResponseFunctionToolCall(
+            type="function_call",
+            name="other_tool",
+            call_id="call_2",
+            status="completed",
+            arguments="{}",
+        )
+        state._generated_items.append(ToolCallItem(agent=agent, raw_item=tool_call_no_desc))
+
+        # 4. Tool call output item
         tool_output = {
             "type": "function_call_output",
             "call_id": "call_1",
@@ -974,10 +986,15 @@ class TestSerializationRoundTrip:
         new_state = await RunState.from_json(agent, json_data)
 
         # Verify all items were restored
-        assert len(new_state._generated_items) == 3
+        assert len(new_state._generated_items) == 4
         assert isinstance(new_state._generated_items[0], MessageOutputItem)
         assert isinstance(new_state._generated_items[1], ToolCallItem)
-        assert isinstance(new_state._generated_items[2], ToolCallOutputItem)
+        assert isinstance(new_state._generated_items[2], ToolCallItem)
+        assert isinstance(new_state._generated_items[3], ToolCallOutputItem)
+
+        # Verify description field is preserved
+        assert new_state._generated_items[1].description == "My tool description"
+        assert new_state._generated_items[2].description is None
 
     async def test_serializes_original_input_with_function_call_output(self):
         """Test that original_input with function_call_output items is preserved."""

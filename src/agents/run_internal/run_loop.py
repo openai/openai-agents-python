@@ -1038,6 +1038,10 @@ async def run_single_turn_streamed(
     """Run a single streamed turn and emit events as results arrive."""
     emitted_tool_call_ids: set[str] = set()
     emitted_reasoning_item_ids: set[str] = set()
+    # Precompute tool name -> tool map once per turn. Dict "last wins" semantics match
+    # execution in process_model_response, so duplicate names (e.g., MCP + local tool)
+    # stream the same description that execution uses.
+    tool_map = {t.name: t for t in all_tools if hasattr(t, "name") and t.name}
 
     try:
         turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
@@ -1208,9 +1212,17 @@ async def run_single_turn_streamed(
                 ):
                     emitted_tool_call_ids.add(output_call_id)
 
+                    # Look up tool description from precomputed map ("last wins" matches
+                    # execution behavior in process_model_response).
+                    tool_name = getattr(output_item, "name", None)
+                    tool_description: str | None = None
+                    if isinstance(tool_name, str) and tool_name in tool_map:
+                        tool_description = getattr(tool_map[tool_name], "description", None)
+
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
+                        description=tool_description,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")

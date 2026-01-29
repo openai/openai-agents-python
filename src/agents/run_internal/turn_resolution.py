@@ -1285,7 +1285,19 @@ def process_model_response(
         elif isinstance(output, McpListTools):
             items.append(MCPListToolsItem(raw_item=output, agent=agent))
         elif isinstance(output, McpCall):
-            items.append(ToolCallItem(raw_item=output, agent=agent))
+            # Look up MCP tool description from the server's cached tools list.
+            # Tool discovery is async I/O, but this function is sync, so this is best-effort and
+            # only works if the server has cached tool metadata (e.g., when cache_tools_list is
+            # enabled).
+            _mcp_description: str | None = None
+            for _server in agent.mcp_servers:
+                if _server.name == output.server_label:
+                    for _tool in _server.cached_tools or []:
+                        if _tool.name == output.name:
+                            _mcp_description = _tool.description
+                            break
+                    break
+            items.append(ToolCallItem(raw_item=output, agent=agent, description=_mcp_description))
             tools_used.append("mcp")
         elif isinstance(output, ImageGenerationCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
@@ -1409,11 +1421,14 @@ def process_model_response(
                 error = f"Tool {output.name} not found in agent {agent.name}"
                 raise ModelBehaviorError(error)
 
-            items.append(ToolCallItem(raw_item=output, agent=agent))
+            func_tool = function_map[output.name]
+            items.append(
+                ToolCallItem(raw_item=output, agent=agent, description=func_tool.description)
+            )
             functions.append(
                 ToolRunFunction(
                     tool_call=output,
-                    function_tool=function_map[output.name],
+                    function_tool=func_tool,
                 )
             )
 

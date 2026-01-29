@@ -245,6 +245,9 @@ class ToolCallItem(RunItemBase[Any]):
 
     type: Literal["tool_call_item"] = "tool_call_item"
 
+    description: str | None = None
+    """Optional tool description if known at item creation time."""
+
 
 ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,
