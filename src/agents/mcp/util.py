@@ -4,7 +4,7 @@ import functools
 import inspect
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
@@ -27,8 +27,8 @@ from ..tracing import FunctionSpanData, SpanError, get_current_span, mcp_tools_s
 from ..util import _error_tracing
 from ..util._types import MaybeAwaitable
 
-ToolOutputItem = Union[ToolOutputTextDict, ToolOutputImageDict]
-ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]
+ToolOutputItem = ToolOutputTextDict | ToolOutputImageDict
+ToolOutput = str | ToolOutputItem | list[ToolOutputItem]
 
 if TYPE_CHECKING:
     from mcp.types import Tool as MCPTool
@@ -46,9 +46,9 @@ class HttpClientFactory(Protocol):
 
     def __call__(
         self,
-        headers: Optional[dict[str, str]] = None,
-        timeout: Optional[httpx.Timeout] = None,
-        auth: Optional[httpx.Auth] = None,
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
     ) -> httpx.AsyncClient: ...
 
 
@@ -59,14 +59,14 @@ class ToolFilterContext:
     run_context: RunContextWrapper[Any]
     """The current run context."""
 
-    agent: "AgentBase"
+    agent: AgentBase
     """The agent that is requesting the tool list."""
 
     server_name: str
     """The name of the MCP server."""
 
 
-ToolFilterCallable = Callable[["ToolFilterContext", "MCPTool"], MaybeAwaitable[bool]]
+ToolFilterCallable = Callable[[ToolFilterContext, MCPTool], MaybeAwaitable[bool]]
 """A function that determines whether a tool should be available.
 
 Args:
@@ -90,14 +90,14 @@ class ToolFilterStatic(TypedDict):
     If set, these tools will be filtered out."""
 
 
-ToolFilter = Union[ToolFilterCallable, ToolFilterStatic, None]
+ToolFilter = ToolFilterCallable | ToolFilterStatic | None
 """A tool filter that can be either a function, static configuration, or None (no filtering)."""
 
 
 def create_static_tool_filter(
-    allowed_tool_names: Optional[list[str]] = None,
-    blocked_tool_names: Optional[list[str]] = None,
-) -> Optional[ToolFilterStatic]:
+    allowed_tool_names: list[str] | None = None,
+    blocked_tool_names: list[str] | None = None,
+) -> ToolFilterStatic | None:
     """Create a static tool filter from allowlist and blocklist parameters.
 
     This is a convenience function for creating a ToolFilterStatic.
@@ -127,10 +127,10 @@ class MCPUtil:
     @classmethod
     async def get_all_function_tools(
         cls,
-        servers: list["MCPServer"],
+        servers: list[MCPServer],
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
@@ -158,10 +158,10 @@ class MCPUtil:
     @classmethod
     async def get_function_tools(
         cls,
-        server: "MCPServer",
+        server: MCPServer,
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
@@ -184,10 +184,10 @@ class MCPUtil:
     @classmethod
     def to_function_tool(
         cls,
-        tool: "MCPTool",
-        server: "MCPServer",
+        tool: MCPTool,
+        server: MCPServer,
         convert_schemas_to_strict: bool,
-        agent: "AgentBase",
+        agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
@@ -256,7 +256,7 @@ class MCPUtil:
 
     @classmethod
     async def invoke_mcp_tool(
-        cls, server: "MCPServer", tool: "MCPTool", context: RunContextWrapper[Any], input_json: str
+        cls, server: MCPServer, tool: MCPTool, context: RunContextWrapper[Any], input_json: str
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as a string."""
         try:
