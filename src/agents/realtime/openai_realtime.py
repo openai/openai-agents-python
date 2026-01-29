@@ -4,6 +4,7 @@ import asyncio
 import base64
 import inspect
 import json
+import math
 import os
 from collections.abc import Mapping
 from datetime import datetime
@@ -526,7 +527,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
         if audio_state is None:
             return None
-        max_audio_ms = int(audio_state.audio_length_ms)
+        max_audio_ms = int(math.ceil(audio_state.audio_length_ms))
         return audio_state.audio_length_ms, max_audio_ms
 
     async def _send_interrupt(self, event: RealtimeModelSendInterrupt) -> None:
@@ -778,12 +779,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     effective_elapsed_ms = float(elapsed_override)
 
                 if playback_item_id and effective_elapsed_ms is not None:
-                    should_send_truncate = self._ongoing_response
+                    should_send_truncate = True
                     max_audio_ms: int | None = None
                     audio_limits = self._get_audio_limits(playback_item_id, playback_content_index)
                     if audio_limits is not None:
                         audio_length_ms, max_audio_ms = audio_limits
-                        if max_audio_ms <= 0:
+                        if audio_length_ms <= 0:
                             should_send_truncate = False
                             logger.debug(
                                 "Skipping truncate because no audio has been received yet. "
@@ -791,13 +792,6 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                                 f"elapsed ms: {effective_elapsed_ms}, "
                                 f"audio length ms: {audio_length_ms}"
                             )
-                    if not self._ongoing_response:
-                        logger.debug(
-                            "Skipping truncate because no response is in progress. "
-                            f"Item id: {playback_item_id}, "
-                            f"elapsed ms: {effective_elapsed_ms}, "
-                            f"content index: {playback_content_index}"
-                        )
 
                     if should_send_truncate:
                         truncated_ms = max(int(round(effective_elapsed_ms)), 0)
