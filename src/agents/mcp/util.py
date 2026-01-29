@@ -66,7 +66,10 @@ class ToolFilterContext:
     """The name of the MCP server."""
 
 
-ToolFilterCallable = Callable[[ToolFilterContext, MCPTool], MaybeAwaitable[bool]]
+if TYPE_CHECKING:
+    ToolFilterCallable = Callable[[ToolFilterContext, MCPTool], MaybeAwaitable[bool]]
+else:
+    ToolFilterCallable = Callable[[ToolFilterContext, Any], MaybeAwaitable[bool]]
 """A function that determines whether a tool should be available.
 
 Args:
