@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -122,6 +123,28 @@ async def test_mcp_meta_resolver_merges_and_passes():
     assert captured["server_name"] == server.name
     assert captured["tool_name"] == "test_tool_1"
     assert captured["arguments"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_meta_resolver_does_not_mutate_arguments():
+    def resolve_meta(context):
+        if context.arguments is not None:
+            context.arguments["mutated"] = "yes"
+        return {"meta": "ok"}
+
+    server = FakeMCPServer(tool_meta_resolver=resolve_meta)
+    server.add_tool("test_tool_1", {})
+
+    ctx = RunContextWrapper(context=None)
+    tool = MCPTool(name="test_tool_1", inputSchema={})
+
+    await MCPUtil.invoke_mcp_tool(server, tool, ctx, '{"foo": "bar"}')
+
+    result = server.tool_results[-1]
+    prefix = f"result_{tool.name}_"
+    assert result.startswith(prefix)
+    args = json.loads(result[len(prefix) :])
+    assert args == {"foo": "bar"}
 
 
 @pytest.mark.asyncio

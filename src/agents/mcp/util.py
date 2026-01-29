@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import functools
 import inspect
 import json
@@ -110,7 +111,13 @@ class MCPToolMetaContext:
     """The parsed tool arguments."""
 
 
-MCPToolMetaResolver = Callable[[MCPToolMetaContext], MaybeAwaitable[dict[str, Any] | None]]
+if TYPE_CHECKING:
+    MCPToolMetaResolver = Callable[
+        [MCPToolMetaContext],
+        MaybeAwaitable[dict[str, Any] | None],
+    ]
+else:
+    MCPToolMetaResolver = Callable[..., Any]
 """A function that produces MCP request metadata for tool calls.
 
 Args:
@@ -287,11 +294,12 @@ class MCPUtil:
         if meta_resolver is None:
             return None
 
+        arguments_copy = copy.deepcopy(arguments) if arguments is not None else None
         resolver_context = MCPToolMetaContext(
             run_context=context,
             server_name=server.name,
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=arguments_copy,
         )
         result = meta_resolver(resolver_context)
         if inspect.isawaitable(result):
