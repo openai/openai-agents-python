@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -27,6 +28,7 @@ class TestPlaybackTracker:
 
         # Set up model with custom tracker directly
         model._playback_tracker = custom_tracker
+        model._ongoing_response = True
 
         # Mock send_raw_message to capture interrupt
         model._send_raw_message = AsyncMock()
@@ -36,9 +38,13 @@ class TestPlaybackTracker:
         await model._send_interrupt(RealtimeModelSendInterrupt())
 
         # Should use custom tracker's 500ms elapsed time
-        model._send_raw_message.assert_called_once()
-        call_args = model._send_raw_message.call_args[0][0]
-        assert call_args.audio_end_ms == 500
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 500
 
     @pytest.mark.asyncio
     async def test_interrupt_skipped_when_no_audio_playing(self, model):
@@ -51,6 +57,29 @@ class TestPlaybackTracker:
 
         # Should not send any interrupt message
         model._send_raw_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_clamps_elapsed_to_audio_length(self, model):
+        """Test interrupt clamps elapsed time to the received audio length."""
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._ongoing_response = True
+
+        # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+        state = model._audio_state_tracker.get_state("item_1", 0)
+        assert state is not None
+        state.initial_received_time = datetime.now() - timedelta(seconds=2)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 1000
 
     def test_audio_state_accumulation_across_deltas(self):
         """Test ModelAudioTracker accumulates audio length across multiple deltas."""
