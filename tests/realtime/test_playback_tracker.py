@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -50,6 +51,22 @@ class TestPlaybackTracker:
         await model._send_interrupt(RealtimeModelSendInterrupt())
 
         # Should not send any interrupt message
+        model._send_raw_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_skips_when_audio_already_played(self, model):
+        """Test interrupt skips truncate when the audio has already completed."""
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+
+        # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
+        model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)
+        state = model._audio_state_tracker.get_state("item_1", 0)
+        assert state is not None
+        state.initial_received_time = datetime.now() - timedelta(seconds=2)
+
+        await model._send_interrupt(RealtimeModelSendInterrupt())
+
         model._send_raw_message.assert_not_called()
 
     def test_audio_state_accumulation_across_deltas(self):
