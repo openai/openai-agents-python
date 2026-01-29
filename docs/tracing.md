@@ -161,3 +161,4 @@ await Runner.run(
 -   [Portkey AI](https://portkey.ai/docs/integrations/agents/openai-agents)
 -   [LangDB AI](https://docs.langdb.ai/getting-started/working-with-agent-frameworks/working-with-openai-agents-sdk)
 -   [Agenta](https://docs.agenta.ai/observability/integrations/openai-agents)
+-   [PostHog](https://posthog.com/docs/llm-analytics/installation/openai-agents)
