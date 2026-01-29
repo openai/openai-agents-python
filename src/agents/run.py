@@ -894,7 +894,7 @@ class AgentRunner:
                             _tool_use_tracker_snapshot=serialize_tool_use_tracker(tool_use_tracker),
                             max_turns=max_turns,
                         )
-                        result._current_turn = current_turn
+                        result._current_turn = max_turns
                         result._model_input_items = list(generated_items)
                         if run_state is not None:
                             result._trace_state = run_state._trace_state
