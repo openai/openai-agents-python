@@ -33,7 +33,12 @@ class TaskBoundServer(MCPServer):
     ) -> list[MCPTool]:
         raise NotImplementedError
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         raise NotImplementedError
 
     async def list_prompts(self) -> ListPromptsResult:
@@ -69,7 +74,12 @@ class FlakyServer(MCPServer):
     ) -> list[MCPTool]:
         raise NotImplementedError
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         raise NotImplementedError
 
     async def list_prompts(self) -> ListPromptsResult:
@@ -104,7 +114,12 @@ class CleanupAwareServer(MCPServer):
     ) -> list[MCPTool]:
         raise NotImplementedError
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         raise NotImplementedError
 
     async def list_prompts(self) -> ListPromptsResult:
@@ -132,7 +147,12 @@ class CancelledServer(MCPServer):
     ) -> list[MCPTool]:
         raise NotImplementedError
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         raise NotImplementedError
 
     async def list_prompts(self) -> ListPromptsResult:

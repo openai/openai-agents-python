@@ -13,6 +13,8 @@ except ImportError:
     pass
 
 from .util import (
+    MCPToolMetaContext,
+    MCPToolMetaResolver,
     MCPUtil,
     ToolFilter,
     ToolFilterCallable,
@@ -31,6 +33,8 @@ __all__ = [
     "MCPServerStreamableHttpParams",
     "MCPServerManager",
     "MCPUtil",
+    "MCPToolMetaContext",
+    "MCPToolMetaResolver",
     "ToolFilter",
     "ToolFilterCallable",
     "ToolFilterContext",
