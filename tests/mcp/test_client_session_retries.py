@@ -14,7 +14,7 @@ class DummySession:
         self.call_tool_attempts = 0
         self.list_tools_attempts = 0
 
-    async def call_tool(self, tool_name, arguments):
+    async def call_tool(self, tool_name, arguments, meta=None):
         self.call_tool_attempts += 1
         if self.call_tool_attempts <= self.fail_call_tool:
             raise RuntimeError("call_tool failure")

@@ -27,7 +27,13 @@ from ..exceptions import UserError
 from ..logger import logger
 from ..run_context import RunContextWrapper
 from ..util._types import MaybeAwaitable
-from .util import HttpClientFactory, ToolFilter, ToolFilterContext, ToolFilterStatic
+from .util import (
+    HttpClientFactory,
+    MCPToolMetaResolver,
+    ToolFilter,
+    ToolFilterContext,
+    ToolFilterStatic,
+)
 
 
 class RequireApprovalToolList(TypedDict, total=False):
@@ -59,6 +65,7 @@ class MCPServer(abc.ABC):
         self,
         use_structured_content: bool = False,
         require_approval: RequireApprovalSetting = None,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """
         Args:
@@ -70,11 +77,14 @@ class MCPServer(abc.ABC):
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, a boolean, or an object with always/never
                 tool lists (mirroring TS requireApproval). Normalized into a needs_approval policy.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         self.use_structured_content = use_structured_content
         self._needs_approval_policy = self._normalize_needs_approval(
             require_approval=require_approval
         )
+        self.tool_meta_resolver = tool_meta_resolver
 
     @abc.abstractmethod
     async def connect(self):
@@ -107,7 +117,12 @@ class MCPServer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         pass
 
@@ -221,6 +236,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """
         Args:
@@ -247,10 +263,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, a boolean, or an object with always/never
                 tool lists.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
             use_structured_content=use_structured_content,
             require_approval=require_approval,
+            tool_meta_resolver=tool_meta_resolver,
         )
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack = AsyncExitStack()
@@ -519,7 +538,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"The server may have disconnected."
             ) from e
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> CallToolResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
         """Invoke a tool on the server."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
@@ -527,7 +551,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
 
         try:
-            return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+            if meta is None:
+                return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
+            return await self._run_with_retries(
+                lambda: session.call_tool(tool_name, arguments, meta=meta)
+            )
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             raise UserError(
@@ -682,6 +710,7 @@ class MCPServerStdio(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the stdio transport.
 
@@ -713,16 +742,19 @@ class MCPServerStdio(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = StdioServerParameters(
@@ -788,6 +820,7 @@ class MCPServerSse(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the HTTP with SSE transport.
 
@@ -821,16 +854,19 @@ class MCPServerSse(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = params
@@ -899,6 +935,7 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
         retry_backoff_seconds_base: float = 1.0,
         message_handler: MessageHandlerFnT | None = None,
         require_approval: RequireApprovalSetting = None,
+        tool_meta_resolver: MCPToolMetaResolver | None = None,
     ):
         """Create a new MCP server based on the Streamable HTTP transport.
 
@@ -933,16 +970,19 @@ class MCPServerStreamableHttp(_MCPServerWithClientSession):
                 ClientSession.
             require_approval: Approval policy for tools on this server. Accepts "always"/"never",
                 a dict of tool names to those values, or an object with always/never tool lists.
+            tool_meta_resolver: Optional callable that produces MCP request metadata (`_meta`) for
+                tool calls. It is invoked by the Agents SDK before calling `call_tool`.
         """
         super().__init__(
-            cache_tools_list,
-            client_session_timeout_seconds,
-            tool_filter,
-            use_structured_content,
-            max_retry_attempts,
-            retry_backoff_seconds_base,
+            cache_tools_list=cache_tools_list,
+            client_session_timeout_seconds=client_session_timeout_seconds,
+            tool_filter=tool_filter,
+            use_structured_content=use_structured_content,
+            max_retry_attempts=max_retry_attempts,
+            retry_backoff_seconds_base=retry_backoff_seconds_base,
             message_handler=message_handler,
             require_approval=require_approval,
+            tool_meta_resolver=tool_meta_resolver,
         )
 
         self.params = params
