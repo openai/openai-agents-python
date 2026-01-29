@@ -54,8 +54,8 @@ class TestPlaybackTracker:
         model._send_raw_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_interrupt_skips_when_audio_already_played(self, model):
-        """Test interrupt skips truncate when the audio has already completed."""
+    async def test_interrupt_clamps_elapsed_to_audio_length(self, model):
+        """Test interrupt clamps elapsed time to the received audio length."""
         model._send_raw_message = AsyncMock()
         model._audio_state_tracker.set_audio_format("pcm16")
 
@@ -67,7 +67,13 @@ class TestPlaybackTracker:
 
         await model._send_interrupt(RealtimeModelSendInterrupt())
 
-        model._send_raw_message.assert_not_called()
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 1000
 
     def test_audio_state_accumulation_across_deltas(self):
         """Test ModelAudioTracker accumulates audio length across multiple deltas."""
