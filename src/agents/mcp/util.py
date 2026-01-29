@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import functools
 import inspect
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
 
 import httpx
 from typing_extensions import NotRequired, TypedDict
@@ -43,9 +45,9 @@ class HttpClientFactory(Protocol):
 
     def __call__(
         self,
-        headers: Optional[dict[str, str]] = None,
-        timeout: Optional[httpx.Timeout] = None,
-        auth: Optional[httpx.Auth] = None,
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
     ) -> httpx.AsyncClient: ...
 
 
@@ -56,7 +58,7 @@ class ToolFilterContext:
     run_context: RunContextWrapper[Any]
     """The current run context."""
 
-    agent: "AgentBase"
+    agent: AgentBase
     """The agent that is requesting the tool list."""
 
     server_name: str
@@ -120,9 +122,9 @@ Returns:
 
 
 def create_static_tool_filter(
-    allowed_tool_names: Optional[list[str]] = None,
-    blocked_tool_names: Optional[list[str]] = None,
-) -> Optional[ToolFilterStatic]:
+    allowed_tool_names: list[str] | None = None,
+    blocked_tool_names: list[str] | None = None,
+) -> ToolFilterStatic | None:
     """Create a static tool filter from allowlist and blocklist parameters.
 
     This is a convenience function for creating a ToolFilterStatic.
@@ -152,10 +154,10 @@ class MCPUtil:
     @classmethod
     async def get_all_function_tools(
         cls,
-        servers: list["MCPServer"],
+        servers: list[MCPServer],
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -178,10 +180,10 @@ class MCPUtil:
     @classmethod
     async def get_function_tools(
         cls,
-        server: "MCPServer",
+        server: MCPServer,
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
-        agent: "AgentBase",
+        agent: AgentBase,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -196,10 +198,10 @@ class MCPUtil:
     @classmethod
     def to_function_tool(
         cls,
-        tool: "MCPTool",
-        server: "MCPServer",
+        tool: MCPTool,
+        server: MCPServer,
         convert_schemas_to_strict: bool,
-        agent: "AgentBase",
+        agent: AgentBase,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool."""
         invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
@@ -276,7 +278,7 @@ class MCPUtil:
     @classmethod
     async def _resolve_meta(
         cls,
-        server: "MCPServer",
+        server: MCPServer,
         context: RunContextWrapper[Any],
         tool_name: str,
         arguments: dict[str, Any] | None,
@@ -303,8 +305,8 @@ class MCPUtil:
     @classmethod
     async def invoke_mcp_tool(
         cls,
-        server: "MCPServer",
-        tool: "MCPTool",
+        server: MCPServer,
+        tool: MCPTool,
         context: RunContextWrapper[Any],
         input_json: str,
         *,
