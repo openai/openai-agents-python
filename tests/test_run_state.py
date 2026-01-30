@@ -231,6 +231,18 @@ class TestRunState:
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
 
+    @pytest.mark.asyncio
+    async def test_tool_input_survives_serialization_round_trip(self):
+        """Structured tool input should be preserved through serialization."""
+        context = RunContextWrapper(context={"foo": "bar"})
+        context.tool_input = {"text": "hola", "target": "en"}
+        agent = Agent(name="ToolInputAgent")
+        state = make_state(agent, context=context, original_input="input1", max_turns=2)
+
+        restored = await RunState.from_string(agent, state.to_string())
+        assert restored._context is not None
+        assert restored._context.tool_input == context.tool_input
+
     async def test_trace_api_key_serialization_is_opt_in(self):
         """Trace API keys are only serialized when explicitly requested."""
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})

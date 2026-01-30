@@ -3,19 +3,29 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import json
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypeAlias, TypedDict
 
+from . import _debug
 from .agent_output import AgentOutputSchemaBase
+from .agent_tool_input import (
+    AgentAsToolInput,
+    StructuredToolInputBuilder,
+    build_structured_input_schema_info,
+    resolve_agent_tool_input,
+)
 from .agent_tool_state import (
     consume_agent_tool_run_result,
     peek_agent_tool_run_result,
     record_agent_tool_run_result,
 )
+from .exceptions import ModelBehaviorError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .logger import logger
@@ -29,16 +39,18 @@ from .models.default_models import (
 from .models.interface import Model
 from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
+from .strict_schema import ensure_strict_json_schema
 from .tool import (
     FunctionTool,
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    _extract_tool_argument_json_error,
     default_tool_error_function,
-    function_tool,
 )
 from .tool_context import ToolContext
-from .util import _transforms
+from .tracing import SpanError
+from .util import _error_tracing, _transforms
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
@@ -442,6 +454,9 @@ class Agent(AgentBase, Generic[TContext]):
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
         needs_approval: bool
         | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
+        parameters: type[Any] | None = None,
+        input_builder: StructuredToolInputBuilder | None = None,
+        include_input_schema: bool = False,
     ) -> Tool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -467,18 +482,82 @@ class Agent(AgentBase, Generic[TContext]):
             failure_error_function: If provided, generate an error message when the tool (agent) run
                 fails. The message is sent to the LLM. If None, the exception is raised instead.
             needs_approval: Bool or callable to decide if this agent tool should pause for approval.
+            parameters: Structured input type for the tool arguments (dataclass or Pydantic model).
+            input_builder: Optional function to build the nested agent input from structured data.
+            include_input_schema: Whether to include the full JSON schema in structured input.
         """
 
-        @function_tool(
-            name_override=tool_name or _transforms.transform_string_function_style(self.name),
-            description_override=tool_description or "",
-            is_enabled=is_enabled,
-            needs_approval=needs_approval,
-            failure_error_function=failure_error_function,
+        def _is_supported_parameters(value: Any) -> bool:
+            if not isinstance(value, type):
+                return False
+            if dataclasses.is_dataclass(value):
+                return True
+            return issubclass(value, BaseModel)
+
+        tool_name_resolved = tool_name or _transforms.transform_string_function_style(self.name)
+        tool_description_resolved = tool_description or ""
+        has_custom_parameters = parameters is not None
+        include_schema = bool(include_input_schema and has_custom_parameters)
+        should_capture_tool_input = bool(
+            has_custom_parameters or include_schema or input_builder is not None
         )
-        async def run_agent(context: ToolContext, input: str) -> Any:
+
+        if parameters is None:
+            params_adapter = TypeAdapter(AgentAsToolInput)
+            params_schema = ensure_strict_json_schema(params_adapter.json_schema())
+        else:
+            if not _is_supported_parameters(parameters):
+                raise TypeError("Agent tool parameters must be a dataclass or Pydantic model type.")
+            params_adapter = TypeAdapter(parameters)
+            params_schema = ensure_strict_json_schema(params_adapter.json_schema())
+
+        schema_info = build_structured_input_schema_info(
+            params_schema,
+            include_json_schema=include_schema,
+        )
+
+        def _normalize_tool_input(parsed: Any) -> Any:
+            if isinstance(parsed, BaseModel):
+                return parsed.model_dump()
+            if dataclasses.is_dataclass(parsed) and not isinstance(parsed, type):
+                return dataclasses.asdict(parsed)
+            return parsed
+
+        async def _run_agent_impl(context: ToolContext, input_json: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
             from .tool_context import ToolContext
+
+            try:
+                json_data = json.loads(input_json) if input_json else {}
+            except Exception as exc:
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Invalid JSON input for tool {tool_name_resolved}")
+                else:
+                    logger.debug(f"Invalid JSON input for tool {tool_name_resolved}: {input_json}")
+                raise ModelBehaviorError(
+                    f"Invalid JSON input for tool {tool_name_resolved}: {input_json}"
+                ) from exc
+
+            if _debug.DONT_LOG_TOOL_DATA:
+                logger.debug(f"Invoking tool {tool_name_resolved}")
+            else:
+                logger.debug(f"Invoking tool {tool_name_resolved} with input {input_json}")
+
+            try:
+                parsed_params = params_adapter.validate_python(json_data)
+            except ValidationError as exc:
+                raise ModelBehaviorError(
+                    f"Invalid JSON input for tool {tool_name_resolved}: {exc}"
+                ) from exc
+
+            params_data = _normalize_tool_input(parsed_params)
+            resolved_input = await resolve_agent_tool_input(
+                params=params_data,
+                schema_info=schema_info if should_capture_tool_input else None,
+                input_builder=input_builder,
+            )
+            if not isinstance(resolved_input, str) and not isinstance(resolved_input, list):
+                raise ModelBehaviorError("Agent tool called with invalid input")
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
             if isinstance(context, ToolContext):
@@ -491,10 +570,20 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
                 )
+                if should_capture_tool_input:
+                    nested_context.tool_input = params_data
             elif isinstance(context, RunContextWrapper):
-                nested_context = context.context
+                if should_capture_tool_input:
+                    nested_context = RunContextWrapper(context=context.context)
+                    nested_context.tool_input = params_data
+                else:
+                    nested_context = context.context
             else:
-                nested_context = context
+                if should_capture_tool_input:
+                    nested_context = RunContextWrapper(context=context)
+                    nested_context.tool_input = params_data
+                else:
+                    nested_context = context
             run_result: RunResult | RunResultStreaming | None = None
             resume_state: RunState | None = None
             should_record_run_result = True
@@ -575,7 +664,7 @@ class Agent(AgentBase, Generic[TContext]):
                 if on_stream is not None:
                     run_result_streaming = Runner.run_streamed(
                         starting_agent=cast(Agent[Any], self),
-                        input=resume_state or input,
+                        input=resume_state or resolved_input,
                         context=None if resume_state is not None else cast(Any, nested_context),
                         run_config=run_config,
                         max_turns=resolved_max_turns,
@@ -639,7 +728,7 @@ class Agent(AgentBase, Generic[TContext]):
                 else:
                     run_result = await Runner.run(
                         starting_agent=cast(Agent[Any], self),
-                        input=resume_state or input,
+                        input=resume_state or resolved_input,
                         context=None if resume_state is not None else cast(Any, nested_context),
                         run_config=run_config,
                         max_turns=resolved_max_turns,
@@ -663,8 +752,52 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
-        # Mark the function tool as an agent tool.
-        run_agent_tool = run_agent
+        async def _run_agent_tool(context: ToolContext, input_json: str) -> Any:
+            try:
+                return await _run_agent_impl(context, input_json)
+            except Exception as exc:
+                if failure_error_function is None:
+                    raise
+
+                result = failure_error_function(context, exc)
+                if inspect.isawaitable(result):
+                    result = await result
+
+                json_decode_error = _extract_tool_argument_json_error(exc)
+                if json_decode_error is not None:
+                    span_error_message = "Error running tool"
+                    span_error_detail = str(json_decode_error)
+                else:
+                    span_error_message = "Error running tool (non-fatal)"
+                    span_error_detail = str(exc)
+
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message=span_error_message,
+                        data={
+                            "tool_name": tool_name_resolved,
+                            "error": span_error_detail,
+                        },
+                    )
+                )
+                if _debug.DONT_LOG_TOOL_DATA:
+                    logger.debug(f"Tool {tool_name_resolved} failed")
+                else:
+                    logger.error(
+                        f"Tool {tool_name_resolved} failed: {input_json} {exc}",
+                        exc_info=exc,
+                    )
+                return result
+
+        run_agent_tool = FunctionTool(
+            name=tool_name_resolved,
+            description=tool_description_resolved,
+            params_json_schema=params_schema,
+            on_invoke_tool=_run_agent_tool,
+            strict_json_schema=True,
+            is_enabled=is_enabled,
+            needs_approval=needs_approval,
+        )
         run_agent_tool._is_agent_tool = True
         run_agent_tool._agent_instance = self
 
