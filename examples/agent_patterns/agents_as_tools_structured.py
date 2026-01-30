@@ -37,11 +37,9 @@ orchestrator = Agent(
                 "and target language."
             ),
             parameters=TranslationInput,
-
             # By default, the input schema will be included in a simpler format.
             # Set include_input_schema to true to include the full JSON Schema:
             # include_input_schema=True,
-
             # Build a custom prompt from structured input data:
             # input_builder=lambda options: (
             #     f'Translate the text "{options["params"]["text"]}" '

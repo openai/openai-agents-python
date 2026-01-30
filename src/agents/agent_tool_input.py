@@ -237,7 +237,9 @@ def _describe_json_schema_field(
         )
 
     if "const" in field_schema:
-        return _SchemaFieldDescription(type=_format_literal_label(field_schema), description=description)
+        return _SchemaFieldDescription(
+            type=_format_literal_label(field_schema), description=description
+        )
 
     return None
 
