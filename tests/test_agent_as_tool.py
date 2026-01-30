@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents import (
     Agent,
@@ -23,6 +24,7 @@ from agents import (
     ToolApprovalItem,
     TResponseInputItem,
 )
+from agents.agent_tool_input import StructuredToolInputBuilderOptions
 from agents.agent_tool_state import record_agent_tool_run_result
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
@@ -384,6 +386,406 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
     output = await tool.on_invoke_tool(tool_context, '{"input": "summarize this"}')
 
     assert output == "custom output"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_structured_input_sets_tool_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structured agent tools should capture input data and pass JSON to the nested run."""
+
+    class TranslationInput(BaseModel):
+        text: str
+        source: str
+        target: str
+
+    agent = Agent(name="translator")
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="translate",
+            tool_description="Translate text",
+            parameters=TranslationInput,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        captured["context"] = context
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    run_context = RunContextWrapper({"locale": "en-US"})
+    args = {"text": "hola", "source": "es", "target": "en"}
+    tool_context = ToolContext(
+        context=run_context.context,
+        usage=run_context.usage,
+        tool_name="translate",
+        tool_call_id="call_structured",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    called_input = captured["input"]
+    assert isinstance(called_input, str)
+    assert json.loads(called_input) == args
+
+    nested_context = captured["context"]
+    assert isinstance(nested_context, ToolContext)
+    assert nested_context.context is run_context.context
+    assert nested_context.usage is run_context.usage
+    assert nested_context.tool_input == args
+    assert run_context.tool_input is None
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_clears_stale_tool_input_for_plain_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-structured agent tools should not inherit stale tool input."""
+
+    agent = Agent(name="plain_agent")
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="plain_tool",
+            tool_description="Plain tool",
+        ),
+    )
+
+    run_context = RunContextWrapper({"locale": "en-US"})
+    run_context.tool_input = {"text": "bonjour"}
+
+    tool_context = ToolContext(
+        context=run_context.context,
+        usage=run_context.usage,
+        tool_name="plain_tool",
+        tool_call_id="call_plain",
+        tool_arguments='{"input": "hello"}',
+    )
+    tool_context.tool_input = run_context.tool_input
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert isinstance(context, ToolContext)
+        assert context.tool_input is None
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+    assert run_context.tool_input == {"text": "bonjour"}
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_includes_schema_summary_with_descriptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema descriptions should be summarized for structured inputs."""
+
+    class TranslationInput(BaseModel):
+        text: str = Field(description="Text to translate")
+        target: str = Field(description="Target language")
+
+    agent = Agent(name="summary_agent")
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="summarize_schema",
+            tool_description="Summary tool",
+            parameters=TranslationInput,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"text": "hola", "target": "en"}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="summarize_schema",
+        tool_call_id="call_summary",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    called_input = captured["input"]
+    assert isinstance(called_input, str)
+    assert "Input Schema Summary:" in called_input
+    assert "text (string, required)" in called_input
+    assert "Text to translate" in called_input
+    assert "target (string, required)" in called_input
+    assert "Target language" in called_input
+    assert '"text": "hola"' in called_input
+    assert '"target": "en"' in called_input
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_supports_custom_input_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom input builders should supply nested input items."""
+
+    class TranslationInput(BaseModel):
+        text: str
+
+    agent = Agent(name="builder_agent")
+    builder_calls: list[StructuredToolInputBuilderOptions] = []
+    custom_items = [{"role": "user", "content": "custom input"}]
+
+    async def builder(options: StructuredToolInputBuilderOptions):
+        builder_calls.append(options)
+        return custom_items
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="builder_tool",
+            tool_description="Builder tool",
+            parameters=TranslationInput,
+            input_builder=builder,
+        ),
+    )
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert input == custom_items
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"text": "hola"}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="builder_tool",
+        tool_call_id="call_builder",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    assert builder_calls
+    assert builder_calls[0]["params"] == args
+    assert builder_calls[0]["summary"] is None
+    assert builder_calls[0]["json_schema"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_rejects_invalid_builder_output() -> None:
+    """Invalid builder output should surface as a tool error."""
+
+    agent = Agent(name="invalid_builder_agent")
+
+    def builder(_options):
+        return 123
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="invalid_builder_tool",
+            tool_description="Invalid builder tool",
+            input_builder=builder,
+        ),
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="invalid_builder_tool",
+        tool_call_id="call_invalid_builder",
+        tool_arguments='{"input": "hi"}',
+    )
+    result = await tool.on_invoke_tool(tool_context, '{"input": "hi"}')
+
+    assert "Agent tool called with invalid input" in result
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_includes_json_schema_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_input_schema should embed the full JSON schema."""
+
+    class TranslationInput(BaseModel):
+        text: str = Field(description="Text to translate")
+        target: str = Field(description="Target language")
+
+    agent = Agent(name="schema_agent")
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="schema_tool",
+            tool_description="Schema tool",
+            parameters=TranslationInput,
+            include_input_schema=True,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    args = {"text": "hola", "target": "en"}
+    tool_context = ToolContext(
+        context=None,
+        tool_name="schema_tool",
+        tool_call_id="call_schema",
+        tool_arguments=json.dumps(args),
+    )
+
+    await tool.on_invoke_tool(tool_context, json.dumps(args))
+
+    called_input = captured["input"]
+    assert isinstance(called_input, str)
+    assert "Input JSON Schema:" in called_input
+    assert '"properties"' in called_input
+    assert '"text"' in called_input
+    assert '"target"' in called_input
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_ignores_input_schema_without_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_input_schema should be ignored when no parameters are provided."""
+
+    agent = Agent(name="default_schema_agent")
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="default_schema_tool",
+            tool_description="Default schema tool",
+            include_input_schema=True,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        captured["input"] = input
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="default_schema_tool",
+        tool_call_id="call_default_schema",
+        tool_arguments='{"input": "hello"}',
+    )
+
+    await tool.on_invoke_tool(tool_context, '{"input": "hello"}')
+
+    assert captured["input"] == "hello"
+    assert "properties" in tool.params_json_schema
 
 
 @pytest.mark.asyncio

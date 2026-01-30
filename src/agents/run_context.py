@@ -47,6 +47,8 @@ class RunContextWrapper(Generic[TContext]):
 
     _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     turn_input: list[TResponseInputItem] = field(default_factory=list)
+    tool_input: Any | None = None
+    """Structured input for the current agent tool run, when available."""
 
     @staticmethod
     def _to_str_or_none(value: Any) -> str | None:
@@ -191,6 +193,23 @@ class RunContextWrapper(Generic[TContext]):
             record.approved = record_dict.get("approved", [])
             record.rejected = record_dict.get("rejected", [])
             self._approvals[tool_name] = record
+
+    def _fork_with_tool_input(self, tool_input: Any) -> RunContextWrapper[TContext]:
+        """Create a child context that shares approvals and usage with tool input set."""
+        fork = RunContextWrapper(context=self.context)
+        fork.usage = self.usage
+        fork._approvals = self._approvals
+        fork.turn_input = self.turn_input
+        fork.tool_input = tool_input
+        return fork
+
+    def _fork_without_tool_input(self) -> RunContextWrapper[TContext]:
+        """Create a child context that shares approvals and usage without tool input."""
+        fork = RunContextWrapper(context=self.context)
+        fork.usage = self.usage
+        fork._approvals = self._approvals
+        fork.turn_input = self.turn_input
+        return fork
 
 
 @dataclass(eq=False)

@@ -76,6 +76,7 @@ from .tool_guardrails import (
 )
 from .tracing.traces import Trace, TraceState
 from .usage import deserialize_usage, serialize_usage
+from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -391,6 +392,23 @@ class RunState(Generic[TContext, TAgent]):
             ),
         )
 
+    def _serialize_tool_input(self, tool_input: Any) -> Any:
+        """Normalize tool input for JSON serialization."""
+        if tool_input is None:
+            return None
+
+        if dataclasses.is_dataclass(tool_input):
+            return dataclasses.asdict(cast(Any, tool_input))
+
+        if hasattr(tool_input, "model_dump"):
+            try:
+                serialized = tool_input.model_dump(exclude_unset=True)
+            except TypeError:
+                serialized = tool_input.model_dump()
+            return _to_dump_compatible(serialized)
+
+        return _to_dump_compatible(tool_input)
+
     def _merge_generated_items_with_processed(self) -> list[RunItem]:
         """Merge persisted and newly processed items without duplication."""
         generated_items = list(self._generated_items)
@@ -484,19 +502,24 @@ class RunState(Generic[TContext, TAgent]):
             strict_context=strict_context,
         )
 
+        context_entry: dict[str, Any] = {
+            "usage": serialize_usage(self._context.usage),
+            "approvals": approvals_dict,
+            "context": context_payload,
+            # Preserve metadata so deserialization can warn when context types were erased.
+            "context_meta": context_meta,
+        }
+        tool_input = self._serialize_tool_input(self._context.tool_input)
+        if tool_input is not None:
+            context_entry["tool_input"] = tool_input
+
         result = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
             "current_turn": self._current_turn,
             "current_agent": {"name": self._current_agent.name},
             "original_input": original_input_serialized,
             "model_responses": model_responses,
-            "context": {
-                "usage": serialize_usage(self._context.usage),
-                "approvals": approvals_dict,
-                "context": context_payload,
-                # Preserve metadata so deserialization can warn when context types were erased.
-                "context_meta": context_meta,
-            },
+            "context": context_entry,
             "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
             "max_turns": self._max_turns,
             "no_active_agent_run": True,
@@ -1764,6 +1787,13 @@ async def _build_run_state_from_json(
         raise UserError("Serialized run state context must be a mapping. Please provide one.")
     context.usage = usage
     context._rebuild_approvals(context_data.get("approvals", {}))
+    serialized_tool_input = context_data.get("tool_input")
+    if (
+        context_override is None
+        and serialized_tool_input is not None
+        and getattr(context, "tool_input", None) is None
+    ):
+        context.tool_input = serialized_tool_input
 
     original_input_raw = state_json["original_input"]
     if isinstance(original_input_raw, list):
