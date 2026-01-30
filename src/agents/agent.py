@@ -520,13 +520,10 @@ class Agent(AgentBase, Generic[TContext]):
             # Prefer JSON mode so structured params (datetime/UUID/Decimal, etc.) serialize cleanly.
             try:
                 return params_adapter.dump_python(parsed, mode="json")
-            except Exception:
-                pass
-            if isinstance(parsed, BaseModel):
-                return parsed.model_dump(mode="json")
-            if dataclasses.is_dataclass(parsed) and not isinstance(parsed, type):
-                return dataclasses.asdict(parsed)
-            return parsed
+            except Exception as exc:
+                raise ModelBehaviorError(
+                    f"Failed to serialize structured tool input for {tool_name_resolved}: {exc}"
+                ) from exc
 
         async def _run_agent_impl(context: ToolContext, input_json: str) -> Any:
             from .run import DEFAULT_MAX_TURNS, Runner
