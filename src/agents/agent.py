@@ -517,8 +517,13 @@ class Agent(AgentBase, Generic[TContext]):
         )
 
         def _normalize_tool_input(parsed: Any) -> Any:
+            # Prefer JSON mode so structured params (datetime/UUID/Decimal, etc.) serialize cleanly.
+            try:
+                return params_adapter.dump_python(parsed, mode="json")
+            except Exception:
+                pass
             if isinstance(parsed, BaseModel):
-                return parsed.model_dump()
+                return parsed.model_dump(mode="json")
             if dataclasses.is_dataclass(parsed) and not isinstance(parsed, type):
                 return dataclasses.asdict(parsed)
             return parsed
