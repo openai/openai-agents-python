@@ -4,7 +4,7 @@ import inspect
 import json
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Callable, TypedDict, cast
+from typing import Any, Callable, TypedDict, Union, cast
 
 from pydantic import BaseModel
 
@@ -40,9 +40,10 @@ class StructuredToolInputBuilderOptions(TypedDict, total=False):
     json_schema: dict[str, Any] | None
 
 
+StructuredToolInputResult = Union[str, list[TResponseInputItem]]
 StructuredToolInputBuilder = Callable[
     [StructuredToolInputBuilderOptions],
-    str | list[TResponseInputItem] | Awaitable[str | list[TResponseInputItem]],
+    Union[StructuredToolInputResult, Awaitable[StructuredToolInputResult]],
 ]
 
 
