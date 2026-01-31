@@ -641,6 +641,39 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         ]
         assert not truncate_events
 
+    @pytest.mark.asyncio
+    async def test_speech_started_truncates_when_response_ongoing(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48_000)
+        state = model._audio_state_tracker.get_state("i1", 0)
+        assert state is not None
+        state.initial_received_time = datetime.now() - timedelta(seconds=5)
+        model._ongoing_response = True
+
+        monkeypatch.setattr(
+            model,
+            "_send_raw_message",
+            AsyncMock(),
+        )
+
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "event_id": "es3",
+                "item_id": "i1",
+                "audio_start_ms": 0,
+                "audio_end_ms": 0,
+            }
+        )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert truncate_events
+        assert truncate_events[0].audio_end_ms == 1000
+
 
 class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     @pytest.mark.asyncio
