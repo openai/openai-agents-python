@@ -28,7 +28,6 @@ class TestPlaybackTracker:
 
         # Set up model with custom tracker directly
         model._playback_tracker = custom_tracker
-        model._ongoing_response = True
 
         # Mock send_raw_message to capture interrupt
         model._send_raw_message = AsyncMock()
@@ -63,7 +62,6 @@ class TestPlaybackTracker:
         """Test interrupt clamps elapsed time to the received audio length."""
         model._send_raw_message = AsyncMock()
         model._audio_state_tracker.set_audio_format("pcm16")
-        model._ongoing_response = True
 
         # 48_000 bytes of PCM16 at 24kHz equals ~1000ms of audio.
         model._audio_state_tracker.on_audio_delta("item_1", 0, b"a" * 48_000)

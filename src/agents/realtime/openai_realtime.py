@@ -552,29 +552,19 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                         content_index=current_item_content_index,
                     )
                 )
-                if not self._ongoing_response:
-                    logger.debug(
-                        "Skipping truncate because no response is in progress. "
-                        f"Item id: {current_item_id}, "
-                        f"elapsed ms: {elapsed_ms}, "
-                        f"content index: {current_item_content_index}"
-                    )
-                else:
-                    max_audio_ms: int | None = None
-                    audio_limits = self._get_audio_limits(
-                        current_item_id, current_item_content_index
-                    )
-                    if audio_limits is not None:
-                        _, max_audio_ms = audio_limits
-                    truncated_ms = max(int(elapsed_ms), 0)
-                    if max_audio_ms is not None:
-                        truncated_ms = min(truncated_ms, max_audio_ms)
-                    converted = _ConversionHelper.convert_interrupt(
-                        current_item_id,
-                        current_item_content_index,
-                        truncated_ms,
-                    )
-                    await self._send_raw_message(converted)
+                max_audio_ms: int | None = None
+                audio_limits = self._get_audio_limits(current_item_id, current_item_content_index)
+                if audio_limits is not None:
+                    _, max_audio_ms = audio_limits
+                truncated_ms = max(int(elapsed_ms), 0)
+                if max_audio_ms is not None:
+                    truncated_ms = min(truncated_ms, max_audio_ms)
+                converted = _ConversionHelper.convert_interrupt(
+                    current_item_id,
+                    current_item_content_index,
+                    truncated_ms,
+                )
+                await self._send_raw_message(converted)
             else:
                 logger.debug(
                     "Didn't interrupt bc elapsed ms is < 0. "
@@ -779,30 +769,20 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     effective_elapsed_ms = float(elapsed_override)
 
                 if playback_item_id and effective_elapsed_ms is not None:
-                    if not self._ongoing_response:
-                        logger.debug(
-                            "Skipping truncate because no response is in progress. "
-                            f"Item id: {playback_item_id}, "
-                            f"elapsed ms: {effective_elapsed_ms}, "
-                            f"content index: {playback_content_index}"
+                    max_audio_ms: int | None = None
+                    audio_limits = self._get_audio_limits(playback_item_id, playback_content_index)
+                    if audio_limits is not None:
+                        _, max_audio_ms = audio_limits
+                    truncated_ms = max(int(round(effective_elapsed_ms)), 0)
+                    if max_audio_ms is not None:
+                        truncated_ms = min(truncated_ms, max_audio_ms)
+                    await self._send_raw_message(
+                        _ConversionHelper.convert_interrupt(
+                            playback_item_id,
+                            playback_content_index,
+                            truncated_ms,
                         )
-                    else:
-                        max_audio_ms: int | None = None
-                        audio_limits = self._get_audio_limits(
-                            playback_item_id, playback_content_index
-                        )
-                        if audio_limits is not None:
-                            _, max_audio_ms = audio_limits
-                        truncated_ms = max(int(round(effective_elapsed_ms)), 0)
-                        if max_audio_ms is not None:
-                            truncated_ms = min(truncated_ms, max_audio_ms)
-                        await self._send_raw_message(
-                            _ConversionHelper.convert_interrupt(
-                                playback_item_id,
-                                playback_content_index,
-                                truncated_ms,
-                            )
-                        )
+                    )
 
                 # Reset trackers so subsequent playback state queries don't
                 # reference audio that has been interrupted client‑side.

@@ -548,7 +548,6 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         # Prepare tracker state to simulate ongoing audio
         model._audio_state_tracker.set_audio_format("pcm16")
         model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 96)
-        model._ongoing_response = True
 
         # Patch sending to avoid websocket dependency
         monkeypatch.setattr(
