@@ -1,5 +1,8 @@
+import asyncio
+import contextlib
 import json
-from typing import Any
+import time
+from typing import Any, Callable
 
 import pytest
 from pydantic import BaseModel
@@ -85,6 +88,70 @@ async def test_simple_function():
         await tool.on_invoke_tool(
             ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
         )
+
+
+@pytest.mark.asyncio
+async def test_sync_function_runs_via_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"to_thread": 0, "func": 0}
+
+    def sync_func() -> str:
+        calls["func"] += 1
+        return "ok"
+
+    async def fake_to_thread(
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        calls["to_thread"] += 1
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    tool = function_tool(sync_func)
+    result = await tool.on_invoke_tool(
+        ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
+    )
+    assert result == "ok"
+    assert calls["to_thread"] == 1
+    assert calls["func"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_function_does_not_block_event_loop() -> None:
+    def sync_func() -> str:
+        time.sleep(0.2)
+        return "ok"
+
+    tool = function_tool(sync_func)
+
+    async def run_tool() -> Any:
+        return await tool.on_invoke_tool(
+            ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments=""), ""
+        )
+
+    tool_task: asyncio.Task[Any] = asyncio.create_task(run_tool())
+    background_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0.01))
+
+    done, pending = await asyncio.wait(
+        {tool_task, background_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    try:
+        assert background_task in done
+        assert tool_task in pending
+        assert await tool_task == "ok"
+    finally:
+        if not background_task.done():
+            background_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await background_task
+        if not tool_task.done():
+            tool_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tool_task
 
 
 class Foo(BaseModel):
