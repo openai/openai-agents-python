@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -608,6 +609,37 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert "audio_interrupted" in types
         assert "transcript_delta" in types
         assert "input_audio_timeout_triggered" in types
+
+    @pytest.mark.asyncio
+    async def test_speech_started_skips_truncate_when_audio_complete(self, model, monkeypatch):
+        model._audio_state_tracker.set_audio_format("pcm16")
+        model._audio_state_tracker.on_audio_delta("i1", 0, b"a" * 48_000)
+        state = model._audio_state_tracker.get_state("i1", 0)
+        assert state is not None
+        state.initial_received_time = datetime.now() - timedelta(seconds=5)
+
+        monkeypatch.setattr(
+            model,
+            "_send_raw_message",
+            AsyncMock(),
+        )
+
+        await model._handle_ws_event(
+            {
+                "type": "input_audio_buffer.speech_started",
+                "event_id": "es2",
+                "item_id": "i1",
+                "audio_start_ms": 0,
+                "audio_end_ms": 0,
+            }
+        )
+
+        truncate_events = [
+            call.args[0]
+            for call in model._send_raw_message.await_args_list
+            if getattr(call.args[0], "type", None) == "conversation.item.truncate"
+        ]
+        assert not truncate_events
 
 
 class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
