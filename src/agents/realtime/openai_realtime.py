@@ -774,7 +774,11 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     if audio_limits is not None:
                         _, max_audio_ms = audio_limits
                     truncated_ms = max(int(round(effective_elapsed_ms)), 0)
-                    if max_audio_ms is not None and truncated_ms >= max_audio_ms:
+                    if (
+                        max_audio_ms is not None
+                        and truncated_ms >= max_audio_ms
+                        and not self._ongoing_response
+                    ):
                         logger.debug(
                             "Skipping truncate because playback appears complete. "
                             f"Item id: {playback_item_id}, "
