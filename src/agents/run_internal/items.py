@@ -23,6 +23,7 @@ _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "apply_patch_call": "apply_patch_call_output",
     "computer_call": "computer_call_output",
     "local_shell_call": "local_shell_call_output",
+    "mcp_call": "mcp_call_output",
 }
 
 __all__ = [
@@ -68,7 +69,8 @@ def drop_orphan_function_calls(items: list[TResponseInputItem]) -> list[TRespons
         if output_type is None:
             filtered.append(entry)
             continue
-        call_id = entry.get("call_id")
+        # Check call_id first, then fall back to id (used by mcp_call)
+        call_id = entry.get("call_id") or entry.get("id")
         if isinstance(call_id, str) and call_id in completed_call_ids.get(output_type, set()):
             filtered.append(entry)
     return filtered
