@@ -774,15 +774,24 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     if audio_limits is not None:
                         _, max_audio_ms = audio_limits
                     truncated_ms = max(int(round(effective_elapsed_ms)), 0)
-                    if max_audio_ms is not None:
-                        truncated_ms = min(truncated_ms, max_audio_ms)
-                    await self._send_raw_message(
-                        _ConversionHelper.convert_interrupt(
-                            playback_item_id,
-                            playback_content_index,
-                            truncated_ms,
+                    if max_audio_ms is not None and truncated_ms >= max_audio_ms:
+                        logger.debug(
+                            "Skipping truncate because playback appears complete. "
+                            f"Item id: {playback_item_id}, "
+                            f"elapsed ms: {effective_elapsed_ms}, "
+                            f"content index: {playback_content_index}, "
+                            f"audio length ms: {max_audio_ms}"
                         )
-                    )
+                    else:
+                        if max_audio_ms is not None:
+                            truncated_ms = min(truncated_ms, max_audio_ms)
+                        await self._send_raw_message(
+                            _ConversionHelper.convert_interrupt(
+                                playback_item_id,
+                                playback_content_index,
+                                truncated_ms,
+                            )
+                        )
 
                 # Reset trackers so subsequent playback state queries don't
                 # reference audio that has been interrupted client‑side.
