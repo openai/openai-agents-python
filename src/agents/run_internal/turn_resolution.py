@@ -1299,6 +1299,26 @@ def process_model_response(
                     break
             items.append(ToolCallItem(raw_item=output, agent=agent, description=_mcp_description))
             tools_used.append("mcp")
+
+            # Create a ToolCallOutputItem for MCP calls that have completed with output.
+            # This ensures MCP tool call results are persisted to session storage for replay.
+            if output.output is not None or output.error is not None:
+                # Build an MCP call output item for session persistence.
+                # Use call_id to link with the corresponding mcp_call item for proper
+                # deduplication and orphan filtering.
+                mcp_output_content = output.error if output.error else output.output
+                mcp_call_output: dict[str, Any] = {
+                    "type": "mcp_call_output",
+                    "call_id": output.id,
+                    "output": mcp_output_content or "",
+                }
+                items.append(
+                    ToolCallOutputItem(
+                        raw_item=mcp_call_output,
+                        output=mcp_output_content,
+                        agent=agent,
+                    )
+                )
         elif isinstance(output, ImageGenerationCall):
             items.append(ToolCallItem(raw_item=output, agent=agent))
             tools_used.append("image_generation")
