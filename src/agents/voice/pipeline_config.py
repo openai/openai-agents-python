@@ -22,9 +22,10 @@ class VoicePipelineConfig:
     tracing: TracingConfig | None = None
     """Tracing configuration for this pipeline."""
 
-    trace_include_sensitive_data: bool = True
-    """Whether to include sensitive data in traces. Defaults to `True`. This is specifically for the
-      voice pipeline, and not for anything that goes on inside your Workflow."""
+    trace_include_sensitive_data: bool = False
+    """Whether to include sensitive data in traces. Defaults to `False` for security. When enabled,
+      tool inputs/outputs and LLM generations may be exposed in traces. Only enable in trusted
+      environments."""
 
     trace_include_sensitive_audio_data: bool = True
     """Whether to include audio data in traces. Defaults to `True`."""
