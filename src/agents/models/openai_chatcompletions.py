@@ -119,8 +119,12 @@ class OpenAIChatCompletionsModel(Model):
                     [message.model_dump()] if message is not None else []
                 )
             span_generation.span_data.usage = {
+                "requests": usage.requests,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "input_tokens_details": usage.input_tokens_details.model_dump(),
+                "output_tokens_details": usage.output_tokens_details.model_dump(),
             }
 
             # Build provider_data for provider_specific_fields
@@ -209,8 +213,16 @@ class OpenAIChatCompletionsModel(Model):
 
             if final_response and final_response.usage:
                 span_generation.span_data.usage = {
+                    "requests": 1,
                     "input_tokens": final_response.usage.input_tokens,
                     "output_tokens": final_response.usage.output_tokens,
+                    "total_tokens": final_response.usage.total_tokens,
+                    "input_tokens_details": (
+                        final_response.usage.input_tokens_details.model_dump()
+                    ),
+                    "output_tokens_details": (
+                        final_response.usage.output_tokens_details.model_dump()
+                    ),
                 }
 
     @overload
