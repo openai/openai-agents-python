@@ -55,16 +55,12 @@ def apply_diff(input: str, diff: str, mode: ApplyDiffMode = "default") -> str:
     This parser understands both the create-file syntax (only "+" prefixed
     lines) and the default update syntax that includes context hunks.
     """
-
-    newline = _detect_newline_from_text(input)
-    normalized_input = _normalize_text_newlines(input)
+    newline = _detect_newline(input, diff, mode)
     diff_lines = _normalize_diff_lines(diff)
     if mode == "create":
-        # Create-file diffs don't have an input to infer newline style from.
-        # Use the diff's newline style if present, otherwise default to LF.
-        created_newline = _detect_newline_from_text(diff)
-        return _parse_create_diff(diff_lines, newline=created_newline)
+        return _parse_create_diff(diff_lines, newline=newline)
 
+    normalized_input = _normalize_text_newlines(input)
     parsed = _parse_update_diff(diff_lines, normalized_input)
     return _apply_chunks(normalized_input, parsed.chunks, newline=newline)
 
@@ -78,6 +74,14 @@ def _normalize_diff_lines(diff: str) -> list[str]:
 
 def _detect_newline_from_text(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
+
+
+def _detect_newline(input: str, diff: str, mode: ApplyDiffMode) -> str:
+    # Create-file diffs don't have an input to infer newline style from.
+    # Use the diff's newline style if present, otherwise default to LF.
+    if mode != "create" and "\n" in input:
+        return _detect_newline_from_text(input)
+    return _detect_newline_from_text(diff)
 
 
 def _normalize_text_newlines(text: str) -> str:

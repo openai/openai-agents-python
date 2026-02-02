@@ -12,6 +12,11 @@ def test_apply_diff_with_floating_hunk_adds_lines() -> None:
     assert apply_diff("", diff) == "hello\nworld\n"
 
 
+def test_apply_diff_with_empty_input_and_crlf_diff_preserves_crlf() -> None:
+    diff = "\r\n".join(["@@", "+hello", "+world"])
+    assert apply_diff("", diff) == "hello\r\nworld\r\n"
+
+
 def test_apply_diff_create_mode_requires_plus_prefix() -> None:
     diff = "plain line"
     with pytest.raises(ValueError):
