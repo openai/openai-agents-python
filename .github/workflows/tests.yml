@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
         with:
           enable-cache: true
       - name: Install dependencies
@@ -44,13 +44,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
         with:
           enable-cache: true
       - name: Install dependencies
@@ -78,13 +78,13 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -104,13 +104,13 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Detect docs changes
         id: changes
         run: ./.github/scripts/detect-changes.sh docs "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
         with:
           enable-cache: true
       - name: Install dependencies
@@ -129,13 +129,13 @@ jobs:
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41
         with:
           enable-cache: true
       - name: Install dependencies
