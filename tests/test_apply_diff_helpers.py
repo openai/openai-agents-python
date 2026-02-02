@@ -61,7 +61,7 @@ def test_find_context_core_stripped_matches() -> None:
 
 def test_apply_chunks_rejects_bad_chunks() -> None:
     with pytest.raises(ValueError):
-        _apply_chunks("abc", [Chunk(orig_index=10, del_lines=[], ins_lines=[])])
+        _apply_chunks("abc", [Chunk(orig_index=10, del_lines=[], ins_lines=[])], newline="\n")
 
     with pytest.raises(ValueError):
         _apply_chunks(
@@ -70,4 +70,5 @@ def test_apply_chunks_rejects_bad_chunks() -> None:
                 Chunk(orig_index=0, del_lines=["a"], ins_lines=[]),
                 Chunk(orig_index=0, del_lines=["b"], ins_lines=[]),
             ],
+            newline="\n",
         )
