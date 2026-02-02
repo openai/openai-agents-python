@@ -314,9 +314,13 @@ class LitellmModel(Model):
                     "total_tokens": final_response.usage.total_tokens,
                     "input_tokens_details": (
                         final_response.usage.input_tokens_details.model_dump()
+                        if final_response.usage.input_tokens_details
+                        else {"cached_tokens": 0}
                     ),
                     "output_tokens_details": (
                         final_response.usage.output_tokens_details.model_dump()
+                        if final_response.usage.output_tokens_details
+                        else {"reasoning_tokens": 0}
                     ),
                 }
 
