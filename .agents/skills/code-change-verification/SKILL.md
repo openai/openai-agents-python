@@ -11,9 +11,9 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 
 ## Quick start
 
-1. Keep this skill at `./.codex/skills/code-change-verification` so it loads automatically for the repository.
-2. macOS/Linux: `bash .codex/skills/code-change-verification/scripts/run.sh`.
-3. Windows: `powershell -ExecutionPolicy Bypass -File .codex/skills/code-change-verification/scripts/run.ps1`.
+1. Keep this skill at `./.agents/skills/code-change-verification` so it loads automatically for the repository.
+2. macOS/Linux: `bash .agents/skills/code-change-verification/scripts/run.sh`.
+3. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
 4. If any command fails, fix the issue, rerun the script, and report the failing output.
 5. Confirm completion only when all commands succeed with no remaining issues.
 

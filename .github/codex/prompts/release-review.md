@@ -11,10 +11,10 @@ Steps:
    - `git diff --dirstat=files,0 BASE_TAG...TARGET`
    - `git diff --name-status BASE_TAG...TARGET`
    - `git log --oneline --reverse BASE_TAG..TARGET`
-4. Review `.codex/skills/final-release-review/references/review-checklist.md` and analyze the diff.
+4. Review `.agents/skills/final-release-review/references/review-checklist.md` and analyze the diff.
 
 Output:
-- Write the report in the exact format used by `$final-release-review` (see `.codex/skills/final-release-review/SKILL.md`).
+- Write the report in the exact format used by `$final-release-review` (see `.agents/skills/final-release-review/SKILL.md`).
 - Use the compare URL: `https://github.com/${GITHUB_REPOSITORY}/compare/BASE_TAG...TARGET`.
 - Include clear ship/block call and risk levels.
 - If no risks are found, include "No material risks identified".

@@ -19,29 +19,29 @@ description: Run python examples in auto mode with logging, rerun helpers, and b
 
 ```bash
 # Start (auto mode; interactive included by default)
-.codex/skills/examples-auto-run/scripts/run.sh start [extra args to run_examples.py]
+.agents/skills/examples-auto-run/scripts/run.sh start [extra args to run_examples.py]
 # Examples:
-.codex/skills/examples-auto-run/scripts/run.sh start --filter basic
-.codex/skills/examples-auto-run/scripts/run.sh start --include-server --include-audio
+.agents/skills/examples-auto-run/scripts/run.sh start --filter basic
+.agents/skills/examples-auto-run/scripts/run.sh start --include-server --include-audio
 
 # Check status
-.codex/skills/examples-auto-run/scripts/run.sh status
+.agents/skills/examples-auto-run/scripts/run.sh status
 
 # Stop running job
-.codex/skills/examples-auto-run/scripts/run.sh stop
+.agents/skills/examples-auto-run/scripts/run.sh stop
 
 # List logs
-.codex/skills/examples-auto-run/scripts/run.sh logs
+.agents/skills/examples-auto-run/scripts/run.sh logs
 
 # Tail latest log (or specify one)
-.codex/skills/examples-auto-run/scripts/run.sh tail
-.codex/skills/examples-auto-run/scripts/run.sh tail main_20260113-123000.log
+.agents/skills/examples-auto-run/scripts/run.sh tail
+.agents/skills/examples-auto-run/scripts/run.sh tail main_20260113-123000.log
 
 # Collect rerun list from a main log (defaults to latest main_*.log)
-.codex/skills/examples-auto-run/scripts/run.sh collect
+.agents/skills/examples-auto-run/scripts/run.sh collect
 
 # Rerun only failed entries from rerun file (auto mode)
-.codex/skills/examples-auto-run/scripts/run.sh rerun
+.agents/skills/examples-auto-run/scripts/run.sh rerun
 ```
 
 ## Defaults (overridable via env)

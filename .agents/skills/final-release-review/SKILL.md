@@ -14,7 +14,7 @@ Use this skill when validating the latest release candidate commit (default tip 
 1. Ensure repository root: `pwd` → `path-to-workspace/openai-agents-python`.
 2. Sync tags and pick base (default `v*`):
    ```bash
-   BASE_TAG="$(.codex/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*')"
+   BASE_TAG="$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*')"
    ```
 3. Choose target commit (default tip of `origin/main`, ensure fresh): `git fetch origin main --prune` then `TARGET="$(git rev-parse origin/main)"`.
 4. Snapshot scope:

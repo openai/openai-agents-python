@@ -63,7 +63,7 @@ cmd_start() {
     echo "Started run_examples.py (pid=$pid)"
     echo "Main log: $main_log"
     echo "Stdout log: $stdout_log"
-    echo "Run '.codex/skills/examples-auto-run/scripts/run.sh validate \"$main_log\"' after it finishes."
+    echo "Run '.agents/skills/examples-auto-run/scripts/run.sh validate \"$main_log\"' after it finishes."
     return 0
   fi
 

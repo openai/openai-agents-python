@@ -3,7 +3,7 @@
 ## Quick commands
 
 - Sync tags: `git fetch origin --tags --prune`.
-- Identify latest release tag (default pattern `v*`): `git tag -l 'v*' --sort=-v:refname | head -n1` or use `.codex/skills/final-release-review/scripts/find_latest_release_tag.sh`.
+- Identify latest release tag (default pattern `v*`): `git tag -l 'v*' --sort=-v:refname | head -n1` or use `.agents/skills/final-release-review/scripts/find_latest_release_tag.sh`.
 - Generate overview: `git diff --stat BASE...TARGET`, `git diff --dirstat=files,0 BASE...TARGET`, `git log --oneline --reverse BASE..TARGET`.
 - Inspect risky files quickly: `git diff --name-status BASE...TARGET`, `git diff --word-diff BASE...TARGET -- <path>`.
 
