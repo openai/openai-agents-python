@@ -557,14 +557,13 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if audio_limits is not None:
                     _, max_audio_ms = audio_limits
                 truncated_ms = max(int(elapsed_ms), 0)
-                if max_audio_ms is not None:
-                    truncated_ms = min(truncated_ms, max_audio_ms)
-                converted = _ConversionHelper.convert_interrupt(
-                    current_item_id,
-                    current_item_content_index,
-                    truncated_ms,
-                )
-                await self._send_raw_message(converted)
+                if self._ongoing_response or max_audio_ms is None or truncated_ms < max_audio_ms:
+                    converted = _ConversionHelper.convert_interrupt(
+                        current_item_id,
+                        current_item_content_index,
+                        truncated_ms,
+                    )
+                    await self._send_raw_message(converted)
             else:
                 logger.debug(
                     "Didn't interrupt bc elapsed ms is < 0. "
