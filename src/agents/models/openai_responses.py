@@ -435,7 +435,7 @@ class Converter:
             }
         elif tool_choice == "web_search":
             return {
-                # TODO: revist the type: ignore comment when ToolChoice is updated in the future
+                # TODO: revisit the type: ignore comment when ToolChoice is updated in the future
                 "type": "web_search",  # type: ignore[misc, return-value]
             }
         elif tool_choice == "web_search_preview":
@@ -518,7 +518,7 @@ class Converter:
             }
             includes: ResponseIncludable | None = None
         elif isinstance(tool, WebSearchTool):
-            # TODO: revist the type: ignore comment when ToolParam is updated in the future
+            # TODO: revisit the type: ignore comment when ToolParam is updated in the future
             converted_tool = {
                 "type": "web_search",
                 "filters": tool.filters.model_dump() if tool.filters is not None else None,  # type: ignore [typeddict-item]
