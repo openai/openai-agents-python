@@ -107,10 +107,10 @@ class RunConfig:
     agent. See the documentation in `Handoff.input_filter` for more details.
     """
 
-    nest_handoff_history: bool = True
-    """Wrap prior run history in a single assistant message before handing off when no custom
-    input filter is set. Set to False to preserve the raw transcript behavior from previous
-    releases.
+    nest_handoff_history: bool = False
+    """Opt-in beta: wrap prior run history in a single assistant message before handing off when no
+    custom input filter is set. This is disabled by default while we stabilize nested handoffs; set
+    to True to enable the collapsed transcript behavior.
     """
 
     handoff_history_mapper: HandoffHistoryMapper | None = None
