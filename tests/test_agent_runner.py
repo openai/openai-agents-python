@@ -135,6 +135,33 @@ def test_set_default_agent_runner_roundtrip():
     assert isinstance(get_default_agent_runner(), AgentRunner)
 
 
+def test_run_streamed_preserves_legacy_positional_previous_response_id():
+    captured: dict[str, Any] = {}
+
+    class DummyRunner:
+        def run_streamed(self, starting_agent: Any, input: Any, **kwargs: Any):
+            captured.update(kwargs)
+            return object()
+
+    original_runner = get_default_agent_runner()
+    set_default_agent_runner(cast(Any, DummyRunner()))
+    try:
+        Runner.run_streamed(
+            cast(Any, None),
+            "hello",
+            None,
+            10,
+            None,
+            None,
+            "resp-legacy",
+        )
+    finally:
+        set_default_agent_runner(original_runner)
+
+    assert captured["previous_response_id"] == "resp-legacy"
+    assert captured["error_handlers"] is None
+
+
 def test_default_trace_include_sensitive_data_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "false")
     assert _default_trace_include_sensitive_data() is False

@@ -317,11 +317,12 @@ class Runner:
         max_turns: int = DEFAULT_MAX_TURNS,
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | None = None,
-        error_handlers: RunErrorHandlers[TContext] | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
         session: Session | None = None,
+        *,
+        error_handlers: RunErrorHandlers[TContext] | None = None,
     ) -> RunResultStreaming:
         """
         Run a workflow starting at the given agent in streaming mode.
