@@ -299,7 +299,7 @@ class MCPUtil:
 
         needs_approval: (
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
-        ) = server._get_needs_approval_for_tool(tool, agent) if agent is not None else False
+        ) = server._get_needs_approval_for_tool(tool, agent)
 
         return FunctionTool(
             name=tool.name,

@@ -228,13 +228,15 @@ class MCPServer(abc.ABC):
     def _get_needs_approval_for_tool(
         self,
         tool: MCPTool,
-        agent: AgentBase,
+        agent: AgentBase | None,
     ) -> bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]:
         """Return a FunctionTool.needs_approval value for a given MCP tool."""
 
         policy = self._needs_approval_policy
 
         if callable(policy):
+            if agent is None:
+                return False
 
             async def _needs_approval(
                 run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str

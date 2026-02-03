@@ -291,8 +291,8 @@ async def test_mcp_tool_timeout_handling():
 
 
 @pytest.mark.asyncio
-async def test_to_function_tool_legacy_call_without_agent_is_supported():
-    """Legacy three-argument to_function_tool calls should remain valid."""
+async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
+    """Legacy three-argument to_function_tool calls should honor server policy."""
 
     server = FakeMCPServer(require_approval="always")
     server.add_tool("legacy_tool", {})
@@ -304,8 +304,8 @@ async def test_to_function_tool_legacy_call_without_agent_is_supported():
         convert_schemas_to_strict=False,
     )
 
-    # v0.7.x behavior: direct conversion did not enable approval gating.
-    assert function_tool.needs_approval is False
+    # Legacy calls should still respect server-level approval settings.
+    assert function_tool.needs_approval is True
 
     tool_context = ToolContext(
         context=None,
