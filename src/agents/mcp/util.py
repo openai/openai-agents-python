@@ -4,6 +4,7 @@ import copy
 import functools
 import inspect
 import json
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Union
 
@@ -232,10 +233,16 @@ class MCPUtil:
         tool: MCPTool,
         server: MCPServer,
         convert_schemas_to_strict: bool,
-        agent: AgentBase,
+        agent: AgentBase | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
     ) -> FunctionTool:
-        """Convert an MCP tool to an Agents SDK function tool."""
+        """Convert an MCP tool to an Agents SDK function tool.
+
+        The ``agent`` parameter is optional for backward compatibility with older
+        call sites that used ``MCPUtil.to_function_tool(tool, server, strict)``.
+        When omitted, this helper preserves the historical behavior and leaves
+        ``needs_approval`` disabled.
+        """
         invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
@@ -290,13 +297,17 @@ class MCPUtil:
 
                 return result
 
+        needs_approval: (
+            bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
+        ) = server._get_needs_approval_for_tool(tool, agent) if agent is not None else False
+
         return FunctionTool(
             name=tool.name,
             description=tool.description or "",
             params_json_schema=schema,
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
-            needs_approval=server._get_needs_approval_for_tool(tool, agent),
+            needs_approval=needs_approval,
         )
 
     @staticmethod
