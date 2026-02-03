@@ -143,6 +143,10 @@ def test_default_trace_include_sensitive_data_env(monkeypatch: pytest.MonkeyPatc
     assert _default_trace_include_sensitive_data() is True
 
 
+def test_run_config_defaults_nested_handoff_history_opt_in():
+    assert RunConfig().nest_handoff_history is False
+
+
 def testdrop_orphan_function_calls_removes_orphans():
     items: list[TResponseInputItem] = [
         cast(
@@ -696,7 +700,7 @@ async def test_handoff_filters():
 
 
 @pytest.mark.asyncio
-async def test_default_handoff_history_nested_and_filters_respected():
+async def test_opt_in_handoff_history_nested_and_filters_respected():
     model = FakeModel()
     agent_1 = Agent(
         name="delegate",
@@ -715,7 +719,11 @@ async def test_default_handoff_history_nested_and_filters_respected():
         ]
     )
 
-    result = await Runner.run(agent_2, input="user_message")
+    result = await Runner.run(
+        agent_2,
+        input="user_message",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
 
     assert isinstance(result.input, list)
     assert len(result.input) == 1
@@ -746,14 +754,18 @@ async def test_default_handoff_history_nested_and_filters_respected():
         ]
     )
 
-    filtered_result = await Runner.run(triage_with_filter, input="user_message")
+    filtered_result = await Runner.run(
+        triage_with_filter,
+        input="user_message",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
 
     assert isinstance(filtered_result.input, str)
     assert filtered_result.input == "user_message"
 
 
 @pytest.mark.asyncio
-async def test_default_handoff_history_accumulates_across_multiple_handoffs():
+async def test_opt_in_handoff_history_accumulates_across_multiple_handoffs():
     triage_model = FakeModel()
     delegate_model = FakeModel()
     closer_model = FakeModel()
@@ -770,7 +782,11 @@ async def test_default_handoff_history_accumulates_across_multiple_handoffs():
     )
     closer_model.add_multiple_turn_outputs([[get_text_message("resolution")]])
 
-    result = await Runner.run(triage, input="user_question")
+    result = await Runner.run(
+        triage,
+        input="user_question",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
 
     assert result.final_output == "resolution"
     assert closer_model.first_turn_args is not None
