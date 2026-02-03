@@ -448,6 +448,38 @@ async def test_shell_tool_needs_approval_rejected_returns_rejection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shell_tool_rejection_uses_run_level_formatter() -> None:
+    """Shell approval rejection should use the run-level formatter message."""
+
+    shell_tool = ShellTool(
+        executor=lambda request: "output",
+        needs_approval=require_approval,
+    )
+
+    tool_call = _shell_call()
+    tool_run = ToolRunShellCall(tool_call=tool_call, shell_tool=shell_tool)
+    _, agent = make_model_and_agent(tools=[shell_tool], name="shell-agent")
+    context_wrapper = make_context_wrapper()
+
+    reject_tool_call(context_wrapper, agent, tool_call, "shell")
+
+    result = await ShellAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(
+            tool_error_formatter=lambda args: f"{args.tool_name} denied ({args.call_id})"
+        ),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert result.output == "shell denied (call_shell)"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["output"][0]["stderr"] == "shell denied (call_shell)"
+
+
+@pytest.mark.asyncio
 async def test_shell_tool_on_approval_callback_auto_approves() -> None:
     """Test that shell tool on_approval callback can auto-approve."""
 

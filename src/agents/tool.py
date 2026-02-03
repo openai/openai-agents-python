@@ -62,6 +62,8 @@ ToolFunction = Union[
     ToolFunctionWithToolContext[ToolParams],
 ]
 
+DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
+
 
 class ToolOutputText(BaseModel):
     """Represents a tool output that should be sent to the model as text."""

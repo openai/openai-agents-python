@@ -1203,6 +1203,46 @@ class TestToolCallExecution:
         )
 
     @pytest.mark.asyncio
+    async def test_reject_pending_tool_call_uses_run_level_formatter(
+        self, mock_model, mock_agent, mock_function_tool
+    ):
+        """Rejecting a pending tool call should use the run-level formatter output."""
+        mock_function_tool.needs_approval = True
+        mock_agent.get_all_tools.return_value = [mock_function_tool]
+
+        session = RealtimeSession(
+            mock_model,
+            mock_agent,
+            None,
+            run_config={
+                "tool_error_formatter": (
+                    lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+                )
+            },
+        )
+
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="test_function", call_id="call_reject_custom", arguments="{}"
+        )
+
+        await session._handle_tool_call(tool_call_event)
+        await session.reject_tool_call(tool_call_event.call_id)
+
+        _sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_output == "run-level test_function denied (call_reject_custom)"
+        assert start_response is True
+
+        events = []
+        while not session._event_queue.empty():
+            events.append(await session._event_queue.get())
+
+        assert any(
+            isinstance(ev, RealtimeToolEnd)
+            and ev.output == "run-level test_function denied (call_reject_custom)"
+            for ev in events
+        )
+
+    @pytest.mark.asyncio
     async def test_function_tool_exception_handling(
         self, mock_model, mock_agent, mock_function_tool
     ):

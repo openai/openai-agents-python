@@ -92,6 +92,7 @@ async def run_execute_approved_tools(
     approval_item: ToolApprovalItem,
     *,
     approve: bool | None,
+    run_config: RunConfig | None = None,
 ) -> list[RunItem]:
     """Execute approved tools with a consistent setup."""
 
@@ -116,7 +117,7 @@ async def run_execute_approved_tools(
         interruptions=[approval_item],
         context_wrapper=context_wrapper,
         generated_items=generated_items,
-        run_config=RunConfig(),
+        run_config=run_config or RunConfig(),
         hooks=RunHooks(),
         all_tools=all_tools,
     )
@@ -2646,6 +2647,58 @@ async def test_execute_approved_tools_with_rejected_tool():
     assert len(generated_items) == 1
     assert "not approved" in generated_items[0].output.lower()
     assert not tool_called  # Tool should not have been executed
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool_uses_run_level_formatter():
+    """Rejected tools should prefer RunConfig tool error formatter output."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(
+            tool_error_formatter=lambda args: f"run-level {args.tool_name} denied ({args.call_id})"
+        ),
+    )
+
+    assert len(generated_items) == 1
+    assert generated_items[0].output == "run-level test_tool denied (2)"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_with_rejected_tool_formatter_none_uses_default():
+    """Rejected tools should use default message when formatter returns None."""
+
+    async def test_tool() -> str:
+        return "tool_result"
+
+    tool = function_tool(test_tool, name_override="test_tool")
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", "{}")
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=False,
+        run_config=RunConfig(tool_error_formatter=lambda _args: None),
+    )
+
+    assert len(generated_items) == 1
+    assert generated_items[0].output == "Tool execution was not approved."
 
 
 @pytest.mark.asyncio

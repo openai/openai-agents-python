@@ -15,8 +15,9 @@ from pydantic import BaseModel
 from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE
 
-REJECTION_MESSAGE = "Tool execution was not approved."
+REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
     "function_call": "function_call_output",
     "shell_call": "shell_call_output",
@@ -175,22 +176,32 @@ def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TRespon
     return deduplicated
 
 
-def function_rejection_item(agent: Any, tool_call: Any) -> ToolCallOutputItem:
+def function_rejection_item(
+    agent: Any,
+    tool_call: Any,
+    *,
+    rejection_message: str = REJECTION_MESSAGE,
+) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
     if isinstance(tool_call, ResponseFunctionToolCall):
         drop_agent_tool_run_result(tool_call)
     return ToolCallOutputItem(
-        output=REJECTION_MESSAGE,
-        raw_item=ItemHelpers.tool_call_output_item(tool_call, REJECTION_MESSAGE),
+        output=rejection_message,
+        raw_item=ItemHelpers.tool_call_output_item(tool_call, rejection_message),
         agent=agent,
     )
 
 
-def shell_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
+def shell_rejection_item(
+    agent: Any,
+    call_id: str,
+    *,
+    rejection_message: str = REJECTION_MESSAGE,
+) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected shell call."""
     rejection_output: dict[str, Any] = {
         "stdout": "",
-        "stderr": REJECTION_MESSAGE,
+        "stderr": rejection_message,
         "outcome": {"type": "exit", "exit_code": 1},
     }
     rejection_raw_item: dict[str, Any] = {
@@ -198,20 +209,25 @@ def shell_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
         "call_id": call_id,
         "output": [rejection_output],
     }
-    return ToolCallOutputItem(agent=agent, output=REJECTION_MESSAGE, raw_item=rejection_raw_item)
+    return ToolCallOutputItem(agent=agent, output=rejection_message, raw_item=rejection_raw_item)
 
 
-def apply_patch_rejection_item(agent: Any, call_id: str) -> ToolCallOutputItem:
+def apply_patch_rejection_item(
+    agent: Any,
+    call_id: str,
+    *,
+    rejection_message: str = REJECTION_MESSAGE,
+) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected apply_patch call."""
     rejection_raw_item: dict[str, Any] = {
         "type": "apply_patch_call_output",
         "call_id": call_id,
         "status": "failed",
-        "output": REJECTION_MESSAGE,
+        "output": rejection_message,
     }
     return ToolCallOutputItem(
         agent=agent,
-        output=REJECTION_MESSAGE,
+        output=rejection_message,
         raw_item=rejection_raw_item,
     )
 

@@ -21,7 +21,7 @@ from ..items import (
     ToolCallOutputItem,
 )
 from ..run_context import RunContextWrapper
-from ..tool import MCPToolApprovalRequest
+from ..tool import FunctionTool, MCPToolApprovalRequest
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .run_steps import (
     ToolRunApplyPatchCall,
@@ -360,7 +360,7 @@ async def _collect_runs_by_approval(
     *,
     call_id_extractor: Callable[[T], str],
     tool_name_resolver: Callable[[T], str],
-    rejection_builder: Callable[[str], RunItem],
+    rejection_builder: Callable[[T, str], Awaitable[RunItem] | RunItem],
     context_wrapper: RunContextWrapper[Any],
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     agent: Agent[Any],
@@ -385,7 +385,12 @@ async def _collect_runs_by_approval(
             continue
 
         if approval_status is False:
-            rejection_items.append(rejection_builder(call_id))
+            rejection = rejection_builder(run, call_id)
+            if inspect.isawaitable(rejection):
+                rejection_item = await cast(Awaitable[RunItem], rejection)
+            else:
+                rejection_item = rejection
+            rejection_items.append(rejection_item)
             continue
 
         needs_approval = True
@@ -461,7 +466,9 @@ async def _select_function_tool_runs_for_resume(
     context_wrapper: RunContextWrapper[Any],
     needs_approval_checker: Callable[[ToolRunFunction], Awaitable[bool]],
     output_exists_checker: Callable[[ToolRunFunction], bool],
-    record_rejection: Callable[[str | None, ResponseFunctionToolCall], None],
+    record_rejection: Callable[
+        [str | None, ResponseFunctionToolCall, FunctionTool], Awaitable[None]
+    ],
     pending_interruption_adder: Callable[[ToolApprovalItem], None],
     pending_item_builder: Callable[[ToolRunFunction], ToolApprovalItem],
 ) -> list[ToolRunFunction]:
@@ -481,7 +488,7 @@ async def _select_function_tool_runs_for_resume(
         requires_approval = await needs_approval_checker(run)
 
         if approval_status is False:
-            record_rejection(call_id, run.tool_call)
+            await record_rejection(call_id, run.tool_call, run.function_tool)
             continue
 
         if approval_status is True:

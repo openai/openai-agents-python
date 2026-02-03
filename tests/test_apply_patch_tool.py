@@ -213,6 +213,38 @@ async def test_apply_patch_tool_needs_approval_rejected_returns_rejection() -> N
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_rejection_uses_run_level_formatter() -> None:
+    """Apply patch approval rejection should use the run-level formatter message."""
+
+    editor = RecordingEditor()
+    tool = ApplyPatchTool(
+        editor=editor,
+        needs_approval=require_approval,
+    )
+    tool_call = _call("call_apply", {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"})
+    agent, context_wrapper, tool_run = build_apply_patch_call(
+        tool, "call_apply", tool_call.operation, context_wrapper=make_context_wrapper()
+    )
+
+    reject_tool_call(context_wrapper, agent, cast(dict[str, Any], tool_call), "apply_patch")
+
+    result = await ApplyPatchAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(
+            tool_error_formatter=lambda args: f"{args.tool_name} denied ({args.call_id})"
+        ),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert result.output == "apply_patch denied (call_apply)"
+    raw_item = cast(dict[str, Any], result.raw_item)
+    assert raw_item["output"] == "apply_patch denied (call_apply)"
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_tool_on_approval_callback_auto_approves() -> None:
     """Test that apply_patch tool on_approval callback can auto-approve."""
 

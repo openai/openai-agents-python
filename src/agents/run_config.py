@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -21,6 +21,7 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .run_context import RunContextWrapper
 
 
 DEFAULT_MAX_TURNS = 10
@@ -50,6 +51,32 @@ class CallModelData(Generic[TContext]):
 
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+
+
+@dataclass
+class ToolErrorFormatterArgs(Generic[TContext]):
+    """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
+
+    kind: Literal["approval_rejected"]
+    """The category of tool error being formatted."""
+
+    tool_type: Literal["function", "computer", "shell", "apply_patch"]
+    """The tool runtime that produced the error."""
+
+    tool_name: str
+    """The name of the tool that produced the error."""
+
+    call_id: str
+    """The unique tool call identifier."""
+
+    default_message: str
+    """The SDK default message for this error kind."""
+
+    run_context: RunContextWrapper[TContext]
+    """The active run context for the current execution."""
+
+
+ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
 
 
 @dataclass
@@ -150,6 +177,12 @@ class RunConfig:
     For example, you can use this to add a system prompt to the input.
     """
 
+    tool_error_formatter: ToolErrorFormatter | None = None
+    """Optional callback that formats tool error messages returned to the model.
+
+    Returning ``None`` falls back to the SDK default message.
+    """
+
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
@@ -189,5 +222,7 @@ __all__ = [
     "ModelInputData",
     "RunConfig",
     "RunOptions",
+    "ToolErrorFormatter",
+    "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",
 ]

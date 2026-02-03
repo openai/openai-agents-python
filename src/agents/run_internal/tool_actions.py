@@ -52,7 +52,7 @@ from .tool_execution import (
     normalize_shell_output,
     normalize_shell_output_entries,
     render_shell_outputs,
-    resolve_approval_interruption,
+    resolve_approval_rejection_message,
     resolve_approval_status,
     serialize_shell_output,
     truncate_shell_outputs,
@@ -248,13 +248,22 @@ class ShellAction:
                 on_approval=shell_tool.on_approval,
             )
 
-            approval_interruption = resolve_approval_interruption(
-                approval_status,
-                approval_item,
-                rejection_factory=lambda: shell_rejection_item(agent, shell_call.call_id),
-            )
-            if approval_interruption:
-                return approval_interruption
+            if approval_status is False:
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=config,
+                    tool_type="shell",
+                    tool_name=shell_tool.name,
+                    call_id=shell_call.call_id,
+                )
+                return shell_rejection_item(
+                    agent,
+                    shell_call.call_id,
+                    rejection_message=rejection_message,
+                )
+
+            if approval_status is not True:
+                return approval_item
 
         await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, shell_tool),
@@ -390,13 +399,22 @@ class ApplyPatchAction:
                 on_approval=apply_patch_tool.on_approval,
             )
 
-            approval_interruption = resolve_approval_interruption(
-                approval_status,
-                approval_item,
-                rejection_factory=lambda: apply_patch_rejection_item(agent, call_id),
-            )
-            if approval_interruption:
-                return approval_interruption
+            if approval_status is False:
+                rejection_message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=config,
+                    tool_type="apply_patch",
+                    tool_name=apply_patch_tool.name,
+                    call_id=call_id,
+                )
+                return apply_patch_rejection_item(
+                    agent,
+                    call_id,
+                    rejection_message=rejection_message,
+                )
+
+            if approval_status is not True:
+                return approval_item
 
         await asyncio.gather(
             hooks.on_tool_start(context_wrapper, agent, apply_patch_tool),

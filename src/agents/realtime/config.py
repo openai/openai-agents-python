@@ -13,6 +13,7 @@ from agents.prompts import Prompt
 from ..guardrail import OutputGuardrail
 from ..handoffs import Handoff
 from ..model_settings import ToolChoice
+from ..run_config import ToolErrorFormatter
 from ..tool import Tool
 
 RealtimeModelName: TypeAlias = Union[
@@ -220,6 +221,9 @@ class RealtimeRunConfig(TypedDict):
 
     async_tool_calls: NotRequired[bool]
     """Whether function tool calls should run asynchronously. Defaults to True."""
+
+    tool_error_formatter: NotRequired[ToolErrorFormatter]
+    """Optional callback that formats tool error messages returned to the model."""
 
     # TODO (rm) Add history audio storage config
 

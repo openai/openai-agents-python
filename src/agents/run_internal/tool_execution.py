@@ -37,8 +37,9 @@ from ..items import (
     ToolApprovalItem,
     ToolCallOutputItem,
 )
+from ..logger import logger
 from ..model_settings import ModelSettings
-from ..run_config import RunConfig
+from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper
 from ..tool import (
     ApplyPatchTool,
@@ -109,6 +110,7 @@ __all__ = [
     "should_keep_hosted_mcp_item",
     "resolve_approval_status",
     "resolve_approval_interruption",
+    "resolve_approval_rejection_message",
     "function_needs_approval",
     "execute_function_tool_calls",
     "execute_local_shell_calls",
@@ -594,6 +596,49 @@ def resolve_approval_interruption(
     return None
 
 
+async def resolve_approval_rejection_message(
+    *,
+    context_wrapper: RunContextWrapper[Any],
+    run_config: RunConfig,
+    tool_type: Literal["function", "computer", "shell", "apply_patch"],
+    tool_name: str,
+    call_id: str,
+) -> str:
+    """Resolve model-visible output text for approval rejections."""
+    formatter = run_config.tool_error_formatter
+    if formatter is None:
+        return REJECTION_MESSAGE
+
+    try:
+        maybe_message = formatter(
+            ToolErrorFormatterArgs(
+                kind="approval_rejected",
+                tool_type=tool_type,
+                tool_name=tool_name,
+                call_id=call_id,
+                default_message=REJECTION_MESSAGE,
+                run_context=context_wrapper,
+            )
+        )
+        message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
+    except Exception as exc:
+        logger.error("Tool error formatter failed for %s: %s", tool_name, exc)
+        return REJECTION_MESSAGE
+
+    if message is None:
+        return REJECTION_MESSAGE
+
+    if not isinstance(message, str):
+        logger.error(
+            "Tool error formatter returned non-string for %s: %s",
+            tool_name,
+            type(message).__name__,
+        )
+        return REJECTION_MESSAGE
+
+    return message
+
+
 async def function_needs_approval(
     function_tool: FunctionTool,
     context_wrapper: RunContextWrapper[Any],
@@ -801,9 +846,16 @@ async def execute_function_tool_calls(
                         )
 
                     if approval_status is False:
+                        rejection_message = await resolve_approval_rejection_message(
+                            context_wrapper=context_wrapper,
+                            run_config=config,
+                            tool_type="function",
+                            tool_name=func_tool.name,
+                            call_id=tool_call.call_id,
+                        )
                         span_fn.set_error(
                             SpanError(
-                                message=REJECTION_MESSAGE,
+                                message=rejection_message,
                                 data={
                                     "tool_name": func_tool.name,
                                     "error": (
@@ -813,12 +865,16 @@ async def execute_function_tool_calls(
                                 },
                             )
                         )
-                        result = REJECTION_MESSAGE
+                        result = rejection_message
                         span_fn.span_data.output = result
                         return FunctionToolResult(
                             tool=func_tool,
                             output=result,
-                            run_item=function_rejection_item(agent, tool_call),
+                            run_item=function_rejection_item(
+                                agent,
+                                tool_call,
+                                rejection_message=rejection_message,
+                            ),
                         )
 
                 rejected_message = await _execute_tool_input_guardrails(
@@ -1088,7 +1144,7 @@ async def execute_approved_tools(
             agent=agent,
         )
 
-    def _resolve_tool_run(
+    async def _resolve_tool_run(
         interruption: Any,
     ) -> tuple[ResponseFunctionToolCall, FunctionTool, str, str] | None:
         tool_call = interruption.raw_item
@@ -1115,12 +1171,28 @@ async def execute_approved_tools(
         approval_status = context_wrapper.get_approval_status(
             tool_name, call_id, existing_pending=interruption
         )
-        if approval_status is not True:
-            message = (
-                REJECTION_MESSAGE if approval_status is False else "Tool approval status unclear."
-            )
+        if approval_status is False:
+            resolved_tool = tool_map.get(tool_name)
+            message = REJECTION_MESSAGE
+            if isinstance(resolved_tool, FunctionTool):
+                message = await resolve_approval_rejection_message(
+                    context_wrapper=context_wrapper,
+                    run_config=run_config,
+                    tool_type="function",
+                    tool_name=tool_name,
+                    call_id=call_id,
+                )
             _append_error(
                 message=message,
+                tool_call=tool_call,
+                tool_name=tool_name,
+                call_id=call_id,
+            )
+            return None
+
+        if approval_status is not True:
+            _append_error(
+                message="Tool approval status unclear.",
                 tool_call=tool_call,
                 tool_name=tool_name,
                 call_id=call_id,
@@ -1160,7 +1232,7 @@ async def execute_approved_tools(
         return tool_call, tool, tool_name, call_id
 
     for interruption in interruptions:
-        resolved = _resolve_tool_run(interruption)
+        resolved = await _resolve_tool_run(interruption)
         if resolved is None:
             continue
         tool_call, tool, tool_name, _ = resolved

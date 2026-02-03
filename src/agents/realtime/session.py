@@ -13,8 +13,9 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ToolApprovalItem
 from ..logger import logger
+from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import FunctionTool
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool
 from ..tool_context import ToolContext
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
@@ -63,7 +64,7 @@ from .model_inputs import (
     RealtimeModelSendUserInput,
 )
 
-REJECTION_MESSAGE = "Tool execution was not approved."
+REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 
 
 class RealtimeSession(RealtimeModelListener):
@@ -477,10 +478,14 @@ class RealtimeSession(RealtimeModelListener):
         agent: RealtimeAgent,
     ) -> None:
         """Send a rejection response back to the model and emit an end event."""
+        rejection_message = await self._resolve_approval_rejection_message(
+            tool=tool,
+            call_id=event.call_id,
+        )
         await self._model.send_event(
             RealtimeModelSendToolOutput(
                 tool_call=event,
-                output=REJECTION_MESSAGE,
+                output=rejection_message,
                 start_response=True,
             )
         )
@@ -489,11 +494,46 @@ class RealtimeSession(RealtimeModelListener):
             RealtimeToolEnd(
                 info=self._event_info,
                 tool=tool,
-                output=REJECTION_MESSAGE,
+                output=rejection_message,
                 agent=agent,
                 arguments=event.arguments,
             )
         )
+
+    async def _resolve_approval_rejection_message(self, *, tool: FunctionTool, call_id: str) -> str:
+        """Resolve model-visible output text for approval rejections."""
+        formatter = self._run_config.get("tool_error_formatter")
+        if formatter is None:
+            return REJECTION_MESSAGE
+
+        try:
+            maybe_message = formatter(
+                ToolErrorFormatterArgs(
+                    kind="approval_rejected",
+                    tool_type="function",
+                    tool_name=tool.name,
+                    call_id=call_id,
+                    default_message=REJECTION_MESSAGE,
+                    run_context=self._context_wrapper,
+                )
+            )
+            message = await maybe_message if inspect.isawaitable(maybe_message) else maybe_message
+        except Exception as exc:
+            logger.error("Tool error formatter failed for %s: %s", tool.name, exc)
+            return REJECTION_MESSAGE
+
+        if message is None:
+            return REJECTION_MESSAGE
+
+        if not isinstance(message, str):
+            logger.error(
+                "Tool error formatter returned non-string for %s: %s",
+                tool.name,
+                type(message).__name__,
+            )
+            return REJECTION_MESSAGE
+
+        return message
 
     async def approve_tool_call(self, call_id: str, *, always: bool = False) -> None:
         """Approve a pending tool call and resume execution."""

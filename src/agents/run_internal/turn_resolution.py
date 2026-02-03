@@ -67,7 +67,12 @@ from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResul
 from ..tracing import SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
-from .items import apply_patch_rejection_item, function_rejection_item, shell_rejection_item
+from .items import (
+    REJECTION_MESSAGE,
+    apply_patch_rejection_item,
+    function_rejection_item,
+    shell_rejection_item,
+)
 from .run_steps import (
     NOT_FINAL_OUTPUT,
     NextStepFinalOutput,
@@ -100,6 +105,7 @@ from .tool_execution import (
     parse_apply_patch_custom_input,
     parse_apply_patch_function_args,
     process_hosted_mcp_approvals,
+    resolve_approval_rejection_message,
     should_keep_hosted_mcp_item,
 )
 from .tool_planning import (
@@ -669,12 +675,25 @@ async def resolve_interrupted_turn(
             ]
         return [item for item in original_pre_step_items if isinstance(item, ToolApprovalItem)]
 
-    def _record_function_rejection(
-        call_id: str | None, tool_call: ResponseFunctionToolCall
+    async def _record_function_rejection(
+        call_id: str | None,
+        tool_call: ResponseFunctionToolCall,
+        function_tool: FunctionTool,
     ) -> None:
         if isinstance(call_id, str) and call_id in rejected_function_call_ids:
             return
-        rejected_function_outputs.append(function_rejection_item(agent, tool_call))
+        rejection_message = REJECTION_MESSAGE
+        if call_id:
+            rejection_message = await resolve_approval_rejection_message(
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                tool_type="function",
+                tool_name=function_tool.name,
+                call_id=call_id,
+            )
+        rejected_function_outputs.append(
+            function_rejection_item(agent, tool_call, rejection_message=rejection_message)
+        )
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
 
@@ -731,11 +750,39 @@ async def resolve_interrupted_turn(
     def _apply_patch_tool_name(run: ToolRunApplyPatchCall) -> str:
         return run.apply_patch_tool.name
 
-    def _build_shell_rejection(call_id: str) -> RunItem:
-        return cast(RunItem, shell_rejection_item(agent, call_id))
+    async def _build_shell_rejection(run: ToolRunShellCall, call_id: str) -> RunItem:
+        rejection_message = await resolve_approval_rejection_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_type="shell",
+            tool_name=run.shell_tool.name,
+            call_id=call_id,
+        )
+        return cast(
+            RunItem,
+            shell_rejection_item(
+                agent,
+                call_id,
+                rejection_message=rejection_message,
+            ),
+        )
 
-    def _build_apply_patch_rejection(call_id: str) -> RunItem:
-        return cast(RunItem, apply_patch_rejection_item(agent, call_id))
+    async def _build_apply_patch_rejection(run: ToolRunApplyPatchCall, call_id: str) -> RunItem:
+        rejection_message = await resolve_approval_rejection_message(
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_type="apply_patch",
+            tool_name=run.apply_patch_tool.name,
+            call_id=call_id,
+        )
+        return cast(
+            RunItem,
+            apply_patch_rejection_item(
+                agent,
+                call_id,
+                rejection_message=rejection_message,
+            ),
+        )
 
     async def _shell_needs_approval(run: ToolRunShellCall) -> bool:
         shell_call = coerce_shell_call(run.tool_call)
@@ -896,7 +943,11 @@ async def resolve_interrupted_turn(
                 name, rebuilt_call_id, existing_pending=approval
             )
             if approval_status is False:
-                _record_function_rejection(rebuilt_call_id, tool_call)
+                await _record_function_rejection(
+                    rebuilt_call_id,
+                    tool_call,
+                    tool_map[name],
+                )
                 continue
             if approval_status is None:
                 if rebuilt_call_id not in existing_pending_call_ids:
