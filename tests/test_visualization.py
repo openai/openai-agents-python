@@ -179,3 +179,43 @@ def test_cycle_detection():
     assert nodes.count('"B" [label="B"') == 1
     assert '"A" -> "B"' in edges
     assert '"B" -> "A"' in edges
+
+
+def test_draw_graph_with_real_agent_no_handoffs():
+    """Test that draw_graph works with a real Agent object without handoffs.
+
+    This test ensures that the visualization code does not use isinstance()
+    with generic types (like Tool), which would fail on Python 3.12+.
+    See: https://github.com/openai/openai-agents-python/issues/2397
+    """
+    agent = Agent(name="TestAgent", instructions="Test instructions")
+
+    # This should not raise TypeError on Python 3.12+
+    graph = draw_graph(agent)
+
+    assert isinstance(graph, graphviz.Source)
+    assert '"TestAgent"' in graph.source
+    assert '"__start__" -> "TestAgent"' in graph.source
+    # Agent without handoffs should connect to __end__
+    assert '"TestAgent" -> "__end__"' in graph.source
+
+
+def test_draw_graph_with_real_agent_with_handoffs():
+    """Test draw_graph with real Agent objects that have handoffs."""
+    child_agent = Agent(name="ChildAgent", instructions="Child instructions")
+    parent_agent = Agent(
+        name="ParentAgent",
+        instructions="Parent instructions",
+        handoffs=[child_agent],
+    )
+
+    graph = draw_graph(parent_agent)
+
+    assert isinstance(graph, graphviz.Source)
+    assert '"ParentAgent"' in graph.source
+    assert '"ChildAgent"' in graph.source
+    assert '"ParentAgent" -> "ChildAgent"' in graph.source
+    # Parent has handoffs, so should NOT connect directly to __end__
+    assert '"ParentAgent" -> "__end__"' not in graph.source
+    # Child has no handoffs, so should connect to __end__
+    assert '"ChildAgent" -> "__end__"' in graph.source

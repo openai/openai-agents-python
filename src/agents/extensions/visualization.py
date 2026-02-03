@@ -4,7 +4,6 @@ import graphviz  # type: ignore
 
 from agents import Agent
 from agents.handoffs import Handoff
-from agents.tool import Tool
 
 
 def get_main_graph(agent: Agent) -> str:
@@ -139,7 +138,7 @@ def get_all_edges(
             "{agent.name}" -> "{handoff.name}";""")
             parts.append(get_all_edges(handoff, agent, visited))
 
-    if not agent.handoffs and not isinstance(agent, Tool):  # type: ignore
+    if not agent.handoffs:
         parts.append(f'"{agent.name}" -> "__end__";')
 
     return "".join(parts)
