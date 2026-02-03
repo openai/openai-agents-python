@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from typing import Union
 
 import anyio
 import pytest
@@ -23,7 +24,9 @@ from agents.mcp.server import (
     _MCPServerWithClientSession,
 )
 
-HandlerMessage = RequestResponder[ServerRequest, ClientResult] | ServerNotification | Exception
+HandlerMessage = Union[  # noqa: UP007
+    RequestResponder[ServerRequest, ClientResult], ServerNotification, Exception
+]
 
 
 class _StubClientSession:

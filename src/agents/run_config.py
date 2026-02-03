@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -76,7 +76,7 @@ class ToolErrorFormatterArgs(Generic[TContext]):
     """The active run context for the current execution."""
 
 
-ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
+ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[Optional[str]]]
 
 
 @dataclass

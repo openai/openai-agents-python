@@ -8,7 +8,7 @@ from collections.abc import Awaitable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast
 
 import httpx
 
@@ -48,9 +48,14 @@ class RequireApprovalObject(TypedDict, total=False):
 
 RequireApprovalPolicy = Literal["always", "never"]
 RequireApprovalMapping = dict[str, RequireApprovalPolicy]
-RequireApprovalSetting = (
-    RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
-)
+if TYPE_CHECKING:
+    RequireApprovalSetting = (
+        RequireApprovalPolicy | RequireApprovalObject | RequireApprovalMapping | bool | None
+    )
+else:
+    RequireApprovalSetting = Union[  # noqa: UP007
+        RequireApprovalPolicy, RequireApprovalObject, RequireApprovalMapping, bool, None
+    ]
 
 
 T = TypeVar("T")
