@@ -24,6 +24,32 @@ matrix below summarises the options that the Python SDK supports.
 
 The sections below walk through each option, how to configure it, and when to prefer one transport over another.
 
+## Agent-level MCP configuration
+
+In addition to choosing a transport, you can tune how MCP tools are prepared by setting `Agent.mcp_config`.
+
+```python
+from agents import Agent
+
+agent = Agent(
+    name="Assistant",
+    mcp_servers=[server],
+    mcp_config={
+        # Try to convert MCP tool schemas to strict JSON schema.
+        "convert_schemas_to_strict": True,
+        # If None, MCP tool failures are raised as exceptions instead of
+        # returning model-visible error text.
+        "failure_error_function": None,
+    },
+)
+```
+
+Notes:
+
+- `convert_schemas_to_strict` is best-effort. If a schema cannot be converted, the original schema is used.
+- `failure_error_function` controls how MCP tool call failures are surfaced to the model.
+- When `failure_error_function` is unset, the SDK uses the default tool error formatter.
+
 ## 1. Hosted MCP server tools
 
 Hosted tools push the entire tool round-trip into OpenAI's infrastructure. Instead of your code listing and calling tools, the

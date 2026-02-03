@@ -52,3 +52,30 @@ The [`raw_responses`][agents.result.RunResultBase.raw_responses] property contai
 ### Original input
 
 The [`input`][agents.result.RunResultBase.input] property contains the original input you provided to the `run` method. In most cases you won't need this, but it's available in case you do.
+
+### Interruptions and resuming runs
+
+If a run pauses for tool approval, pending approvals are exposed in [`interruptions`][agents.result.RunResultBase.interruptions]. Convert the result into a [`RunState`][agents.run_state.RunState] with `to_state()`, approve or reject the interruption(s), and resume with `Runner.run(...)` or `Runner.run_streamed(...)`.
+
+```python
+from agents import Agent, Runner
+
+agent = Agent(name="Assistant", instructions="Use tools when needed.")
+result = await Runner.run(agent, "Delete temp files that are no longer needed.")
+
+if result.interruptions:
+    state = result.to_state()
+    for interruption in result.interruptions:
+        state.approve(interruption)
+    result = await Runner.run(agent, state)
+```
+
+Both [`RunResult`][agents.result.RunResult] and [`RunResultStreaming`][agents.result.RunResultStreaming] support `to_state()`.
+
+### Convenience helpers
+
+`RunResultBase` includes a few helper methods/properties that are useful in production flows:
+
+- [`final_output_as(...)`][agents.result.RunResultBase.final_output_as] casts final output to a specific type (optionally with runtime type checking).
+- [`last_response_id`][agents.result.RunResultBase.last_response_id] returns the latest model response ID, useful for response chaining.
+- [`release_agents(...)`][agents.result.RunResultBase.release_agents] drops strong references to agents when you want to reduce memory pressure after inspecting results.

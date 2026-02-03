@@ -321,7 +321,7 @@ async def main():
 
 ### Customizing tool-agents
 
-The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It doesn't support all configuration though; for example, you can't set `max_turns`. For advanced use cases, use `Runner.run` directly in your tool implementation:
+The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, and `session`. For advanced orchestration (for example, conditional retries, fallback behavior, or chaining multiple agent calls), use `Runner.run` directly in your tool implementation:
 
 ```python
 @function_tool
@@ -377,7 +377,7 @@ from agents import AgentToolStreamEvent
 
 async def handle_stream(event: AgentToolStreamEvent) -> None:
     # Inspect the underlying StreamEvent along with agent metadata.
-    print(f"[stream] {event['agent']['name']} :: {event['event'].type}")
+    print(f"[stream] {event['agent'].name} :: {event['event'].type}")
 
 
 billing_agent_tool = billing_agent.as_tool(
@@ -392,7 +392,7 @@ What to expect:
 - Event types mirror `StreamEvent["type"]`: `raw_response_event`, `run_item_stream_event`, `agent_updated_stream_event`.
 - Providing `on_stream` automatically runs the nested agent in streaming mode and drains the stream before returning the final output.
 - The handler may be synchronous or asynchronous; each event is delivered in order as it arrives.
-- `tool_call_id` is present when the tool is invoked via a model tool call; direct calls may leave it `None`.
+- `tool_call` is present when the tool is invoked via a model tool call; direct calls may leave it `None`.
 - See `examples/agent_patterns/agents_as_tools_streaming.py` for a complete runnable sample.
 
 ### Conditional tool enabling
