@@ -506,7 +506,7 @@ during a tool call. This surface is experimental and may change.
 
 ```python
 from agents import Agent
-from agents.extensions.experimental.codex import ThreadOptions, codex_tool
+from agents.extensions.experimental.codex import ThreadOptions, TurnOptions, codex_tool
 
 agent = Agent(
     name="Codex Agent",
@@ -517,8 +517,13 @@ agent = Agent(
             working_directory="/path/to/repo",
             default_thread_options=ThreadOptions(
                 model="gpt-5.2-codex",
+                model_reasoning_effort="low",
                 network_access_enabled=True,
-                web_search_enabled=False,
+                web_search_mode="disabled",
+                approval_policy="never",
+            ),
+            default_turn_options=TurnOptions(
+                idle_timeout_seconds=60,
             ),
             persist_session=True,
         )
@@ -529,9 +534,13 @@ agent = Agent(
 What to know:
 
 -   Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
--   Runtime: `codex_options.base_url` overrides the CLI base URL, and `codex_options.codex_path_override` (or `CODEX_PATH`) selects the binary.
+-   Runtime: `codex_options.base_url` overrides the CLI base URL.
+-   Binary resolution: set `codex_options.codex_path_override` (or `CODEX_PATH`) to pin the CLI path. Otherwise the SDK resolves `codex` from `PATH`, then falls back to the bundled vendor binary.
 -   Environment: `codex_options.env` fully controls the subprocess environment. When it is provided, the subprocess does not inherit `os.environ`.
+-   Stream limits: `codex_options.codex_subprocess_stream_limit_bytes` (or `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`) controls stdout/stderr reader limits. Valid range is `65536` to `67108864`; default is `8388608`.
 -   Inputs: tool calls must include at least one item in `inputs` with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`.
+-   Thread defaults: configure `default_thread_options` for `model_reasoning_effort`, `web_search_mode` (preferred over legacy `web_search_enabled`), `approval_policy`, and `additional_directories`.
+-   Turn defaults: configure `default_turn_options` for `idle_timeout_seconds` and cancellation `signal`.
 -   Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
 -   Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
 -   Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
