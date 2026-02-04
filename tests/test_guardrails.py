@@ -510,6 +510,104 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
 
 
 @pytest.mark.asyncio
+async def test_parallel_guardrail_trip_cancels_model_task():
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_after_model_starts(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        return GuardrailFunctionOutput(
+            output_info="parallel_tripwire",
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    original_get_response = model.get_response
+
+    async def slow_get_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.sleep(0.2)
+            return await original_get_response(*args, **kwargs)
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="parallel_tripwire_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[tripwire_after_model_starts],
+        model=model,
+    )
+    model.set_next_output([get_text_message("should_not_finish")])
+
+    with patch.object(model, "get_response", side_effect=slow_get_response):
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            await Runner.run(agent, "trigger guardrail")
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
+    model_started = asyncio.Event()
+    model_cancelled = asyncio.Event()
+    model_finished = asyncio.Event()
+
+    @input_guardrail(run_in_parallel=True)
+    async def tripwire_after_model_starts(
+        ctx: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        await asyncio.wait_for(model_started.wait(), timeout=1)
+        return GuardrailFunctionOutput(
+            output_info="parallel_tripwire",
+            tripwire_triggered=True,
+        )
+
+    model = FakeModel()
+    original_get_response = model.get_response
+
+    async def slow_get_response(*args, **kwargs):
+        model_started.set()
+        try:
+            await asyncio.sleep(0.2)
+            return await original_get_response(*args, **kwargs)
+        except asyncio.CancelledError:
+            model_cancelled.set()
+            raise
+        finally:
+            model_finished.set()
+
+    agent = Agent(
+        name="parallel_tripwire_agent",
+        instructions="Reply with 'hello'",
+        input_guardrails=[tripwire_after_model_starts],
+        model=model,
+    )
+    model.set_next_output([get_text_message("should_finish_without_cancel")])
+
+    with patch.object(model, "get_response", side_effect=slow_get_response):
+        with patch(
+            "agents.run._should_cancel_parallel_model_task_on_input_guardrail_trip",
+            return_value=False,
+        ):
+            with pytest.raises(InputGuardrailTripwireTriggered):
+                await Runner.run(agent, "trigger guardrail")
+
+    await asyncio.wait_for(model_finished.wait(), timeout=1)
+    assert model_started.is_set() is True
+    assert model_cancelled.is_set() is False
+
+
+@pytest.mark.asyncio
 async def test_parallel_guardrail_may_not_prevent_tool_execution_streaming():
     tool_was_executed = False
     guardrail_executed = False
