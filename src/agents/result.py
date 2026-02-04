@@ -76,8 +76,9 @@ def _populate_state_from_result(
     state._previous_response_id = previous_response_id
     state._auto_previous_response_id = auto_previous_response_id
 
-    if result.interruptions:
-        state._current_step = NextStepInterruption(interruptions=result.interruptions)
+    interruptions = list(getattr(result, "interruptions", []))
+    if interruptions:
+        state._current_step = NextStepInterruption(interruptions=interruptions)
 
     trace_state = getattr(result, "_trace_state", None)
     if trace_state is None:
@@ -119,9 +120,6 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
-
-    interruptions: list[ToolApprovalItem]
-    """Pending tool approval requests (interruptions) for this run."""
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
@@ -228,6 +226,8 @@ class RunResult(RunResultBase):
     """Whether automatic previous response tracking was enabled."""
     max_turns: int = 10
     """The maximum number of turns allowed for this run."""
+    interruptions: list[ToolApprovalItem] = field(default_factory=list)
+    """Pending tool approval requests (interruptions) for this run."""
 
     def __post_init__(self) -> None:
         self._last_agent_ref = weakref.ref(self._last_agent)
@@ -328,6 +328,8 @@ class RunResultStreaming(RunResultBase):
     _current_agent_output_schema: AgentOutputSchemaBase | None = field(repr=False)
 
     trace: Trace | None = field(repr=False)
+    interruptions: list[ToolApprovalItem] = field(default_factory=list)
+    """Pending tool approval requests (interruptions) for this run."""
 
     is_complete: bool = False
     """Whether the agent has finished running."""
@@ -352,7 +354,7 @@ class RunResultStreaming(RunResultBase):
     )
 
     # Store the asyncio tasks that we're waiting on
-    run_loop_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    _run_impl_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _input_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: Exception | None = field(default=None, repr=False)
@@ -392,6 +394,15 @@ class RunResultStreaming(RunResultBase):
         # Store the original input at creation time (it will be set via input field)
         if self._original_input is None:
             self._original_input = self.input
+
+    @property
+    def run_loop_task(self) -> asyncio.Task[Any] | None:
+        """Backward-compatible alias for the internal run loop task."""
+        return self._run_impl_task
+
+    @run_loop_task.setter
+    def run_loop_task(self, value: asyncio.Task[Any] | None) -> None:
+        self._run_impl_task = value
 
     @property
     def last_agent(self) -> Agent[Any]:

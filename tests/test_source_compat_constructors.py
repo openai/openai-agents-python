@@ -3,12 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from agents import (
+    Agent,
     AgentHookContext,
     FunctionTool,
     HandoffInputData,
     ItemHelpers,
     MultiProvider,
     RunConfig,
+    RunContextWrapper,
+    RunResult,
+    RunResultStreaming,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -68,3 +72,62 @@ def test_agent_hook_context_third_positional_argument_is_turn_input() -> None:
 
     assert context.turn_input == turn_input
     assert isinstance(context._approvals, dict)
+
+
+def test_run_result_v070_positional_constructor_still_works() -> None:
+    result = RunResult(
+        "x",
+        [],
+        [],
+        "ok",
+        [],
+        [],
+        [],
+        [],
+        RunContextWrapper(context=None),
+        Agent(name="agent"),
+    )
+    assert result.final_output == "ok"
+    assert result.interruptions == []
+
+
+def test_run_result_streaming_v070_positional_constructor_still_works() -> None:
+    result = RunResultStreaming(
+        "x",
+        [],
+        [],
+        "ok",
+        [],
+        [],
+        [],
+        [],
+        RunContextWrapper(context=None),
+        Agent(name="agent"),
+        0,
+        1,
+        None,
+        None,
+    )
+    assert result.final_output == "ok"
+    assert result.interruptions == []
+
+
+def test_run_result_streaming_accepts_legacy_run_impl_task_keyword() -> None:
+    result = RunResultStreaming(
+        input="x",
+        new_items=[],
+        raw_responses=[],
+        final_output="ok",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="agent"),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        _run_impl_task=None,
+    )
+    assert result.run_loop_task is None
