@@ -49,6 +49,7 @@ Notes:
 - `convert_schemas_to_strict` is best-effort. If a schema cannot be converted, the original schema is used.
 - `failure_error_function` controls how MCP tool call failures are surfaced to the model.
 - When `failure_error_function` is unset, the SDK uses the default tool error formatter.
+- Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
 
 ## 1. Hosted MCP server tools
 
