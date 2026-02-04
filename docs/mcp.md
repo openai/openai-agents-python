@@ -204,6 +204,61 @@ The constructor accepts additional options:
 - `use_structured_content` toggles whether `tool_result.structured_content` is preferred over textual output.
 - `max_retry_attempts` and `retry_backoff_seconds_base` add automatic retries for `list_tools()` and `call_tool()`.
 - `tool_filter` lets you expose only a subset of tools (see [Tool filtering](#tool-filtering)).
+- `require_approval` enables human-in-the-loop approval policies on local MCP tools.
+- `failure_error_function` customizes model-visible MCP tool failure messages; set it to `None` to raise errors instead.
+- `tool_meta_resolver` injects per-call MCP `_meta` payloads before `call_tool()`.
+
+### Approval policies for local MCP servers
+
+`MCPServerStdio`, `MCPServerSse`, and `MCPServerStreamableHttp` all accept `require_approval`.
+
+Supported forms:
+
+- `"always"` or `"never"` for all tools.
+- `True` / `False` (equivalent to always/never).
+- A per-tool map, for example `{"delete_file": "always", "read_file": "never"}`.
+- A grouped object:
+  `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
+
+```python
+async with MCPServerStreamableHttp(
+    name="Filesystem MCP",
+    params={"url": "http://localhost:8000/mcp"},
+    require_approval={"always": {"tool_names": ["delete_file"]}},
+) as server:
+    ...
+```
+
+For a full pause/resume flow, see [Human-in-the-loop](human_in_the_loop.md) and `examples/mcp/get_all_mcp_tools_example/main.py`.
+
+### Per-call metadata with `tool_meta_resolver`
+
+Use `tool_meta_resolver` when your MCP server expects request metadata in `_meta` (for example, tenant IDs or trace context). The example below assumes you pass a `dict` as `context` to `Runner.run(...)`.
+
+```python
+from agents.mcp import MCPServerStreamableHttp, MCPToolMetaContext
+
+
+def resolve_meta(context: MCPToolMetaContext) -> dict[str, str] | None:
+    run_context_data = context.run_context.context or {}
+    tenant_id = run_context_data.get("tenant_id")
+    if tenant_id is None:
+        return None
+    return {"tenant_id": str(tenant_id), "source": "agents-sdk"}
+
+
+server = MCPServerStreamableHttp(
+    name="Metadata-aware MCP",
+    params={"url": "http://localhost:8000/mcp"},
+    tool_meta_resolver=resolve_meta,
+)
+```
+
+If your run context is a Pydantic model, dataclass, or custom class, read the tenant ID with attribute access instead.
+
+### MCP tool outputs: text and images
+
+When an MCP tool returns image content, the SDK maps it to image tool output entries automatically. Mixed text/image responses are forwarded as a list of output items, so agents can consume MCP image results the same way they consume image output from regular function tools.
 
 ## 3. HTTP with SSE MCP servers
 

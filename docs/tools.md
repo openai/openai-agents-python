@@ -321,7 +321,7 @@ async def main():
 
 ### Customizing tool-agents
 
-The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, and `session`. For advanced orchestration (for example, conditional retries, fallback behavior, or chaining multiple agent calls), use `Runner.run` directly in your tool implementation:
+The `agent.as_tool` function is a convenience method to make it easy to turn an agent into a tool. It supports common runtime options such as `max_turns`, `run_config`, `hooks`, `previous_response_id`, `conversation_id`, `session`, and `needs_approval`. It also supports structured input with `parameters`, `input_builder`, and `include_input_schema`. For advanced orchestration (for example, conditional retries, fallback behavior, or chaining multiple agent calls), use `Runner.run` directly in your tool implementation:
 
 ```python
 @function_tool
@@ -339,6 +339,40 @@ async def run_my_agent() -> str:
 
     return str(result.final_output)
 ```
+
+### Structured input for tool-agents
+
+By default, `Agent.as_tool()` expects a single string input (`{"input": "..."}`), but you can expose a structured schema by passing `parameters` (a Pydantic model or dataclass type).
+
+Additional options:
+
+- `include_input_schema=True` includes the full JSON Schema in the generated nested input.
+- `input_builder=...` lets you fully customize how structured tool arguments become nested agent input.
+- `RunContextWrapper.tool_input` contains the parsed structured payload inside the nested run context.
+
+```python
+from pydantic import BaseModel, Field
+
+
+class TranslationInput(BaseModel):
+    text: str = Field(description="Text to translate.")
+    source: str = Field(description="Source language.")
+    target: str = Field(description="Target language.")
+
+
+translator_tool = translator_agent.as_tool(
+    tool_name="translate_text",
+    tool_description="Translate text between languages.",
+    parameters=TranslationInput,
+    include_input_schema=True,
+)
+```
+
+See `examples/agent_patterns/agents_as_tools_structured.py` for a complete runnable example.
+
+### Approval gates for tool-agents
+
+`Agent.as_tool(..., needs_approval=...)` uses the same approval flow as `function_tool`. If approval is required, the run pauses and pending items appear in `result.interruptions`; then use `result.to_state()` and resume after calling `state.approve(...)` or `state.reject(...)`. See the [Human-in-the-loop guide](human_in_the_loop.md) for the full pause/resume pattern.
 
 ### Custom output extraction
 
