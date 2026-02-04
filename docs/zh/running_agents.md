@@ -4,11 +4,11 @@ search:
 ---
 # 运行智能体
 
-你可以通过 [`Runner`][agents.run.Runner] 类来运行智能体。你有 3 种选择：
+你可以通过 [`Runner`][agents.run.Runner] 类运行智能体。你有 3 个选项：
 
 1. [`Runner.run()`][agents.run.Runner.run]：异步运行并返回 [`RunResult`][agents.result.RunResult]。
 2. [`Runner.run_sync()`][agents.run.Runner.run_sync]：同步方法，底层只是运行 `.run()`。
-3. [`Runner.run_streamed()`][agents.run.Runner.run_streamed]：异步运行并返回 [`RunResultStreaming`][agents.result.RunResultStreaming]。它以流式模式调用 LLM，并在接收到事件时将这些事件流式传输给你。
+3. [`Runner.run_streamed()`][agents.run.Runner.run_streamed]：异步运行并返回 [`RunResultStreaming`][agents.result.RunResultStreaming]。它以流式模式调用 LLM，并在接收到事件时将这些事件流式传递给你。
 
 ```python
 from agents import Agent, Runner
@@ -23,62 +23,62 @@ async def main():
     # Infinite loop's dance
 ```
 
-更多信息请参阅[结果指南](results.md)。
+在 [results 指南](results.md)中了解更多。
 
 ## 智能体循环
 
-当你在 `Runner` 中使用 run 方法时，需要传入一个起始智能体和输入。输入可以是字符串（会被视为一条用户消息），也可以是输入项列表（即 OpenAI Responses API 中的 items）。
+当你在 `Runner` 中使用 run 方法时，需要传入一个起始智能体和输入。输入既可以是字符串（会被视为一条用户消息），也可以是输入项列表（即 OpenAI Responses API 中的那些条目）。
 
-Runner 随后会运行一个循环：
+然后 runner 会运行一个循环：
 
 1. 我们使用当前输入为当前智能体调用 LLM。
-2. LLM 生成其输出。
+2. LLM 生成输出。
     1. 如果 LLM 返回 `final_output`，循环结束并返回结果。
-    2. 如果 LLM 进行了 handoff，我们会更新当前智能体和输入，并重新运行循环。
-    3. 如果 LLM 产生了工具调用，我们会运行这些工具调用，追加结果，然后重新运行循环。
+    2. 如果 LLM 执行任务转移，我们更新当前智能体和输入，并重新运行循环。
+    3. 如果 LLM 生成工具调用，我们执行这些工具调用，追加结果，然后重新运行循环。
 3. 如果超过传入的 `max_turns`，我们会抛出 [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded] 异常。
 
 !!! note
 
-    判断 LLM 输出是否被视为“最终输出”的规则是：它生成了所需类型的文本输出，并且没有任何工具调用。
+    判断 LLM 输出是否被视为“最终输出”的规则是：它生成了具有期望类型的文本输出，并且没有任何工具调用。
 
 ## 流式传输
 
-流式传输允许你在 LLM 运行时额外接收流式事件。流结束后，[`RunResultStreaming`][agents.result.RunResultStreaming] 将包含本次运行的完整信息，包括产生的所有新输出。你可以调用 `.stream_events()` 来获取流式事件。更多信息请参阅[流式传输指南](streaming.md)。
+流式传输允许你在 LLM 运行时额外接收流式事件。流结束后，[`RunResultStreaming`][agents.result.RunResultStreaming] 将包含本次运行的完整信息，包括产生的所有新输出。你可以调用 `.stream_events()` 获取流式事件。在 [streaming 指南](streaming.md)中了解更多。
 
 ## 运行配置
 
 `run_config` 参数允许你为智能体运行配置一些全局设置：
 
--   [`model`][agents.run.RunConfig.model]：允许设置全局要使用的 LLM 模型，不受每个 Agent 的 `model` 影响。
+-   [`model`][agents.run.RunConfig.model]：允许设置一个全局 LLM 模型，不受每个 Agent 自身 `model` 的影响。
 -   [`model_provider`][agents.run.RunConfig.model_provider]：用于查找模型名称的模型提供方，默认为 OpenAI。
--   [`model_settings`][agents.run.RunConfig.model_settings]：覆盖智能体级别的设置。例如，你可以设置全局的 `temperature` 或 `top_p`。
--   [`input_guardrails`][agents.run.RunConfig.input_guardrails]、[`output_guardrails`][agents.run.RunConfig.output_guardrails]：要在所有运行中包含的一组输入或输出安全防护措施。
--   [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]：用于所有 handoffs 的全局输入过滤器（如果 handoff 本身尚未设置）。输入过滤器允许你编辑发送给新智能体的输入。更多详情请参阅 [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] 文档。
--   [`nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]：可选开启的 beta 功能，会在调用下一个智能体之前，将先前的对话记录折叠为一条 assistant 消息。在我们稳定嵌套任务转移期间，此功能默认关闭；设置为 `True` 以启用，或保持 `False` 以透传原始对话记录。当你未传入 `RunConfig` 时，所有 [`Runner` 方法](agents.run.Runner)都会自动创建一个 `RunConfig`，因此 quickstarts 和示例保持默认关闭；任何显式的 [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] 回调仍会覆盖它。单个 handoff 可以通过 [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history] 覆盖此设置。
--   [`handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper]：可选的可调用对象。在你选择启用 `nest_handoff_history` 时，它会在每次收到归一化的对话记录（history + handoff items）时被调用。它必须返回要转发给下一个智能体的、完全一致的输入项列表，从而让你无需编写完整的 handoff 过滤器即可替换内置摘要。
--   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]：允许你为整个运行禁用[追踪](tracing.md)。
--   [`tracing`][agents.run.RunConfig.tracing]：传入 [`TracingConfig`][agents.tracing.TracingConfig] 以覆盖本次运行的导出器、进程或追踪元数据。
--   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]：配置追踪中是否包含潜在敏感数据，例如 LLM 与工具调用的输入/输出。
--   [`workflow_name`][agents.run.RunConfig.workflow_name]、[`trace_id`][agents.run.RunConfig.trace_id]、[`group_id`][agents.run.RunConfig.group_id]：设置本次运行的追踪工作流名称、trace ID 和 trace group ID。我们建议至少设置 `workflow_name`。group ID 是可选字段，可让你跨多次运行关联 traces。
--   [`trace_metadata`][agents.run.RunConfig.trace_metadata]：要包含在所有 traces 上的元数据。
--   [`session_input_callback`][agents.run.RunConfig.session_input_callback]：在使用 Sessions 时，自定义在每轮之前如何将新的用户输入与会话历史合并。
--   [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]：用于在模型调用前立即编辑已完全准备好的模型输入（instructions 和输入项）的钩子，例如用于裁剪历史或注入系统提示词。
+-   [`model_settings`][agents.run.RunConfig.model_settings]：覆盖智能体级别的设置。例如，你可以设置全局 `temperature` 或 `top_p`。
+-   [`input_guardrails`][agents.run.RunConfig.input_guardrails]、[`output_guardrails`][agents.run.RunConfig.output_guardrails]：在所有运行中启用的一组输入或输出安全防护措施。
+-   [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]：应用于所有任务转移的全局输入过滤器（如果该任务转移本身未设置）。输入过滤器允许你编辑发送给新智能体的输入。更多细节见 [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] 文档。
+-   [`nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]：可选启用的 beta 功能：在调用下一个智能体前，将此前的对话记录折叠为一条 assistant 消息。在我们稳定嵌套任务转移期间该功能默认关闭；设为 `True` 以启用，或保留 `False` 以直接透传原始对话记录。当你不传入时，所有 [`Runner` 方法](agents.run.Runner)都会自动创建 `RunConfig`，因此快速入门与示例默认保持关闭；任何显式的 [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] 回调仍会覆盖该设置。单个任务转移可通过 [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history] 覆盖此设置。
+-   [`handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper]：可选的可调用对象；当你选择启用 `nest_handoff_history` 时，它会在每次收到规范化对话记录（history + handoff 条目）时被调用。它必须返回要转发给下一个智能体的、完全一致的输入项列表，从而允许你在不编写完整任务转移过滤器的情况下替换内置摘要。
+-   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]：允许为整个运行禁用[追踪](tracing.md)。
+-   [`tracing`][agents.run.RunConfig.tracing]：传入 [`TracingConfig`][agents.tracing.TracingConfig]，为本次运行覆盖 exporter、processor 或追踪元数据。
+-   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]：配置追踪是否包含潜在敏感数据，例如 LLM 与工具调用的输入/输出。
+-   [`workflow_name`][agents.run.RunConfig.workflow_name]、[`trace_id`][agents.run.RunConfig.trace_id]、[`group_id`][agents.run.RunConfig.group_id]：设置本次运行的追踪工作流名称、trace ID 和 trace group ID。我们建议至少设置 `workflow_name`。group ID 是可选字段，可用于跨多次运行关联 traces。
+-   [`trace_metadata`][agents.run.RunConfig.trace_metadata]：要包含在所有 traces 中的元数据。
+-   [`session_input_callback`][agents.run.RunConfig.session_input_callback]：使用 Sessions 时，自定义在每个回合前如何将新的用户输入与会话历史合并。
+-   [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]：在模型调用前立即编辑已完全准备好的模型输入（instructions 和输入项）的 hook，例如用于裁剪历史或注入系统提示词。
 
-嵌套任务转移（nested handoffs）以可选开启的 beta 形式提供。通过传入 `RunConfig(nest_handoff_history=True)` 来启用折叠对话记录的行为，或对特定 handoff 设置 `handoff(..., nest_handoff_history=True)` 以为该 handoff 启用。如果你更倾向于保留原始对话记录（默认行为），请不要设置该标志，或提供一个 `handoff_input_filter`（或 `handoff_history_mapper`）来按你的需求逐字转发对话。若要在不编写自定义 mapper 的情况下更改生成摘要中使用的包装文本，请调用 [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers]（并通过 [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] 恢复默认值）。
+嵌套任务转移作为可选启用的 beta 提供。通过传入 `RunConfig(nest_handoff_history=True)` 启用折叠对话记录行为，或对某个特定任务转移设置 `handoff(..., nest_handoff_history=True)`。如果你更希望保留原始对话记录（默认行为），请不要设置该标志，或提供一个 `handoff_input_filter`（或 `handoff_history_mapper`）来按你的需要原样转发对话。若要在不编写自定义 mapper 的情况下更改生成摘要中使用的包装文本，可调用 [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers]（并用 [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] 恢复默认值）。
 
 ## 对话/聊天线程
 
-调用任意 run 方法都可能导致一个或多个智能体运行（因此会有一次或多次 LLM 调用），但它表示聊天对话中的一次逻辑轮次。例如：
+调用任意 run 方法可能会导致一个或多个智能体运行（因此会有一次或多次 LLM 调用），但它代表聊天对话中的一个逻辑回合。例如：
 
-1. 用户轮次：用户输入文本
-2. Runner 运行：第一个智能体调用 LLM、运行工具、handoff 到第二个智能体，第二个智能体运行更多工具，然后生成输出。
+1. 用户回合：用户输入文本
+2. Runner 运行：第一个智能体调用 LLM、运行工具、任务转移到第二个智能体，第二个智能体运行更多工具，然后生成输出。
 
-在智能体运行结束时，你可以选择向用户展示什么。例如，你可以向用户展示智能体生成的每一条新 item，或仅展示最终输出。无论哪种方式，用户随后可能会提出后续问题，此时你可以再次调用 run 方法。
+在智能体运行结束时，你可以选择向用户展示什么。例如，你可以向用户展示智能体生成的每一个新条目，或只展示最终输出。无论哪种方式，用户随后都可能提出后续问题，此时你可以再次调用 run 方法。
 
 ### 手动对话管理
 
-你可以使用 [`RunResultBase.to_input_list()`][agents.result.RunResultBase.to_input_list] 方法手动管理对话历史，以获取下一轮所需的输入：
+你可以使用 [`RunResultBase.to_input_list()`][agents.result.RunResultBase.to_input_list] 方法获取下一回合的输入，从而手动管理对话历史：
 
 ```python
 async def main():
@@ -100,7 +100,7 @@ async def main():
 
 ### 使用 Sessions 的自动对话管理
 
-为了更简单，你可以使用 [Sessions](sessions/index.md) 自动处理对话历史，而无需手动调用 `.to_input_list()`：
+如需更简单的方法，你可以使用 [Sessions](sessions/index.md) 自动处理对话历史，而无需手动调用 `.to_input_list()`：
 
 ```python
 from agents import Agent, Runner, SQLiteSession
@@ -130,17 +130,17 @@ Sessions 会自动：
 -   在每次运行后存储新消息
 -   为不同的 session ID 维护彼此独立的对话
 
-更多详情请参阅 [Sessions 文档](sessions/index.md)。
+更多细节见 [Sessions 文档](sessions/index.md)。
 
-### 服务端托管的对话
+### 服务端管理的对话
 
-你也可以让 OpenAI conversation state 功能在服务端管理对话状态，而不是在本地使用 `to_input_list()` 或 `Sessions` 来处理。这样你无需手动重发所有历史消息，就能保留对话历史。更多详情请参阅 [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses)。
+你也可以让 OpenAI conversation state 功能在服务端管理对话状态，而不是在本地通过 `to_input_list()` 或 `Sessions` 处理。这使你能够在不手动重发所有历史消息的情况下保留对话历史。更多细节见 [OpenAI Conversation state 指南](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses)。
 
-OpenAI 提供两种方式来跨轮次跟踪状态：
+OpenAI 提供两种方式来跨回合跟踪状态：
 
 #### 1. 使用 `conversation_id`
 
-你先使用 OpenAI Conversations API 创建一个对话，然后在后续每次调用中复用它的 ID：
+你首先使用 OpenAI Conversations API 创建一个对话，然后在后续每次调用中复用该对话的 ID：
 
 ```python
 from agents import Agent, Runner
@@ -163,7 +163,7 @@ async def main():
 
 #### 2. 使用 `previous_response_id`
 
-另一种选择是**响应串联（response chaining）**，其中每一轮都显式链接到上一轮的 response ID。
+另一种选项是**响应链式调用**（response chaining），其中每个回合都会显式链接到上一回合的 response ID。
 
 ```python
 from agents import Agent, Runner
@@ -188,9 +188,9 @@ async def main():
         print(f"Assistant: {result.final_output}")
 ```
 
-## Call model input filter
+## 调用模型输入过滤器
 
-使用 `call_model_input_filter` 在模型调用前编辑模型输入。该钩子接收当前智能体、上下文，以及合并后的输入项（包含存在时的会话历史），并返回新的 `ModelInputData`。
+使用 `call_model_input_filter` 在模型调用前对模型输入进行编辑。该 hook 接收当前智能体、上下文以及合并后的输入项（若存在会话历史也会包含在内），并返回新的 `ModelInputData`。
 
 ```python
 from agents import Agent, Runner, RunConfig
@@ -209,27 +209,31 @@ result = Runner.run_sync(
 )
 ```
 
-你可以通过 `run_config` 为每次运行设置该钩子，或将其设为你的 `Runner` 的默认值，用于脱敏敏感数据、裁剪过长历史，或注入额外的系统指导。
+你可以通过 `run_config` 为每次运行设置该 hook，或将其作为 `Runner` 的默认值，用于脱敏敏感数据、裁剪过长的历史记录，或注入额外的系统指导。
 
 ## 长时间运行的智能体与 human-in-the-loop
 
 ### Temporal
 
-你可以使用 Agents SDK 的 [Temporal](https://temporal.io/) 集成来运行持久的、长时间运行的工作流，包括 human-in-the-loop 任务。观看 Temporal 与 Agents SDK 协作完成长时间任务的演示，请参见[此视频](https://www.youtube.com/watch?v=fFBZqzT4DD8)，并[在此查看文档](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents)。 
+你可以使用 Agents SDK 的 [Temporal](https://temporal.io/) 集成来运行可持久化、长时间运行的工作流，包括 human-in-the-loop 任务。在[该视频](https://www.youtube.com/watch?v=fFBZqzT4DD8)中查看 Temporal 与 Agents SDK 协同完成长时间任务的演示，并在[此处查看文档](https://github.com/temporalio/sdk-python/tree/main/temporalio/contrib/openai_agents)。 
 
 ### Restate
 
-你可以使用 Agents SDK 的 [Restate](https://restate.dev/) 集成来实现轻量级、持久的智能体，包括人工审批、handoffs 与会话管理。该集成需要 Restate 的单二进制运行时作为依赖，并支持将智能体作为进程/容器或无服务器函数运行。
-更多详情请阅读[概览](https://www.restate.dev/blog/durable-orchestration-for-ai-agents-with-restate-and-openai-sdk)或查看[文档](https://docs.restate.dev/ai)。
+你可以使用 Agents SDK 的 [Restate](https://restate.dev/) 集成来构建轻量且可持久化的智能体，包括人工审批、任务转移和会话管理。该集成依赖 Restate 的单二进制运行时，并支持以进程/容器或无服务器函数的方式运行智能体。
+阅读[概览](https://www.restate.dev/blog/durable-orchestration-for-ai-agents-with-restate-and-openai-sdk)或查看[文档](https://docs.restate.dev/ai)了解更多细节。
+
+### DBOS
+
+你可以使用 Agents SDK 的 [DBOS](https://dbos.dev/) 集成来运行可靠的智能体，以在故障与重启之间保留进度。它支持长时间运行的智能体、human-in-the-loop 工作流以及任务转移。它同时支持同步与异步方法。该集成只需要 SQLite 或 Postgres 数据库作为依赖。查看集成 [repo](https://github.com/dbos-inc/dbos-openai-agents) 和[文档](https://docs.dbos.dev/integrations/openai-agents)了解更多细节。
 
 ## 异常
 
 SDK 会在某些情况下抛出异常。完整列表见 [`agents.exceptions`][]。概览如下：
 
--   [`AgentsException`][agents.exceptions.AgentsException]：SDK 内部抛出的所有异常的基类。它作为通用类型，所有其他具体异常都从它派生。
--   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]：当智能体运行超过传入 `Runner.run`、`Runner.run_sync` 或 `Runner.run_streamed` 方法的 `max_turns` 限制时抛出。它表示智能体无法在指定的交互轮次数内完成任务。
+-   [`AgentsException`][agents.exceptions.AgentsException]：SDK 内部抛出的所有异常的基类。它作为通用类型，其他更具体的异常均从其派生。
+-   [`MaxTurnsExceeded`][agents.exceptions.MaxTurnsExceeded]：当智能体运行超过传递给 `Runner.run`、`Runner.run_sync` 或 `Runner.run_streamed` 方法的 `max_turns` 限制时抛出。它表示智能体无法在指定的交互回合数内完成任务。
 -   [`ModelBehaviorError`][agents.exceptions.ModelBehaviorError]：当底层模型（LLM）产生意外或无效输出时发生。可能包括：
-    -   JSON 格式错误：当模型为工具调用或其直接输出提供了格式错误的 JSON 结构，尤其是在定义了特定 `output_type` 的情况下。
+    -   JSON 格式错误：当模型为工具调用或其直接输出提供了格式错误的 JSON 结构时，尤其是在定义了特定 `output_type` 的情况下。
     -   与工具相关的意外失败：当模型未按预期方式使用工具时
--   [`UserError`][agents.exceptions.UserError]：当你（使用 SDK 编写代码的人）在使用 SDK 时发生错误而抛出。通常源于错误的代码实现、无效配置或对 SDK API 的误用。
--   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered]、[`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]：当输入安全防护措施或输出安全防护措施的条件分别被满足时抛出。输入安全防护措施会在处理前检查传入消息，而输出安全防护措施会在交付前检查智能体的最终响应。
+-   [`UserError`][agents.exceptions.UserError]：当你（使用 SDK 编写代码的人）在使用 SDK 时出错而抛出。通常源于错误的代码实现、无效配置或误用 SDK API。
+-   [`InputGuardrailTripwireTriggered`][agents.exceptions.InputGuardrailTripwireTriggered]、[`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered]：当输入安全防护措施或输出安全防护措施的条件分别被满足时抛出。输入安全防护措施在处理前检查传入消息，而输出安全防护措施在交付前检查智能体的最终响应。
