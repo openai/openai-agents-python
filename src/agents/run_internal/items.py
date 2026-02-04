@@ -35,6 +35,7 @@ __all__ = [
     "normalize_resumed_input",
     "fingerprint_input_item",
     "deduplicate_input_items",
+    "deduplicate_input_items_preferring_latest",
     "function_rejection_item",
     "shell_rejection_item",
     "apply_patch_rejection_item",
@@ -174,6 +175,15 @@ def deduplicate_input_items(items: Sequence[TResponseInputItem]) -> list[TRespon
         seen_keys.add(dedupe_key)
         deduplicated.append(item)
     return deduplicated
+
+
+def deduplicate_input_items_preferring_latest(
+    items: Sequence[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Deduplicate by stable identifiers while keeping the latest occurrence."""
+    # deduplicate_input_items keeps the first item per dedupe key. Reverse twice so that
+    # the latest item in the original order wins for duplicate IDs/call_ids.
+    return list(reversed(deduplicate_input_items(list(reversed(items)))))
 
 
 def function_rejection_item(

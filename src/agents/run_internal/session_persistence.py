@@ -26,7 +26,8 @@ from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
     copy_input_items,
-    deduplicate_input_items,
+    deduplicate_input_items_preferring_latest,
+    drop_orphan_function_calls,
     ensure_input_item_format,
     fingerprint_input_item,
     normalize_input_items_for_api,
@@ -45,15 +46,6 @@ __all__ = [
     "rewind_session_items",
     "wait_for_session_cleanup",
 ]
-
-
-def _deduplicate_input_items_preferring_latest(
-    items: list[TResponseInputItem],
-) -> list[TResponseInputItem]:
-    """Deduplicate by stable identifiers while keeping the latest occurrence."""
-    # deduplicate_input_items keeps the first item per dedupe key. Reverse twice so that
-    # the latest item in the original order wins for duplicate IDs/call_ids.
-    return list(reversed(deduplicate_input_items(list(reversed(items)))))
 
 
 async def prepare_input_with_session(
@@ -142,8 +134,9 @@ async def prepare_input_with_session(
             prepared_items_raw = new_items_for_callback if preserve_dropped_new_items else []
 
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
-    normalized = normalize_input_items_for_api(prepared_as_inputs)
-    deduplicated = _deduplicate_input_items_preferring_latest(normalized)
+    filtered = drop_orphan_function_calls(prepared_as_inputs)
+    normalized = normalize_input_items_for_api(filtered)
+    deduplicated = deduplicate_input_items_preferring_latest(normalized)
 
     return deduplicated, [ensure_input_item_format(item) for item in appended_items]
 
@@ -266,7 +259,7 @@ async def save_result_to_session(
         for item in new_items_for_fingerprint
     ]
 
-    items_to_save = deduplicate_input_items(input_list + new_items_as_input)
+    items_to_save = deduplicate_input_items_preferring_latest(input_list + new_items_as_input)
 
     if is_openai_conversation_session and items_to_save:
         items_to_save = [_sanitize_openai_conversation_item(item) for item in items_to_save]

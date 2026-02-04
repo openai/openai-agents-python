@@ -78,7 +78,7 @@ from .guardrails import (
 from .items import (
     REJECTION_MESSAGE,
     copy_input_items,
-    deduplicate_input_items,
+    deduplicate_input_items_preferring_latest,
     ensure_input_item_format,
     normalize_input_items_for_api,
     normalize_resumed_input,
@@ -1109,7 +1109,7 @@ async def run_single_turn_streamed(
         system_instructions=system_prompt,
     )
     if isinstance(filtered.input, list):
-        filtered.input = deduplicate_input_items(filtered.input)
+        filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     if server_conversation_tracker is not None:
         logger.debug(
             "filtered.input has %s items; ids=%s",
@@ -1418,7 +1418,7 @@ async def get_new_response(
         system_instructions=system_prompt,
     )
     if isinstance(filtered.input, list):
-        filtered.input = deduplicate_input_items(filtered.input)
+        filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.mark_input_as_sent(filtered.input)

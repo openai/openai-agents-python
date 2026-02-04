@@ -1236,7 +1236,7 @@ async def test_prepare_input_with_session_prefers_latest_function_call_output():
 
 
 @pytest.mark.asyncio
-async def test_prepare_input_with_session_keeps_orphan_function_calls():
+async def test_prepare_input_with_session_drops_orphan_function_calls():
     orphan_call = cast(
         TResponseInputItem,
         {
@@ -1252,7 +1252,7 @@ async def test_prepare_input_with_session_keeps_orphan_function_calls():
 
     assert isinstance(prepared_input, list)
     assert len(session_items) == 1
-    assert any(
+    assert not any(
         isinstance(item, dict)
         and item.get("type") == "function_call"
         and item.get("call_id") == "orphan_call"
@@ -1518,6 +1518,42 @@ async def test_save_result_to_session_preserves_function_outputs():
         saved_dict = cast(dict[str, Any], saved)
         assert saved_dict["type"] == "function_call_output"
         assert "output" in saved_dict
+
+
+@pytest.mark.asyncio
+async def test_save_result_to_session_prefers_latest_duplicate_function_outputs():
+    session = SimpleListSession()
+    original_item = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_duplicate",
+            "output": "old-output",
+        },
+    )
+    new_item_payload = {
+        "type": "function_call_output",
+        "call_id": "call_duplicate",
+        "output": "new-output",
+    }
+    new_item = _DummyRunItem(new_item_payload)
+
+    await save_result_to_session(
+        session,
+        [original_item],
+        [cast(RunItem, new_item)],
+        None,
+    )
+
+    duplicates = [
+        cast(dict[str, Any], item)
+        for item in session.saved_items
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_duplicate"
+    ]
+    assert len(duplicates) == 1
+    assert duplicates[0]["output"] == "new-output"
 
 
 @pytest.mark.asyncio
