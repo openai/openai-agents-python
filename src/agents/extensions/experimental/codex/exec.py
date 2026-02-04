@@ -10,10 +10,16 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 
+from agents.exceptions import UserError
+
 from .thread_options import ApprovalMode, ModelReasoningEffort, SandboxMode, WebSearchMode
 
 _INTERNAL_ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
 _TYPESCRIPT_SDK_ORIGINATOR = "codex_sdk_ts"
+_SUBPROCESS_STREAM_LIMIT_ENV_VAR = "OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES"
+_DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES = 8 * 1024 * 1024
+_MIN_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024
+_MAX_SUBPROCESS_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -44,9 +50,13 @@ class CodexExec:
         *,
         executable_path: str | None = None,
         env: dict[str, str] | None = None,
+        subprocess_stream_limit_bytes: int | None = None,
     ) -> None:
         self._executable_path = executable_path or find_codex_path()
         self._env_override = env
+        self._subprocess_stream_limit_bytes = _resolve_subprocess_stream_limit_bytes(
+            subprocess_stream_limit_bytes
+        )
 
     async def run(self, args: CodexExecArgs) -> AsyncGenerator[str, None]:
         # Build the CLI args for `codex exec --experimental-json`.
@@ -112,6 +122,9 @@ class CodexExec:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Codex emits one JSON event per line; large tool outputs can exceed asyncio's
+            # default 64 KiB readline limit.
+            limit=self._subprocess_stream_limit_bytes,
             env=env,
         )
 
@@ -261,3 +274,31 @@ def find_codex_path() -> str:
     binary_name = "codex.exe" if sys.platform.startswith("win") else "codex"
     binary_path = arch_root / "codex" / binary_name
     return str(binary_path)
+
+
+def _resolve_subprocess_stream_limit_bytes(explicit_value: int | None) -> int:
+    if explicit_value is not None:
+        return _validate_subprocess_stream_limit_bytes(explicit_value)
+
+    env_value = os.environ.get(_SUBPROCESS_STREAM_LIMIT_ENV_VAR)
+    if env_value is None:
+        return _DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES
+
+    try:
+        parsed = int(env_value)
+    except ValueError as exc:
+        raise UserError(
+            f"{_SUBPROCESS_STREAM_LIMIT_ENV_VAR} must be an integer number of bytes."
+        ) from exc
+    return _validate_subprocess_stream_limit_bytes(parsed)
+
+
+def _validate_subprocess_stream_limit_bytes(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UserError("codex_subprocess_stream_limit_bytes must be an integer number of bytes.")
+    if value < _MIN_SUBPROCESS_STREAM_LIMIT_BYTES or value > _MAX_SUBPROCESS_STREAM_LIMIT_BYTES:
+        raise UserError(
+            "codex_subprocess_stream_limit_bytes must be between "
+            f"{_MIN_SUBPROCESS_STREAM_LIMIT_BYTES} and {_MAX_SUBPROCESS_STREAM_LIMIT_BYTES} bytes."
+        )
+    return value

@@ -425,6 +425,7 @@ def _resolve_codex_options(
         base_url=options.base_url,
         api_key=api_key,
         env=options.env,
+        codex_subprocess_stream_limit_bytes=options.codex_subprocess_stream_limit_bytes,
     )
 
 

@@ -17,6 +17,8 @@ class CodexOptions:
     api_key: str | None = None
     # Environment variables for the Codex CLI process (do not inherit os.environ).
     env: Mapping[str, str] | None = None
+    # StreamReader byte limit used for Codex subprocess stdout/stderr pipes.
+    codex_subprocess_stream_limit_bytes: int | None = None
 
 
 def coerce_codex_options(

@@ -30,6 +30,7 @@ class Codex:
         base_url: str | None = None,
         api_key: str | None = None,
         env: Mapping[str, str] | None = None,
+        codex_subprocess_stream_limit_bytes: int | None = None,
     ) -> None: ...
 
     def __init__(
@@ -40,12 +41,14 @@ class Codex:
         base_url: str | None | _UnsetType = _UNSET,
         api_key: str | None | _UnsetType = _UNSET,
         env: Mapping[str, str] | None | _UnsetType = _UNSET,
+        codex_subprocess_stream_limit_bytes: int | None | _UnsetType = _UNSET,
     ) -> None:
         kw_values = {
             "codex_path_override": codex_path_override,
             "base_url": base_url,
             "api_key": api_key,
             "env": env,
+            "codex_subprocess_stream_limit_bytes": codex_subprocess_stream_limit_bytes,
         }
         has_kwargs = any(value is not _UNSET for value in kw_values.values())
         if options is not None and has_kwargs:
@@ -59,6 +62,7 @@ class Codex:
         self._exec = CodexExec(
             executable_path=resolved_options.codex_path_override,
             env=_normalize_env(resolved_options),
+            subprocess_stream_limit_bytes=resolved_options.codex_subprocess_stream_limit_bytes,
         )
         self._options = resolved_options
 

@@ -219,6 +219,11 @@ def test_codex_init_accepts_kwargs() -> None:
     assert codex._options.base_url == "https://example.com"
 
 
+def test_codex_init_accepts_stream_limit_kwarg() -> None:
+    codex = Codex(codex_path_override="/bin/codex", codex_subprocess_stream_limit_bytes=123456)
+    assert codex._exec._subprocess_stream_limit_bytes == 123456
+
+
 def test_codex_init_rejects_options_and_kwargs() -> None:
     with pytest.raises(UserError, match="Codex options must be provided"):
         Codex(  # type: ignore[call-overload]
@@ -235,6 +240,35 @@ def test_codex_init_kw_matches_codex_options() -> None:
     ]
     option_fields = [field.name for field in fields(CodexOptions)]
     assert kw_only == option_fields
+
+
+def test_codex_exec_stream_limit_uses_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(exec_module._SUBPROCESS_STREAM_LIMIT_ENV_VAR, "131072")
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    assert exec_client._subprocess_stream_limit_bytes == 131072
+
+
+def test_codex_exec_stream_limit_explicit_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(exec_module._SUBPROCESS_STREAM_LIMIT_ENV_VAR, "262144")
+    exec_client = exec_module.CodexExec(
+        executable_path="/bin/codex",
+        subprocess_stream_limit_bytes=524288,
+    )
+    assert exec_client._subprocess_stream_limit_bytes == 524288
+
+
+def test_codex_exec_stream_limit_rejects_invalid_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(exec_module._SUBPROCESS_STREAM_LIMIT_ENV_VAR, "not-a-number")
+    with pytest.raises(UserError, match=exec_module._SUBPROCESS_STREAM_LIMIT_ENV_VAR):
+        _ = exec_module.CodexExec(executable_path="/bin/codex")
+
+
+def test_codex_exec_stream_limit_rejects_out_of_range_value() -> None:
+    with pytest.raises(UserError, match="must be between"):
+        _ = exec_module.CodexExec(
+            executable_path="/bin/codex",
+            subprocess_stream_limit_bytes=1024,
+        )
 
 
 @pytest.mark.asyncio
@@ -312,6 +346,47 @@ async def test_codex_exec_run_builds_command_args_and_env(monkeypatch: pytest.Mo
     assert env[exec_module._INTERNAL_ORIGINATOR_ENV] == exec_module._TYPESCRIPT_SDK_ORIGINATOR
     assert env["OPENAI_BASE_URL"] == "https://example.com"
     assert env["CODEX_API_KEY"] == "api-key"
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_handles_large_single_line_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    large_payload = "x" * (2**16 + 1)
+
+    class StreamReaderProcess:
+        def __init__(self, *, line: str, limit: int) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = asyncio.StreamReader(limit=limit)
+            self.stdout.feed_data(f"{line}\n".encode())
+            self.stdout.feed_eof()
+            self.stderr = FakeStderr([])
+            self.returncode: int | None = 0
+            self.killed = False
+            self.terminated = False
+
+        async def wait(self) -> None:
+            if self.returncode is None:
+                self.returncode = 0
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    async def fake_create_subprocess_exec(*_args: Any, **kwargs: Any) -> StreamReaderProcess:
+        captured["kwargs"] = kwargs
+        return StreamReaderProcess(line=large_payload, limit=kwargs["limit"])
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    output = [line async for line in exec_client.run(exec_module.CodexExecArgs(input="hello"))]
+
+    assert output == [large_payload]
+    assert captured["kwargs"]["limit"] == exec_module._DEFAULT_SUBPROCESS_STREAM_LIMIT_BYTES
 
 
 @pytest.mark.asyncio
