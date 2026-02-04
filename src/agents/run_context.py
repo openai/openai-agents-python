@@ -9,10 +9,16 @@ from .usage import Usage
 
 if TYPE_CHECKING:
     from .items import ToolApprovalItem, TResponseInputItem
+else:
+    # Keep runtime annotations resolvable for TypeAdapter users (e.g., Temporal's
+    # Pydantic data converter) without importing items.py and introducing cycles.
+    ToolApprovalItem = Any
+    TResponseInputItem = Any
 
 TContext = TypeVar("TContext", default=Any)
 
 
+@dataclass(eq=False)
 class _ApprovalRecord:
     """Tracks approval/rejection state for a tool.
 
@@ -20,12 +26,8 @@ class _ApprovalRecord:
     or lists of call IDs when approval is scoped to specific tool calls.
     """
 
-    approved: bool | list[str]
-    rejected: bool | list[str]
-
-    def __init__(self):
-        self.approved = []
-        self.rejected = []
+    approved: bool | list[str] = field(default_factory=list)
+    rejected: bool | list[str] = field(default_factory=list)
 
 
 @dataclass(eq=False)

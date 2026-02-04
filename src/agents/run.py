@@ -86,7 +86,6 @@ from .run_internal.run_steps import (
     NextStepHandoff,
     NextStepInterruption,
     NextStepRunAgain,
-    SingleStepResult,
 )
 from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
@@ -975,21 +974,6 @@ class AgentRunner:
                             raise
 
                         parallel_results: list[InputGuardrailResult] = []
-                        parallel_guardrail_task: asyncio.Task[list[InputGuardrailResult]] | None = (
-                            None
-                        )
-                        model_task: asyncio.Task[SingleStepResult] | None = None
-
-                        if parallel_guardrails:
-                            parallel_guardrail_task = asyncio.create_task(
-                                run_input_guardrails(
-                                    starting_agent,
-                                    parallel_guardrails,
-                                    copy_input_items(prepared_input),
-                                    context_wrapper,
-                                )
-                            )
-
                         model_task = asyncio.create_task(
                             run_single_turn(
                                 agent=current_agent,
@@ -1011,46 +995,29 @@ class AgentRunner:
                             )
                         )
 
-                        if parallel_guardrail_task:
-                            done, pending = await asyncio.wait(
-                                {parallel_guardrail_task, model_task},
-                                return_when=asyncio.FIRST_COMPLETED,
-                            )
-
-                            if parallel_guardrail_task in done:
-                                try:
-                                    parallel_results = parallel_guardrail_task.result()
-                                except InputGuardrailTripwireTriggered:
-                                    model_task.cancel()
-                                    await asyncio.gather(model_task, return_exceptions=True)
-                                    session_input_items_for_persistence = (
-                                        await persist_session_items_for_guardrail_trip(
-                                            session,
-                                            server_conversation_tracker,
-                                            session_input_items_for_persistence,
-                                            original_user_input,
-                                            run_state,
-                                            store=store_setting,
-                                        )
+                        if parallel_guardrails:
+                            try:
+                                parallel_results, turn_result = await asyncio.gather(
+                                    run_input_guardrails(
+                                        starting_agent,
+                                        parallel_guardrails,
+                                        copy_input_items(prepared_input),
+                                        context_wrapper,
+                                    ),
+                                    model_task,
+                                )
+                            except InputGuardrailTripwireTriggered:
+                                session_input_items_for_persistence = (
+                                    await persist_session_items_for_guardrail_trip(
+                                        session,
+                                        server_conversation_tracker,
+                                        session_input_items_for_persistence,
+                                        original_user_input,
+                                        run_state,
+                                        store=store_setting,
                                     )
-                                    raise
-                                turn_result = await model_task
-                            else:
-                                turn_result = await model_task
-                                try:
-                                    parallel_results = await parallel_guardrail_task
-                                except InputGuardrailTripwireTriggered:
-                                    session_input_items_for_persistence = (
-                                        await persist_session_items_for_guardrail_trip(
-                                            session,
-                                            server_conversation_tracker,
-                                            session_input_items_for_persistence,
-                                            original_user_input,
-                                            run_state,
-                                            store=store_setting,
-                                        )
-                                    )
-                                    raise
+                                )
+                                raise
                         else:
                             turn_result = await model_task
 
