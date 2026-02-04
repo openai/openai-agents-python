@@ -96,11 +96,6 @@ class RunConfig:
     settings.
     """
 
-    session_settings: SessionSettings | None = None
-    """Configure session settings. Any non-null values will override the session's default
-    settings. Used to control session behavior like the number of items to retrieve.
-    """
-
     handoff_input_filter: HandoffInputFilter | None = None
     """A global input filter to apply to all handoffs. If `Handoff.input_filter` is set, then that
     will take precedence. The input filter allows you to edit the inputs that are sent to the new
@@ -181,6 +176,11 @@ class RunConfig:
     """Optional callback that formats tool error messages returned to the model.
 
     Returning ``None`` falls back to the SDK default message.
+    """
+
+    session_settings: SessionSettings | None = None
+    """Configure session settings. Any non-null values will override the session's default
+    settings. Used to control session behavior like the number of items to retrieve.
     """
 
 

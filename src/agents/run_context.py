@@ -45,8 +45,8 @@ class RunContextWrapper(Generic[TContext]):
     last chunk of the stream is processed.
     """
 
-    _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     turn_input: list[TResponseInputItem] = field(default_factory=list)
+    _approvals: dict[str, _ApprovalRecord] = field(default_factory=dict)
     tool_input: Any | None = None
     """Structured input for the current agent tool run, when available."""
 

@@ -36,6 +36,15 @@ Call out potential backward compatibility or public API risks early in your plan
 
 Use an ExecPlan when work is multi-step, spans several files, involves new features or refactors, or is likely to take more than about an hour. Start with the template and rules in `PLANS.md`, keep milestones and living sections (Progress, Surprises & Discoveries, Decision Log, Outcomes & Retrospective) up to date as you execute, and rewrite the plan if scope shifts. If you intentionally skip an ExecPlan for a complex task, note why in your response so reviewers understand the choice.
 
+### Public API Positional Compatibility
+
+Treat the parameter and dataclass field order of exported runtime APIs as a compatibility contract.
+
+- For public constructors (for example `RunConfig`, `FunctionTool`, `AgentHookContext`), preserve existing positional argument meaning. Do not insert new constructor parameters or dataclass fields in the middle of existing public order.
+- When adding a new optional public field/parameter, append it to the end whenever possible and keep old fields in the same order.
+- If reordering is unavoidable, add an explicit compatibility layer and regression tests that exercise the old positional call pattern.
+- Prefer keyword arguments at call sites to reduce accidental breakage, but do not rely on this to justify breaking positional compatibility for public APIs.
+
 ## Project Structure Guide
 
 ### Overview

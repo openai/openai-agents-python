@@ -240,6 +240,15 @@ class FunctionTool:
     and returns whether the tool is enabled. You can use this to dynamically enable/disable a tool
     based on your context/state."""
 
+    # Keep guardrail fields before needs_approval to preserve v0.7.0 positional
+    # constructor compatibility for public FunctionTool callers.
+    # Tool-specific guardrails.
+    tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
+    """Optional list of input guardrails to run before invoking this tool."""
+
+    tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
+    """Optional list of output guardrails to run after invoking this tool."""
+
     needs_approval: (
         bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
     ) = False
@@ -248,13 +257,6 @@ class FunctionTool:
     RunState.reject() before continuing. Can be a bool (always/never needs approval) or a
     function that takes (run_context, tool_parameters, call_id) and returns whether this
     specific call needs approval."""
-
-    # Tool-specific guardrails
-    tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None
-    """Optional list of input guardrails to run before invoking this tool."""
-
-    tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None
-    """Optional list of output guardrails to run after invoking this tool."""
 
     _is_agent_tool: bool = field(default=False, init=False, repr=False)
     """Internal flag indicating if this tool is an agent-as-tool."""
