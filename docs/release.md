@@ -19,6 +19,20 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.8.0
+
+In this version, two runtime behavior changes may require migration work:
+
+- Function tools wrapping **synchronous** Python callables now execute on worker threads via `asyncio.to_thread(...)` instead of running on the event loop thread. If your tool logic depends on thread-local state or thread-affine resources, migrate to an async tool implementation or make thread affinity explicit in your tool code.
+- Local MCP tool failure handling is now configurable, and the default behavior can return model-visible error output instead of failing the whole run. If you rely on fail-fast semantics, set `mcp_config={"failure_error_function": None}` (or server-level `failure_error_function=None`) so MCP tool exceptions are raised.
+
+### 0.7.0
+
+In this version, there were a few behavior changes that can affect existing applications:
+
+- Nested handoff history is now **opt-in** (disabled by default). If you depended on the v0.6.x default nested behavior, explicitly set `RunConfig(nest_handoff_history=True)`.
+- The default `reasoning.effort` for `gpt-5.1` / `gpt-5.2` changed to `"none"` (from the previous default `"low"` configured by SDK defaults). If your prompts or quality/cost profile relied on `"low"`, set it explicitly in `model_settings`.
+
 ### 0.6.0
 
 In this version, the default handoff history is now packaged into a single assistant message instead of exposing the raw user/assistant turns, giving downstream agents a concise, predictable recap
