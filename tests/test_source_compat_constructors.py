@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, cast
 
 from agents import (
     Agent,
@@ -74,6 +75,16 @@ def test_agent_hook_context_third_positional_argument_is_turn_input() -> None:
     assert isinstance(context._approvals, dict)
 
 
+def test_tool_context_v070_positional_constructor_still_works() -> None:
+    usage = Usage()
+    context = ToolContext(None, usage, "tool_name", "call_id", '{"x":1}', None)
+
+    assert context.usage is usage
+    assert context.tool_name == "tool_name"
+    assert context.tool_call_id == "call_id"
+    assert context.tool_arguments == '{"x":1}'
+
+
 def test_run_result_v070_positional_constructor_still_works() -> None:
     result = RunResult(
         "x",
@@ -112,7 +123,39 @@ def test_run_result_streaming_v070_positional_constructor_still_works() -> None:
     assert result.interruptions == []
 
 
+def test_run_result_streaming_v070_optional_positional_constructor_still_works() -> None:
+    event_queue: asyncio.Queue[Any] = asyncio.Queue()
+    input_guardrail_queue: asyncio.Queue[Any] = asyncio.Queue()
+    result = RunResultStreaming(
+        "x",
+        [],
+        [],
+        "ok",
+        [],
+        [],
+        [],
+        [],
+        RunContextWrapper(context=None),
+        Agent(name="agent"),
+        0,
+        1,
+        None,
+        None,
+        True,
+        [],
+        event_queue,
+        input_guardrail_queue,
+        None,
+    )
+    assert result.is_complete is True
+    assert result.run_loop_task is None
+    assert result._event_queue is event_queue
+    assert result._input_guardrail_queue is input_guardrail_queue
+    assert result.interruptions == []
+
+
 def test_run_result_streaming_accepts_legacy_run_impl_task_keyword() -> None:
+    sentinel_task = cast(Any, object())
     result = RunResultStreaming(
         input="x",
         new_items=[],
@@ -128,6 +171,58 @@ def test_run_result_streaming_accepts_legacy_run_impl_task_keyword() -> None:
         max_turns=1,
         _current_agent_output_schema=None,
         trace=None,
-        _run_impl_task=None,
+        _run_impl_task=sentinel_task,
     )
-    assert result.run_loop_task is None
+    assert result.run_loop_task is sentinel_task
+
+
+def test_run_result_streaming_accepts_run_loop_task_keyword() -> None:
+    sentinel_task = cast(Any, object())
+    result = RunResultStreaming(
+        input="x",
+        new_items=[],
+        raw_responses=[],
+        final_output="ok",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=RunContextWrapper(context=None),
+        current_agent=Agent(name="agent"),
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        run_loop_task=sentinel_task,
+    )
+    assert result.run_loop_task is sentinel_task
+
+
+def test_run_result_streaming_v070_run_impl_task_positional_binding_is_preserved() -> None:
+    sentinel_task = cast(Any, object())
+    event_queue: asyncio.Queue[Any] = asyncio.Queue()
+    input_guardrail_queue: asyncio.Queue[Any] = asyncio.Queue()
+    result = RunResultStreaming(
+        "x",
+        [],
+        [],
+        "ok",
+        [],
+        [],
+        [],
+        [],
+        RunContextWrapper(context=None),
+        Agent(name="agent"),
+        0,
+        1,
+        None,
+        None,
+        False,
+        [],
+        event_queue,
+        input_guardrail_queue,
+        sentinel_task,
+    )
+    assert result._event_queue is event_queue
+    assert result._input_guardrail_queue is input_guardrail_queue
+    assert result.run_loop_task is sentinel_task
