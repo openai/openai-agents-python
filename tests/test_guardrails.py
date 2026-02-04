@@ -596,7 +596,7 @@ async def test_parallel_guardrail_trip_compat_mode_does_not_cancel_model_task():
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
         with patch(
-            "agents.run._should_cancel_parallel_model_task_on_input_guardrail_trip",
+            "agents.run.should_cancel_parallel_model_task_on_input_guardrail_trip",
             return_value=False,
         ):
             with pytest.raises(InputGuardrailTripwireTriggered):

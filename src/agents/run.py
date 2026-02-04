@@ -52,6 +52,7 @@ from .run_internal.agent_runner_helpers import (
     resolve_resumed_context,
     resolve_trace_settings,
     save_turn_items_if_needed,
+    should_cancel_parallel_model_task_on_input_guardrail_trip,
     update_run_state_for_interruption,
     validate_session_conversation_settings,
 )
@@ -112,10 +113,6 @@ from .util import _error_tracing
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
 
-_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
-    "openai_agents.cancel_parallel_model_task_on_input_guardrail_trip.v1"
-)
-
 __all__ = [
     "AgentRunner",
     "Runner",
@@ -150,22 +147,6 @@ def get_default_agent_runner() -> AgentRunner:
     """
     global DEFAULT_AGENT_RUNNER
     return DEFAULT_AGENT_RUNNER
-
-
-def _should_cancel_parallel_model_task_on_input_guardrail_trip() -> bool:
-    """Return whether an in-flight model task should be cancelled on guardrail trip."""
-    try:
-        from temporalio import workflow as temporal_workflow  # type: ignore[import-not-found]
-    except Exception:
-        return True
-
-    try:
-        if not temporal_workflow.in_workflow():
-            return True
-        # Preserve replay compatibility for histories created before cancellation.
-        return temporal_workflow.patched(_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID)
-    except Exception:
-        return True
 
 
 class Runner:
@@ -1027,7 +1008,7 @@ class AgentRunner:
                                     model_task,
                                 )
                             except InputGuardrailTripwireTriggered:
-                                if _should_cancel_parallel_model_task_on_input_guardrail_trip():
+                                if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                     if not model_task.done():
                                         model_task.cancel()
                                     await asyncio.gather(model_task, return_exceptions=True)

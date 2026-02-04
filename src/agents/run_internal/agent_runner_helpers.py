@@ -43,8 +43,29 @@ __all__ = [
     "resolve_processed_response",
     "resolve_resumed_context",
     "save_turn_items_if_needed",
+    "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
 ]
+
+_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
+    "openai_agents.cancel_parallel_model_task_on_input_guardrail_trip.v1"
+)
+
+
+def should_cancel_parallel_model_task_on_input_guardrail_trip() -> bool:
+    """Return whether an in-flight model task should be cancelled on guardrail trip."""
+    try:
+        from temporalio import workflow as temporal_workflow  # type: ignore[import-not-found]
+    except Exception:
+        return True
+
+    try:
+        if not temporal_workflow.in_workflow():
+            return True
+        # Preserve replay compatibility for histories created before cancellation.
+        return temporal_workflow.patched(_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID)
+    except Exception:
+        return True
 
 
 def apply_resumed_conversation_settings(
