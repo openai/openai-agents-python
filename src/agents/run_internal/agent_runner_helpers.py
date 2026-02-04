@@ -63,7 +63,7 @@ def should_cancel_parallel_model_task_on_input_guardrail_trip() -> bool:
         if not temporal_workflow.in_workflow():
             return True
         # Preserve replay compatibility for histories created before cancellation.
-        return temporal_workflow.patched(_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID)
+        return bool(temporal_workflow.patched(_PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID))
     except Exception:
         return True
 
