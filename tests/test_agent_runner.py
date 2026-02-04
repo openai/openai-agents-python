@@ -49,6 +49,7 @@ from agents.run_internal.items import (
     drop_orphan_function_calls,
     ensure_input_item_format,
     normalize_input_items_for_api,
+    normalize_resumed_input,
 )
 from agents.run_internal.oai_conversation import OpenAIServerConversationTracker
 from agents.run_internal.run_loop import get_new_response
@@ -254,6 +255,43 @@ def testdrop_orphan_function_calls_removes_orphans():
     assert _has_call("apply_patch_call", "patch_keep")
     assert _has_call("computer_call", "computer_keep")
     assert _has_call("local_shell_call", "local_shell_keep")
+
+
+def test_normalize_resumed_input_drops_orphan_function_calls():
+    raw_input: list[TResponseInputItem] = [
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "orphan_call",
+                "name": "tool_orphan",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {
+                "type": "function_call",
+                "call_id": "paired_call",
+                "name": "tool_paired",
+                "arguments": "{}",
+            },
+        ),
+        cast(
+            TResponseInputItem,
+            {"type": "function_call_output", "call_id": "paired_call", "output": "ok"},
+        ),
+    ]
+
+    normalized = normalize_resumed_input(raw_input)
+    assert isinstance(normalized, list)
+    call_ids = [
+        cast(dict[str, Any], item).get("call_id")
+        for item in normalized
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    assert "orphan_call" not in call_ids
+    assert "paired_call" in call_ids
 
 
 def testnormalize_input_items_for_api_preserves_provider_data():
@@ -1159,6 +1197,71 @@ async def test_prepare_input_with_session_keeps_function_call_outputs():
     assert first_item["type"] == "function_call_output"
     assert last_item["role"] == "user"
     assert last_item["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_prefers_latest_function_call_output():
+    history_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_latest",
+            "output": "history-output",
+        },
+    )
+    session = SimpleListSession(history=[history_output])
+    latest_output = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call_output",
+            "call_id": "call_latest",
+            "output": "new-output",
+        },
+    )
+
+    prepared_input, session_items = await prepare_input_with_session([latest_output], session, None)
+
+    assert isinstance(prepared_input, list)
+    prepared_outputs = [
+        cast(dict[str, Any], item)
+        for item in prepared_input
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_latest"
+    ]
+    assert len(prepared_outputs) == 1
+    assert prepared_outputs[0]["output"] == "new-output"
+    assert len(session_items) == 1
+    assert cast(dict[str, Any], session_items[0])["output"] == "new-output"
+
+
+@pytest.mark.asyncio
+async def test_prepare_input_with_session_keeps_orphan_function_calls():
+    orphan_call = cast(
+        TResponseInputItem,
+        {
+            "type": "function_call",
+            "call_id": "orphan_call",
+            "name": "tool_orphan",
+            "arguments": "{}",
+        },
+    )
+    session = SimpleListSession(history=[orphan_call])
+
+    prepared_input, session_items = await prepare_input_with_session("hello", session, None)
+
+    assert isinstance(prepared_input, list)
+    assert len(session_items) == 1
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == "orphan_call"
+        for item in prepared_input
+    )
+    assert any(
+        isinstance(item, dict) and item.get("role") == "user" and item.get("content") == "hello"
+        for item in prepared_input
+    )
 
 
 def test_ensure_api_input_item_handles_model_dump_objects():

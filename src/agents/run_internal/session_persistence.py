@@ -27,7 +27,6 @@ from ..run_state import RunState
 from .items import (
     copy_input_items,
     deduplicate_input_items,
-    drop_orphan_function_calls,
     ensure_input_item_format,
     fingerprint_input_item,
     normalize_input_items_for_api,
@@ -46,6 +45,15 @@ __all__ = [
     "rewind_session_items",
     "wait_for_session_cleanup",
 ]
+
+
+def _deduplicate_input_items_preferring_latest(
+    items: list[TResponseInputItem],
+) -> list[TResponseInputItem]:
+    """Deduplicate by stable identifiers while keeping the latest occurrence."""
+    # deduplicate_input_items keeps the first item per dedupe key. Reverse twice so that
+    # the latest item in the original order wins for duplicate IDs/call_ids.
+    return list(reversed(deduplicate_input_items(list(reversed(items)))))
 
 
 async def prepare_input_with_session(
@@ -134,9 +142,8 @@ async def prepare_input_with_session(
             prepared_items_raw = new_items_for_callback if preserve_dropped_new_items else []
 
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
-    filtered = drop_orphan_function_calls(prepared_as_inputs)
-    normalized = normalize_input_items_for_api(filtered)
-    deduplicated = deduplicate_input_items(normalized)
+    normalized = normalize_input_items_for_api(prepared_as_inputs)
+    deduplicated = _deduplicate_input_items_preferring_latest(normalized)
 
     return deduplicated, [ensure_input_item_format(item) for item in appended_items]
 
