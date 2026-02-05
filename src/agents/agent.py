@@ -45,6 +45,8 @@ from .tool import (
     FunctionToolResult,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     _extract_tool_argument_json_error,
     default_tool_error_function,
 )
@@ -802,6 +804,11 @@ class Agent(AgentBase, Generic[TContext]):
         )
         run_agent_tool._is_agent_tool = True
         run_agent_tool._agent_instance = self
+        # Set origin tracking on run_agent (the FunctionTool returned by @function_tool)
+        run_agent_tool._tool_origin = ToolOrigin(
+            type=ToolOriginType.AGENT_AS_TOOL,
+            agent_as_tool=self,
+        )
 
         return run_agent_tool
 
