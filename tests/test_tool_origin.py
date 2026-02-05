@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import sys
+import weakref
 from typing import cast
 
 import pytest
@@ -331,3 +333,54 @@ async def test_non_function_tool_items_have_no_origin():
     )
 
     assert item.tool_origin is None
+
+
+def test_tool_origin_release_agent_clears_strong_reference():
+    """Test that release_agent() clears strong reference to agent_as_tool."""
+    # Create a ToolOrigin with an agent_as_tool
+    nested_agent = Agent(
+        name="nested_agent",
+        model=FakeModel(),
+        instructions="You are a nested agent.",
+    )
+
+    tool_origin = ToolOrigin(
+        type=ToolOriginType.AGENT_AS_TOOL,
+        agent_as_tool=nested_agent,
+    )
+
+    # Create a ToolCallItem with this tool_origin
+    tool_call_item = ToolCallItem(
+        raw_item=cast(
+            ToolCallItemTypes,
+            {
+                "type": "function_call",
+                "name": "test_tool",
+                "call_id": "call_123",
+                "arguments": "{}",
+            },
+        ),
+        agent=nested_agent,
+        tool_origin=tool_origin,
+    )
+
+    # Verify agent_as_tool is set
+    assert tool_call_item.tool_origin is not None
+    assert tool_call_item.tool_origin.agent_as_tool is nested_agent
+
+    # Create weak reference to verify GC behavior
+    nested_agent_ref = weakref.ref(nested_agent)
+
+    # Release agent - this should clear strong reference in tool_origin
+    tool_call_item.release_agent()
+
+    # After release, agent_as_tool should still be accessible via weakref
+    assert tool_call_item.tool_origin.agent_as_tool is nested_agent
+
+    # Delete the agent and force GC
+    del nested_agent
+    gc.collect()
+
+    # After GC, agent_as_tool should be None since strong refs were cleared
+    assert nested_agent_ref() is None
+    assert tool_call_item.tool_origin.agent_as_tool is None
