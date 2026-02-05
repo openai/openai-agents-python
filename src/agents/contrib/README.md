@@ -4,10 +4,9 @@ Kernel-level guardrails and policy enforcement for OpenAI Agents SDK using [Agen
 
 ## Features
 
-- **Output Guardrails**: Block dangerous patterns in agent outputs
-- **Input Validation**: Filter malicious inputs before processing
-- **Tool Control**: Limit which tools agents can use
-- **Rate Limiting**: Cap tool invocations per run
+- **Output Guardrails**: Block dangerous patterns in agent outputs (automatic)
+- **Input Validation**: Filter malicious inputs before processing (automatic)
+- **Tool Policy**: Define allowed/blocked tools (requires manual `check_tool()` calls)
 - **Violation Handling**: Callbacks for policy violations
 
 ## Installation
@@ -27,8 +26,8 @@ from agents.contrib import create_governance_guardrail
 # Create guardrail with simple config
 guardrail = create_governance_guardrail(
     blocked_patterns=["DROP TABLE", "rm -rf", "DELETE FROM"],
-    blocked_tools=["shell_execute"],
-    max_tool_calls=10,
+    blocked_tools=["shell_execute"],  # Use with check_tool() for enforcement
+    max_tool_calls=10,  # Use with check_tool() for enforcement
 )
 
 # Create agent with guardrail
@@ -124,6 +123,29 @@ if violation:
     print(f"Input blocked: {violation.description}")
 else:
     result = await Runner.run(agent, user_input)
+```
+
+### Tool Policy Enforcement
+
+Tool policies (`blocked_tools`, `allowed_tools`, `max_tool_calls`) are not automatically
+enforced during agent execution. Use `check_tool()` in your tool implementations:
+
+```python
+from agents.contrib import GovernanceGuardrail, GovernancePolicy
+
+policy = GovernancePolicy(
+    blocked_tools=["dangerous_tool"],
+    max_tool_calls=10,
+)
+
+guardrail = GovernanceGuardrail(policy)
+
+# In your tool implementation:
+def my_tool(name: str, args: dict):
+    violation = guardrail.check_tool(name)
+    if violation:
+        raise ValueError(f"Tool blocked: {violation.description}")
+    # ... execute tool
 ```
 
 ## Integration with Agent-OS Kernel

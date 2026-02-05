@@ -152,7 +152,7 @@ class GovernanceGuardrail:
                 tripwire_triggered=True,
             )
 
-        return GuardrailFunctionOutput(tripwire_triggered=False)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
 
     def check_tool(self, tool_name: str) -> Optional[PolicyViolation]:
         """Check if a tool is allowed by policy.
