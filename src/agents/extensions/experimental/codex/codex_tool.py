@@ -876,17 +876,22 @@ def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any], key: st
             "Pass context={} (or an object) to Runner.run()."
         )
 
-    if isinstance(context, Mapping) and not isinstance(context, MutableMapping):
+    if isinstance(context, MutableMapping):
+        return
+
+    if isinstance(context, Mapping):
         raise UserError(
             "use_run_context_thread_id=True requires a mutable run context mapping "
             "or a writable object context."
         )
 
-    if isinstance(context, BaseModel) and bool(context.model_config.get("frozen", False)):
-        raise UserError(
-            "use_run_context_thread_id=True requires a mutable run context object. "
-            "Frozen Pydantic models are not supported."
-        )
+    if isinstance(context, BaseModel):
+        if bool(context.model_config.get("frozen", False)):
+            raise UserError(
+                "use_run_context_thread_id=True requires a mutable run context object. "
+                "Frozen Pydantic models are not supported."
+            )
+        return
 
     if dataclasses.is_dataclass(context):
         params = getattr(type(context), "__dataclass_params__", None)
@@ -905,6 +910,13 @@ def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any], key: st
                 + f'"{key}". '
                 "Use a mutable dict context, or add a writable field/slot to the context object."
             )
+        return
+
+    if not hasattr(context, "__dict__"):
+        raise UserError(
+            "use_run_context_thread_id=True requires a mutable run context mapping "
+            "or a writable object context."
+        )
 
 
 def _store_thread_id_in_run_context(

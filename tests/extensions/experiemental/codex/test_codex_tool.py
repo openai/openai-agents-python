@@ -1229,6 +1229,43 @@ async def test_codex_tool_run_context_thread_id_rejects_slots_object_without_thr
     assert state.resume_calls == 0
 
 
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_rejects_non_writable_object_context() -> None:
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "List context", "path": ""}]}'
+    context: ToolContext[Any] = ToolContext(
+        context=cast(Any, []),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match="use_run_context_thread_id=True"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
