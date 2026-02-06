@@ -5,9 +5,10 @@ import dataclasses
 import inspect
 import json
 import os
-from collections.abc import AsyncGenerator, Awaitable, Mapping
+import re
+from collections.abc import AsyncGenerator, Awaitable, Mapping, MutableMapping
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Union
 
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -62,6 +63,9 @@ SPAN_TRIM_KEYS = (
     "changes",
     "items",
 )
+DEFAULT_CODEX_TOOL_NAME = "codex"
+DEFAULT_RUN_CONTEXT_THREAD_ID_KEY = "codex_thread_id"
+CODEX_TOOL_NAME_PREFIX = "codex_"
 
 
 class CodexToolInputItem(BaseModel):
@@ -95,6 +99,37 @@ class CodexToolInputItem(BaseModel):
 
 
 class CodexToolParameters(BaseModel):
+    inputs: list[CodexToolInputItem] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Structured inputs appended to the Codex task. Provide at least one input item."
+        ),
+    )
+    thread_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional Codex thread ID to resume. If omitted, a new thread is started unless "
+            "configured elsewhere."
+        ),
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_thread_id(self) -> CodexToolParameters:
+        if self.thread_id is None:
+            return self
+
+        normalized = self.thread_id.strip()
+        if not normalized:
+            raise ValueError('When provided, "thread_id" must be a non-empty string.')
+
+        self.thread_id = normalized
+        return self
+
+
+class CodexToolRunContextParameters(BaseModel):
     inputs: list[CodexToolInputItem] = Field(
         ...,
         min_length=1,
@@ -177,9 +212,13 @@ class CodexToolOptions:
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None = None
     is_enabled: bool | Callable[[RunContextWrapper[Any], Any], MaybeAwaitable[bool]] = True
     failure_error_function: ToolErrorFunction | None = default_tool_error_function
+    use_run_context_thread_id: bool = False
+    run_context_thread_id_key: str | None = None
 
 
-CodexToolCallArguments: TypeAlias = dict[str, Optional[list[UserInput]]]
+class CodexToolCallArguments(TypedDict):
+    inputs: list[UserInput] | None
+    thread_id: str | None
 
 
 class _UnsetType:
@@ -209,6 +248,8 @@ def codex_tool(
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Any], MaybeAwaitable[bool]] | None = None,
     failure_error_function: ToolErrorFunction | None | _UnsetType = _UNSET,
+    use_run_context_thread_id: bool | None = None,
+    run_context_thread_id_key: str | None = None,
 ) -> FunctionTool:
     resolved_options = _coerce_tool_options(options)
     if name is not None:
@@ -245,7 +286,10 @@ def codex_tool(
         resolved_options.is_enabled = is_enabled
     if not isinstance(failure_error_function, _UnsetType):
         resolved_options.failure_error_function = failure_error_function
-
+    if use_run_context_thread_id is not None:
+        resolved_options.use_run_context_thread_id = use_run_context_thread_id
+    if run_context_thread_id_key is not None:
+        resolved_options.run_context_thread_id_key = run_context_thread_id_key
     resolved_options.codex_options = coerce_codex_options(resolved_options.codex_options)
     resolved_options.default_thread_options = coerce_thread_options(
         resolved_options.default_thread_options
@@ -253,11 +297,21 @@ def codex_tool(
     resolved_options.default_turn_options = coerce_turn_options(
         resolved_options.default_turn_options
     )
-    name = resolved_options.name or "codex"
+    name = _resolve_codex_tool_name(resolved_options.name)
+    resolved_run_context_thread_id_key = _resolve_run_context_thread_id_key(
+        tool_name=name,
+        configured_key=resolved_options.run_context_thread_id_key,
+    )
     description = resolved_options.description or (
         "Executes an agentic Codex task against the current workspace."
     )
-    parameters_model = resolved_options.parameters or CodexToolParameters
+    if resolved_options.parameters is not None:
+        parameters_model = resolved_options.parameters
+    elif resolved_options.use_run_context_thread_id:
+        # In run-context mode, hide thread_id from the default tool schema.
+        parameters_model = CodexToolRunContextParameters
+    else:
+        parameters_model = CodexToolParameters
 
     params_schema = ensure_strict_json_schema(parameters_model.model_json_schema())
     resolved_codex_options = _resolve_codex_options(resolved_options.codex_options)
@@ -280,18 +334,25 @@ def codex_tool(
             args = _normalize_parameters(parsed)
 
             codex = await resolve_codex()
+            call_thread_id = _resolve_call_thread_id(
+                args=args,
+                ctx=ctx,
+                configured_thread_id=resolved_options.thread_id,
+                use_run_context_thread_id=resolved_options.use_run_context_thread_id,
+                run_context_thread_id_key=resolved_run_context_thread_id_key,
+            )
             if resolved_options.persist_session:
                 # Reuse a single Codex thread across tool calls.
                 thread = _get_or_create_persisted_thread(
                     codex,
-                    resolved_options.thread_id,
+                    call_thread_id,
                     resolved_thread_options,
                     persisted_thread,
                 )
                 if persisted_thread is None:
                     persisted_thread = thread
             else:
-                thread = _get_thread(codex, resolved_options.thread_id, resolved_thread_options)
+                thread = _get_thread(codex, call_thread_id, resolved_thread_options)
 
             turn_options = _build_turn_options(
                 resolved_options.default_turn_options, validated_output_schema
@@ -311,6 +372,13 @@ def codex_tool(
 
             if usage is not None:
                 ctx.usage.add(_to_agent_usage(usage))
+
+            if resolved_options.use_run_context_thread_id:
+                _store_thread_id_in_run_context(
+                    ctx,
+                    resolved_run_context_thread_id_key,
+                    thread.id,
+                )
 
             return CodexToolResult(thread_id=thread.id, response=response, usage=usage)
         except Exception as exc:  # noqa: BLE001
@@ -333,7 +401,7 @@ def codex_tool(
                 logger.error("Codex tool failed: %s", exc, exc_info=exc)
             return result
 
-    return FunctionTool(
+    function_tool = FunctionTool(
         name=name,
         description=description,
         params_json_schema=params_schema,
@@ -341,14 +409,17 @@ def codex_tool(
         strict_json_schema=True,
         is_enabled=resolved_options.is_enabled,
     )
+    # Internal marker used for codex-tool specific runtime validation.
+    function_tool._is_codex_tool = True
+    return function_tool
 
 
 def _coerce_tool_options(
     options: CodexToolOptions | Mapping[str, Any] | None,
 ) -> CodexToolOptions:
     if options is None:
-        return CodexToolOptions()
-    if isinstance(options, CodexToolOptions):
+        resolved = CodexToolOptions()
+    elif isinstance(options, CodexToolOptions):
         resolved = options
     else:
         if not isinstance(options, Mapping):
@@ -364,7 +435,61 @@ def _coerce_tool_options(
     resolved.codex_options = coerce_codex_options(resolved.codex_options)
     resolved.default_thread_options = coerce_thread_options(resolved.default_thread_options)
     resolved.default_turn_options = coerce_turn_options(resolved.default_turn_options)
+    key = resolved.run_context_thread_id_key
+    if key is not None:
+        resolved.run_context_thread_id_key = _validate_run_context_thread_id_key(key)
+
     return resolved
+
+
+def _validate_run_context_thread_id_key(value: Any) -> str:
+    if not isinstance(value, str):
+        raise UserError("run_context_thread_id_key must be a string.")
+
+    key = value.strip()
+    if not key:
+        raise UserError("run_context_thread_id_key must be a non-empty string.")
+
+    return key
+
+
+def _resolve_codex_tool_name(configured_name: str | None) -> str:
+    if configured_name is None:
+        return DEFAULT_CODEX_TOOL_NAME
+
+    if not isinstance(configured_name, str):
+        raise UserError("Codex tool name must be a string.")
+
+    normalized = configured_name.strip()
+    if not normalized:
+        raise UserError("Codex tool name must be a non-empty string.")
+
+    if normalized != DEFAULT_CODEX_TOOL_NAME and not normalized.startswith(CODEX_TOOL_NAME_PREFIX):
+        raise UserError(
+            f'Codex tool name must be "{DEFAULT_CODEX_TOOL_NAME}" or start with '
+            f'"{CODEX_TOOL_NAME_PREFIX}".'
+        )
+
+    return normalized
+
+
+def _resolve_run_context_thread_id_key(tool_name: str, configured_key: str | None) -> str:
+    if configured_key is not None:
+        return _validate_run_context_thread_id_key(configured_key)
+
+    if tool_name == DEFAULT_CODEX_TOOL_NAME:
+        return DEFAULT_RUN_CONTEXT_THREAD_ID_KEY
+
+    suffix = tool_name[len(CODEX_TOOL_NAME_PREFIX) :]
+    suffix = _normalize_name_for_context_key(suffix)
+    return f"{DEFAULT_RUN_CONTEXT_THREAD_ID_KEY}_{suffix}"
+
+
+def _normalize_name_for_context_key(value: str) -> str:
+    # Keep generated context keys deterministic and broadly attribute-safe.
+    normalized = re.sub(r"[^0-9a-zA-Z_]+", "_", value.strip().lower())
+    normalized = normalized.strip("_")
+    return normalized or "tool"
 
 
 def _parse_tool_input(parameters_model: type[BaseModel], input_json: str) -> BaseModel:
@@ -387,6 +512,7 @@ def _normalize_parameters(params: BaseModel) -> CodexToolCallArguments:
     inputs_value = getattr(params, "inputs", None)
     if inputs_value is None:
         raise UserError("Codex tool parameters must include an inputs field.")
+    thread_id_value = getattr(params, "thread_id", None)
 
     inputs = [{"type": item.type, "text": item.text, "path": item.path} for item in inputs_value]
 
@@ -397,7 +523,10 @@ def _normalize_parameters(params: BaseModel) -> CodexToolCallArguments:
         else:
             normalized_inputs.append({"type": "local_image", "path": item["path"] or ""})
 
-    return {"inputs": normalized_inputs if normalized_inputs else None}
+    return {
+        "inputs": normalized_inputs if normalized_inputs else None,
+        "thread_id": _normalize_thread_id(thread_id_value),
+    }
 
 
 def _build_codex_input(args: CodexToolCallArguments) -> Input:
@@ -637,6 +766,85 @@ def _get_thread(codex: Codex, thread_id: str | None, defaults: ThreadOptions | N
     if thread_id:
         return codex.resume_thread(thread_id, defaults)
     return codex.start_thread(defaults)
+
+
+def _normalize_thread_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise UserError("Codex thread_id must be a string when provided.")
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _resolve_call_thread_id(
+    args: CodexToolCallArguments,
+    ctx: RunContextWrapper[Any],
+    configured_thread_id: str | None,
+    use_run_context_thread_id: bool,
+    run_context_thread_id_key: str,
+) -> str | None:
+    explicit_thread_id = _normalize_thread_id(args.get("thread_id"))
+    if explicit_thread_id:
+        return explicit_thread_id
+
+    if use_run_context_thread_id:
+        context_thread_id = _read_thread_id_from_run_context(ctx, run_context_thread_id_key)
+        if context_thread_id:
+            return context_thread_id
+
+    return configured_thread_id
+
+
+def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> str | None:
+    context = ctx.context
+    if context is None:
+        return None
+
+    if isinstance(context, Mapping):
+        value = context.get(key)
+    else:
+        value = getattr(context, key, None)
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise UserError(f'Run context "{key}" must be a string when provided.')
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+
+    return normalized
+
+
+def _store_thread_id_in_run_context(
+    ctx: RunContextWrapper[Any], key: str, thread_id: str | None
+) -> None:
+    if thread_id is None:
+        return
+
+    context = ctx.context
+    if context is None:
+        raise UserError(
+            "use_run_context_thread_id=True requires a mutable run context object. "
+            "Pass context={} (or an object) to Runner.run()."
+        )
+
+    if isinstance(context, MutableMapping):
+        context[key] = thread_id
+        return
+
+    try:
+        setattr(context, key, thread_id)
+    except Exception as exc:  # noqa: BLE001
+        raise UserError(
+            f'Unable to store Codex thread_id in run context field "{key}". '
+            "Use a mutable dict context or set a writable attribute."
+        ) from exc
 
 
 def _get_or_create_persisted_thread(

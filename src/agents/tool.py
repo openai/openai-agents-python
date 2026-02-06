@@ -261,6 +261,9 @@ class FunctionTool:
     _is_agent_tool: bool = field(default=False, init=False, repr=False)
     """Internal flag indicating if this tool is an agent-as-tool."""
 
+    _is_codex_tool: bool = field(default=False, init=False, repr=False)
+    """Internal flag indicating if this tool is a Codex tool wrapper."""
+
     _agent_instance: Any = field(default=None, init=False, repr=False)
     """Internal reference to the agent instance if this is an agent-as-tool."""
 

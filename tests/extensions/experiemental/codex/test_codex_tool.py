@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from agents import Agent, function_tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.extensions.experimental.codex import (
     Codex,
@@ -35,6 +36,7 @@ class CodexMockState:
         self.last_turn_options: Any = None
         self.start_calls = 0
         self.resume_calls = 0
+        self.last_resumed_thread_id: str | None = None
         self.options: Any = None
 
 
@@ -65,6 +67,7 @@ class FakeCodex:
 
     def resume_thread(self, _thread_id: str, _options: Any = None) -> FakeThread:
         self._state.resume_calls += 1
+        self._state.last_resumed_thread_id = _thread_id
         return FakeThread(self._state)
 
 
@@ -469,7 +472,7 @@ async def test_codex_tool_accepts_keyword_options(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(codex_tool_module, "Codex", CaptureCodex)
 
-    tool = codex_tool(name="codex-keyword", codex_options={"api_key": "from-kwargs"})
+    tool = codex_tool(name="codex_keyword", codex_options={"api_key": "from-kwargs"})
     input_json = '{"inputs": [{"type": "text", "text": "Check keyword options", "path": ""}]}'
     context = ToolContext(
         context=None,
@@ -480,7 +483,7 @@ async def test_codex_tool_accepts_keyword_options(monkeypatch: pytest.MonkeyPatc
 
     await tool.on_invoke_tool(context, input_json)
 
-    assert tool.name == "codex-keyword"
+    assert tool.name == "codex_keyword"
     assert state.options is not None
     assert getattr(state.options, "api_key", None) == "from-kwargs"
 
@@ -602,6 +605,237 @@ async def test_codex_tool_persists_session() -> None:
     assert state.resume_calls == 0
 
 
+@pytest.mark.asyncio
+async def test_codex_tool_accepts_thread_id_from_tool_input() -> None:
+    state = CodexMockState()
+    state.thread_id = "thread-from-input"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-from-input"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(CodexToolOptions(codex=cast(Codex, FakeCodex(state))))
+    input_json = (
+        '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}], '
+        '"thread_id": "thread-xyz"}'
+    )
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    result = await tool.on_invoke_tool(context, input_json)
+
+    assert isinstance(result, CodexToolResult)
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-xyz"
+    assert result.thread_id == "thread-from-input"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_uses_run_context_thread_id_and_persists_latest() -> None:
+    state = CodexMockState()
+    state.thread_id = "thread-next"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            run_context_thread_id_key="codex_agent_thread_id",
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context = {"codex_agent_thread_id": "thread-prev"}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    result = await tool.on_invoke_tool(context, input_json)
+
+    assert isinstance(result, CodexToolResult)
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-prev"
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert result.thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_default_run_context_key_follows_tool_name() -> None:
+    state = CodexMockState()
+    state.thread_id = "thread-next"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+        ),
+        name="codex_engineer",
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context = {"codex_thread_id_engineer": "thread-prev"}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    await tool.on_invoke_tool(context, input_json)
+
+    assert state.last_resumed_thread_id == "thread-prev"
+    assert run_context["codex_thread_id_engineer"] == "thread-next"
+
+
+def test_codex_tool_rejects_custom_name_without_codex_prefix() -> None:
+    with pytest.raises(UserError, match='must be "codex" or start with "codex_"'):
+        codex_tool(name="engineer")
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_tool_input_thread_id_overrides_run_context_thread_id() -> None:
+    state = CodexMockState()
+    state.thread_id = "thread-from-tool-input"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-from-tool-input"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            parameters=codex_tool_module.CodexToolParameters,
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = (
+        '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}], '
+        '"thread_id": "thread-from-args"}'
+    )
+    context = ToolContext(
+        context={"codex_thread_id": "thread-from-context"},
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    await tool.on_invoke_tool(context, input_json)
+
+    assert state.last_resumed_thread_id == "thread-from-args"
+
+
+def test_codex_tool_run_context_mode_hides_thread_id_in_default_parameters() -> None:
+    tool = codex_tool(use_run_context_thread_id=True)
+    assert "thread_id" not in tool.params_json_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_duplicate_names_fail_fast() -> None:
+    agent = Agent(
+        name="test",
+        tools=[
+            codex_tool(),
+            codex_tool(),
+        ],
+    )
+
+    with pytest.raises(UserError, match="Duplicate Codex tool names found"):
+        await agent.get_all_tools(RunContextWrapper(context=None))
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_name_collision_with_other_tool_fails_fast() -> None:
+    @function_tool(name_override="codex")
+    def other_tool() -> str:
+        return "ok"
+
+    agent = Agent(
+        name="test",
+        tools=[
+            codex_tool(),
+            other_tool,
+        ],
+    )
+
+    with pytest.raises(UserError, match="Duplicate Codex tool names found"):
+        await agent.get_all_tools(RunContextWrapper(context=None))
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_requires_mutable_context() -> None:
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "No context", "path": ""}]}'
+    context = ToolContext(
+        context=None,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match="use_run_context_thread_id=True"):
+        await tool.on_invoke_tool(context, input_json)
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
@@ -637,6 +871,11 @@ def test_codex_tool_normalize_parameters_requires_inputs() -> None:
 def test_codex_tool_coerce_options_rejects_unknown_fields() -> None:
     with pytest.raises(UserError, match="Unknown Codex tool option"):
         codex_tool_module._coerce_tool_options({"unknown": "value"})
+
+
+def test_codex_tool_keyword_rejects_empty_run_context_key() -> None:
+    with pytest.raises(UserError, match="run_context_thread_id_key"):
+        codex_tool(run_context_thread_id_key=" ")
 
 
 def test_codex_tool_resolve_output_schema_validation_errors() -> None:
@@ -780,6 +1019,15 @@ def test_codex_tool_normalize_parameters_handles_local_image() -> None:
         {"type": "text", "text": "hello"},
         {"type": "local_image", "path": "/tmp/img.png"},
     ]
+    assert normalized["thread_id"] is None
+
+
+def test_codex_tool_input_thread_id_validation_errors() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        codex_tool_module.CodexToolParameters(
+            inputs=[codex_tool_module.CodexToolInputItem(type="text", text="hello")],
+            thread_id="   ",
+        )
 
 
 def test_codex_tool_build_codex_input_empty() -> None:
@@ -1097,7 +1345,7 @@ def test_codex_tool_accepts_all_keyword_overrides() -> None:
 
     tool = codex_tool(
         CodexToolOptions(codex=cast(Codex, FakeCodex(state))),
-        name="codex-overrides",
+        name="codex_overrides",
         description="desc",
         parameters=CustomParams,
         output_schema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -1114,6 +1362,18 @@ def test_codex_tool_accepts_all_keyword_overrides() -> None:
         on_stream=lambda _payload: None,
         is_enabled=False,
         failure_error_function=lambda _ctx, _exc: "handled",
+        use_run_context_thread_id=True,
+        run_context_thread_id_key="thread_key",
     )
 
-    assert tool.name == "codex-overrides"
+    assert tool.name == "codex_overrides"
+
+
+def test_codex_tool_coerce_options_rejects_empty_run_context_key() -> None:
+    with pytest.raises(UserError, match="run_context_thread_id_key"):
+        codex_tool_module._coerce_tool_options(
+            {
+                "use_run_context_thread_id": True,
+                "run_context_thread_id_key": " ",
+            }
+        )
