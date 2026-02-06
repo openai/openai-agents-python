@@ -85,6 +85,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Computer use
     -   Image generation
     -   Experimental Codex tool workflows (`examples/tools/codex.py`)
+    -   Experimental Codex same-thread workflows (`examples/tools/codex_same_thread.py`)
 
 -   **[voice](https://github.com/openai/openai-agents-python/tree/main/examples/voice):**
     See examples of voice agents, using our TTS and STT models, including streamed voice examples.
