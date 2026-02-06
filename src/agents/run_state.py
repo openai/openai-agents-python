@@ -1936,7 +1936,16 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                         )
                     continue
             else:
-                handoff_agent = handoff_item
+                # Backward-compatibility fallback for custom legacy handoff wrappers that expose
+                # the target directly on `.agent` without inheriting from `Handoff`.
+                legacy_agent = getattr(handoff_item, "agent", None)
+                if legacy_agent is not None:
+                    handoff_agent = legacy_agent
+                    logger.debug(
+                        "Using legacy non-`Handoff` `.agent` fallback while building agent map."
+                    )
+                else:
+                    handoff_agent = handoff_item
                 candidate_name = getattr(handoff_agent, "name", None)
                 handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
 

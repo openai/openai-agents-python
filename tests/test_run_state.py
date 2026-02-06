@@ -904,6 +904,21 @@ class TestBuildAgentMap:
 
         assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
 
+    def test_build_agent_map_supports_legacy_non_handoff_agent_wrapper(self):
+        """Test that buildAgentMap supports legacy non-Handoff wrappers with `.agent` targets."""
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+
+        class LegacyWrapper:
+            def __init__(self, target: Agent[Any]):
+                self.agent = target
+
+        agent_a.handoffs = [LegacyWrapper(agent_b)]  # type: ignore[list-item]
+
+        agent_map = _build_agent_map(agent_a)
+
+        assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
+
     def test_build_agent_map_skips_unresolved_handoff_objects(self):
         """Test that buildAgentMap skips custom handoffs without target agent references."""
         agent_a = Agent(name="AgentA")
