@@ -728,6 +728,43 @@ async def test_codex_tool_persists_thread_started_id_when_thread_object_id_is_no
 
 
 @pytest.mark.asyncio
+async def test_codex_tool_persists_thread_id_for_recoverable_turn_failure() -> None:
+    state = CodexMockState()
+    state.thread_id = None
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {"type": "turn.failed", "error": {"message": "boom"}},
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            run_context_thread_id_key="codex_agent_thread_id",
+            failure_error_function=lambda _ctx, _exc: "handled",
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context: dict[str, str] = {}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    first_result = await tool.on_invoke_tool(context, input_json)
+    second_result = await tool.on_invoke_tool(context, input_json)
+
+    assert first_result == "handled"
+    assert second_result == "handled"
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert state.start_calls == 1
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
 async def test_codex_tool_uses_run_context_thread_id_with_pydantic_context() -> None:
     class RunContext(BaseModel):
         model_config = ConfigDict(extra="forbid")

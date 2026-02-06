@@ -330,6 +330,7 @@ def codex_tool(
 
     async def _on_invoke_tool(ctx: ToolContext[Any], input_json: str) -> Any:
         nonlocal persisted_thread
+        resolved_thread_id: str | None = None
         try:
             parsed = _parse_tool_input(parameters_model, input_json)
             args = _normalize_parameters(parsed)
@@ -362,17 +363,24 @@ def codex_tool(
                 resolved_options.default_turn_options, validated_output_schema
             )
             codex_input = _build_codex_input(args)
+            resolved_thread_id = thread.id
 
             # Always stream and aggregate locally to enable on_stream callbacks.
             stream_result = await thread.run_streamed(codex_input, turn_options)
-            response, usage, resolved_thread_id = await _consume_events(
-                stream_result.events,
-                args,
-                ctx,
-                thread,
-                resolved_options.on_stream,
-                resolved_options.span_data_max_chars,
-            )
+            resolved_thread_id_holder: dict[str, str | None] = {"thread_id": resolved_thread_id}
+            try:
+                response, usage, resolved_thread_id = await _consume_events(
+                    stream_result.events,
+                    args,
+                    ctx,
+                    thread,
+                    resolved_options.on_stream,
+                    resolved_options.span_data_max_chars,
+                    resolved_thread_id_holder=resolved_thread_id_holder,
+                )
+            except Exception:
+                resolved_thread_id = resolved_thread_id_holder["thread_id"]
+                raise
 
             if usage is not None:
                 ctx.usage.add(_to_agent_usage(usage))
@@ -388,6 +396,16 @@ def codex_tool(
         except Exception as exc:  # noqa: BLE001
             if resolved_options.failure_error_function is None:
                 raise
+
+            if resolved_options.use_run_context_thread_id and resolved_thread_id is not None:
+                try:
+                    _store_thread_id_in_run_context(
+                        ctx,
+                        resolved_run_context_thread_id_key,
+                        resolved_thread_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to store Codex thread id in run context after error.")
 
             result = resolved_options.failure_error_function(ctx, exc)
             if inspect.isawaitable(result):
@@ -961,12 +979,15 @@ async def _consume_events(
     thread: Thread,
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None,
     span_data_max_chars: int | None,
+    resolved_thread_id_holder: dict[str, str | None] | None = None,
 ) -> tuple[str, Usage | None, str | None]:
     # Track spans keyed by item id for command/mcp/reasoning events.
     active_spans: dict[str, Any] = {}
     final_response = ""
     usage: Usage | None = None
     resolved_thread_id = thread.id
+    if resolved_thread_id_holder is not None:
+        resolved_thread_id_holder["thread_id"] = resolved_thread_id
 
     event_queue: asyncio.Queue[CodexToolStreamEvent | None] | None = None
     dispatch_task: asyncio.Task[None] | None = None
@@ -1023,6 +1044,8 @@ async def _consume_events(
                 usage = event.usage
             elif isinstance(event, ThreadStartedEvent):
                 resolved_thread_id = event.thread_id
+                if resolved_thread_id_holder is not None:
+                    resolved_thread_id_holder["thread_id"] = resolved_thread_id
             elif isinstance(event, TurnFailedEvent):
                 error = event.error.message
                 raise UserError(f"Codex turn failed{(': ' + error) if error else ''}")
