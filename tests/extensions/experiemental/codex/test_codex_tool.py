@@ -793,6 +793,8 @@ async def test_codex_tool_persists_thread_id_for_raised_turn_failure() -> None:
     with pytest.raises(UserError, match="Codex turn failed: boom"):
         await tool.on_invoke_tool(context, input_json)
 
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+
     with pytest.raises(UserError, match="Codex turn failed: boom"):
         await tool.on_invoke_tool(context, input_json)
 

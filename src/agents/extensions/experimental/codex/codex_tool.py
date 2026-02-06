@@ -395,15 +395,12 @@ def codex_tool(
 
             return CodexToolResult(thread_id=resolved_thread_id, response=response, usage=usage)
         except Exception as exc:  # noqa: BLE001
-            if resolved_options.use_run_context_thread_id and resolved_thread_id is not None:
-                try:
-                    _store_thread_id_in_run_context(
-                        ctx,
-                        resolved_run_context_thread_id_key,
-                        resolved_thread_id,
-                    )
-                except Exception:
-                    logger.exception("Failed to store Codex thread id in run context after error.")
+            _try_store_thread_id_in_run_context_after_error(
+                ctx=ctx,
+                key=resolved_run_context_thread_id_key,
+                thread_id=resolved_thread_id,
+                enabled=resolved_options.use_run_context_thread_id,
+            )
 
             if resolved_options.failure_error_function is None:
                 raise
@@ -948,6 +945,22 @@ def _store_thread_id_in_run_context(
             f'Unable to store Codex thread_id in run context field "{key}". '
             "Use a mutable dict context or set a writable attribute."
         ) from exc
+
+
+def _try_store_thread_id_in_run_context_after_error(
+    *,
+    ctx: RunContextWrapper[Any],
+    key: str,
+    thread_id: str | None,
+    enabled: bool,
+) -> None:
+    if not enabled or thread_id is None:
+        return
+
+    try:
+        _store_thread_id_in_run_context(ctx, key, thread_id)
+    except Exception:
+        logger.exception("Failed to store Codex thread id in run context after error.")
 
 
 def _set_pydantic_context_value(context: BaseModel, key: str, value: str) -> bool:
