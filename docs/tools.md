@@ -2,21 +2,21 @@
 
 Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
--   Hosted OpenAI tools: run alongside the model on OpenAI servers.
--   Local runtime tools: run in your environment (computer use, shell, apply patch).
--   Function calling: wrap any Python function as a tool.
--   Agents as tools: expose an agent as a callable tool without a full handoff.
--   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
+- Hosted OpenAI tools: run alongside the model on OpenAI servers.
+- Local runtime tools: run in your environment (computer use, shell, apply patch).
+- Function calling: wrap any Python function as a tool.
+- Agents as tools: expose an agent as a callable tool without a full handoff.
+- Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
 
 ## Hosted tools
 
 OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]:
 
--   The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
--   The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
--   The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
--   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
--   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
+- The [`WebSearchTool`][agents.tool.WebSearchTool] lets an agent search the web.
+- The [`FileSearchTool`][agents.tool.FileSearchTool] allows retrieving information from your OpenAI Vector Stores.
+- The [`CodeInterpreterTool`][agents.tool.CodeInterpreterTool] lets the LLM execute code in a sandboxed environment.
+- The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
+- The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
 
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
@@ -41,9 +41,9 @@ async def main():
 
 Local runtime tools execute in your environment and require you to supply implementations:
 
--   [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
--   [`ShellTool`][agents.tool.ShellTool] or [`LocalShellTool`][agents.tool.LocalShellTool]: provide a shell executor to run commands.
--   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
+- [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
+- [`ShellTool`][agents.tool.ShellTool] or [`LocalShellTool`][agents.tool.LocalShellTool]: provide a shell executor to run commands.
+- [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -89,10 +89,10 @@ agent = Agent(
 
 You can use any Python function as a tool. The Agents SDK will setup the tool automatically:
 
--   The name of the tool will be the name of the Python function (or you can provide a name)
--   Tool description will be taken from the docstring of the function (or you can provide a description)
--   The schema for the function inputs is automatically created from the function's arguments
--   Descriptions for each input are taken from the docstring of the function, unless disabled
+- The name of the tool will be the name of the Python function (or you can provide a name)
+- Tool description will be taken from the docstring of the function (or you can provide a description)
+- The schema for the function inputs is automatically created from the function's arguments
+- Descriptions for each input are taken from the docstring of the function, unless disabled
 
 We use Python's `inspect` module to extract the function signature, along with [`griffe`](https://mkdocstrings.github.io/griffe/) to parse docstrings and `pydantic` for schema creation.
 
@@ -225,18 +225,18 @@ for tool in agent.tools:
 
 In addition to returning text outputs, you can return one or many images or files as the output of a function tool. To do so, you can return any of:
 
--   Images: [`ToolOutputImage`][agents.tool.ToolOutputImage] (or the TypedDict version, [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
--   Files: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (or the TypedDict version, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
--   Text: either a string or stringable objects, or [`ToolOutputText`][agents.tool.ToolOutputText] (or the TypedDict version, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
+- Images: [`ToolOutputImage`][agents.tool.ToolOutputImage] (or the TypedDict version, [`ToolOutputImageDict`][agents.tool.ToolOutputImageDict])
+- Files: [`ToolOutputFileContent`][agents.tool.ToolOutputFileContent] (or the TypedDict version, [`ToolOutputFileContentDict`][agents.tool.ToolOutputFileContentDict])
+- Text: either a string or stringable objects, or [`ToolOutputText`][agents.tool.ToolOutputText] (or the TypedDict version, [`ToolOutputTextDict`][agents.tool.ToolOutputTextDict])
 
 ### Custom function tools
 
 Sometimes, you don't want to use a Python function as a tool. You can directly create a [`FunctionTool`][agents.tool.FunctionTool] if you prefer. You'll need to provide:
 
--   `name`
--   `description`
--   `params_json_schema`, which is the JSON schema for the arguments
--   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
+- `name`
+- `description`
+- `params_json_schema`, which is the JSON schema for the arguments
+- `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
 
 ```python
 from typing import Any
@@ -278,7 +278,7 @@ As mentioned before, we automatically parse the function signature to extract th
 
 The code for the schema extraction lives in [`agents.function_schema`][].
 
-### Constraining and describing arguments with Pydantic Field
+### Constraining argument values
 
 You can use Pydantic's [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) to add constraints (e.g. min/max for numbers, length or pattern for strings) and descriptions to tool arguments. As in Pydantic, both forms are supported: default-based (`arg: int = Field(..., ge=1)`) and `Annotated` (`arg: Annotated[int, Field(..., ge=1)]`). The generated JSON schema and validation include these constraints.
 
@@ -398,9 +398,9 @@ See `examples/agent_patterns/agents_as_tools_structured.py` for a complete runna
 
 In certain cases, you might want to modify the output of the tool-agents before returning it to the central agent. This may be useful if you want to:
 
--   Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
--   Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
--   Validate the output or provide a fallback value when the agent’s response is missing or malformed.
+- Extract a specific piece of information (e.g., a JSON payload) from the sub-agent's chat history.
+- Convert or reformat the agent’s final answer (e.g., transform Markdown into plain text or CSV).
+- Validate the output or provide a fallback value when the agent’s response is missing or malformed.
 
 You can do this by supplying the `custom_output_extractor` argument to the `as_tool` method:
 
@@ -508,16 +508,16 @@ asyncio.run(main())
 
 The `is_enabled` parameter accepts:
 
--   **Boolean values**: `True` (always enabled) or `False` (always disabled)
--   **Callable functions**: Functions that take `(context, agent)` and return a boolean
--   **Async functions**: Async functions for complex conditional logic
+- **Boolean values**: `True` (always enabled) or `False` (always disabled)
+- **Callable functions**: Functions that take `(context, agent)` and return a boolean
+- **Async functions**: Async functions for complex conditional logic
 
 Disabled tools are completely hidden from the LLM at runtime, making this useful for:
 
--   Feature gating based on user permissions
--   Environment-specific tool availability (dev vs prod)
--   A/B testing different tool configurations
--   Dynamic tool filtering based on runtime state
+- Feature gating based on user permissions
+- Environment-specific tool availability (dev vs prod)
+- A/B testing different tool configurations
+- Dynamic tool filtering based on runtime state
 
 ## Experimental: Codex tool
 
@@ -553,28 +553,28 @@ agent = Agent(
 
 What to know:
 
--   Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
--   Runtime: `codex_options.base_url` overrides the CLI base URL.
--   Binary resolution: set `codex_options.codex_path_override` (or `CODEX_PATH`) to pin the CLI path. Otherwise the SDK resolves `codex` from `PATH`, then falls back to the bundled vendor binary.
--   Environment: `codex_options.env` fully controls the subprocess environment. When it is provided, the subprocess does not inherit `os.environ`.
--   Stream limits: `codex_options.codex_subprocess_stream_limit_bytes` (or `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`) controls stdout/stderr reader limits. Valid range is `65536` to `67108864`; default is `8388608`.
--   Inputs: tool calls must include at least one item in `inputs` with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`.
--   Thread defaults: configure `default_thread_options` for `model_reasoning_effort`, `web_search_mode` (preferred over legacy `web_search_enabled`), `approval_policy`, and `additional_directories`.
--   Turn defaults: configure `default_turn_options` for `idle_timeout_seconds` and cancellation `signal`.
--   Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
--   Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
--   Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
--   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
--   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
--   See `examples/tools/codex.py` for a complete runnable sample.
+- Auth: set `CODEX_API_KEY` (preferred) or `OPENAI_API_KEY`, or pass `codex_options={"api_key": "..."}`.
+- Runtime: `codex_options.base_url` overrides the CLI base URL.
+- Binary resolution: set `codex_options.codex_path_override` (or `CODEX_PATH`) to pin the CLI path. Otherwise the SDK resolves `codex` from `PATH`, then falls back to the bundled vendor binary.
+- Environment: `codex_options.env` fully controls the subprocess environment. When it is provided, the subprocess does not inherit `os.environ`.
+- Stream limits: `codex_options.codex_subprocess_stream_limit_bytes` (or `OPENAI_AGENTS_CODEX_SUBPROCESS_STREAM_LIMIT_BYTES`) controls stdout/stderr reader limits. Valid range is `65536` to `67108864`; default is `8388608`.
+- Inputs: tool calls must include at least one item in `inputs` with `{ "type": "text", "text": ... }` or `{ "type": "local_image", "path": ... }`.
+- Thread defaults: configure `default_thread_options` for `model_reasoning_effort`, `web_search_mode` (preferred over legacy `web_search_enabled`), `approval_policy`, and `additional_directories`.
+- Turn defaults: configure `default_turn_options` for `idle_timeout_seconds` and cancellation `signal`.
+- Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
+- Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
+- Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
+- Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
+- Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
+- See `examples/tools/codex.py` for a complete runnable sample.
 
 ## Handling errors in function tools
 
 When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
 
--   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
--   If you pass your own error function, it runs that instead, and sends the response to the LLM.
--   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+- By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
+- If you pass your own error function, it runs that instead, and sends the response to the LLM.
+- If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
 
 ```python
 from agents import function_tool, RunContextWrapper
