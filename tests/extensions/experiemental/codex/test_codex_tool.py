@@ -32,7 +32,7 @@ codex_tool_module = importlib.import_module("agents.extensions.experimental.code
 class CodexMockState:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
-        self.thread_id = "thread-1"
+        self.thread_id: str | None = "thread-1"
         self.last_turn_options: Any = None
         self.start_calls = 0
         self.resume_calls = 0
@@ -680,6 +680,51 @@ async def test_codex_tool_uses_run_context_thread_id_and_persists_latest() -> No
     assert state.last_resumed_thread_id == "thread-prev"
     assert run_context["codex_agent_thread_id"] == "thread-next"
     assert result.thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_persists_thread_started_id_when_thread_object_id_is_none() -> None:
+    state = CodexMockState()
+    state.thread_id = None
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            run_context_thread_id_key="codex_agent_thread_id",
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context: dict[str, str] = {}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    first_result = await tool.on_invoke_tool(context, input_json)
+    second_result = await tool.on_invoke_tool(context, input_json)
+
+    assert isinstance(first_result, CodexToolResult)
+    assert isinstance(second_result, CodexToolResult)
+    assert first_result.thread_id == "thread-next"
+    assert second_result.thread_id == "thread-next"
+    assert run_context["codex_agent_thread_id"] == "thread-next"
+    assert state.start_calls == 1
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-next"
 
 
 @pytest.mark.asyncio
@@ -1461,7 +1506,7 @@ async def test_codex_tool_consume_events_with_on_stream_error() -> None:
     )
 
     with trace("codex-test"):
-        response, usage = await codex_tool_module._consume_events(
+        response, usage, thread_id = await codex_tool_module._consume_events(
             event_stream(),
             {"inputs": [{"type": "text", "text": "hello"}]},
             context,
@@ -1472,6 +1517,7 @@ async def test_codex_tool_consume_events_with_on_stream_error() -> None:
 
     assert response == "done"
     assert usage == Usage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+    assert thread_id == "thread-1"
     assert "item.started" in callbacks
 
 
@@ -1495,7 +1541,7 @@ async def test_codex_tool_consume_events_default_response() -> None:
         tool_arguments="{}",
     )
 
-    response, usage = await codex_tool_module._consume_events(
+    response, usage, thread_id = await codex_tool_module._consume_events(
         event_stream(),
         {"inputs": [{"type": "text", "text": "hello"}]},
         context,
@@ -1506,6 +1552,7 @@ async def test_codex_tool_consume_events_default_response() -> None:
 
     assert response == "Codex task completed with inputs."
     assert usage == Usage(input_tokens=1, cached_input_tokens=0, output_tokens=1)
+    assert thread_id == "thread-1"
 
 
 @pytest.mark.asyncio

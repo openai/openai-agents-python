@@ -35,6 +35,7 @@ from .events import (
     ItemUpdatedEvent,
     ThreadErrorEvent,
     ThreadEvent,
+    ThreadStartedEvent,
     TurnCompletedEvent,
     TurnFailedEvent,
     Usage,
@@ -364,7 +365,7 @@ def codex_tool(
 
             # Always stream and aggregate locally to enable on_stream callbacks.
             stream_result = await thread.run_streamed(codex_input, turn_options)
-            response, usage = await _consume_events(
+            response, usage, resolved_thread_id = await _consume_events(
                 stream_result.events,
                 args,
                 ctx,
@@ -380,10 +381,10 @@ def codex_tool(
                 _store_thread_id_in_run_context(
                     ctx,
                     resolved_run_context_thread_id_key,
-                    thread.id,
+                    resolved_thread_id,
                 )
 
-            return CodexToolResult(thread_id=thread.id, response=response, usage=usage)
+            return CodexToolResult(thread_id=resolved_thread_id, response=response, usage=usage)
         except Exception as exc:  # noqa: BLE001
             if resolved_options.failure_error_function is None:
                 raise
@@ -960,11 +961,12 @@ async def _consume_events(
     thread: Thread,
     on_stream: Callable[[CodexToolStreamEvent], MaybeAwaitable[None]] | None,
     span_data_max_chars: int | None,
-) -> tuple[str, Usage | None]:
+) -> tuple[str, Usage | None, str | None]:
     # Track spans keyed by item id for command/mcp/reasoning events.
     active_spans: dict[str, Any] = {}
     final_response = ""
     usage: Usage | None = None
+    resolved_thread_id = thread.id
 
     event_queue: asyncio.Queue[CodexToolStreamEvent | None] | None = None
     dispatch_task: asyncio.Task[None] | None = None
@@ -1019,6 +1021,8 @@ async def _consume_events(
                     final_response = event.item.text
             elif isinstance(event, TurnCompletedEvent):
                 usage = event.usage
+            elif isinstance(event, ThreadStartedEvent):
+                resolved_thread_id = event.thread_id
             elif isinstance(event, TurnFailedEvent):
                 error = event.error.message
                 raise UserError(f"Codex turn failed{(': ' + error) if error else ''}")
@@ -1039,7 +1043,7 @@ async def _consume_events(
     if not final_response:
         final_response = _build_default_response(args)
 
-    return final_response, usage
+    return final_response, usage, resolved_thread_id
 
 
 def _handle_item_started(
