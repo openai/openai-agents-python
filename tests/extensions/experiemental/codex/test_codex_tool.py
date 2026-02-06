@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
@@ -999,6 +999,90 @@ async def test_codex_tool_run_context_thread_id_rejects_frozen_pydantic_context(
     )
 
     with pytest.raises(UserError, match="Frozen Pydantic models"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_rejects_frozen_dataclass_context() -> None:
+    @dataclass(frozen=True)
+    class FrozenRunContext:
+        user_id: str
+
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Frozen dataclass", "path": ""}]}'
+    context = ToolContext(
+        context=FrozenRunContext(user_id="abc"),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match="Frozen dataclass contexts"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_rejects_slots_object_without_thread_field() -> None:
+    class SlotsRunContext:
+        __slots__ = ("user_id",)
+
+        def __init__(self, user_id: str) -> None:
+            self.user_id = user_id
+
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Slots context", "path": ""}]}'
+    context = ToolContext(
+        context=SlotsRunContext(user_id="abc"),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match='support field "codex_thread_id"'):
         await tool.on_invoke_tool(context, input_json)
 
     assert state.start_calls == 0

@@ -334,7 +334,7 @@ def codex_tool(
             args = _normalize_parameters(parsed)
 
             if resolved_options.use_run_context_thread_id:
-                _validate_run_context_thread_id_context(ctx)
+                _validate_run_context_thread_id_context(ctx, resolved_run_context_thread_id_key)
 
             codex = await resolve_codex()
             call_thread_id = _resolve_call_thread_id(
@@ -824,7 +824,7 @@ def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> s
     return normalized
 
 
-def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any]) -> None:
+def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any], key: str) -> None:
     context = ctx.context
     if context is None:
         raise UserError(
@@ -844,6 +844,24 @@ def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any]) -> None
             "Frozen Pydantic models are not supported."
         )
 
+    if dataclasses.is_dataclass(context):
+        params = getattr(type(context), "__dataclass_params__", None)
+        if params is not None and bool(getattr(params, "frozen", False)):
+            raise UserError(
+                "use_run_context_thread_id=True requires a mutable run context object. "
+                "Frozen dataclass contexts are not supported."
+            )
+
+    slots = getattr(type(context), "__slots__", None)
+    if slots is not None and not hasattr(context, "__dict__"):
+        slot_names = (slots,) if isinstance(slots, str) else tuple(slots)
+        if key not in slot_names:
+            raise UserError(
+                "use_run_context_thread_id=True requires the run context to support field "
+                + f'"{key}". '
+                "Use a mutable dict context, or add a writable field/slot to the context object."
+            )
+
 
 def _store_thread_id_in_run_context(
     ctx: RunContextWrapper[Any], key: str, thread_id: str | None
@@ -851,7 +869,7 @@ def _store_thread_id_in_run_context(
     if thread_id is None:
         return
 
-    _validate_run_context_thread_id_context(ctx)
+    _validate_run_context_thread_id_context(ctx, key)
     context = ctx.context
     assert context is not None
 
