@@ -943,6 +943,16 @@ def test_codex_tool_rejects_custom_name_without_codex_prefix() -> None:
         codex_tool(name="engineer")
 
 
+def test_codex_tool_allows_non_alnum_suffix_when_run_context_thread_id_disabled() -> None:
+    tool = codex_tool(name="codex_a-b")
+    assert tool.name == "codex_a-b"
+
+
+def test_codex_tool_rejects_lossy_default_run_context_thread_id_key_suffix() -> None:
+    with pytest.raises(UserError, match="run_context_thread_id_key"):
+        codex_tool(name="codex_a-b", use_run_context_thread_id=True)
+
+
 @pytest.mark.asyncio
 async def test_codex_tool_tool_input_thread_id_overrides_run_context_thread_id() -> None:
     state = CodexMockState()

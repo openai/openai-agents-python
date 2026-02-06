@@ -302,6 +302,7 @@ def codex_tool(
     resolved_run_context_thread_id_key = _resolve_run_context_thread_id_key(
         tool_name=name,
         configured_key=resolved_options.run_context_thread_id_key,
+        strict_default_key=resolved_options.use_run_context_thread_id,
     )
     description = resolved_options.description or (
         "Executes an agentic Codex task against the current workspace."
@@ -495,7 +496,9 @@ def _resolve_codex_tool_name(configured_name: str | None) -> str:
     return normalized
 
 
-def _resolve_run_context_thread_id_key(tool_name: str, configured_key: str | None) -> str:
+def _resolve_run_context_thread_id_key(
+    tool_name: str, configured_key: str | None, *, strict_default_key: bool = False
+) -> str:
     if configured_key is not None:
         return _validate_run_context_thread_id_key(configured_key)
 
@@ -503,6 +506,9 @@ def _resolve_run_context_thread_id_key(tool_name: str, configured_key: str | Non
         return DEFAULT_RUN_CONTEXT_THREAD_ID_KEY
 
     suffix = tool_name[len(CODEX_TOOL_NAME_PREFIX) :]
+    if strict_default_key:
+        suffix = _validate_default_run_context_thread_id_suffix(suffix)
+        return f"{DEFAULT_RUN_CONTEXT_THREAD_ID_KEY}_{suffix}"
     suffix = _normalize_name_for_context_key(suffix)
     return f"{DEFAULT_RUN_CONTEXT_THREAD_ID_KEY}_{suffix}"
 
@@ -512,6 +518,25 @@ def _normalize_name_for_context_key(value: str) -> str:
     normalized = re.sub(r"[^0-9a-zA-Z_]+", "_", value.strip().lower())
     normalized = normalized.strip("_")
     return normalized or "tool"
+
+
+def _validate_default_run_context_thread_id_suffix(value: str) -> str:
+    suffix = value.strip()
+    if not suffix:
+        raise UserError(
+            "When use_run_context_thread_id=True and run_context_thread_id_key is omitted, "
+            'codex tool names must include a non-empty suffix after "codex_".'
+        )
+
+    if not re.fullmatch(r"[A-Za-z0-9_]+", suffix):
+        raise UserError(
+            "When use_run_context_thread_id=True and run_context_thread_id_key is omitted, "
+            'the codex tool name suffix (after "codex_") must match [A-Za-z0-9_]+. '
+            "Use only letters, numbers, and underscores, "
+            "or set run_context_thread_id_key explicitly."
+        )
+
+    return suffix
 
 
 def _parse_tool_input(parameters_model: type[BaseModel], input_json: str) -> BaseModel:
