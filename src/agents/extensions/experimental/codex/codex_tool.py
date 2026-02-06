@@ -333,6 +333,9 @@ def codex_tool(
             parsed = _parse_tool_input(parameters_model, input_json)
             args = _normalize_parameters(parsed)
 
+            if resolved_options.use_run_context_thread_id:
+                _validate_run_context_thread_id_context(ctx)
+
             codex = await resolve_codex()
             call_thread_id = _resolve_call_thread_id(
                 args=args,
@@ -821,12 +824,7 @@ def _read_thread_id_from_run_context(ctx: RunContextWrapper[Any], key: str) -> s
     return normalized
 
 
-def _store_thread_id_in_run_context(
-    ctx: RunContextWrapper[Any], key: str, thread_id: str | None
-) -> None:
-    if thread_id is None:
-        return
-
+def _validate_run_context_thread_id_context(ctx: RunContextWrapper[Any]) -> None:
     context = ctx.context
     if context is None:
         raise UserError(
@@ -834,9 +832,40 @@ def _store_thread_id_in_run_context(
             "Pass context={} (or an object) to Runner.run()."
         )
 
+    if isinstance(context, Mapping) and not isinstance(context, MutableMapping):
+        raise UserError(
+            "use_run_context_thread_id=True requires a mutable run context mapping "
+            "or a writable object context."
+        )
+
+    if isinstance(context, BaseModel) and bool(context.model_config.get("frozen", False)):
+        raise UserError(
+            "use_run_context_thread_id=True requires a mutable run context object. "
+            "Frozen Pydantic models are not supported."
+        )
+
+
+def _store_thread_id_in_run_context(
+    ctx: RunContextWrapper[Any], key: str, thread_id: str | None
+) -> None:
+    if thread_id is None:
+        return
+
+    _validate_run_context_thread_id_context(ctx)
+    context = ctx.context
+    assert context is not None
+
     if isinstance(context, MutableMapping):
         context[key] = thread_id
         return
+
+    if isinstance(context, BaseModel):
+        if _set_pydantic_context_value(context, key, thread_id):
+            return
+        raise UserError(
+            f'Unable to store Codex thread_id in run context field "{key}". '
+            "Use a mutable dict context or set a writable attribute."
+        )
 
     try:
         setattr(context, key, thread_id)
@@ -845,6 +874,35 @@ def _store_thread_id_in_run_context(
             f'Unable to store Codex thread_id in run context field "{key}". '
             "Use a mutable dict context or set a writable attribute."
         ) from exc
+
+
+def _set_pydantic_context_value(context: BaseModel, key: str, value: str) -> bool:
+    model_config = context.model_config
+    if bool(model_config.get("frozen", False)):
+        return False
+
+    model_fields = type(context).model_fields
+    if key in model_fields:
+        try:
+            setattr(context, key, value)
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
+    try:
+        setattr(context, key, value)
+        return True
+    except ValueError:
+        pass
+    except Exception:  # noqa: BLE001
+        return False
+
+    state = getattr(context, "__dict__", None)
+    if isinstance(state, dict):
+        state[key] = value
+        return True
+
+    return False
 
 
 def _get_or_create_persisted_thread(

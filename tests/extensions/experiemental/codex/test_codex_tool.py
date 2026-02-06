@@ -4,7 +4,7 @@ import importlib
 import inspect
 import json
 from dataclasses import fields
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -683,6 +683,94 @@ async def test_codex_tool_uses_run_context_thread_id_and_persists_latest() -> No
 
 
 @pytest.mark.asyncio
+async def test_codex_tool_uses_run_context_thread_id_with_pydantic_context() -> None:
+    class RunContext(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        user_id: str
+
+    state = CodexMockState()
+    state.thread_id = "thread-next"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context = RunContext(user_id="abc")
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    await tool.on_invoke_tool(context, input_json)
+    await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 1
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-next"
+    assert run_context.__dict__["codex_thread_id"] == "thread-next"
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_uses_pydantic_context_field_matching_thread_id_key() -> None:
+    class RunContext(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        user_id: str
+        codex_thread_id: str | None = None
+
+    state = CodexMockState()
+    state.thread_id = "thread-next"
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-next"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context = RunContext(user_id="abc", codex_thread_id="thread-prev")
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 1
+    assert state.last_resumed_thread_id == "thread-prev"
+    assert run_context.codex_thread_id == "thread-next"
+
+
+@pytest.mark.asyncio
 async def test_codex_tool_default_run_context_key_follows_tool_name() -> None:
     state = CodexMockState()
     state.thread_id = "thread-next"
@@ -834,6 +922,87 @@ async def test_codex_tool_run_context_thread_id_requires_mutable_context() -> No
 
     with pytest.raises(UserError, match="use_run_context_thread_id=True"):
         await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_rejects_immutable_mapping_context() -> None:
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Immutable context", "path": ""}]}'
+    context = ToolContext(
+        context=MappingProxyType({"codex_thread_id": "thread-prev"}),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match="use_run_context_thread_id=True"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_codex_tool_run_context_thread_id_rejects_frozen_pydantic_context() -> None:
+    class FrozenRunContext(BaseModel):
+        model_config = ConfigDict(frozen=True)
+        user_id: str
+
+    state = CodexMockState()
+    state.events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            use_run_context_thread_id=True,
+            failure_error_function=None,
+        )
+    )
+    input_json = '{"inputs": [{"type": "text", "text": "Frozen context", "path": ""}]}'
+    context = ToolContext(
+        context=FrozenRunContext(user_id="abc"),
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=input_json,
+    )
+
+    with pytest.raises(UserError, match="Frozen Pydantic models"):
+        await tool.on_invoke_tool(context, input_json)
+
+    assert state.start_calls == 0
+    assert state.resume_calls == 0
 
 
 @pytest.mark.parametrize(

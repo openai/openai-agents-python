@@ -1,6 +1,8 @@
 import asyncio
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+
+from pydantic import BaseModel
 
 from agents import Agent, ModelSettings, Runner, gen_trace_id, trace
 
@@ -50,6 +52,13 @@ def log(message: str) -> None:
         print(f"{timestamp} {line}")
 
 
+def read_context_value(context: Mapping[str, str] | BaseModel, key: str) -> str | None:
+    # either dict or pydantic model
+    if isinstance(context, Mapping):
+        return context.get(key)
+    return getattr(context, key, None)
+
+
 async def main() -> None:
     agent = Agent(
         name="Codex Agent (same thread)",
@@ -79,22 +88,31 @@ async def main() -> None:
         model_settings=ModelSettings(tool_choice="required"),
     )
 
-    context: dict[str, Any] = {}
+    class MyContext(BaseModel):
+        something: str | None = None
+        # the default is "codex_thread_id"; missing this works as well
+        codex_thread_id_engineer: str | None = None  # aligns with run_context_thread_id_key
+
+    context = MyContext()
+
+    # Simple dict object works as well:
+    # context: dict[str, str] = {}
+
     trace_id = gen_trace_id()
     log(f"View trace: https://platform.openai.com/traces/trace?trace_id={trace_id}")
 
     with trace("Codex same thread example", trace_id=trace_id):
         log("Turn 1: ask writing python code")
-        first_prompt = "Write working python code example demonstrating how to call Responses API with web search tool."
+        first_prompt = "Write working python code example demonstrating how to call OpenAI's Responses API with web search tool."
         first_result = await Runner.run(agent, first_prompt, context=context)
-        first_thread_id = context.get(THREAD_ID_KEY)
+        first_thread_id = read_context_value(context, THREAD_ID_KEY)
         log(first_result.final_output)
         log(f"thread id after turn 1: {first_thread_id}")
 
         log("Turn 2: continue with the same Codex thread.")
         second_prompt = "Write the same code in TypeScript."
         second_result = await Runner.run(agent, second_prompt, context=context)
-        second_thread_id = context.get(THREAD_ID_KEY)
+        second_thread_id = read_context_value(context, THREAD_ID_KEY)
         log(second_result.final_output)
         log(f"thread id after turn 2: {second_thread_id}")
         log(
