@@ -765,6 +765,54 @@ async def test_codex_tool_persists_thread_id_for_recoverable_turn_failure() -> N
 
 
 @pytest.mark.asyncio
+async def test_codex_tool_falls_back_to_call_thread_id_when_thread_object_id_is_none() -> None:
+    state = CodexMockState()
+    state.thread_id = None
+    state.events = [
+        {
+            "type": "item.completed",
+            "item": {"id": "agent-1", "type": "agent_message", "text": "Codex done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1},
+        },
+    ]
+
+    tool = codex_tool(
+        CodexToolOptions(
+            codex=cast(Codex, FakeCodex(state)),
+            parameters=codex_tool_module.CodexToolParameters,
+            use_run_context_thread_id=True,
+        )
+    )
+    first_input_json = (
+        '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}], '
+        '"thread_id": "thread-explicit"}'
+    )
+    second_input_json = '{"inputs": [{"type": "text", "text": "Continue thread", "path": ""}]}'
+    run_context: dict[str, str] = {}
+    context = ToolContext(
+        context=run_context,
+        tool_name=tool.name,
+        tool_call_id="call-1",
+        tool_arguments=first_input_json,
+    )
+
+    first_result = await tool.on_invoke_tool(context, first_input_json)
+    second_result = await tool.on_invoke_tool(context, second_input_json)
+
+    assert isinstance(first_result, CodexToolResult)
+    assert isinstance(second_result, CodexToolResult)
+    assert first_result.thread_id == "thread-explicit"
+    assert second_result.thread_id == "thread-explicit"
+    assert run_context["codex_thread_id"] == "thread-explicit"
+    assert state.start_calls == 0
+    assert state.resume_calls == 2
+    assert state.last_resumed_thread_id == "thread-explicit"
+
+
+@pytest.mark.asyncio
 async def test_codex_tool_uses_run_context_thread_id_with_pydantic_context() -> None:
     class RunContext(BaseModel):
         model_config = ConfigDict(extra="forbid")

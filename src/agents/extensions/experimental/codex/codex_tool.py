@@ -363,7 +363,7 @@ def codex_tool(
                 resolved_options.default_turn_options, validated_output_schema
             )
             codex_input = _build_codex_input(args)
-            resolved_thread_id = thread.id
+            resolved_thread_id = thread.id or call_thread_id
 
             # Always stream and aggregate locally to enable on_stream callbacks.
             stream_result = await thread.run_streamed(codex_input, turn_options)
@@ -986,6 +986,8 @@ async def _consume_events(
     final_response = ""
     usage: Usage | None = None
     resolved_thread_id = thread.id
+    if resolved_thread_id is None and resolved_thread_id_holder is not None:
+        resolved_thread_id = resolved_thread_id_holder.get("thread_id")
     if resolved_thread_id_holder is not None:
         resolved_thread_id_holder["thread_id"] = resolved_thread_id
 
