@@ -395,9 +395,6 @@ def codex_tool(
 
             return CodexToolResult(thread_id=resolved_thread_id, response=response, usage=usage)
         except Exception as exc:  # noqa: BLE001
-            if resolved_options.failure_error_function is None:
-                raise
-
             if resolved_options.use_run_context_thread_id and resolved_thread_id is not None:
                 try:
                     _store_thread_id_in_run_context(
@@ -407,6 +404,9 @@ def codex_tool(
                     )
                 except Exception:
                     logger.exception("Failed to store Codex thread id in run context after error.")
+
+            if resolved_options.failure_error_function is None:
+                raise
 
             result = resolved_options.failure_error_function(ctx, exc)
             if inspect.isawaitable(result):
