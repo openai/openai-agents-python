@@ -1898,11 +1898,54 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
         agent_map[current.name] = current
 
         # Add handoff agents to the queue
-        for handoff in current.handoffs:
-            # Handoff can be either an Agent or a Handoff object with an .agent attribute
-            handoff_agent = handoff if not hasattr(handoff, "agent") else handoff.agent
-            if handoff_agent and handoff_agent.name not in agent_map:  # type: ignore[union-attr]
-                queue.append(handoff_agent)  # type: ignore[arg-type]
+        for handoff_item in current.handoffs:
+            handoff_agent: Any | None = None
+            handoff_agent_name: str | None = None
+
+            if isinstance(handoff_item, Handoff):
+                # Some custom/mocked Handoff subclasses bypass dataclass initialization.
+                # Prefer agent_name, then legacy name fallback used in tests.
+                candidate_name = getattr(handoff_item, "agent_name", None) or getattr(
+                    handoff_item, "name", None
+                )
+                if isinstance(candidate_name, str):
+                    handoff_agent_name = candidate_name
+                    if handoff_agent_name in agent_map:
+                        continue
+
+                handoff_ref = getattr(handoff_item, "_agent_ref", None)
+                handoff_agent = handoff_ref() if callable(handoff_ref) else None
+                if handoff_agent is None:
+                    # Backward-compatibility fallback for custom legacy handoff objects that store
+                    # the target directly on `.agent`. New code should prefer `handoff()` objects.
+                    legacy_agent = getattr(handoff_item, "agent", None)
+                    if legacy_agent is not None:
+                        handoff_agent = legacy_agent
+                        logger.debug(
+                            "Using legacy handoff `.agent` fallback while building agent map. "
+                            "This compatibility path is not recommended for new code."
+                        )
+                if handoff_agent_name is None:
+                    candidate_name = getattr(handoff_agent, "name", None)
+                    handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
+                if handoff_agent is None or not hasattr(handoff_agent, "handoffs"):
+                    if handoff_agent_name:
+                        logger.debug(
+                            "Skipping unresolved handoff target while building agent map: %s",
+                            handoff_agent_name,
+                        )
+                    continue
+            else:
+                handoff_agent = handoff_item
+                candidate_name = getattr(handoff_agent, "name", None)
+                handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
+
+            if (
+                handoff_agent is not None
+                and handoff_agent_name
+                and handoff_agent_name not in agent_map
+            ):
+                queue.append(cast(Any, handoff_agent))
 
         # Include agent-as-tool instances so nested approvals can be restored.
         tools = getattr(current, "tools", None)

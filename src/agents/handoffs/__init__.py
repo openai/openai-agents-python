@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import weakref
 from collections.abc import Awaitable
-from dataclasses import dataclass, replace as dataclasses_replace
+from dataclasses import dataclass, field, replace as dataclasses_replace
 from typing import TYPE_CHECKING, Any, Callable, Generic, cast, overload
 
 from pydantic import TypeAdapter
@@ -147,6 +148,11 @@ class Handoff(Generic[TContext, TAgent]):
     handoff is enabled. You can use this to dynamically enable or disable a handoff based on your
     context or state.
     """
+
+    _agent_ref: weakref.ReferenceType[AgentBase[Any]] | None = field(
+        default=None, init=False, repr=False
+    )
+    """Weak reference to the target agent when constructed via `handoff()`."""
 
     def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
@@ -300,7 +306,7 @@ def handoff(
             return await result
         return bool(result)
 
-    return Handoff(
+    handoff_obj = Handoff(
         tool_name=tool_name,
         tool_description=tool_description,
         input_json_schema=input_json_schema,
@@ -310,6 +316,8 @@ def handoff(
         agent_name=agent.name,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
     )
+    handoff_obj._agent_ref = weakref.ref(agent)
+    return handoff_obj
 
 
 __all__ = [
