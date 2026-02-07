@@ -88,11 +88,11 @@ async def test_agent_model_object_is_used_when_present() -> None:
     assert result.final_output == "from-agent-object"
 
 
-def test_trace_include_sensitive_data_defaults_to_true_when_env_not_set(monkeypatch):
-    """By default, trace_include_sensitive_data should be True when the env is not set."""
+def test_trace_include_sensitive_data_defaults_to_false_when_env_not_set(monkeypatch):
+    """By default, trace_include_sensitive_data should be False for security when the env is not set."""
     monkeypatch.delenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", raising=False)
     config = RunConfig()
-    assert config.trace_include_sensitive_data is True
+    assert config.trace_include_sensitive_data is False
 
 
 @pytest.mark.parametrize(
