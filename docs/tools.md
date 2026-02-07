@@ -278,6 +278,26 @@ As mentioned before, we automatically parse the function signature to extract th
 
 The code for the schema extraction lives in [`agents.function_schema`][].
 
+### Constraining and describing arguments with Pydantic Field
+
+You can use Pydantic's [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) to add constraints (e.g. min/max for numbers, length or pattern for strings) and descriptions to tool arguments. As in Pydantic, both forms are supported: default-based (`arg: int = Field(..., ge=1)`) and `Annotated` (`arg: Annotated[int, Field(..., ge=1)]`). The generated JSON schema and validation include these constraints.
+
+```python
+from typing import Annotated
+from pydantic import Field
+from agents import function_tool
+
+# Default-based form
+@function_tool
+def score_a(score: int = Field(..., ge=0, le=100, description="Score from 0 to 100")) -> str:
+    return f"Score recorded: {score}"
+
+# Annotated form
+@function_tool
+def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score from 0 to 100")]) -> str:
+    return f"Score recorded: {score}"
+```
+
 ## Agents as tools
 
 In some workflows, you may want a central agent to orchestrate a network of specialized agents, instead of handing off control. You can do this by modeling agents as tools.
