@@ -63,6 +63,8 @@ from .tool import (
     HostedMCPTool,
     LocalShellTool,
     ShellTool,
+    ToolOrigin,
+    ToolOriginType,
 )
 from .tool_guardrails import (
     AllowBehavior,
@@ -635,6 +637,13 @@ class RunState(Generic[TContext, TAgent]):
             result["tool_name"] = item.tool_name
         if hasattr(item, "description") and item.description is not None:
             result["description"] = item.description
+        if hasattr(item, "tool_origin") and item.tool_origin is not None:
+            tool_origin_data: dict[str, Any] = {"type": item.tool_origin.type.value}
+            if item.tool_origin.agent_as_tool is not None:
+                tool_origin_data["agent_as_tool"] = {"name": item.tool_origin.agent_as_tool.name}
+            if item.tool_origin.mcp_server is not None:
+                tool_origin_data["mcp_server"] = {"name": item.tool_origin.mcp_server.name}
+            result["tool_origin"] = tool_origin_data
 
         return result
 
@@ -1918,6 +1927,67 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
     return agent_map
 
 
+def _deserialize_tool_origin(
+    tool_origin_data: dict[str, Any] | None, agent_map: dict[str, Agent[Any]], agent: Agent[Any]
+) -> ToolOrigin | None:
+    """Deserialize ToolOrigin from JSON data.
+
+    Args:
+        tool_origin_data: Serialized tool origin dictionary.
+        agent_map: Map of agent names to agent instances.
+        agent: The agent associated with this item (used for MCP server lookup).
+
+    Returns:
+        ToolOrigin instance or None if data is missing/invalid.
+    """
+    if not tool_origin_data:
+        return None
+
+    origin_type_str = tool_origin_data.get("type")
+    if not origin_type_str:
+        return None
+
+    try:
+        origin_type = ToolOriginType(origin_type_str)
+    except ValueError:
+        logger.warning(f"Unknown tool origin type: {origin_type_str}")
+        return None
+
+    agent_as_tool: Agent[Any] | None = None
+    mcp_server: Any | None = None
+
+    if origin_type == ToolOriginType.AGENT_AS_TOOL:
+        agent_data = tool_origin_data.get("agent_as_tool")
+        if agent_data and isinstance(agent_data, Mapping):
+            agent_name = agent_data.get("name")
+            if agent_name:
+                agent_as_tool = agent_map.get(agent_name)
+                if not agent_as_tool:
+                    logger.warning(f"Agent {agent_name} not found in agent map for tool_origin")
+
+    elif origin_type == ToolOriginType.MCP:
+        mcp_data = tool_origin_data.get("mcp_server")
+        if mcp_data and isinstance(mcp_data, Mapping):
+            server_name = mcp_data.get("name")
+            if server_name:
+                # Try to find the MCP server from the agent's mcp_servers list
+                mcp_servers = getattr(agent, "mcp_servers", [])
+                for server in mcp_servers:
+                    if hasattr(server, "name") and server.name == server_name:
+                        mcp_server = server
+                        break
+                if not mcp_server:
+                    logger.debug(
+                        f"MCP server {server_name} not found in agent's mcp_servers for tool_origin"
+                    )
+
+    return ToolOrigin(
+        type=origin_type,
+        agent_as_tool=agent_as_tool,
+        mcp_server=mcp_server,
+    )
+
+
 def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[ModelResponse]:
     """Deserialize model responses from JSON data.
 
@@ -2019,8 +2089,17 @@ def _deserialize_items(
                 raw_item_tool = _deserialize_tool_call_raw_item(normalized_raw_item)
                 # Preserve description if it was stored with the item
                 description = item_data.get("description")
+                # Preserve tool_origin if it was stored with the item
+                tool_origin = _deserialize_tool_origin(
+                    item_data.get("tool_origin"), agent_map, agent
+                )
                 result.append(
-                    ToolCallItem(agent=agent, raw_item=raw_item_tool, description=description)
+                    ToolCallItem(
+                        agent=agent,
+                        raw_item=raw_item_tool,
+                        description=description,
+                        tool_origin=tool_origin,
+                    )
                 )
 
             elif item_type == "tool_call_output_item":
@@ -2029,11 +2108,16 @@ def _deserialize_items(
                 raw_item_output = _deserialize_tool_call_output_raw_item(normalized_raw_item)
                 if raw_item_output is None:
                     continue
+                # Preserve tool_origin if it was stored with the item
+                tool_origin = _deserialize_tool_origin(
+                    item_data.get("tool_origin"), agent_map, agent
+                )
                 result.append(
                     ToolCallOutputItem(
                         agent=agent,
                         raw_item=raw_item_output,
                         output=item_data.get("output", ""),
+                        tool_origin=tool_origin,
                     )
                 )
 
