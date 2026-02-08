@@ -20,6 +20,8 @@ from ..tool import (
     FunctionTool,
     Tool,
     ToolErrorFunction,
+    ToolOrigin,
+    ToolOriginType,
     ToolOutputImageDict,
     ToolOutputTextDict,
     default_tool_error_function,
@@ -301,7 +303,7 @@ class MCPUtil:
             bool | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]]
         ) = server._get_needs_approval_for_tool(tool, agent)
 
-        return FunctionTool(
+        function_tool = FunctionTool(
             name=tool.name,
             description=tool.description or "",
             params_json_schema=schema,
@@ -309,6 +311,11 @@ class MCPUtil:
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
         )
+        function_tool._tool_origin = ToolOrigin(
+            type=ToolOriginType.MCP,
+            mcp_server=server,
+        )
+        return function_tool
 
     @staticmethod
     def _merge_mcp_meta(

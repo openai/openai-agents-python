@@ -10,7 +10,11 @@ import dataclasses as _dc
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
-from openai.types.responses import ResponseCompletedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseFunctionToolCall,
+    ResponseOutputItemDoneEvent,
+)
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -49,7 +53,7 @@ from ..stream_events import (
     RawResponsesStreamEvent,
     RunItemStreamEvent,
 )
-from ..tool import Tool, dispose_resolved_computers
+from ..tool import FunctionTool, Tool, _get_tool_origin_info, dispose_resolved_computers
 from ..tracing import Span, SpanError, agent_span, get_current_trace
 from ..tracing.model_tracing import get_model_tracing_impl
 from ..tracing.span_data import AgentSpanData
@@ -113,6 +117,7 @@ from .session_persistence import (
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
 from .tool_execution import (
+    build_litellm_json_tool_call,
     coerce_shell_call,
     execute_apply_patch_calls,
     execute_computer_actions,
@@ -1222,13 +1227,28 @@ async def run_single_turn_streamed(
                     # execution behavior in process_model_response).
                     tool_name = getattr(output_item, "name", None)
                     tool_description: str | None = None
+                    tool_origin = None
                     if isinstance(tool_name, str) and tool_name in tool_map:
-                        tool_description = getattr(tool_map[tool_name], "description", None)
+                        tool = tool_map[tool_name]
+                        tool_description = getattr(tool, "description", None)
+                        if isinstance(tool, FunctionTool):
+                            tool_origin = _get_tool_origin_info(tool)
+                    elif (
+                        isinstance(tool_name, str)
+                        and tool_name == "json_tool_call"
+                        and output_schema is not None
+                        and isinstance(output_item, ResponseFunctionToolCall)
+                    ):
+                        # json_tool_call is synthesized dynamically and not in tool_map.
+                        # Synthesize it here to get tool_origin, matching process_model_response.
+                        json_tool = build_litellm_json_tool_call(output_item)
+                        tool_origin = _get_tool_origin_info(json_tool)
 
                     tool_item = ToolCallItem(
                         raw_item=cast(ToolCallItemTypes, output_item),
                         agent=agent,
                         description=tool_description,
+                        tool_origin=tool_origin,
                     )
                     streamed_result._event_queue.put_nowait(
                         RunItemStreamEvent(item=tool_item, name="tool_called")
