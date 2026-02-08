@@ -25,7 +25,7 @@ from .agent_tool_state import (
     peek_agent_tool_run_result,
     record_agent_tool_run_result,
 )
-from .exceptions import ModelBehaviorError
+from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .logger import logger
@@ -88,6 +88,32 @@ ToolsToFinalOutputFunction: TypeAlias = Callable[
 """A function that takes a run context and a list of tool results, and returns a
 `ToolsToFinalOutputResult`.
 """
+
+
+def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
+    codex_tool_names = {
+        tool.name
+        for tool in tools
+        if isinstance(tool, FunctionTool) and bool(getattr(tool, "_is_codex_tool", False))
+    }
+    if not codex_tool_names:
+        return
+
+    name_counts: dict[str, int] = {}
+    for tool in tools:
+        tool_name = getattr(tool, "name", None)
+        if isinstance(tool_name, str) and tool_name:
+            name_counts[tool_name] = name_counts.get(tool_name, 0) + 1
+
+    duplicate_codex_names = sorted(
+        name for name in codex_tool_names if name_counts.get(name, 0) > 1
+    )
+    if duplicate_codex_names:
+        raise UserError(
+            "Duplicate Codex tool names found: "
+            + ", ".join(duplicate_codex_names)
+            + ". Provide a unique codex_tool(name=...) per tool instance."
+        )
 
 
 class AgentToolStreamEvent(TypedDict):
@@ -184,7 +210,9 @@ class AgentBase(Generic[TContext]):
 
         results = await asyncio.gather(*(_check_tool_enabled(t) for t in self.tools))
         enabled: list[Tool] = [t for t, ok in zip(self.tools, results) if ok]
-        return [*mcp_tools, *enabled]
+        all_tools: list[Tool] = [*mcp_tools, *enabled]
+        _validate_codex_tool_name_collisions(all_tools)
+        return all_tools
 
 
 @dataclass

@@ -503,6 +503,8 @@ Disabled tools are completely hidden from the LLM at runtime, making this useful
 
 The `codex_tool` wraps the Codex CLI so an agent can run workspace-scoped tasks (shell, file edits, MCP tools)
 during a tool call. This surface is experimental and may change.
+By default, the tool name is `codex`. If you set a custom name, it must be `codex` or start with `codex_`.
+When an agent includes multiple Codex tools, each must use a unique name (including vs non-Codex tools).
 
 ```python
 from agents import Agent
@@ -542,11 +544,13 @@ What to know:
 -   Thread defaults: configure `default_thread_options` for `model_reasoning_effort`, `web_search_mode` (preferred over legacy `web_search_enabled`), `approval_policy`, and `additional_directories`.
 -   Turn defaults: configure `default_turn_options` for `idle_timeout_seconds` and cancellation `signal`.
 -   Safety: pair `sandbox_mode` with `working_directory`; set `skip_git_repo_check=True` outside Git repos.
--   Behavior: `persist_session=True` reuses a single Codex thread and returns its `thread_id`.
--   Streaming: `on_stream` receives Codex events (reasoning, command execution, MCP tool calls, file changes, web search).
+-   Run-context thread persistence: `use_run_context_thread_id=True` stores and reuses `thread_id` in run context, across runs that share that context. This requires a mutable run context (for example, `dict` or a writable object field).
+-   Run-context key defaults: the stored key defaults to `codex_thread_id` for `name="codex"`, or `codex_thread_id_<suffix>` for `name="codex_<suffix>"`. Set `run_context_thread_id_key` to override.
+-   Thread ID precedence: per-call `thread_id` input takes priority, then run-context `thread_id` (if enabled), then the configured `thread_id` option.
+-   Streaming: `on_stream` receives thread/turn lifecycle events and item events (`reasoning`, `command_execution`, `mcp_tool_call`, `file_change`, `web_search`, `todo_list`, and `error` item updates).
 -   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
 -   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
--   See `examples/tools/codex.py` for a complete runnable sample.
+-   See `examples/tools/codex.py` and `examples/tools/codex_same_thread.py` for complete runnable samples.
 
 ## Handling errors in function tools
 

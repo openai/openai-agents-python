@@ -951,6 +951,12 @@ async def start_streaming(
                     if streamed_result._state is not None:
                         streamed_result._state._current_step = NextStepRunAgain()
 
+                    await _save_stream_items_with_count(
+                        turn_session_items,
+                        turn_result.model_response.response_id,
+                        store_setting,
+                    )
+
                     if streamed_result._cancel_mode == "after_turn":  # type: ignore[comparison-overlap]
                         streamed_result.is_complete = True
                         streamed_result._event_queue.put_nowait(QueueCompleteSentinel())

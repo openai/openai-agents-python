@@ -876,6 +876,70 @@ class TestBuildAgentMap:
         assert len(agent_map) == 4
         assert all(agent_map.get(name) is not None for name in ["A", "B", "C", "D"])
 
+    def test_build_agent_map_handles_handoff_objects(self):
+        """Test that buildAgentMap resolves handoff() objects via weak references."""
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+        agent_a.handoffs = [handoff(agent_b)]
+
+        agent_map = _build_agent_map(agent_a)
+
+        assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
+
+    def test_build_agent_map_supports_legacy_handoff_agent_attribute(self):
+        """Test that buildAgentMap keeps legacy custom handoffs with `.agent` targets working."""
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+
+        class LegacyHandoff(Handoff):
+            def __init__(self, target: Agent[Any]):
+                # Legacy custom handoff shape supported only for backward compatibility.
+                self.agent = target
+                self.agent_name = target.name
+                self.name = "legacy_handoff"
+
+        agent_a.handoffs = [LegacyHandoff(agent_b)]
+
+        agent_map = _build_agent_map(agent_a)
+
+        assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
+
+    def test_build_agent_map_supports_legacy_non_handoff_agent_wrapper(self):
+        """Test that buildAgentMap supports legacy non-Handoff wrappers with `.agent` targets."""
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+
+        class LegacyWrapper:
+            def __init__(self, target: Agent[Any]):
+                self.agent = target
+
+        agent_a.handoffs = [LegacyWrapper(agent_b)]  # type: ignore[list-item]
+
+        agent_map = _build_agent_map(agent_a)
+
+        assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
+
+    def test_build_agent_map_skips_unresolved_handoff_objects(self):
+        """Test that buildAgentMap skips custom handoffs without target agent references."""
+        agent_a = Agent(name="AgentA")
+        agent_b = Agent(name="AgentB")
+
+        async def _invoke_handoff(_ctx: RunContextWrapper[Any], _input: str) -> Agent[Any]:
+            return agent_b
+
+        detached_handoff = Handoff(
+            tool_name="transfer_to_agent_b",
+            tool_description="Transfer to AgentB.",
+            input_json_schema={},
+            on_invoke_handoff=_invoke_handoff,
+            agent_name=agent_b.name,
+        )
+        agent_a.handoffs = [detached_handoff]
+
+        agent_map = _build_agent_map(agent_a)
+
+        assert sorted(agent_map.keys()) == ["AgentA"]
+
 
 class TestSerializationRoundTrip:
     """Test that serialization and deserialization preserve state correctly."""

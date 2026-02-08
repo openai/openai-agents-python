@@ -152,6 +152,42 @@ async def test_tool_call_runs():
 
 
 @pytest.mark.asyncio
+async def test_streamed_run_again_persists_tool_items_to_session():
+    model = FakeModel()
+    call_id = "call-session-run-again"
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+    session = SimpleListSession()
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", json.dumps({"a": "b"}), call_id=call_id)],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(agent, input="user_message", session=session)
+    await consume_stream(result)
+
+    saved_items = await session.get_items()
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("call_id") == call_id
+        for item in saved_items
+    )
+    assert any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and item.get("call_id") == call_id
+        for item in saved_items
+    )
+
+
+@pytest.mark.asyncio
 async def test_handoffs():
     model = FakeModel()
     agent_1 = Agent(
