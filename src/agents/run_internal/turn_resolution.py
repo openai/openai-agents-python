@@ -1459,11 +1459,19 @@ def process_model_response(
         else:
             if output.name not in function_map:
                 if output_schema is not None and output.name == "json_tool_call":
-                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    json_tool = build_litellm_json_tool_call(output)
+                    tool_origin = _get_tool_origin_info(json_tool)
+                    items.append(
+                        ToolCallItem(
+                            raw_item=output,
+                            agent=agent,
+                            tool_origin=tool_origin,
+                        )
+                    )
                     functions.append(
                         ToolRunFunction(
                             tool_call=output,
-                            function_tool=build_litellm_json_tool_call(output),
+                            function_tool=json_tool,
                         )
                     )
                     continue
