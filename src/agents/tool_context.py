@@ -9,6 +9,7 @@ from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from .agent import Agent
     from .items import TResponseInputItem
     from .run_context import _ApprovalRecord
 
@@ -44,6 +45,9 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_call: ResponseFunctionToolCall | None = None
     """The tool call object associated with this invocation."""
 
+    agent: Agent[Any] | None = None
+    """The agent that is calling this tool, if available."""
+
     def __init__(
         self,
         context: TContext,
@@ -53,6 +57,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_arguments: str | object = _MISSING,
         tool_call: ResponseFunctionToolCall | None = None,
         *,
+        agent: Agent[Any] | None = None,
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
@@ -80,6 +85,7 @@ class ToolContext(RunContextWrapper[TContext]):
             else cast(str, tool_call_id)
         )
         self.tool_call = tool_call
+        self.agent = agent
 
     @classmethod
     def from_agent_context(
@@ -87,6 +93,7 @@ class ToolContext(RunContextWrapper[TContext]):
         context: RunContextWrapper[TContext],
         tool_call_id: str,
         tool_call: ResponseFunctionToolCall | None = None,
+        agent: Agent[Any] | None = None,
     ) -> ToolContext:
         """
         Create a ToolContext from a RunContextWrapper.
@@ -105,6 +112,7 @@ class ToolContext(RunContextWrapper[TContext]):
             tool_call_id=tool_call_id,
             tool_arguments=tool_args,
             tool_call=tool_call,
+            agent=agent,
             **base_values,
         )
         return tool_context
