@@ -989,6 +989,7 @@ class TestToolCallExecution:
         call_args = mock_function_tool.on_invoke_tool.call_args
         tool_context = call_args[0][0]
         assert isinstance(tool_context, ToolContext)
+        assert tool_context.agent == mock_agent
         assert call_args[0][1] == '{"param": "value"}'
 
         # Verify tool output was sent to model

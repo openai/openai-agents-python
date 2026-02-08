@@ -599,6 +599,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_call_id=context.tool_call_id,
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
+                    agent=context.agent,
                 )
                 if should_capture_tool_input:
                     nested_context.tool_input = params_data

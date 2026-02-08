@@ -63,6 +63,7 @@ from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
 from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.tool_context import ToolContext
 from agents.usage import Usage
 
 from .fake_model import FakeModel
@@ -435,6 +436,36 @@ async def test_tool_call_runs():
         "should have five inputs: the original input, the message, the tool call, the tool result "
         "and the done message"
     )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_includes_current_agent() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].agent is agent
 
 
 @pytest.mark.asyncio

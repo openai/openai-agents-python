@@ -9,6 +9,7 @@ from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from .agent import AgentBase
     from .items import TResponseInputItem
     from .run_context import _ApprovalRecord
 
@@ -44,6 +45,9 @@ class ToolContext(RunContextWrapper[TContext]):
     tool_call: ResponseFunctionToolCall | None = None
     """The tool call object associated with this invocation."""
 
+    agent: AgentBase[Any] | None = None
+    """The active agent for this tool call, when available."""
+
     def __init__(
         self,
         context: TContext,
@@ -52,6 +56,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call_id: str | object = _MISSING,
         tool_arguments: str | object = _MISSING,
         tool_call: ResponseFunctionToolCall | None = None,
+        agent: AgentBase[Any] | None = None,
         *,
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
@@ -80,6 +85,7 @@ class ToolContext(RunContextWrapper[TContext]):
             else cast(str, tool_call_id)
         )
         self.tool_call = tool_call
+        self.agent = agent
 
     @classmethod
     def from_agent_context(
@@ -87,6 +93,7 @@ class ToolContext(RunContextWrapper[TContext]):
         context: RunContextWrapper[TContext],
         tool_call_id: str,
         tool_call: ResponseFunctionToolCall | None = None,
+        agent: AgentBase[Any] | None = None,
     ) -> ToolContext:
         """
         Create a ToolContext from a RunContextWrapper.
@@ -99,12 +106,16 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_args = (
             tool_call.arguments if tool_call is not None else _assert_must_pass_tool_arguments()
         )
+        tool_agent = agent
+        if tool_agent is None and isinstance(context, ToolContext):
+            tool_agent = context.agent
 
         tool_context = cls(
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             tool_arguments=tool_args,
             tool_call=tool_call,
+            agent=tool_agent,
             **base_values,
         )
         return tool_context

@@ -1,6 +1,7 @@
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
+from agents import Agent
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
 from tests.utils.hitl import make_context_wrapper
@@ -30,9 +31,16 @@ def test_tool_context_from_agent_context_populates_fields() -> None:
         arguments='{"a": 1}',
     )
     ctx = make_context_wrapper()
+    agent = Agent(name="agent")
 
-    tool_ctx = ToolContext.from_agent_context(ctx, tool_call_id="call-123", tool_call=tool_call)
+    tool_ctx = ToolContext.from_agent_context(
+        ctx,
+        tool_call_id="call-123",
+        tool_call=tool_call,
+        agent=agent,
+    )
 
     assert tool_ctx.tool_name == "test_tool"
     assert tool_ctx.tool_call_id == "call-123"
     assert tool_ctx.tool_arguments == '{"a": 1}'
+    assert tool_ctx.agent is agent

@@ -83,6 +83,19 @@ def test_tool_context_v070_positional_constructor_still_works() -> None:
     assert context.tool_name == "tool_name"
     assert context.tool_call_id == "call_id"
     assert context.tool_arguments == '{"x":1}'
+    assert context.agent is None
+
+
+def test_tool_context_supports_appended_agent_positional_argument() -> None:
+    usage = Usage()
+    agent = Agent(name="agent")
+    context = ToolContext(None, usage, "tool_name", "call_id", '{"x":1}', None, agent)
+
+    assert context.usage is usage
+    assert context.tool_name == "tool_name"
+    assert context.tool_call_id == "call_id"
+    assert context.tool_arguments == '{"x":1}'
+    assert context.agent is agent
 
 
 def test_run_result_v070_positional_constructor_still_works() -> None:
