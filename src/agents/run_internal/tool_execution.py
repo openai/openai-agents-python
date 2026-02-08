@@ -868,6 +868,7 @@ async def execute_function_tool_calls(
                         )
                         result = rejection_message
                         span_fn.span_data.output = result
+                        tool_origin = _get_tool_origin_info(func_tool)
                         return FunctionToolResult(
                             tool=func_tool,
                             output=result,
@@ -875,6 +876,7 @@ async def execute_function_tool_calls(
                                 agent,
                                 tool_call,
                                 rejection_message=rejection_message,
+                                tool_origin=tool_origin,
                             ),
                         )
 

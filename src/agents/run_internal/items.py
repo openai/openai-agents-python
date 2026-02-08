@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
-from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, ToolOrigin
 
 REJECTION_MESSAGE = DEFAULT_APPROVAL_REJECTION_MESSAGE
 _TOOL_CALL_TO_OUTPUT_TYPE: dict[str, str] = {
@@ -191,6 +191,7 @@ def function_rejection_item(
     tool_call: Any,
     *,
     rejection_message: str = REJECTION_MESSAGE,
+    tool_origin: ToolOrigin | None = None,
 ) -> ToolCallOutputItem:
     """Build a ToolCallOutputItem representing a rejected function tool call."""
     if isinstance(tool_call, ResponseFunctionToolCall):
@@ -199,6 +200,7 @@ def function_rejection_item(
         output=rejection_message,
         raw_item=ItemHelpers.tool_call_output_item(tool_call, rejection_message),
         agent=agent,
+        tool_origin=tool_origin,
     )
 
 

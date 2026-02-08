@@ -692,8 +692,11 @@ async def resolve_interrupted_turn(
                 tool_name=function_tool.name,
                 call_id=call_id,
             )
+        tool_origin = _get_tool_origin_info(function_tool)
         rejected_function_outputs.append(
-            function_rejection_item(agent, tool_call, rejection_message=rejection_message)
+            function_rejection_item(
+                agent, tool_call, rejection_message=rejection_message, tool_origin=tool_origin
+            )
         )
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
