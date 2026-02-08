@@ -101,11 +101,12 @@ class ChatCmplHelpers:
 
     @classmethod
     def clean_gemini_tool_call_id(cls, tool_call_id: str, model: str | None = None) -> str:
-        """Clean up litellm's addition of __thought__ suffix to tool_call.id for Gemini models.
+        """Clean up litellm's __thought__ suffix from Gemini tool call IDs.
 
-        LiteLLM adds a "__thought__" suffix to Gemini tool call IDs to track thought signatures.
-        This suffix is redundant since we can get thought_signature from provider_specific_fields,
-        and this hack causes validation errors when cross-model passing to other models.
+        LiteLLM adds a "__thought__" suffix to Gemini tool call IDs to track thought
+        signatures. This suffix is redundant since we can get thought_signature from
+        provider_specific_fields, and this hack causes validation errors when cross-model
+        passing to other models.
 
         See: https://github.com/BerriAI/litellm/pull/16895
 
