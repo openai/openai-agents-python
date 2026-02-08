@@ -42,7 +42,7 @@ from ...items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models.chatcmpl_converter import Converter
-from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE
+from ...models.chatcmpl_helpers import ChatCmplHelpers, HEADERS, HEADERS_OVERRIDE
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
@@ -819,12 +819,7 @@ class LitellmConverter:
     ) -> ChatCompletionMessageFunctionToolCall:
         # Clean up litellm's addition of __thought__ suffix to tool_call.id for
         # Gemini models. See: https://github.com/BerriAI/litellm/pull/16895
-        # This suffix is redundant since we can get thought_signature from
-        # provider_specific_fields, and this hack causes validation errors when
-        # cross-model passing to other models.
-        tool_call_id = tool_call.id
-        if model and "gemini" in model.lower() and "__thought__" in tool_call_id:
-            tool_call_id = tool_call_id.split("__thought__")[0]
+        tool_call_id = ChatCmplHelpers.clean_gemini_tool_call_id(tool_call.id, model)
 
         # Convert litellm's tool call format to chat completion message format
         base_tool_call = ChatCompletionMessageFunctionToolCall(
