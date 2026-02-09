@@ -116,8 +116,9 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return None
 
     try:
+        payload: Any
         if hasattr(item, "model_dump"):
-            payload = item.model_dump(exclude_unset=True)
+            payload = _model_dump_without_warnings(item)
         elif isinstance(item, dict):
             payload = dict(item)
             if ignore_ids_for_matching:
@@ -314,13 +315,25 @@ def _coerce_to_dict(value: object) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, BaseModel):
-        try:
-            return value.model_dump(exclude_unset=True)
-        except Exception:
-            return None
+        return _model_dump_without_warnings(value)
     if hasattr(value, "model_dump"):
+        return _model_dump_without_warnings(value)
+    return None
+
+
+def _model_dump_without_warnings(value: object) -> dict[str, Any] | None:
+    """Best-effort model_dump that avoids noisy serialization warnings from third-party models."""
+    if not hasattr(value, "model_dump"):
+        return None
+
+    model_dump = cast(Any, value).model_dump
+    try:
+        return cast(dict[str, Any], model_dump(exclude_unset=True, warnings=False))
+    except TypeError:
+        # Some model_dump-compatible objects only accept exclude_unset.
         try:
-            return cast(dict[str, Any], value.model_dump(exclude_unset=True))
+            return cast(dict[str, Any], model_dump(exclude_unset=True))
         except Exception:
             return None
-    return None
+    except Exception:
+        return None

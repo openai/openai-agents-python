@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import httpx
 import pytest
 from openai import BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from typing_extensions import TypedDict
 
 from agents import (
@@ -1277,6 +1279,29 @@ def test_ensure_api_input_item_handles_model_dump_objects():
     converted = ensure_input_item_format(dummy_item)
     assert converted["type"] == "function_call_output"
     assert converted["output"] == "dumped"
+
+
+def test_ensure_api_input_item_avoids_pydantic_serialization_warnings():
+    annotation = AnnotationFileCitation.model_construct(
+        type="container_file_citation",
+        file_id="file_123",
+        filename="result.txt",
+        index=0,
+    )
+    output_text = ResponseOutputText.model_construct(
+        type="output_text",
+        text="done",
+        annotations=[annotation],
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        converted = ensure_input_item_format(cast(Any, output_text))
+
+    converted_payload = cast(dict[str, Any], converted)
+    assert captured == []
+    assert converted_payload["type"] == "output_text"
+    assert converted_payload["annotations"][0]["type"] == "container_file_citation"
 
 
 def test_ensure_api_input_item_preserves_object_output():
