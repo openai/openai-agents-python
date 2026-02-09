@@ -226,3 +226,31 @@ Or pass it directly when creating the session:
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
+
+## Azure OpenAI endpoint format
+
+If you connect to Azure OpenAI instead of OpenAI's default endpoint, pass a GA Realtime URL in
+`model_config["url"]` and set auth headers explicitly.
+
+```python
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"api-key": "<your-azure-api-key>"},
+    }
+)
+```
+
+You can also use a bearer token:
+
+```python
+session = await runner.run(
+    model_config={
+        "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+        "headers": {"authorization": f"Bearer {token}"},
+    }
+)
+```
+
+Avoid using the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. The
+SDK expects the GA Realtime interface.
