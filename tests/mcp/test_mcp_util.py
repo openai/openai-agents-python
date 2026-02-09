@@ -8,7 +8,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, Tool as MCPTool
 from pydantic import BaseModel, TypeAdapter
 
 from agents import Agent, FunctionTool, RunContextWrapper, default_tool_error_function
-from agents.exceptions import AgentsException, ModelBehaviorError
+from agents.exceptions import AgentsException, ModelBehaviorError, UserError
 from agents.mcp import MCPServer, MCPUtil
 from agents.tool_context import ToolContext
 
@@ -78,6 +78,97 @@ async def test_get_all_function_tools():
     tools = await MCPUtil.get_all_function_tools(servers, True, run_context, agent)
     assert len(tools) == 5
     assert all(tool.name in names for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_duplicate_names_raise_by_default():
+    server1 = FakeMCPServer(server_name="github")
+    server1.add_tool("create_issue", {})
+
+    server2 = FakeMCPServer(server_name="linear")
+    server2.add_tool("create_issue", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(name="test_agent", instructions="Test agent")
+
+    with pytest.raises(UserError, match="Duplicate tool names found across MCP servers"):
+        await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_can_prefix_with_server_name():
+    server1 = FakeMCPServer(server_name="GitHub MCP Server")
+    server1.add_tool("create_issue", {})
+
+    server2 = FakeMCPServer(server_name="linear")
+    server2.add_tool("create_issue", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        mcp_servers=[server1, server2],
+        mcp_config={"prefix_tool_names_with_server_name": True},
+    )
+
+    tools = await agent.get_mcp_tools(run_context)
+    tool_names = {tool.name for tool in tools}
+    assert tool_names == {"GitHub_MCP_Server_create_issue", "linear_create_issue"}
+
+    github_tool = next(tool for tool in tools if tool.name == "GitHub_MCP_Server_create_issue")
+    linear_tool = next(tool for tool in tools if tool.name == "linear_create_issue")
+    assert isinstance(github_tool, FunctionTool)
+    assert isinstance(linear_tool, FunctionTool)
+
+    github_ctx = ToolContext(
+        context=None,
+        tool_name=github_tool.name,
+        tool_call_id="prefixed_call_1",
+        tool_arguments='{"title":"a"}',
+    )
+    linear_ctx = ToolContext(
+        context=None,
+        tool_name=linear_tool.name,
+        tool_call_id="prefixed_call_2",
+        tool_arguments='{"title":"b"}',
+    )
+
+    github_result = await github_tool.on_invoke_tool(github_ctx, '{"title":"a"}')
+    linear_result = await linear_tool.on_invoke_tool(linear_ctx, '{"title":"b"}')
+    assert isinstance(github_result, dict)
+    assert isinstance(linear_result, dict)
+    assert server1.tool_calls == ["create_issue"]
+    assert server2.tool_calls == ["create_issue"]
+
+
+@pytest.mark.asyncio
+async def test_get_all_function_tools_prefix_falls_back_for_empty_server_name_slug():
+    server = FakeMCPServer(server_name="!!!")
+    server.add_tool("search", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        mcp_servers=[server],
+        mcp_config={"prefix_tool_names_with_server_name": True},
+    )
+
+    tools = await agent.get_mcp_tools(run_context)
+    assert len(tools) == 1
+    prefixed_tool = tools[0]
+    assert isinstance(prefixed_tool, FunctionTool)
+    assert prefixed_tool.name == "server_search"
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=prefixed_tool.name,
+        tool_call_id="prefixed_call_3",
+        tool_arguments='{"query":"docs"}',
+    )
+    result = await prefixed_tool.on_invoke_tool(tool_context, '{"query":"docs"}')
+    assert isinstance(result, dict)
+    assert server.tool_calls == ["search"]
 
 
 @pytest.mark.asyncio
@@ -288,6 +379,40 @@ async def test_mcp_tool_timeout_handling():
     assert isinstance(result, str)
     assert "error" in result.lower() or "occurred" in result.lower()
     assert "Timed out" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_failure_logs_prefixed_name_when_tool_data_logging_enabled(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    import agents._debug as debug_settings
+
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(debug_settings, "DONT_LOG_TOOL_DATA", False)
+
+    server = CrashingFakeMCPServer()
+    server.add_tool("crashing_tool", {})
+
+    mcp_tool = MCPTool(name="crashing_tool", inputSchema={})
+    agent = Agent(name="test-agent")
+    function_tool = MCPUtil.to_function_tool(
+        mcp_tool,
+        server,
+        convert_schemas_to_strict=False,
+        agent=agent,
+        tool_name_override="prefixed_crashing_tool",
+    )
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="prefixed_crashing_tool",
+        tool_call_id="test_call_prefixed_log",
+        tool_arguments="{}",
+    )
+    result = await function_tool.on_invoke_tool(tool_context, "{}")
+
+    assert isinstance(result, str)
+    assert "MCP tool prefixed_crashing_tool failed" in caplog.text
 
 
 @pytest.mark.asyncio

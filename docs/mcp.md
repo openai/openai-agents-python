@@ -37,6 +37,9 @@ agent = Agent(
     mcp_config={
         # Try to convert MCP tool schemas to strict JSON schema.
         "convert_schemas_to_strict": True,
+        # Optional: namespace tools as "<server_name>_<tool_name>" to
+        # avoid collisions when multiple MCP servers expose the same tool name.
+        "prefix_tool_names_with_server_name": True,
         # If None, MCP tool failures are raised as exceptions instead of
         # returning model-visible error text.
         "failure_error_function": None,
@@ -47,6 +50,7 @@ agent = Agent(
 Notes:
 
 - `convert_schemas_to_strict` is best-effort. If a schema cannot be converted, the original schema is used.
+- `prefix_tool_names_with_server_name` sanitizes server names and prefixes MCP tool names, for example `github_create_issue`.
 - `failure_error_function` controls how MCP tool call failures are surfaced to the model.
 - When `failure_error_function` is unset, the SDK uses the default tool error formatter.
 - Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
