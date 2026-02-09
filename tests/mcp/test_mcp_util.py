@@ -217,6 +217,48 @@ async def test_mcp_meta_resolver_merges_and_passes():
 
 
 @pytest.mark.asyncio
+async def test_mcp_meta_resolver_uses_original_tool_name_with_prefixed_display_name():
+    captured: dict[str, Any] = {}
+
+    def resolve_meta(context):
+        captured["tool_name"] = context.tool_name
+        return {"scope": "meta"}
+
+    server = FakeMCPServer(
+        server_name="GitHub MCP Server",
+        tool_meta_resolver=resolve_meta,
+    )
+    server.add_tool("create_issue", {})
+
+    run_context = RunContextWrapper(context=None)
+    agent = Agent(
+        name="test_agent",
+        instructions="Test agent",
+        mcp_servers=[server],
+        mcp_config={"prefix_tool_names_with_server_name": True},
+    )
+
+    tools = await agent.get_mcp_tools(run_context)
+    assert len(tools) == 1
+
+    prefixed_tool = tools[0]
+    assert isinstance(prefixed_tool, FunctionTool)
+    assert prefixed_tool.name == "GitHub_MCP_Server_create_issue"
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name=prefixed_tool.name,
+        tool_call_id="prefixed_call_meta_1",
+        tool_arguments='{"title":"a"}',
+    )
+    await prefixed_tool.on_invoke_tool(tool_context, '{"title":"a"}')
+
+    assert captured["tool_name"] == "create_issue"
+    assert server.tool_calls == ["create_issue"]
+    assert server.tool_metas[-1] == {"scope": "meta"}
+
+
+@pytest.mark.asyncio
 async def test_mcp_meta_resolver_does_not_mutate_arguments():
     def resolve_meta(context):
         if context.arguments is not None:

@@ -403,7 +403,10 @@ class MCPUtil:
             logger.debug(f"Invoking MCP tool {tool_name} with input {input_json}")
 
         try:
-            resolved_meta = await cls._resolve_meta(server, context, tool_name, json_data)
+            # Meta resolvers should receive the canonical MCP tool identifier.
+            # The display name may be prefixed for collision avoidance, but call_tool
+            # and downstream resolver routing still key off the original tool name.
+            resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
             if merged_meta is None:
                 result = await server.call_tool(tool.name, json_data)
