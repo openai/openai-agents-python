@@ -327,6 +327,44 @@ def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(moc
 
 
 @patch("httpx.Client")
+def test_backend_span_exporter_keeps_generation_usage_for_custom_endpoint(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def __init__(self):
+            self.exported_payload = {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "generation",
+                    "usage": {
+                        "requests": 1,
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                    },
+                },
+            }
+
+        def export(self):
+            return self.exported_payload
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(
+        api_key="test_key",
+        endpoint="https://example.com/v1/traces/ingest",
+    )
+    exporter.export([DummyItem()])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert sent_payload["span_data"]["usage"]["requests"] == 1
+    assert sent_payload["span_data"]["usage"]["input_tokens"] == 10
+    assert sent_payload["span_data"]["usage"]["output_tokens"] == 5
+    exporter.close()
+
+
+@patch("httpx.Client")
 def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client):
     class DummyItem:
         tracing_api_key = None
