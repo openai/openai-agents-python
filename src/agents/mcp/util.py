@@ -183,6 +183,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        prefix_tool_names_with_server_name: bool = False,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -194,6 +195,7 @@ class MCPUtil:
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
+                prefix_tool_names_with_server_name=prefix_tool_names_with_server_name,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -214,6 +216,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        prefix_tool_names_with_server_name: bool = False,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -221,6 +224,9 @@ class MCPUtil:
             tools = await server.list_tools(run_context, agent)
             span.span_data.result = [tool.name for tool in tools]
 
+        tool_name_prefix = (
+            cls._server_tool_name_prefix(server.name) if prefix_tool_names_with_server_name else ""
+        )
         return [
             cls.to_function_tool(
                 tool,
@@ -228,9 +234,20 @@ class MCPUtil:
                 convert_schemas_to_strict,
                 agent,
                 failure_error_function=failure_error_function,
+                tool_name_override=f"{tool_name_prefix}{tool.name}" if tool_name_prefix else None,
             )
             for tool in tools
         ]
+
+    @staticmethod
+    def _server_tool_name_prefix(server_name: str) -> str:
+        normalized = "".join(
+            char if char.isalnum() or char in ("_", "-") else "_" for char in server_name
+        )
+        normalized = normalized.strip("_-")
+        if not normalized:
+            normalized = "server"
+        return f"{normalized}_"
 
     @classmethod
     def to_function_tool(
@@ -240,6 +257,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         agent: AgentBase | None = None,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        tool_name_override: str | None = None,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool.
 
@@ -249,7 +267,10 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
-        invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
+        tool_name = tool_name_override or tool.name
+        invoke_func_impl = functools.partial(
+            cls.invoke_mcp_tool, server, tool, tool_display_name=tool_name
+        )
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
         )
@@ -271,7 +292,7 @@ class MCPUtil:
         ) = server._get_needs_approval_for_tool(tool, agent)
 
         function_tool = _build_wrapped_function_tool(
-            name=tool.name,
+            name=tool_name,
             description=tool.description or "",
             params_json_schema=schema,
             invoke_tool_impl=invoke_func_impl,
@@ -336,26 +357,28 @@ class MCPUtil:
         input_json: str,
         *,
         meta: dict[str, Any] | None = None,
+        tool_display_name: str | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        tool_name = tool_display_name or tool.name
         try:
             json_data: dict[str, Any] = json.loads(input_json) if input_json else {}
         except Exception as e:
             if _debug.DONT_LOG_TOOL_DATA:
-                logger.debug(f"Invalid JSON input for tool {tool.name}")
+                logger.debug(f"Invalid JSON input for tool {tool_name}")
             else:
-                logger.debug(f"Invalid JSON input for tool {tool.name}: {input_json}")
+                logger.debug(f"Invalid JSON input for tool {tool_name}: {input_json}")
             raise ModelBehaviorError(
-                f"Invalid JSON input for tool {tool.name}: {input_json}"
+                f"Invalid JSON input for tool {tool_name}: {input_json}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"Invoking MCP tool {tool.name}")
+            logger.debug(f"Invoking MCP tool {tool_name}")
         else:
-            logger.debug(f"Invoking MCP tool {tool.name} with input {input_json}")
+            logger.debug(f"Invoking MCP tool {tool_name} with input {input_json}")
 
         try:
-            resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
+            resolved_meta = await cls._resolve_meta(server, context, tool_name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
             if merged_meta is None:
                 result = await server.call_tool(tool.name, json_data)
@@ -373,20 +396,20 @@ class MCPUtil:
                 # failure_error_function=None will have the error raised as documented.
                 error_text = e.error.message if hasattr(e, "error") and e.error else str(e)
                 logger.warning(
-                    f"MCP tool {tool.name} on server '{server.name}' returned an error: "
+                    f"MCP tool {tool_name} on server '{server.name}' returned an error: "
                     f"{error_text}"
                 )
                 raise
 
-            logger.error(f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}")
+            logger.error(f"Error invoking MCP tool {tool_name} on server '{server.name}': {e}")
             raise AgentsException(
-                f"Error invoking MCP tool {tool.name} on server '{server.name}': {e}"
+                f"Error invoking MCP tool {tool_name} on server '{server.name}': {e}"
             ) from e
 
         if _debug.DONT_LOG_TOOL_DATA:
-            logger.debug(f"MCP tool {tool.name} completed.")
+            logger.debug(f"MCP tool {tool_name} completed.")
         else:
-            logger.debug(f"MCP tool {tool.name} returned {result}")
+            logger.debug(f"MCP tool {tool_name} returned {result}")
 
         # If structured content is requested and available, use it exclusively
         tool_output: ToolOutput
