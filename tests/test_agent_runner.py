@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import httpx
 import pytest
 from openai import BadRequestError
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_output_text import AnnotationFileCitation, ResponseOutputText
 from typing_extensions import TypedDict
 
 from agents import (
@@ -48,6 +50,7 @@ from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.items import (
     drop_orphan_function_calls,
     ensure_input_item_format,
+    fingerprint_input_item,
     normalize_input_items_for_api,
     normalize_resumed_input,
 )
@@ -63,6 +66,7 @@ from agents.run_internal.tool_execution import execute_approved_tools
 from agents.run_internal.tool_use_tracker import AgentToolUseTracker
 from agents.run_state import RunState
 from agents.tool import ComputerTool, FunctionToolResult, function_tool
+from agents.tool_context import ToolContext
 from agents.usage import Usage
 
 from .fake_model import FakeModel
@@ -328,6 +332,14 @@ def testnormalize_input_items_for_api_preserves_provider_data():
     assert second["provider_data"] == {"trace": "remove"}
 
 
+def test_fingerprint_input_item_returns_none_when_model_dump_fails():
+    class _BrokenModelDump:
+        def model_dump(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("model_dump failed")
+
+    assert fingerprint_input_item(_BrokenModelDump()) is None
+
+
 def test_server_conversation_tracker_tracks_previous_response_id():
     tracker = OpenAIServerConversationTracker(conversation_id=None, previous_response_id="resp_a")
     response = ModelResponse(
@@ -435,6 +447,36 @@ async def test_tool_call_runs():
         "should have five inputs: the original input, the message, the tool call, the tool result "
         "and the done message"
     )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_context_includes_current_agent() -> None:
+    model = FakeModel()
+    captured_contexts: list[ToolContext[Any]] = []
+
+    @function_tool(name_override="foo")
+    def foo(context: ToolContext[Any]) -> str:
+        captured_contexts.append(context)
+        return "tool_result"
+
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[foo],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [get_function_tool_call("foo", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = await Runner.run(agent, input="user_message")
+
+    assert result.final_output == "done"
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].agent is agent
 
 
 @pytest.mark.asyncio
@@ -1277,6 +1319,29 @@ def test_ensure_api_input_item_handles_model_dump_objects():
     converted = ensure_input_item_format(dummy_item)
     assert converted["type"] == "function_call_output"
     assert converted["output"] == "dumped"
+
+
+def test_ensure_api_input_item_avoids_pydantic_serialization_warnings():
+    annotation = AnnotationFileCitation.model_construct(
+        type="container_file_citation",
+        file_id="file_123",
+        filename="result.txt",
+        index=0,
+    )
+    output_text = ResponseOutputText.model_construct(
+        type="output_text",
+        text="done",
+        annotations=[annotation],
+    )
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        converted = ensure_input_item_format(cast(Any, output_text))
+
+    converted_payload = cast(dict[str, Any], converted)
+    assert captured == []
+    assert converted_payload["type"] == "output_text"
+    assert converted_payload["annotations"][0]["type"] == "container_file_citation"
 
 
 def test_ensure_api_input_item_preserves_object_output():

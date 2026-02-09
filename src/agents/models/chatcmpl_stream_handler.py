@@ -394,12 +394,7 @@ class ChatCmplStreamHandler:
                     if tc_delta.id:
                         # Clean up litellm's addition of __thought__ suffix to tool_call.id for
                         # Gemini models. See: https://github.com/BerriAI/litellm/pull/16895
-                        # This suffix is redundant since we can get thought_signature from
-                        # provider_specific_fields, and this hack causes validation errors when
-                        # cross-model passing to other models.
-                        tool_call_id = tc_delta.id
-                        if model and "gemini" in model.lower() and "__thought__" in tool_call_id:
-                            tool_call_id = tool_call_id.split("__thought__")[0]
+                        tool_call_id = ChatCmplHelpers.clean_gemini_tool_call_id(tc_delta.id, model)
 
                         state.function_calls[tc_delta.index].call_id = tool_call_id
 
