@@ -16,6 +16,7 @@ from agents import (
     MaxTurnsExceeded,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
+    RunConfig,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
@@ -98,7 +99,11 @@ async def test_multi_turn_no_handoffs():
     )
 
     with pytest.raises(ValueError):
-        result = Runner.run_streamed(agent, input="first_test")
+        result = Runner.run_streamed(
+            agent,
+            input="first_test",
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
         async for _ in result.stream_events():
             pass
 
@@ -158,7 +163,11 @@ async def test_tool_call_error():
         ]
     )
 
-    result = Runner.run_streamed(agent, input="first_test")
+    result = Runner.run_streamed(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
     async for _ in result.stream_events():
         pass
 
@@ -243,7 +252,11 @@ async def test_multiple_handoff_doesnt_error():
             [get_text_message("done")],
         ]
     )
-    result = Runner.run_streamed(agent_3, input="user_message")
+    result = Runner.run_streamed(
+        agent_3,
+        input="user_message",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
     async for _ in result.stream_events():
         pass
 
@@ -380,7 +393,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
             [get_text_message("done")],
         ]
     )
-    result = Runner.run_streamed(agent_3, input="user_message")
+    result = Runner.run_streamed(
+        agent_3,
+        input="user_message",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
     async for _ in result.stream_events():
         pass
 
@@ -485,7 +502,12 @@ async def test_max_turns_exceeded():
     )
 
     with pytest.raises(MaxTurnsExceeded):
-        result = Runner.run_streamed(agent, input="user_message", max_turns=2)
+        result = Runner.run_streamed(
+            agent,
+            input="user_message",
+            max_turns=2,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
         async for _ in result.stream_events():
             pass
 
