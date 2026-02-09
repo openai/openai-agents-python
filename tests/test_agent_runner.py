@@ -50,6 +50,7 @@ from agents.run_config import _default_trace_include_sensitive_data
 from agents.run_internal.items import (
     drop_orphan_function_calls,
     ensure_input_item_format,
+    fingerprint_input_item,
     normalize_input_items_for_api,
     normalize_resumed_input,
 )
@@ -328,6 +329,14 @@ def testnormalize_input_items_for_api_preserves_provider_data():
     assert first["provider_data"] == {"trace": "keep"}
     assert second["role"] == "user"
     assert second["provider_data"] == {"trace": "remove"}
+
+
+def test_fingerprint_input_item_returns_none_when_model_dump_fails():
+    class _BrokenModelDump:
+        def model_dump(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("model_dump failed")
+
+    assert fingerprint_input_item(_BrokenModelDump()) is None
 
 
 def test_server_conversation_tracker_tracks_previous_response_id():

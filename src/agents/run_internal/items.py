@@ -119,6 +119,8 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         payload: Any
         if hasattr(item, "model_dump"):
             payload = _model_dump_without_warnings(item)
+            if payload is None:
+                return None
         elif isinstance(item, dict):
             payload = dict(item)
             if ignore_ids_for_matching:
