@@ -276,3 +276,109 @@ def test_backend_span_exporter_close(mock_client):
 
     # Ensure underlying http client is closed
     mock_client.return_value.close.assert_called_once()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(mock_client):
+    """Unsupported usage keys should be stripped before POSTing to OpenAI tracing."""
+
+    class DummyItem:
+        tracing_api_key = None
+
+        def __init__(self):
+            self.exported_payload = {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "generation",
+                    "usage": {
+                        "requests": 1,
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "input_tokens_details": {"cached_tokens": 1},
+                        "output_tokens_details": {"reasoning_tokens": 2},
+                    },
+                },
+            }
+
+        def export(self):
+            return self.exported_payload
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key")
+    item = DummyItem()
+    exporter.export([item])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    sent_usage = sent_payload["span_data"]["usage"]
+    assert "requests" not in sent_usage
+    assert sent_usage["input_tokens"] == 10
+    assert sent_usage["output_tokens"] == 5
+    assert sent_usage["total_tokens"] == 15
+    assert sent_usage["input_tokens_details"] == {"cached_tokens": 1}
+    assert sent_usage["output_tokens_details"] == {"reasoning_tokens": 2}
+
+    # Ensure the original exported object has not been mutated.
+    assert "requests" in item.exported_payload["span_data"]["usage"]
+    exporter.close()
+
+
+@patch("httpx.Client")
+def test_backend_span_exporter_does_not_modify_non_generation_usage(mock_client):
+    class DummyItem:
+        tracing_api_key = None
+
+        def export(self):
+            return {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "function",
+                    "usage": {"requests": 1},
+                },
+            }
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key")
+    exporter.export([DummyItem()])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    assert sent_payload["span_data"]["usage"] == {"requests": 1}
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_keeps_allowed_generation_usage():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        },
+    }
+    assert exporter._sanitize_for_openai_tracing_api(payload) is payload
+    exporter.close()
+
+
+def test_sanitize_for_openai_tracing_api_skips_non_dict_generation_usage():
+    exporter = BackendSpanExporter(api_key="test_key")
+    payload = {
+        "object": "trace.span",
+        "span_data": {
+            "type": "generation",
+            "usage": None,
+        },
+    }
+    assert exporter._sanitize_for_openai_tracing_api(payload) is payload
+    exporter.close()

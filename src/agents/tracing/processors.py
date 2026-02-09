@@ -28,6 +28,16 @@ class ConsoleSpanExporter(TracingExporter):
 
 
 class BackendSpanExporter(TracingExporter):
+    _OPENAI_TRACING_ALLOWED_USAGE_KEYS = frozenset(
+        {
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "input_tokens_details",
+            "output_tokens_details",
+        }
+    )
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -103,7 +113,11 @@ class BackendSpanExporter(TracingExporter):
                 logger.warning("OPENAI_API_KEY is not set, skipping trace export")
                 continue
 
-            data = [item.export() for item in grouped if item.export()]
+            data: list[dict[str, Any]] = []
+            for item in grouped:
+                exported = item.export()
+                if exported:
+                    data.append(self._sanitize_for_openai_tracing_api(exported))
             payload = {"data": data}
 
             headers = {
@@ -159,6 +173,33 @@ class BackendSpanExporter(TracingExporter):
                 sleep_time = delay + random.uniform(0, 0.1 * delay)  # 10% jitter
                 time.sleep(sleep_time)
                 delay = min(delay * 2, self.max_delay)
+
+    def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
+        """Drop fields known to be rejected by OpenAI tracing ingestion."""
+        span_data = payload_item.get("span_data")
+        if not isinstance(span_data, dict):
+            return payload_item
+
+        if span_data.get("type") != "generation":
+            return payload_item
+
+        usage = span_data.get("usage")
+        if not isinstance(usage, dict):
+            return payload_item
+
+        filtered_usage = {
+            key: value
+            for key, value in usage.items()
+            if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS
+        }
+        if filtered_usage == usage:
+            return payload_item
+
+        sanitized_span_data = dict(span_data)
+        sanitized_span_data["usage"] = filtered_usage
+        sanitized_payload_item = dict(payload_item)
+        sanitized_payload_item["span_data"] = sanitized_span_data
+        return sanitized_payload_item
 
     def close(self):
         """Close the underlying HTTP client."""
