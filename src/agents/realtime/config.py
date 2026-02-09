@@ -100,6 +100,9 @@ class RealtimeTurnDetectionConfig(TypedDict):
     idle_timeout_ms: NotRequired[int]
     """Threshold for server-vad to trigger a response if the user is idle for this duration."""
 
+    model_version: NotRequired[str]
+    """Optional backend-specific VAD model identifier."""
+
 
 class RealtimeAudioInputConfig(TypedDict, total=False):
     """Configuration for audio input in realtime sessions."""

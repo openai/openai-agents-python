@@ -998,6 +998,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "prefixPaddingMs": "prefix_padding_ms",
             "silenceDurationMs": "silence_duration_ms",
             "idleTimeoutMs": "idle_timeout_ms",
+            "modelVersion": "model_version",
         }
         for camel_key, snake_key in key_map.items():
             if camel_key in normalized and snake_key not in normalized:

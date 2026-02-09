@@ -821,6 +821,7 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
                         "type": "server_vad",
                         "createResponse": True,
                         "silenceDurationMs": 450,
+                        "modelVersion": "default",
                     },
                 },
                 "output": {
@@ -848,7 +849,9 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         )
         assert turn_detection_mapping["create_response"] is True
         assert turn_detection_mapping["silence_duration_ms"] == 450
+        assert turn_detection_mapping["model_version"] == "default"
         assert "silenceDurationMs" not in turn_detection_mapping
+        assert "modelVersion" not in turn_detection_mapping
 
     @pytest.mark.asyncio
     async def test_handle_error_event_success(self, model):
