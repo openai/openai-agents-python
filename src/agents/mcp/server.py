@@ -709,7 +709,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 else:
                     logger.error(f"Error cleaning up server: {e}")
             finally:
+                # Always reset the exit stack so we don't retain callbacks/references from the
+                # previous connection. This keeps teardown deterministic and allows reconnecting
+                # with a fresh stack even if cleanup encountered recoverable errors.
+                self.exit_stack = AsyncExitStack()
                 self.session = None
+                self.server_initialize_result = None
 
 
 class MCPServerStdioParams(TypedDict):
