@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Generic,
     Literal,
+    Optional,
     Protocol,
     TypeVar,
     Union,
@@ -929,7 +930,7 @@ def function_tool(
                     resolved_failure_error_function = default_tool_error_function
                 else:
                     resolved_failure_error_function = cast(
-                        ToolErrorFunction | None, failure_error_function
+                        Optional[ToolErrorFunction], failure_error_function
                     )
 
                 if resolved_failure_error_function is None:
