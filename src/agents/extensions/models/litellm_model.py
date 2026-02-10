@@ -7,18 +7,6 @@ from collections.abc import AsyncIterator
 from copy import copy
 from typing import Any, Literal, cast, overload
 
-from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
-
-from agents.exceptions import ModelBehaviorError
-
-try:
-    import litellm
-except ImportError as _e:
-    raise ImportError(
-        "`litellm` is required to use the LitellmModel. You can install it via the optional "
-        "dependency group: `pip install 'openai-agents[litellm]'`."
-    ) from _e
-
 from openai import AsyncStream, NotGiven, omit
 from openai.types.chat import (
     ChatCompletionChunk,
@@ -33,7 +21,10 @@ from openai.types.chat.chat_completion_message import (
 )
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.responses import Response
+from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 from pydantic import BaseModel
+
+from agents.exceptions import ModelBehaviorError
 
 from ... import _debug
 from ...agent_output import AgentOutputSchemaBase
@@ -53,6 +44,41 @@ from ...tracing.span_data import GenerationSpanData
 from ...tracing.spans import Span
 from ...usage import Usage
 from ...util._json import _to_dump_compatible
+
+_LITELLM_IMPORT_ERROR_MESSAGE = (
+    "`litellm` is required to use the LitellmModel. You can install it via the optional "
+    "dependency group: `pip install 'openai-agents[litellm]'`."
+)
+_litellm_module: Any | None = None
+_litellm_import_error: Exception | None = None
+
+
+def _import_litellm() -> Any:
+    """Import litellm only when first needed."""
+    global _litellm_module, _litellm_import_error
+
+    if _litellm_module is not None:
+        return _litellm_module
+
+    if _litellm_import_error is not None:
+        raise ImportError(_LITELLM_IMPORT_ERROR_MESSAGE) from _litellm_import_error
+
+    try:
+        import litellm as _litellm
+    except Exception as exc:
+        _litellm_import_error = exc
+        raise ImportError(_LITELLM_IMPORT_ERROR_MESSAGE) from exc
+
+    _litellm_module = _litellm
+    return _litellm_module
+
+
+class _LazyLiteLLMModule:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_import_litellm(), name)
+
+
+litellm: Any = _LazyLiteLLMModule()
 
 
 def _patch_litellm_serializer_warnings() -> None:
