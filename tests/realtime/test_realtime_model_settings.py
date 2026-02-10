@@ -6,6 +6,7 @@ import pytest
 from openai.types.realtime.realtime_session_create_request import (
     RealtimeSessionCreateRequest,
 )
+from openai.types.realtime.session_update_event import SessionUpdateEvent
 
 from agents.handoffs import Handoff
 from agents.realtime.agent import RealtimeAgent
@@ -14,6 +15,7 @@ from agents.realtime.handoffs import realtime_handoff
 from agents.realtime.model import RealtimeModelConfig
 from agents.realtime.openai_realtime import (
     OpenAIRealtimeSIPModel,
+    OpenAIRealtimeWebSocketModel,
     _build_model_settings_from_agent,
     _collect_enabled_handoffs,
 )
@@ -129,3 +131,36 @@ async def test_sip_model_build_initial_session_payload(monkeypatch: pytest.Monke
             tool_names.add(name)
     assert ping.name in tool_names
     assert f"transfer_to_{child_agent.name}" in tool_names
+
+
+def test_call_id_session_update_omits_null_audio_formats() -> None:
+    model = OpenAIRealtimeWebSocketModel()
+    model._call_id = "call_123"
+
+    session_config = model._get_session_config({})
+    payload = SessionUpdateEvent(type="session.update", session=session_config).model_dump(
+        exclude_unset=True
+    )
+
+    audio = payload["session"]["audio"]
+    assert "format" not in audio["input"]
+    assert "format" not in audio["output"]
+
+
+def test_call_id_session_update_includes_explicit_audio_formats() -> None:
+    model = OpenAIRealtimeWebSocketModel()
+    model._call_id = "call_123"
+
+    session_config = model._get_session_config(
+        {
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
+        }
+    )
+    payload = SessionUpdateEvent(type="session.update", session=session_config).model_dump(
+        exclude_unset=True
+    )
+
+    audio = payload["session"]["audio"]
+    assert audio["input"]["format"]["type"] == "audio/pcmu"
+    assert audio["output"]["format"]["type"] == "audio/pcmu"
