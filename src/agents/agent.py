@@ -590,6 +590,9 @@ class Agent(AgentBase, Generic[TContext]):
                 raise ModelBehaviorError("Agent tool called with invalid input")
 
             resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
+            resolved_run_config = run_config
+            if resolved_run_config is None and isinstance(context, ToolContext):
+                resolved_run_config = context.run_config
             if isinstance(context, ToolContext):
                 # Use a fresh ToolContext to avoid sharing approval state with parent runs.
                 nested_context = ToolContext(
@@ -600,6 +603,7 @@ class Agent(AgentBase, Generic[TContext]):
                     tool_arguments=context.tool_arguments,
                     tool_call=context.tool_call,
                     agent=context.agent,
+                    run_config=resolved_run_config,
                 )
                 if should_capture_tool_input:
                     nested_context.tool_input = params_data
@@ -697,7 +701,7 @@ class Agent(AgentBase, Generic[TContext]):
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
                         context=None if resume_state is not None else cast(Any, nested_context),
-                        run_config=run_config,
+                        run_config=resolved_run_config,
                         max_turns=resolved_max_turns,
                         hooks=hooks,
                         previous_response_id=None
@@ -761,7 +765,7 @@ class Agent(AgentBase, Generic[TContext]):
                         starting_agent=cast(Agent[Any], self),
                         input=resume_state or resolved_input,
                         context=None if resume_state is not None else cast(Any, nested_context),
-                        run_config=run_config,
+                        run_config=resolved_run_config,
                         max_turns=resolved_max_turns,
                         hooks=hooks,
                         previous_response_id=None

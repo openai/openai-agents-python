@@ -247,6 +247,32 @@ async def test_multiple_tool_calls_with_tool_context():
 
 
 @pytest.mark.asyncio
+async def test_function_tool_context_includes_run_config() -> None:
+    async def _tool_with_run_config(context: ToolContext[str]) -> str:
+        assert context.run_config is not None
+        return str(context.run_config.model)
+
+    tool = function_tool(
+        _tool_with_run_config,
+        name_override="tool_with_run_config",
+        failure_error_function=None,
+    )
+    agent = Agent(name="test", tools=[tool])
+    response = ModelResponse(
+        output=[get_function_tool_call("tool_with_run_config", "{}", call_id="call-1")],
+        usage=Usage(),
+        response_id=None,
+    )
+    run_config = RunConfig(model="gpt-4.1-mini")
+
+    result = await get_execute_result(agent, response, run_config=run_config)
+
+    assert len(result.generated_items) == 2
+    assert_item_is_function_tool_call_output(result.generated_items[1], "gpt-4.1-mini")
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_handoff_output_leads_to_handoff_next_step():
     agent_1 = Agent(name="test_1")
     agent_2 = Agent(name="test_2")

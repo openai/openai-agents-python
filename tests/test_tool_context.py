@@ -2,6 +2,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall
 
 from agents import Agent
+from agents.run_config import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
 from tests.utils.hitl import make_context_wrapper
@@ -103,3 +104,55 @@ def test_tool_context_from_tool_context_inherits_agent() -> None:
     )
 
     assert derived_context.agent is agent
+
+
+def test_tool_context_from_tool_context_inherits_run_config() -> None:
+    original_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-3",
+        arguments="{}",
+    )
+    derived_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-4",
+        arguments="{}",
+    )
+    parent_run_config = RunConfig(model="gpt-4.1-mini")
+    parent_context: ToolContext[dict[str, object]] = ToolContext(
+        context={},
+        tool_name="test_tool",
+        tool_call_id="call-3",
+        tool_arguments="{}",
+        tool_call=original_call,
+        run_config=parent_run_config,
+    )
+
+    derived_context = ToolContext.from_agent_context(
+        parent_context,
+        tool_call_id="call-4",
+        tool_call=derived_call,
+    )
+
+    assert derived_context.run_config is parent_run_config
+
+
+def test_tool_context_from_agent_context_prefers_explicit_run_config() -> None:
+    tool_call = ResponseFunctionToolCall(
+        type="function_call",
+        name="test_tool",
+        call_id="call-1",
+        arguments="{}",
+    )
+    ctx = make_context_wrapper()
+    explicit_run_config = RunConfig(model="gpt-4.1")
+
+    tool_ctx = ToolContext.from_agent_context(
+        ctx,
+        tool_call_id="call-1",
+        tool_call=tool_call,
+        run_config=explicit_run_config,
+    )
+
+    assert tool_ctx.run_config is explicit_run_config
