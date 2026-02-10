@@ -135,3 +135,39 @@ async def test_prompt_id_omits_tools_parameter_when_no_tools_configured():
     )
 
     assert called_kwargs["tools"] is omit
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_prompt_id_omits_tool_choice_when_no_tools_configured():
+    called_kwargs: dict[str, Any] = {}
+
+    class DummyResponses:
+        async def create(self, **kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return get_response_obj([])
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(
+        model="gpt-4",
+        openai_client=DummyResponsesClient(),  # type: ignore[arg-type]
+        model_is_explicit=False,
+    )
+
+    await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(tool_choice="web_search_preview"),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+        prompt={"id": "pmpt_123"},
+    )
+
+    assert called_kwargs["tools"] is omit
+    assert called_kwargs["tool_choice"] is omit
