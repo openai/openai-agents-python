@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
 import random
@@ -29,6 +30,8 @@ class ConsoleSpanExporter(TracingExporter):
 
 class BackendSpanExporter(TracingExporter):
     _OPENAI_TRACING_INGEST_ENDPOINT = "https://api.openai.com/v1/traces/ingest"
+    _OPENAI_TRACING_MAX_FIELD_BYTES = 100_000
+    _OPENAI_TRACING_STRING_TRUNCATION_SUFFIX = "... [truncated]"
     _OPENAI_TRACING_ALLOWED_USAGE_KEYS = frozenset(
         {
             "input_tokens",
@@ -182,31 +185,84 @@ class BackendSpanExporter(TracingExporter):
         return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
-        """Drop fields known to be rejected by OpenAI tracing ingestion."""
+        """Drop or truncate fields known to be rejected by OpenAI tracing ingestion."""
         span_data = payload_item.get("span_data")
         if not isinstance(span_data, dict):
             return payload_item
 
-        if span_data.get("type") != "generation":
+        sanitized_span_data = span_data
+        did_mutate = False
+
+        for field_name in ("input", "output"):
+            if field_name not in span_data:
+                continue
+            truncated_field = self._truncate_span_field_value(span_data[field_name])
+            if truncated_field != span_data[field_name]:
+                if not did_mutate:
+                    sanitized_span_data = dict(span_data)
+                    did_mutate = True
+                sanitized_span_data[field_name] = truncated_field
+
+        if span_data.get("type") == "generation":
+            usage = span_data.get("usage")
+            if isinstance(usage, dict):
+                filtered_usage = {
+                    key: value
+                    for key, value in usage.items()
+                    if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS
+                }
+                if filtered_usage != usage:
+                    if not did_mutate:
+                        sanitized_span_data = dict(span_data)
+                        did_mutate = True
+                    sanitized_span_data["usage"] = filtered_usage
+
+        if not did_mutate:
             return payload_item
 
-        usage = span_data.get("usage")
-        if not isinstance(usage, dict):
-            return payload_item
-
-        filtered_usage = {
-            key: value
-            for key, value in usage.items()
-            if key in self._OPENAI_TRACING_ALLOWED_USAGE_KEYS
-        }
-        if filtered_usage == usage:
-            return payload_item
-
-        sanitized_span_data = dict(span_data)
-        sanitized_span_data["usage"] = filtered_usage
         sanitized_payload_item = dict(payload_item)
         sanitized_payload_item["span_data"] = sanitized_span_data
         return sanitized_payload_item
+
+    def _value_json_size_bytes(self, value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
+        suffix = self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+        if self._value_json_size_bytes(suffix) > max_bytes:
+            return ""
+
+        low = 0
+        high = len(value)
+        best = suffix
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = value[:mid] + suffix
+            if self._value_json_size_bytes(candidate) <= max_bytes:
+                best = candidate
+                low = mid + 1
+            else:
+                high = mid - 1
+        return best
+
+    def _truncate_span_field_value(self, value: Any) -> Any:
+        max_bytes = self._OPENAI_TRACING_MAX_FIELD_BYTES
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+
+        if isinstance(value, str):
+            return self._truncate_string_for_json_limit(value, max_bytes)
+
+        preview = str(value)
+        if len(preview) > 512:
+            preview = preview[:512] + self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        return {
+            "truncated": True,
+            "original_type": type(value).__name__,
+            "preview": preview,
+        }
 
     def close(self):
         """Close the underlying HTTP client."""
