@@ -61,7 +61,6 @@ async def test_mcp_tracing():
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_1",
-                                    "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_1_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
@@ -122,17 +121,12 @@ async def test_mcp_tracing():
                         "children": [
                             {
                                 "type": "function",
-                                "data": {
-                                    "name": "non_mcp_tool",
-                                    "input": "",
-                                    "output": "tool_result",
-                                },
+                                "data": {"name": "non_mcp_tool"},
                             },
                             {
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_2",
-                                    "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_2_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
@@ -196,7 +190,6 @@ async def test_mcp_tracing():
                                 "type": "function",
                                 "data": {
                                     "name": "test_tool_3",
-                                    "input": "",
                                     "output": "{'type': 'text', 'text': 'result_test_tool_3_{}'}",  # noqa: E501
                                     "mcp_data": {"server": "fake_mcp_server"},
                                 },
