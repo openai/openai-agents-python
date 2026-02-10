@@ -36,6 +36,7 @@ from agents import (
 )
 from agents.agent import ToolsToFinalOutputResult
 from agents.computer import Computer
+from agents.extensions.handoff_filters import remove_all_tools
 from agents.items import (
     HandoffOutputItem,
     ModelResponse,
@@ -2094,6 +2095,111 @@ async def test_run_streamed_rejects_session_with_resumed_conversation_state():
 
     with pytest.raises(UserError, match="Session persistence"):
         Runner.run_streamed(agent, state, session=session)
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_server_conversation_with_nested_handoff_history():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        await Runner.run(
+            triage,
+            input="test",
+            conversation_id="conv-test",
+            run_config=RunConfig(nest_handoff_history=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_server_conversation_with_remove_all_tools_filter():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[handoff(delegate, input_filter=remove_all_tools)],
+    )
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        await Runner.run(
+            triage,
+            input="test",
+            conversation_id="conv-test",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_server_conversation_with_global_remove_all_tools_filter():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        await Runner.run(
+            triage,
+            input="test",
+            conversation_id="conv-test",
+            run_config=RunConfig(handoff_input_filter=remove_all_tools),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_streamed_rejects_server_conversation_with_nested_handoff_history():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        Runner.run_streamed(
+            triage,
+            input="test",
+            conversation_id="conv-test",
+            run_config=RunConfig(nest_handoff_history=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_resumed_server_conversation_with_nested_handoff_history():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    context_wrapper = RunContextWrapper(context=None)
+    state = RunState(
+        context=context_wrapper,
+        original_input="hello",
+        starting_agent=triage,
+        conversation_id="conv-test",
+    )
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        await Runner.run(
+            triage,
+            state,
+            run_config=RunConfig(nest_handoff_history=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_streamed_rejects_resumed_server_conversation_with_nested_handoff_history():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[delegate])
+    context_wrapper = RunContextWrapper(context=None)
+    state = RunState(
+        context=context_wrapper,
+        original_input="hello",
+        starting_agent=triage,
+        conversation_id="conv-test",
+    )
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        Runner.run_streamed(
+            triage,
+            state,
+            run_config=RunConfig(nest_handoff_history=True),
+        )
 
 
 @pytest.mark.asyncio
