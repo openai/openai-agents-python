@@ -497,6 +497,59 @@ async def test_agent_as_tool_explicit_run_config_overrides_parent_context(
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_inherits_trace_include_sensitive_data_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent(name="trace_config_agent")
+    parent_run_config = RunConfig(trace_include_sensitive_data=False)
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        assert starting_agent is agent
+        assert input == "hello"
+        assert isinstance(context, ToolContext)
+        assert run_config is parent_run_config
+        assert run_config.trace_include_sensitive_data is False
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool = cast(
+        FunctionTool,
+        agent.as_tool(
+            tool_name="trace_config_tool",
+            tool_description="inherits trace config",
+        ),
+    )
+    tool_context = ToolContext(
+        context=None,
+        tool_name="trace_config_tool",
+        tool_call_id="call_trace",
+        tool_arguments='{"input":"hello"}',
+        run_config=parent_run_config,
+    )
+
+    output = await tool.on_invoke_tool(tool_context, '{"input":"hello"}')
+
+    assert output == "ok"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_structured_input_sets_tool_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
