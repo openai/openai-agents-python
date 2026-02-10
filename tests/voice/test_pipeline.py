@@ -13,6 +13,7 @@ try:
         TTSModelSettings,
         VoicePipeline,
         VoicePipelineConfig,
+        VoiceStreamEvent,
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
     )
@@ -63,14 +64,14 @@ async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -
         TTSModelSettings(buffer_size=1, dtype=np.int16),
         VoicePipelineConfig(),
     )
-    local_queue: asyncio.Queue[object] = asyncio.Queue()
+    local_queue: asyncio.Queue[VoiceStreamEvent | None] = asyncio.Queue()
 
     await result._stream_audio("hello", local_queue, finish_turn=True)
 
     audio_chunks: list[bytes] = []
     while True:
         event = await local_queue.get()
-        if isinstance(event, VoiceStreamEventAudio):
+        if isinstance(event, VoiceStreamEventAudio) and event.data is not None:
             audio_chunks.append(event.data.tobytes())
         if isinstance(event, VoiceStreamEventLifecycle) and event.event == "turn_ended":
             break
