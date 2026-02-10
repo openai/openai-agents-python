@@ -158,9 +158,7 @@ def validate_server_conversation_handoff_settings(
     auto_previous_response_id: bool,
 ) -> None:
     server_manages_conversation = (
-        conversation_id is not None
-        or previous_response_id is not None
-        or auto_previous_response_id
+        conversation_id is not None or previous_response_id is not None or auto_previous_response_id
     )
     if not server_manages_conversation:
         return
