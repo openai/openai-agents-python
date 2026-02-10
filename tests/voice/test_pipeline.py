@@ -5,12 +5,45 @@ import numpy.typing as npt
 import pytest
 
 try:
-    from agents.voice import AudioInput, TTSModelSettings, VoicePipeline, VoicePipelineConfig
+    from agents.voice import (
+        AudioInput,
+        StreamedAudioResult,
+        TTSModelSettings,
+        VoicePipeline,
+        VoicePipelineConfig,
+    )
 
     from .fake_models import FakeStreamedAudioInput, FakeSTT, FakeTTS, FakeWorkflow
     from .helpers import extract_events
 except ImportError:
     pass
+
+
+def test_streamed_audio_result_odd_length_buffer_int16() -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(dtype=np.int16),
+        VoicePipelineConfig(),
+    )
+
+    transformed = result._transform_audio_buffer([b"\x01"], np.int16)
+
+    assert transformed.dtype == np.int16
+    assert transformed.tolist() == [1]
+
+
+def test_streamed_audio_result_odd_length_buffer_float32() -> None:
+    result = StreamedAudioResult(
+        FakeTTS(),
+        TTSModelSettings(dtype=np.float32),
+        VoicePipelineConfig(),
+    )
+
+    transformed = result._transform_audio_buffer([b"\x01"], np.float32)
+
+    assert transformed.dtype == np.float32
+    assert transformed.shape == (1, 1)
+    assert transformed[0, 0] == pytest.approx(1 / 32767.0)
 
 
 @pytest.mark.asyncio
