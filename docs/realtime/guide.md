@@ -50,18 +50,6 @@ Key differences from regular agents:
 
 The session configuration allows you to control the underlying realtime model behavior. You can configure the model name (such as `gpt-realtime`), voice selection (alloy, echo, fable, onyx, nova, shimmer), and supported modalities (text and/or audio). Audio formats can be set for both input and output, with PCM16 being the default.
 
-When connecting to Azure OpenAI, use the GA Realtime endpoint format and pass credentials via
-headers in `model_config`:
-
-```python
-model_config = {
-    "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
-    "headers": {"api-key": "<your-azure-api-key>"},
-}
-```
-
-For token-based auth, use `{"authorization": f"Bearer {token}"}` in `headers`.
-
 ### Audio configuration
 
 Audio settings control how the session handles voice input and output. You can configure input audio transcription using models like Whisper, set language preferences, and provide transcription prompts to improve accuracy for domain-specific terms. Turn detection settings control when the agent should start and stop responding, with options for voice activity detection thresholds, silence duration, and padding around detected speech.
@@ -211,3 +199,17 @@ This gives you direct access to the [`RealtimeModel`][agents.realtime.model.Real
 ## Examples
 
 For complete working examples, check out the [examples/realtime directory](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) which includes demos with and without UI components.
+
+## Azure OpenAI endpoint format
+
+When connecting to Azure OpenAI, use the GA Realtime endpoint format and pass credentials via
+headers in `model_config`:
+
+```python
+model_config = {
+    "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+    "headers": {"api-key": "<your-azure-api-key>"},
+}
+```
+
+For token-based auth, use `{"authorization": f"Bearer {token}"}` in `headers`.
