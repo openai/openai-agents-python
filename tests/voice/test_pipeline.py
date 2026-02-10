@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -11,6 +13,8 @@ try:
         TTSModelSettings,
         VoicePipeline,
         VoicePipelineConfig,
+        VoiceStreamEventAudio,
+        VoiceStreamEventLifecycle,
     )
 
     from .fake_models import FakeStreamedAudioInput, FakeSTT, FakeTTS, FakeWorkflow
@@ -44,6 +48,34 @@ def test_streamed_audio_result_odd_length_buffer_float32() -> None:
     assert transformed.dtype == np.float32
     assert transformed.shape == (1, 1)
     assert transformed[0, 0] == pytest.approx(1 / 32767.0)
+
+
+@pytest.mark.asyncio
+async def test_streamed_audio_result_preserves_cross_chunk_sample_boundaries() -> None:
+    class SplitSampleTTS(FakeTTS):
+        async def run(self, text: str, settings: TTSModelSettings):
+            del text, settings
+            yield b"\x01"
+            yield b"\x00"
+
+    result = StreamedAudioResult(
+        SplitSampleTTS(),
+        TTSModelSettings(buffer_size=1, dtype=np.int16),
+        VoicePipelineConfig(),
+    )
+    local_queue: asyncio.Queue[object] = asyncio.Queue()
+
+    await result._stream_audio("hello", local_queue, finish_turn=True)
+
+    audio_chunks: list[bytes] = []
+    while True:
+        event = await local_queue.get()
+        if isinstance(event, VoiceStreamEventAudio):
+            audio_chunks.append(event.data.tobytes())
+        if isinstance(event, VoiceStreamEventLifecycle) and event.event == "turn_ended":
+            break
+
+    assert audio_chunks == [np.array([1], dtype=np.int16).tobytes()]
 
 
 @pytest.mark.asyncio

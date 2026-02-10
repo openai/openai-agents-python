@@ -123,6 +123,7 @@ class StreamedAudioResult:
                 first_byte_received = False
                 buffer: list[bytes] = []
                 full_audio_data: list[bytes] = []
+                pending_byte = b""
 
                 async for chunk in self.tts_model.run(text, self.tts_settings):
                     if not first_byte_received:
@@ -133,15 +134,33 @@ class StreamedAudioResult:
                         buffer.append(chunk)
                         full_audio_data.append(chunk)
                         if len(buffer) >= self._buffer_size:
-                            audio_np = self._transform_audio_buffer(buffer, self.tts_settings.dtype)
-                            if self.tts_settings.transform_data:
-                                audio_np = self.tts_settings.transform_data(audio_np)
-                            await local_queue.put(
-                                VoiceStreamEventAudio(data=audio_np)
-                            )  # Use local queue
+                            combined = pending_byte + b"".join(buffer)
+                            if len(combined) % 2 != 0:
+                                pending_byte = combined[-1:]
+                                combined = combined[:-1]
+                            else:
+                                pending_byte = b""
+
+                            if combined:
+                                audio_np = self._transform_audio_buffer(
+                                    [combined], self.tts_settings.dtype
+                                )
+                                if self.tts_settings.transform_data:
+                                    audio_np = self.tts_settings.transform_data(audio_np)
+                                await local_queue.put(
+                                    VoiceStreamEventAudio(data=audio_np)
+                                )  # Use local queue
                             buffer = []
                 if buffer:
-                    audio_np = self._transform_audio_buffer(buffer, self.tts_settings.dtype)
+                    combined = pending_byte + b"".join(buffer)
+                else:
+                    combined = pending_byte
+
+                if combined:
+                    # Final flush: pad the remaining half sample if needed.
+                    if len(combined) % 2 != 0:
+                        combined += b"\x00"
+                    audio_np = self._transform_audio_buffer([combined], self.tts_settings.dtype)
                     if self.tts_settings.transform_data:
                         audio_np = self.tts_settings.transform_data(audio_np)
                     await local_queue.put(VoiceStreamEventAudio(data=audio_np))  # Use local queue
