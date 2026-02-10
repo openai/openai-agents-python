@@ -8,6 +8,7 @@ import pytest
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
+import agents.tool as tool_module
 from agents import (
     Agent,
     AgentBase,
@@ -446,6 +447,25 @@ async def test_async_failure_error_function_is_awaited() -> None:
     ctx = ToolContext(None, tool_name=boom.name, tool_call_id="boom", tool_arguments="{}")
     result = await boom.on_invoke_tool(ctx, "{}")
     assert result.startswith("handled:")
+
+
+@pytest.mark.asyncio
+async def test_default_failure_error_function_is_resolved_at_invoke_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(a: int) -> None:
+        raise ValueError(f"boom:{a}")
+
+    tool = function_tool(boom)
+
+    def patched_default(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        return f"patched:{error}"
+
+    monkeypatch.setattr(tool_module, "default_tool_error_function", patched_default)
+
+    ctx = ToolContext(None, tool_name=tool.name, tool_call_id="1", tool_arguments='{"a": 7}')
+    result = await tool.on_invoke_tool(ctx, '{"a": 7}')
+    assert result == "patched:boom:7"
 
 
 def test_function_tool_accepts_guardrail_arguments():
