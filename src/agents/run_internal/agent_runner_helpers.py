@@ -115,6 +115,11 @@ def _is_remove_all_tools_filter(filter_fn: object | None) -> bool:
     )
 
 
+def _is_disabled_handoff(handoff_obj: Handoff[Any, Agent[Any]]) -> bool:
+    is_enabled = handoff_obj.is_enabled
+    return isinstance(is_enabled, bool) and not is_enabled
+
+
 def _collect_handoff_edges(
     agent: Agent[Any],
 ) -> list[tuple[Agent[Any], Handoff[Any, Agent[Any]] | None]]:
@@ -136,6 +141,8 @@ def _collect_handoff_edges(
                 target = handoff_or_agent
             elif isinstance(handoff_or_agent, Handoff):
                 handoff = handoff_or_agent
+                if _is_disabled_handoff(handoff):
+                    continue
                 target_ref = handoff._agent_ref() if handoff._agent_ref is not None else None
                 if not isinstance(target_ref, Agent):
                     continue

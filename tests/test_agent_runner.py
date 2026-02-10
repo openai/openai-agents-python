@@ -2146,6 +2146,45 @@ async def test_run_rejects_server_conversation_with_global_remove_all_tools_filt
 
 
 @pytest.mark.asyncio
+async def test_run_allows_server_conversation_with_disabled_remove_all_tools_handoff():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[handoff(delegate, input_filter=remove_all_tools, is_enabled=False)],
+    )
+
+    result = await Runner.run(
+        triage,
+        input="test",
+        conversation_id="conv-test",
+    )
+
+    assert result.last_agent == triage
+
+
+@pytest.mark.asyncio
+async def test_run_allows_server_conversation_with_disabled_nested_handoff_history():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[handoff(delegate, nest_handoff_history=True, is_enabled=False)],
+    )
+
+    result = await Runner.run(
+        triage,
+        input="test",
+        conversation_id="conv-test",
+        run_config=RunConfig(nest_handoff_history=True),
+    )
+
+    assert result.last_agent == triage
+
+
+@pytest.mark.asyncio
 async def test_run_streamed_rejects_server_conversation_with_nested_handoff_history():
     model = FakeModel()
     delegate = Agent(name="delegate", model=model)
