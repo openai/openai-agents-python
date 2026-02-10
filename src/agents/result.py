@@ -480,7 +480,7 @@ class RunResultStreaming(RunResultBase):
         try:
             while True:
                 self._check_errors()
-                if self._stored_exception:
+                if self._stored_exception and self._event_queue.empty():
                     logger.debug("Breaking due to stored exception")
                     self.is_complete = True
                     break
