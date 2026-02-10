@@ -146,7 +146,7 @@ class MCPConfig(TypedDict):
     default_tool_error_function.
     """
 
-    prefix_tool_names_with_server_name: NotRequired[bool]
+    include_server_in_tool_names: NotRequired[bool]
     """If True, MCP tools are exposed as `<server_name>_<tool_name>` to avoid collisions across
     servers that publish the same tool names. Defaults to False.
     """
@@ -187,8 +187,8 @@ class AgentBase(Generic[TContext]):
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
         )
-        prefix_tool_names_with_server_name = self.mcp_config.get(
-            "prefix_tool_names_with_server_name", False
+        include_server_in_tool_names = self.mcp_config.get(
+            "include_server_in_tool_names", False
         )
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers,
@@ -196,7 +196,7 @@ class AgentBase(Generic[TContext]):
             run_context,
             self,
             failure_error_function=failure_error_function,
-            prefix_tool_names_with_server_name=prefix_tool_names_with_server_name,
+            include_server_in_tool_names=include_server_in_tool_names,
         )
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:

@@ -178,7 +178,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
-        prefix_tool_names_with_server_name: bool = False,
+        include_server_in_tool_names: bool = False,
     ) -> list[Tool]:
         """Get all function tools from a list of MCP servers."""
         tools = []
@@ -190,7 +190,7 @@ class MCPUtil:
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
-                prefix_tool_names_with_server_name=prefix_tool_names_with_server_name,
+                include_server_in_tool_names=include_server_in_tool_names,
             )
             server_tool_names = {tool.name for tool in server_tools}
             if len(server_tool_names & tool_names) > 0:
@@ -211,7 +211,7 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
-        prefix_tool_names_with_server_name: bool = False,
+        include_server_in_tool_names: bool = False,
     ) -> list[Tool]:
         """Get all function tools from a single MCP server."""
 
@@ -220,7 +220,7 @@ class MCPUtil:
             span.span_data.result = [tool.name for tool in tools]
 
         tool_name_prefix = (
-            cls._server_tool_name_prefix(server.name) if prefix_tool_names_with_server_name else ""
+            cls._server_tool_name_prefix(server.name) if include_server_in_tool_names else ""
         )
         return [
             cls.to_function_tool(

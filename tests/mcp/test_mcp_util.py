@@ -108,7 +108,7 @@ async def test_get_all_function_tools_can_prefix_with_server_name():
         name="test_agent",
         instructions="Test agent",
         mcp_servers=[server1, server2],
-        mcp_config={"prefix_tool_names_with_server_name": True},
+        mcp_config={"include_server_in_tool_names": True},
     )
 
     tools = await agent.get_mcp_tools(run_context)
@@ -151,7 +151,7 @@ async def test_get_all_function_tools_prefix_falls_back_for_empty_server_name_sl
         name="test_agent",
         instructions="Test agent",
         mcp_servers=[server],
-        mcp_config={"prefix_tool_names_with_server_name": True},
+        mcp_config={"include_server_in_tool_names": True},
     )
 
     tools = await agent.get_mcp_tools(run_context)
@@ -235,7 +235,7 @@ async def test_mcp_meta_resolver_uses_original_tool_name_with_prefixed_display_n
         name="test_agent",
         instructions="Test agent",
         mcp_servers=[server],
-        mcp_config={"prefix_tool_names_with_server_name": True},
+        mcp_config={"include_server_in_tool_names": True},
     )
 
     tools = await agent.get_mcp_tools(run_context)
