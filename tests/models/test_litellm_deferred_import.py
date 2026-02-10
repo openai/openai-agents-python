@@ -4,6 +4,7 @@ import builtins
 import importlib
 import sys
 import types as pytypes
+from typing import Any, cast
 
 import pytest
 
@@ -39,7 +40,8 @@ def test_litellm_import_is_deferred_until_module_usage(monkeypatch):
 def test_litellm_import_loader_caches_successful_import(monkeypatch):
     fake_litellm = pytypes.ModuleType("litellm")
     marker = object()
-    fake_litellm.marker = marker
+    fake_litellm_any = cast(Any, fake_litellm)
+    fake_litellm_any.marker = marker
 
     monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
     monkeypatch.delitem(sys.modules, "agents.extensions.models.litellm_model", raising=False)
@@ -47,6 +49,7 @@ def test_litellm_import_loader_caches_successful_import(monkeypatch):
     litellm_mod = importlib.import_module("agents.extensions.models.litellm_model")
     assert litellm_mod._litellm_module is None
 
-    assert litellm_mod.litellm.marker is marker
+    litellm_proxy = cast(Any, litellm_mod.litellm)
+    assert litellm_proxy.marker is marker
     assert litellm_mod._litellm_module is fake_litellm
-    assert litellm_mod.litellm.marker is marker
+    assert litellm_proxy.marker is marker
