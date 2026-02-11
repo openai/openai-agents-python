@@ -9,7 +9,6 @@ from .session import (
 )
 from .session_settings import SessionSettings
 from .sqlite_session import SQLiteSession
-from .tool_output_trimmer import ToolOutputTrimmer
 from .util import SessionInputCallback
 
 __all__ = [
@@ -18,7 +17,6 @@ __all__ = [
     "SessionInputCallback",
     "SessionSettings",
     "SQLiteSession",
-    "ToolOutputTrimmer",
     "OpenAIConversationsSession",
     "OpenAIResponsesCompactionSession",
     "OpenAIResponsesCompactionArgs",

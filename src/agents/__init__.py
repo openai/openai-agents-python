@@ -74,7 +74,6 @@ from .memory import (
     SessionABC,
     SessionSettings,
     SQLiteSession,
-    ToolOutputTrimmer,
     is_openai_responses_compaction_aware_session,
 )
 from .model_settings import ModelSettings
@@ -317,7 +316,6 @@ __all__ = [
     "OpenAIResponsesCompactionArgs",
     "OpenAIResponsesCompactionAwareSession",
     "is_openai_responses_compaction_aware_session",
-    "ToolOutputTrimmer",
     "CompactionItem",
     "AgentHookContext",
     "RunContextWrapper",

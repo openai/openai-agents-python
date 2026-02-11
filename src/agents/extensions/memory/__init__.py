@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
 
+from .tool_output_trimmer import ToolOutputTrimmer
+
 __all__: list[str] = [
     "AdvancedSQLiteSession",
     "AsyncSQLiteSession",
@@ -31,6 +33,7 @@ __all__: list[str] = [
     "EncryptedSession",
     "RedisSession",
     "SQLAlchemySession",
+    "ToolOutputTrimmer",
 ]
 
 
