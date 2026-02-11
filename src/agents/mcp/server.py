@@ -651,6 +651,21 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
                 raise
             except BaseExceptionGroup as eg:
+                def contains_cancelled_error(exc: BaseException) -> bool:
+                    if isinstance(exc, asyncio.CancelledError):
+                        return True
+                    if isinstance(exc, BaseExceptionGroup):
+                        return any(contains_cancelled_error(inner) for inner in exc.exceptions)
+                    return False
+
+                if contains_cancelled_error(eg):
+                    cleanup_cancelled = True
+                    logger.debug(
+                        "Cleanup cancelled for MCP server "
+                        f"'{self.name}' with grouped exception: {eg}"
+                    )
+                    raise
+
                 # Extract HTTP errors from ExceptionGroup raised during cleanup
                 # This happens when background tasks fail (e.g., HTTP errors)
                 http_error = None

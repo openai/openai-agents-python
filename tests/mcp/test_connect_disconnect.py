@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -7,6 +8,11 @@ from mcp.types import ListToolsResult, Tool as MCPTool
 from agents.mcp import MCPServerStdio
 
 from .helpers import DummyStreamsContextManager, tee
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # pyright: ignore[reportMissingImports]
+else:
+    from builtins import BaseExceptionGroup
 
 
 class CountingStreamsContextManager:
@@ -29,6 +35,19 @@ class CancelThenCloseExitStack:
         self.close_calls += 1
         if self.close_calls == 1:
             raise asyncio.CancelledError("first cleanup interrupted")
+
+
+class CancelGroupThenCloseExitStack:
+    def __init__(self):
+        self.close_calls = 0
+
+    async def aclose(self):
+        self.close_calls += 1
+        if self.close_calls == 1:
+            raise BaseExceptionGroup(
+                "grouped cancellation during cleanup",
+                [asyncio.CancelledError("grouped cleanup interruption")],
+            )
 
 
 @pytest.mark.asyncio
@@ -137,6 +156,35 @@ async def test_cleanup_cancellation_preserves_exit_stack_for_retry():
     server.server_initialize_result = object()  # type: ignore[assignment]
 
     with pytest.raises(asyncio.CancelledError):
+        await server.cleanup()
+
+    assert id(server.exit_stack) == id(cancelled_exit_stack)
+    assert server.session is not None
+    assert server.server_initialize_result is not None
+
+    await server.cleanup()
+
+    assert cancelled_exit_stack.close_calls == 2
+    assert id(server.exit_stack) != id(cancelled_exit_stack)
+    assert server.session is None
+    assert server.server_initialize_result is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_grouped_cancellation_preserves_exit_stack_for_retry():
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_tools_list=True,
+    )
+    cancelled_exit_stack = CancelGroupThenCloseExitStack()
+
+    server.exit_stack = cancelled_exit_stack  # type: ignore[assignment]
+    server.session = object()  # type: ignore[assignment]
+    server.server_initialize_result = object()  # type: ignore[assignment]
+
+    with pytest.raises(BaseExceptionGroup):
         await server.cleanup()
 
     assert id(server.exit_stack) == id(cancelled_exit_stack)
