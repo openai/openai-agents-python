@@ -11,6 +11,7 @@ from openai.types.responses import (
     Response,
     ResponseComputerToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseInputItemParam,
@@ -253,6 +254,7 @@ ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,
     ComputerCallOutput,
     LocalShellCallOutput,
+    ResponseFunctionShellToolCallOutput,
     dict[str, Any],
 ]
 

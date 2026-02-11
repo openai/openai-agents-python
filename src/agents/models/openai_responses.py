@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union, cast, overload
@@ -37,6 +37,7 @@ from ..tool import (
     ImageGenerationTool,
     LocalShellTool,
     ShellTool,
+    ShellToolEnvironment,
     Tool,
     WebSearchTool,
 )
@@ -412,6 +413,19 @@ class ConvertedTools:
 
 class Converter:
     @classmethod
+    def _convert_shell_environment(cls, environment: ShellToolEnvironment | None) -> dict[str, Any]:
+        """Convert shell environment settings to OpenAI payload shape."""
+        if environment is None:
+            return {"type": "local"}
+        if not isinstance(environment, Mapping):
+            raise UserError("Shell environment must be a mapping.")
+
+        payload = dict(environment)
+        if "type" not in payload:
+            payload["type"] = "local"
+        return payload
+
+    @classmethod
     def convert_tool_choice(
         cls, tool_choice: Literal["auto", "required", "none"] | str | MCPToolChoice | None
     ) -> response_create_params.ToolChoice | Omit:
@@ -561,7 +575,13 @@ class Converter:
             converted_tool = cast(ToolParam, {"type": "apply_patch"})
             includes = None
         elif isinstance(tool, ShellTool):
-            converted_tool = cast(ToolParam, {"type": "shell"})
+            converted_tool = cast(
+                ToolParam,
+                {
+                    "type": "shell",
+                    "environment": cls._convert_shell_environment(tool.environment),
+                },
+            )
             includes = None
         elif isinstance(tool, ImageGenerationTool):
             converted_tool = tool.tool_config

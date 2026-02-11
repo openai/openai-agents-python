@@ -176,6 +176,77 @@ async def test_plaintext_agent_with_tool_call_is_run_again():
 
 
 @pytest.mark.asyncio
+async def test_plaintext_agent_hosted_shell_items_without_message_runs_again():
+    shell_tool = ShellTool(environment={"type": "container_auto"})
+    agent = Agent(name="test", tools=[shell_tool])
+    response = ModelResponse(
+        output=[
+            make_shell_call(
+                "call_shell_hosted", id_value="shell_call_hosted", commands=["echo hi"]
+            ),
+            cast(
+                Any,
+                {
+                    "type": "shell_call_output",
+                    "id": "sh_out_hosted",
+                    "call_id": "call_shell_hosted",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 2
+    assert isinstance(result.generated_items[0], ToolCallItem)
+    assert isinstance(result.generated_items[1], ToolCallOutputItem)
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
+async def test_plaintext_agent_shell_output_only_without_message_runs_again():
+    agent = Agent(name="test")
+    response = ModelResponse(
+        output=[
+            cast(
+                Any,
+                {
+                    "type": "shell_call_output",
+                    "id": "sh_out_only",
+                    "call_id": "call_shell_only",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "hi\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+        ],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    result = await get_execute_result(agent, response)
+
+    assert len(result.generated_items) == 1
+    assert isinstance(result.generated_items[0], ToolCallOutputItem)
+    assert isinstance(result.next_step, NextStepRunAgain)
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls():
     agent = Agent(
         name="test",

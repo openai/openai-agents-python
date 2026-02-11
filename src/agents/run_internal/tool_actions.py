@@ -284,7 +284,10 @@ class ShellAction:
         )
 
         try:
-            executor_result = call.shell_tool.executor(request)
+            executor = call.shell_tool.executor
+            if executor is None:
+                raise ModelBehaviorError("Shell tool has no local executor configured.")
+            executor_result = executor(request)
             result = (
                 await executor_result if inspect.isawaitable(executor_result) else executor_result
             )

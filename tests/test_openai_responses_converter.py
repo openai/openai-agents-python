@@ -23,6 +23,8 @@ We test the following aspects:
   one `ComputerTool`.
 """
 
+from typing import Any, cast
+
 import pytest
 from openai import omit
 from pydantic import BaseModel
@@ -34,6 +36,7 @@ from agents import (
     ComputerTool,
     FileSearchTool,
     Handoff,
+    ShellTool,
     Tool,
     UserError,
     WebSearchTool,
@@ -185,6 +188,127 @@ def test_convert_tools_basic_types_and_includes():
     # Only one computer tool should be allowed.
     with pytest.raises(UserError):
         Converter.convert_tools(tools=[comp_tool, comp_tool], handoffs=[])
+
+
+def test_convert_tools_shell_local_environment() -> None:
+    shell_tool = ShellTool(executor=lambda request: "ok")
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [{"type": "shell", "environment": {"type": "local"}}]
+    assert converted.includes == []
+
+
+def test_convert_tools_shell_container_reference_environment() -> None:
+    shell_tool = ShellTool(environment={"type": "container_reference", "container_id": "cntr_123"})
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_reference",
+                "container_id": "cntr_123",
+            },
+        }
+    ]
+
+
+def test_convert_tools_shell_container_auto_environment() -> None:
+    shell_tool = ShellTool(
+        environment={
+            "type": "container_auto",
+            "file_ids": ["file-123"],
+            "memory_limit": "1g",
+            "network_policy": {
+                "type": "allowlist",
+                "allowed_domains": ["example.com"],
+                "domain_secrets": [{"domain": "example.com", "name": "TOKEN", "value": "secret"}],
+            },
+            "skills": [
+                {"type": "skill_reference", "skill_id": "skill_123", "version": "latest"},
+                {
+                    "type": "inline",
+                    "name": "csv-workbench",
+                    "description": "Analyze CSV files.",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/zip",
+                        "data": "ZmFrZS16aXA=",
+                    },
+                },
+            ],
+        }
+    )
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_auto",
+                "file_ids": ["file-123"],
+                "memory_limit": "1g",
+                "network_policy": {
+                    "type": "allowlist",
+                    "allowed_domains": ["example.com"],
+                    "domain_secrets": [
+                        {"domain": "example.com", "name": "TOKEN", "value": "secret"}
+                    ],
+                },
+                "skills": [
+                    {
+                        "type": "skill_reference",
+                        "skill_id": "skill_123",
+                        "version": "latest",
+                    },
+                    {
+                        "type": "inline",
+                        "name": "csv-workbench",
+                        "description": "Analyze CSV files.",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/zip",
+                            "data": "ZmFrZS16aXA=",
+                        },
+                    },
+                ],
+            },
+        }
+    ]
+
+
+def test_convert_tools_shell_environment_passes_through_unknown_fields() -> None:
+    shell_tool = ShellTool(
+        environment=cast(
+            Any,
+            {
+                "type": "container_auto",
+                "network_policy": {
+                    "type": "future_mode",
+                    "allowed_domains": ["example.com"],
+                    "some_new_field": "keep-me",
+                },
+            },
+        )
+    )
+
+    converted = Converter.convert_tools(tools=[shell_tool], handoffs=[])
+    assert converted.tools == [
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_auto",
+                "network_policy": {
+                    "type": "future_mode",
+                    "allowed_domains": ["example.com"],
+                    "some_new_field": "keep-me",
+                },
+            },
+        }
+    ]
 
 
 def test_convert_tools_includes_handoffs():

@@ -10,6 +10,7 @@ from openai.types.responses import (
     ResponseComputerToolCall,
     ResponseCustomToolCall,
     ResponseFileSearchToolCall,
+    ResponseFunctionShellToolCallOutput,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputMessage,
@@ -601,33 +602,37 @@ async def execute_tools_and_side_effects(
     )
 
     if not processed_response.has_tools_or_approvals_to_run():
-        if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
-            final_output = output_schema.validate_json(potential_final_output_text)
-            return await execute_final_output_call(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=final_output,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                tool_input_guardrail_results=tool_input_guardrail_results,
-                tool_output_guardrail_results=tool_output_guardrail_results,
-            )
-        if not output_schema or output_schema.is_plain_text():
-            return await execute_final_output_call(
-                agent=agent,
-                original_input=original_input,
-                new_response=new_response,
-                pre_step_items=pre_step_items,
-                new_step_items=new_step_items,
-                final_output=potential_final_output_text or "",
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                tool_input_guardrail_results=tool_input_guardrail_results,
-                tool_output_guardrail_results=tool_output_guardrail_results,
-            )
+        has_tool_activity_without_message = potential_final_output_text is None and bool(
+            processed_response.tools_used
+        )
+        if not has_tool_activity_without_message:
+            if output_schema and not output_schema.is_plain_text() and potential_final_output_text:
+                final_output = output_schema.validate_json(potential_final_output_text)
+                return await execute_final_output_call(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=final_output,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
+            if not output_schema or output_schema.is_plain_text():
+                return await execute_final_output_call(
+                    agent=agent,
+                    original_input=original_input,
+                    new_response=new_response,
+                    pre_step_items=pre_step_items,
+                    new_step_items=new_step_items,
+                    final_output=potential_final_output_text or "",
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    tool_input_guardrail_results=tool_input_guardrail_results,
+                    tool_output_guardrail_results=tool_output_guardrail_results,
+                )
 
     return SingleStepResult(
         original_input=original_input,
@@ -1234,7 +1239,22 @@ def process_model_response(
             output.__class__.__name__ if hasattr(output, "__class__") else type(output),
         )
         if output_type == "shell_call":
-            items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+            if isinstance(output, dict):
+                shell_call_raw = dict(output)
+            elif hasattr(output, "model_dump"):
+                shell_call_raw = cast(Any, output).model_dump(exclude_unset=True)
+            else:
+                shell_call_raw = {
+                    "type": "shell_call",
+                    "id": get_mapping_or_attr(output, "id"),
+                    "call_id": get_mapping_or_attr(output, "call_id"),
+                    "status": get_mapping_or_attr(output, "status"),
+                    "action": get_mapping_or_attr(output, "action"),
+                    "environment": get_mapping_or_attr(output, "environment"),
+                    "created_by": get_mapping_or_attr(output, "created_by"),
+                }
+            shell_call_raw.pop("created_by", None)
+            items.append(ToolCallItem(raw_item=cast(Any, shell_call_raw), agent=agent))
             if not shell_tool:
                 tools_used.append("shell")
                 _error_tracing.attach_error_to_current_span(
@@ -1245,19 +1265,71 @@ def process_model_response(
                 )
                 raise ModelBehaviorError("Model produced shell call without a shell tool.")
             tools_used.append(shell_tool.name)
+            shell_environment = shell_tool.environment
+            if shell_environment is None or shell_environment["type"] != "local":
+                logger.debug(
+                    "Skipping local shell execution for hosted shell tool %s", shell_tool.name
+                )
+                continue
+            if shell_tool.executor is None:
+                _error_tracing.attach_error_to_current_span(
+                    SpanError(
+                        message="Local shell executor not found",
+                        data={},
+                    )
+                )
+                raise ModelBehaviorError(
+                    "Model produced local shell call without a local shell executor."
+                )
             call_identifier = get_mapping_or_attr(output, "call_id")
             logger.debug("Queuing shell_call %s", call_identifier)
             shell_calls.append(ToolRunShellCall(tool_call=output, shell_tool=shell_tool))
             continue
+        if output_type == "shell_call_output" and isinstance(
+            output, (dict, ResponseFunctionShellToolCallOutput)
+        ):
+            tools_used.append(shell_tool.name if shell_tool else "shell")
+            if isinstance(output, dict):
+                shell_output_raw = dict(output)
+            else:
+                shell_output_raw = output.model_dump(exclude_unset=True)
+            shell_output_raw.pop("created_by", None)
+            shell_outputs = shell_output_raw.get("output")
+            if isinstance(shell_outputs, list):
+                for shell_output in shell_outputs:
+                    if isinstance(shell_output, dict):
+                        shell_output.pop("created_by", None)
+            items.append(
+                ToolCallOutputItem(
+                    raw_item=cast(Any, shell_output_raw),
+                    output=shell_output_raw.get("output"),
+                    agent=agent,
+                )
+            )
+            continue
         if output_type == "apply_patch_call":
-            items.append(ToolCallItem(raw_item=cast(Any, output), agent=agent))
+            if isinstance(output, dict):
+                apply_patch_call_raw = dict(output)
+            elif hasattr(output, "model_dump"):
+                apply_patch_call_raw = cast(Any, output).model_dump(exclude_unset=True)
+            else:
+                apply_patch_call_raw = {
+                    "type": "apply_patch_call",
+                    "id": get_mapping_or_attr(output, "id"),
+                    "call_id": get_mapping_or_attr(output, "call_id"),
+                    "status": get_mapping_or_attr(output, "status"),
+                    "operation": get_mapping_or_attr(output, "operation"),
+                    "created_by": get_mapping_or_attr(output, "created_by"),
+                }
+            apply_patch_call_raw.pop("created_by", None)
+            items.append(ToolCallItem(raw_item=cast(Any, apply_patch_call_raw), agent=agent))
             if apply_patch_tool:
                 tools_used.append(apply_patch_tool.name)
-                call_identifier = get_mapping_or_attr(output, "call_id")
+                call_identifier = get_mapping_or_attr(apply_patch_call_raw, "call_id")
                 logger.debug("Queuing apply_patch_call %s", call_identifier)
                 apply_patch_calls.append(
                     ToolRunApplyPatchCall(
-                        tool_call=output,
+                        tool_call=apply_patch_call_raw,
                         apply_patch_tool=apply_patch_tool,
                     )
                 )

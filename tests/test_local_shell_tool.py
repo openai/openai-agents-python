@@ -144,6 +144,7 @@ async def test_runner_executes_local_shell_calls() -> None:
 
     local_shell_output = items[2]
     assert isinstance(local_shell_output, ToolCallOutputItem)
+    assert isinstance(local_shell_output.raw_item, dict)
     assert local_shell_output.raw_item.get("type") == "local_shell_call_output"
     assert local_shell_output.output == "shell result"
 
