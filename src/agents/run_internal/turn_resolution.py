@@ -602,7 +602,7 @@ async def execute_tools_and_side_effects(
     )
 
     if not processed_response.has_tools_or_approvals_to_run():
-        has_tool_activity_without_message = potential_final_output_text is None and bool(
+        has_tool_activity_without_message = not message_items and bool(
             processed_response.tools_used
         )
         if not has_tool_activity_without_message:
