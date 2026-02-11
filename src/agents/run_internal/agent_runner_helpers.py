@@ -145,6 +145,8 @@ def _collect_handoff_edges(
                     continue
                 target_ref = handoff._agent_ref() if handoff._agent_ref is not None else None
                 if not isinstance(target_ref, Agent):
+                    # Still validate handoff-level settings even when target resolution is deferred.
+                    edges.append((current, handoff))
                     continue
                 target = target_ref
             else:

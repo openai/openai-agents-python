@@ -2131,6 +2131,26 @@ async def test_run_rejects_server_conversation_with_remove_all_tools_filter():
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_server_conversation_with_unresolved_remove_all_tools_handoff():
+    model = FakeModel()
+    delegate = Agent(name="delegate", model=model)
+    unresolved_handoff = handoff(delegate, input_filter=remove_all_tools)
+    unresolved_handoff._agent_ref = None
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[unresolved_handoff],
+    )
+
+    with pytest.raises(UserError, match="Server-managed conversation"):
+        await Runner.run(
+            triage,
+            input="test",
+            conversation_id="conv-test",
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_rejects_server_conversation_with_global_remove_all_tools_filter():
     model = FakeModel()
     delegate = Agent(name="delegate", model=model)
