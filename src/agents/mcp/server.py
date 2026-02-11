@@ -651,6 +651,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
                 raise
             except BaseExceptionGroup as eg:
+
                 def contains_cancelled_error(exc: BaseException) -> bool:
                     if isinstance(exc, asyncio.CancelledError):
                         return True
