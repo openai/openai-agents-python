@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,6 +19,16 @@ class CountingStreamsContextManager:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self.counter["exit"] += 1
+
+
+class CancelThenCloseExitStack:
+    def __init__(self):
+        self.close_calls = 0
+
+    async def aclose(self):
+        self.close_calls += 1
+        if self.close_calls == 1:
+            raise asyncio.CancelledError("first cleanup interrupted")
 
 
 @pytest.mark.asyncio
@@ -109,3 +120,32 @@ async def test_cleanup_resets_exit_stack_and_reconnects(
     await server.connect()
     await server.cleanup()
     assert counter == {"enter": 2, "exit": 2}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancellation_preserves_exit_stack_for_retry():
+    server = MCPServerStdio(
+        params={
+            "command": tee,
+        },
+        cache_tools_list=True,
+    )
+    cancelled_exit_stack = CancelThenCloseExitStack()
+
+    server.exit_stack = cancelled_exit_stack  # type: ignore[assignment]
+    server.session = object()  # type: ignore[assignment]
+    server.server_initialize_result = object()  # type: ignore[assignment]
+
+    with pytest.raises(asyncio.CancelledError):
+        await server.cleanup()
+
+    assert id(server.exit_stack) == id(cancelled_exit_stack)
+    assert server.session is not None
+    assert server.server_initialize_result is not None
+
+    await server.cleanup()
+
+    assert cancelled_exit_stack.close_calls == 2
+    assert id(server.exit_stack) != id(cancelled_exit_stack)
+    assert server.session is None
+    assert server.server_initialize_result is None

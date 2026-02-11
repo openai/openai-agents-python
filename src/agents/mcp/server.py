@@ -638,6 +638,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def cleanup(self):
         """Cleanup the server."""
         async with self._cleanup_lock:
+            cleanup_cancelled = False
             # Only raise HTTP errors if we're cleaning up after a failed connection.
             # During normal teardown (via __aexit__), log but don't raise to avoid
             # masking the original exception.
@@ -646,6 +647,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             try:
                 await self.exit_stack.aclose()
             except asyncio.CancelledError as e:
+                cleanup_cancelled = True
                 logger.debug(f"Cleanup cancelled for MCP server '{self.name}': {e}")
                 raise
             except BaseExceptionGroup as eg:
@@ -709,12 +711,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 else:
                     logger.error(f"Error cleaning up server: {e}")
             finally:
-                # Always reset the exit stack so we don't retain callbacks/references from the
-                # previous connection. This keeps teardown deterministic and allows reconnecting
-                # with a fresh stack even if cleanup encountered recoverable errors.
-                self.exit_stack = AsyncExitStack()
-                self.session = None
-                self.server_initialize_result = None
+                if not cleanup_cancelled:
+                    # Reset stack state only after a completed cleanup. If cleanup is cancelled,
+                    # keep the existing stack so a follow-up cleanup can finish unwinding it.
+                    self.exit_stack = AsyncExitStack()
+                    self.session = None
+                    self.server_initialize_result = None
 
 
 class MCPServerStdioParams(TypedDict):
