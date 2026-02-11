@@ -554,3 +554,15 @@ def test_truncate_string_for_json_limit_returns_empty_when_suffix_too_large():
     )
     assert exporter._truncate_string_for_json_limit("x" * 100, max_bytes) == ""
     exporter.close()
+
+
+def test_truncate_string_for_json_limit_handles_escape_heavy_input():
+    exporter = BackendSpanExporter(api_key="test_key")
+    value = ('\\"' * 40000) + "tail"
+    max_bytes = exporter._OPENAI_TRACING_MAX_FIELD_BYTES
+
+    truncated = exporter._truncate_string_for_json_limit(value, max_bytes)
+
+    assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
+    assert exporter._value_json_size_bytes(truncated) <= max_bytes
+    exporter.close()

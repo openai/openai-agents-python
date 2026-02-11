@@ -229,22 +229,28 @@ class BackendSpanExporter(TracingExporter):
 
     def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
         suffix = self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
-        if self._value_json_size_bytes(value) <= max_bytes:
+        value_size = self._value_json_size_bytes(value)
+        if value_size <= max_bytes:
             return value
-        if self._value_json_size_bytes(suffix) > max_bytes:
+        suffix_size = self._value_json_size_bytes(suffix)
+        if suffix_size > max_bytes:
             return ""
+        if max_bytes <= suffix_size:
+            return suffix if suffix_size == max_bytes else ""
 
-        low = 0
-        high = len(value)
-        best = suffix
-        while low <= high:
-            mid = (low + high) // 2
-            candidate = value[:mid] + suffix
-            if self._value_json_size_bytes(candidate) <= max_bytes:
-                best = candidate
-                low = mid + 1
-            else:
-                high = mid - 1
+        # Use a proportional estimate to avoid repeatedly serializing dozens of candidates.
+        budget_without_suffix = max_bytes - suffix_size
+        estimated_chars = int(len(value) * budget_without_suffix / max(value_size, 1))
+        estimated_chars = max(0, min(len(value), estimated_chars))
+
+        best = value[:estimated_chars] + suffix
+        best_size = self._value_json_size_bytes(best)
+        while best_size > max_bytes and estimated_chars > 0:
+            overflow_ratio = (best_size - max_bytes) / max(best_size, 1)
+            trim_chars = max(1, int(estimated_chars * overflow_ratio) + 1)
+            estimated_chars = max(0, estimated_chars - trim_chars)
+            best = value[:estimated_chars] + suffix
+            best_size = self._value_json_size_bytes(best)
         return best
 
     def _truncate_span_field_value(self, value: Any) -> Any:
