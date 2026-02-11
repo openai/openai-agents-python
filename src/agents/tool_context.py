@@ -100,6 +100,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call_id: str,
         tool_call: ResponseFunctionToolCall | None = None,
         agent: AgentBase[Any] | None = None,
+        *,
         run_config: RunConfig | None = None,
     ) -> ToolContext:
         """
