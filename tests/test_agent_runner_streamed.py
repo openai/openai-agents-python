@@ -1352,6 +1352,30 @@ async def test_streaming_max_turns_emits_pending_tool_output_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_non_max_turns_exception_does_not_emit_queued_events() -> None:
+    model, agent = make_model_and_agent(name="test")
+    model.set_next_output([get_text_message("done")])
+
+    result = Runner.run_streamed(agent, input="hello")
+    result.cancel()
+    await asyncio.sleep(0)
+
+    while not result._event_queue.empty():
+        result._event_queue.get_nowait()
+        result._event_queue.task_done()
+
+    result._stored_exception = RuntimeError("guardrail-triggered")
+    result._event_queue.put_nowait(AgentUpdatedStreamEvent(new_agent=agent))
+
+    streamed_events: list[StreamEvent] = []
+    with pytest.raises(RuntimeError, match="guardrail-triggered"):
+        async for event in result.stream_events():
+            streamed_events.append(event)
+
+    assert streamed_events == []
+
+
+@pytest.mark.asyncio
 async def test_streaming_hitl_server_conversation_tracker_priming():
     """Test that resuming streaming run from RunState primes server conversation tracker."""
     model, agent = make_model_and_agent(name="test")
