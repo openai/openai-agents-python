@@ -271,7 +271,9 @@ class OpenAIResponsesModel(Model):
         should_omit_model = prompt is not None and not self._model_is_explicit
         model_param: str | ChatModel | Omit = self.model if not should_omit_model else omit
         should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
-        should_omit_tool_choice = should_omit_tools and tool_choice is not omit
+        # In prompt-managed tool flows without local tools payload, omit only named tool choices
+        # that must match an explicit tool list. Keep control literals like "none"/"required".
+        should_omit_tool_choice = should_omit_tools and isinstance(tool_choice, dict)
         tools_param: list[ToolParam] | Omit = (
             converted_tools_payload if not should_omit_tools else omit
         )
