@@ -600,6 +600,7 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         assert session is not None
 
         try:
+            self._validate_required_parameters(tool_name=tool_name, arguments=arguments)
             if meta is None:
                 return await self._run_with_retries(lambda: session.call_tool(tool_name, arguments))
             return await self._run_with_retries(
@@ -616,6 +617,40 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 f"Failed to call tool '{tool_name}' on MCP server '{self.name}': Connection lost. "
                 f"The server may have disconnected."
             ) from e
+
+    def _validate_required_parameters(
+        self, tool_name: str, arguments: dict[str, Any] | None
+    ) -> None:
+        """Validate required tool parameters from cached MCP tool schemas before invocation."""
+        if self._tools_list is None:
+            return
+
+        tool = next((item for item in self._tools_list if item.name == tool_name), None)
+        if tool is None or not isinstance(tool.inputSchema, dict):
+            return
+
+        raw_required = tool.inputSchema.get("required")
+        if not isinstance(raw_required, list) or not raw_required:
+            return
+
+        if arguments is None:
+            arguments_to_validate: dict[str, Any] = {}
+        elif isinstance(arguments, dict):
+            arguments_to_validate = arguments
+        else:
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                "arguments must be an object."
+            )
+
+        required_names = [name for name in raw_required if isinstance(name, str)]
+        missing = [name for name in required_names if name not in arguments_to_validate]
+        if missing:
+            missing_text = ", ".join(sorted(missing))
+            raise UserError(
+                f"Failed to call tool '{tool_name}' on MCP server '{self.name}': "
+                f"missing required parameters: {missing_text}"
+            )
 
     async def list_prompts(
         self,

@@ -821,6 +821,7 @@ async def execute_function_tool_calls(
                 tool_call.call_id,
                 tool_call=tool_call,
                 agent=agent,
+                run_config=config,
             )
             agent_hooks = agent.hooks
             if config.trace_include_sensitive_data:

@@ -1043,7 +1043,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 input_format_source = model_settings.get(
                     "input_audio_format", DEFAULT_MODEL_SETTINGS.get("input_audio_format")
                 )
-        audio_input_args["format"] = to_realtime_audio_format(input_format_source)
+        input_format = to_realtime_audio_format(input_format_source)
+        if input_format is not None:
+            audio_input_args["format"] = input_format
 
         if "noise_reduction" in input_audio_config:
             audio_input_args["noise_reduction"] = input_audio_config.get("noise_reduction")
@@ -1085,7 +1087,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 output_format_source = model_settings.get(
                     "output_audio_format", DEFAULT_MODEL_SETTINGS.get("output_audio_format")
                 )
-        audio_output_args["format"] = to_realtime_audio_format(output_format_source)
+        output_format = to_realtime_audio_format(output_format_source)
+        if output_format is not None:
+            audio_output_args["format"] = output_format
 
         if "speed" in output_audio_config:
             audio_output_args["speed"] = output_audio_config.get("speed")

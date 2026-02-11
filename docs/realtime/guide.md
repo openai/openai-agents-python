@@ -199,3 +199,17 @@ This gives you direct access to the [`RealtimeModel`][agents.realtime.model.Real
 ## Examples
 
 For complete working examples, check out the [examples/realtime directory](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) which includes demos with and without UI components.
+
+## Azure OpenAI endpoint format
+
+When connecting to Azure OpenAI, use the GA Realtime endpoint format and pass credentials via
+headers in `model_config`:
+
+```python
+model_config = {
+    "url": "wss://<your-resource>.openai.azure.com/openai/v1/realtime?model=<deployment-name>",
+    "headers": {"api-key": "<your-azure-api-key>"},
+}
+```
+
+For token-based auth, use `{"authorization": f"Bearer {token}"}` in `headers`.

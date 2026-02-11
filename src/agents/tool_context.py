@@ -11,6 +11,7 @@ from .usage import Usage
 if TYPE_CHECKING:
     from .agent import AgentBase
     from .items import TResponseInputItem
+    from .run_config import RunConfig
     from .run_context import _ApprovalRecord
 
 
@@ -48,6 +49,9 @@ class ToolContext(RunContextWrapper[TContext]):
     agent: AgentBase[Any] | None = None
     """The active agent for this tool call, when available."""
 
+    run_config: RunConfig | None = None
+    """The active run config for this tool call, when available."""
+
     def __init__(
         self,
         context: TContext,
@@ -58,6 +62,7 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call: ResponseFunctionToolCall | None = None,
         *,
         agent: AgentBase[Any] | None = None,
+        run_config: RunConfig | None = None,
         turn_input: list[TResponseInputItem] | None = None,
         _approvals: dict[str, _ApprovalRecord] | None = None,
         tool_input: Any | None = None,
@@ -86,6 +91,7 @@ class ToolContext(RunContextWrapper[TContext]):
         )
         self.tool_call = tool_call
         self.agent = agent
+        self.run_config = run_config
 
     @classmethod
     def from_agent_context(
@@ -94,6 +100,8 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_call_id: str,
         tool_call: ResponseFunctionToolCall | None = None,
         agent: AgentBase[Any] | None = None,
+        *,
+        run_config: RunConfig | None = None,
     ) -> ToolContext:
         """
         Create a ToolContext from a RunContextWrapper.
@@ -109,6 +117,9 @@ class ToolContext(RunContextWrapper[TContext]):
         tool_agent = agent
         if tool_agent is None and isinstance(context, ToolContext):
             tool_agent = context.agent
+        tool_run_config = run_config
+        if tool_run_config is None and isinstance(context, ToolContext):
+            tool_run_config = context.run_config
 
         tool_context = cls(
             tool_name=tool_name,
@@ -116,6 +127,7 @@ class ToolContext(RunContextWrapper[TContext]):
             tool_arguments=tool_args,
             tool_call=tool_call,
             agent=tool_agent,
+            run_config=tool_run_config,
             **base_values,
         )
         return tool_context

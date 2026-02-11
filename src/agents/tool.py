@@ -12,6 +12,7 @@ from typing import (
     Callable,
     Generic,
     Literal,
+    Optional,
     Protocol,
     TypeVar,
     Union,
@@ -765,6 +766,7 @@ def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -
 
 
 ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
+_UNSET_FAILURE_ERROR_FUNCTION = object()
 
 
 @overload
@@ -813,7 +815,7 @@ def function_tool(
     description_override: str | None = None,
     docstring_style: DocstringStyle | None = None,
     use_docstring_info: bool = True,
-    failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+    failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
     strict_mode: bool = True,
     is_enabled: bool | Callable[[RunContextWrapper[Any], AgentBase], MaybeAwaitable[bool]] = True,
     needs_approval: bool
@@ -923,10 +925,18 @@ def function_tool(
             try:
                 return await _on_invoke_tool_impl(ctx, input)
             except Exception as e:
-                if failure_error_function is None:
+                resolved_failure_error_function: ToolErrorFunction | None
+                if failure_error_function is _UNSET_FAILURE_ERROR_FUNCTION:
+                    resolved_failure_error_function = default_tool_error_function
+                else:
+                    resolved_failure_error_function = cast(
+                        Optional[ToolErrorFunction], failure_error_function
+                    )
+
+                if resolved_failure_error_function is None:
                     raise
 
-                result = failure_error_function(ctx, e)
+                result = resolved_failure_error_function(ctx, e)
                 if inspect.isawaitable(result):
                     return await result
 
