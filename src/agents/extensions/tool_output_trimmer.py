@@ -8,7 +8,7 @@ bulky tool outputs from older turns while keeping recent turns at full fidelity.
 Usage::
 
     from agents import RunConfig
-    from agents.extensions.memory import ToolOutputTrimmer
+    from agents.extensions import ToolOutputTrimmer
 
     config = RunConfig(
         call_model_input_filter=ToolOutputTrimmer(
@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ...run_config import CallModelData, ModelInputData
+    from ..run_config import CallModelData, ModelInputData
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ class ToolOutputTrimmer:
         from old turns. Does NOT mutate the original items — creates shallow copies when
         needed.
         """
-        from ...run_config import ModelInputData as _ModelInputData
+        from ..run_config import ModelInputData as _ModelInputData
 
         model_data = data.model_data
         items = model_data.input

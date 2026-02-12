@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agents.extensions.memory.tool_output_trimmer import ToolOutputTrimmer
+from agents.extensions.tool_output_trimmer import ToolOutputTrimmer
 from agents.run_config import CallModelData, ModelInputData
 
 # ---------------------------------------------------------------------------
