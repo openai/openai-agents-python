@@ -265,6 +265,7 @@ class StreamedAudioResult:
 
     async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
         """Stream the events and audio data as they're generated."""
+        saw_session_end = False
         while True:
             try:
                 event = await self._queue.get()
@@ -278,7 +279,17 @@ class StreamedAudioResult:
                 break
             yield event
             if event.type == "voice_stream_event_lifecycle" and event.event == "session_ended":
+                saw_session_end = True
                 break
+
+        # On the normal completion path, let the producer task finish gracefully so any active
+        # trace context can emit `trace_end` before we run cleanup.
+        if (
+            saw_session_end
+            and self.text_generation_task is not None
+            and not self.text_generation_task.done()
+        ):
+            await asyncio.shield(self.text_generation_task)
 
         self._check_errors()
         self._cleanup_tasks()

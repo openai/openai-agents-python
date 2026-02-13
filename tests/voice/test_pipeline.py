@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 import numpy.typing as npt
 import pytest
+
+from tests.testing_processor import fetch_events
 
 try:
     from agents.voice import AudioInput, TTSModelSettings, VoicePipeline, VoicePipelineConfig
@@ -177,3 +181,71 @@ async def test_voicepipeline_transform_data() -> None:
         "session_ended",
     ]
     await fake_tts.verify_audio("out_1", audio_chunks[0], dtype=np.int16)
+
+
+class _BlockingWorkflow(FakeWorkflow):
+    def __init__(self, gate: asyncio.Event):
+        super().__init__()
+        self._gate = gate
+
+    async def run(self, _: str):
+        await self._gate.wait()
+        yield "out_1"
+
+
+class _OnStartYieldThenFailWorkflow(FakeWorkflow):
+    async def on_start(self):
+        yield "intro"
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_trace_not_finished_before_single_turn_completes() -> None:
+    fake_stt = FakeSTT(["first"])
+    fake_tts = FakeTTS()
+    gate = asyncio.Event()
+    workflow = _BlockingWorkflow(gate)
+    config = VoicePipelineConfig(tts_settings=TTSModelSettings(buffer_size=1))
+    pipeline = VoicePipeline(
+        workflow=workflow, stt_model=fake_stt, tts_model=fake_tts, config=config
+    )
+
+    audio_input = AudioInput(buffer=np.zeros(2, dtype=np.int16))
+    result = await pipeline.run(audio_input)
+    await asyncio.sleep(0)
+
+    events_before_unblock = fetch_events()
+    assert "trace_start" in events_before_unblock
+    assert "trace_end" not in events_before_unblock
+
+    gate.set()
+    await extract_events(result)
+    assert fetch_events()[-1] == "trace_end"
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_trace_finishes_after_multi_turn_processing() -> None:
+    fake_stt = FakeSTT(["first", "second"])
+    workflow = FakeWorkflow([["out_1"], ["out_2"]])
+    fake_tts = FakeTTS()
+    pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
+
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=2)
+    result = await pipeline.run(streamed_audio_input)
+    await extract_events(result)
+    assert fetch_events()[-1] == "trace_end"
+
+
+@pytest.mark.asyncio
+async def test_voicepipeline_multi_turn_on_start_exception_does_not_abort() -> None:
+    fake_stt = FakeSTT(["first"])
+    workflow = _OnStartYieldThenFailWorkflow([["out_1"]])
+    fake_tts = FakeTTS()
+    pipeline = VoicePipeline(workflow=workflow, stt_model=fake_stt, tts_model=fake_tts)
+
+    streamed_audio_input = await FakeStreamedAudioInput.get(count=1)
+    result = await pipeline.run(streamed_audio_input)
+    events, _ = await extract_events(result)
+
+    assert events[-1] == "session_ended"
+    assert "error" not in events
