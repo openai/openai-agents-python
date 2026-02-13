@@ -92,11 +92,12 @@ To customize this default setup, to send traces to alternative or additional bac
 
 ## External tracing processors list
 
+-   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
 -   [Arize-Phoenix](https://docs.arize.com/phoenix/tracing/integrations-tracing/openai-agents-sdk)
 -   [Braintrust](https://braintrust.dev/docs/guides/traces/integrations#openai-agents-sdk)
--   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
--   [AgentOps](https://docs.agentops.ai/v1/integrations/agentssdk)
--   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration)
+-   [Comet Opik](https://www.comet.com/docs/opik/integrations/openai_agents)
 -   [Keywords AI](https://docs.keywordsai.co/integration/development-frameworks/openai-agent)
 -   [LangSmith](https://docs.smith.langchain.com/observability/how_to_guides/trace_with_openai_agents_sdk)
 -   [Maxim AI](https://www.getmaxim.ai/docs/observe/integrations/openai-agents-sdk)
+-   [Pydantic Logfire](https://logfire.pydantic.dev/docs/integrations/llms/openai/#openai-agents)
+-   [Scorecard](https://docs.scorecard.io/docs/documentation/features/tracing#openai-agents-sdk-integration)
