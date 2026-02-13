@@ -4,14 +4,14 @@ search:
 ---
 # 快速入门
 
-Realtime 智能体支持使用 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建第一个 realtime 语音智能体。
+Realtime 智能体使你能够使用 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建第一个实时语音智能体。
 
 !!! warning "Beta 功能"
-Realtime 智能体目前处于 beta 阶段。随着我们改进实现，可能会出现一些破坏性变更。
+Realtime 智能体处于 beta 阶段。随着我们改进实现，预计会有一些破坏性变更。
 
 ## 前置条件
 
--   Python 3.9 或更高版本
+-   Python 3.10 或更高版本
 -   OpenAI API key
 -   对 OpenAI Agents SDK 的基本了解
 
@@ -23,7 +23,7 @@ Realtime 智能体目前处于 beta 阶段。随着我们改进实现，可能�
 pip install openai-agents
 ```
 
-## 创建你的第一个 realtime 智能体
+## 创建你的第一个实时智能体
 
 ### 1. 导入所需组件
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. 创建一个 realtime 智能体
+### 2. 创建一个实时智能体
 
 ```python
 agent = RealtimeAgent(
@@ -192,14 +192,14 @@ if __name__ == "__main__":
 
 ### 模型设置
 
--   `model_name`: 从可用的 realtime 模型中选择（例如 `gpt-realtime`）
+-   `model_name`: 从可用的 realtime 模型中选择（例如：`gpt-realtime`）
 -   `voice`: 选择声音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 -   `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
 
 ### 音频设置
 
--   `input_audio_format`: 输入音频的格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
--   `output_audio_format`: 输出音频的格式
+-   `input_audio_format`: 输入音频格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
+-   `output_audio_format`: 输出音频格式
 -   `input_audio_transcription`: 转写配置
 
 ### 轮次检测
@@ -213,9 +213,9 @@ if __name__ == "__main__":
 
 -   [了解更多 realtime 智能体](guide.md)
 -   查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的可运行示例
--   为你的智能体添加工具调用
--   实现智能体之间的任务转移
--   为安全设置安全防护措施
+-   为你的智能体添加 tools
+-   在智能体之间实现 handoffs
+-   设置 guardrails 以确保安全
 
 ## 身份验证
 
@@ -233,8 +233,8 @@ session = await runner.run(model_config={"api_key": "your-api-key"})
 
 ## Azure OpenAI 端点格式
 
-如果你连接的是 Azure OpenAI 而不是 OpenAI 的默认端点，请在
-`model_config["url"]` 中传入 GA Realtime URL，并显式设置认证 headers。
+如果你连接的是 Azure OpenAI，而不是 OpenAI 的默认端点，请在
+`model_config["url"]` 中传入 GA Realtime URL，并显式设置 auth headers。
 
 ```python
 session = await runner.run(
@@ -256,4 +256,5 @@ session = await runner.run(
 )
 ```
 
-避免在 realtime 智能体中使用旧版 beta 路径（`/openai/realtime?api-version=...`）。SDK 期望使用 GA Realtime 接口。
+避免在 realtime 智能体中使用旧版 beta 路径（`/openai/realtime?api-version=...`）。该
+SDK 期望使用 GA Realtime 接口。

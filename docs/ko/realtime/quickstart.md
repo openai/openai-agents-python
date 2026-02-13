@@ -4,14 +4,14 @@ search:
 ---
 # 빠른 시작
 
-실시간 에이전트를 사용하면 OpenAI의 Realtime API로 AI 에이전트와 음성 대화를 할 수 있습니다. 이 가이드에서는 첫 번째 실시간 음성 에이전트를 만드는 과정을 안내합니다.
+실시간 에이전트를 사용하면 OpenAI의 Realtime API로 AI 에이전트와 음성 대화를 할 수 있습니다. 이 가이드는 첫 실시간 음성 에이전트를 만드는 과정을 안내합니다.
 
 !!! warning "베타 기능"
-실시간 에이전트는 베타 버전입니다. 구현을 개선하는 과정에서 일부 호환성이 깨지는 변경이 있을 수 있습니다.
+실시간 에이전트는 베타입니다. 구현을 개선하는 과정에서 일부 파괴적 변경이 있을 수 있습니다.
 
 ## 사전 준비 사항
 
--   Python 3.9 이상
+-   Python 3.10 이상
 -   OpenAI API 키
 -   OpenAI Agents SDK에 대한 기본적인 이해
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. 실시간 에이전트 생성하기
+### 2. 실시간 에이전트 만들기
 
 ```python
 agent = RealtimeAgent(
@@ -111,7 +111,7 @@ def _truncate_str(s: str, max_length: int) -> str:
 
 ## 전체 예제
 
-다음은 완전하게 동작하는 전체 예제입니다:
+다음은 완전히 동작하는 전체 예제입니다:
 
 ```python
 import asyncio
@@ -192,9 +192,9 @@ if __name__ == "__main__":
 
 ### 모델 설정
 
--   `model_name`: 사용 가능한 실시간 모델에서 선택하세요(예: `gpt-realtime`)
--   `voice`: 음성 선택(`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
--   `modalities`: 텍스트 또는 오디오 활성화(`["text"]` 또는 `["audio"]`)
+-   `model_name`: 사용 가능한 실시간 모델에서 선택합니다(예: `gpt-realtime`)
+-   `voice`: 음성을 선택합니다(`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
+-   `modalities`: 텍스트 또는 오디오를 활성화합니다(`["text"]` 또는 `["audio"]`)
 
 ### 오디오 설정
 
@@ -205,27 +205,27 @@ if __name__ == "__main__":
 ### 턴 감지
 
 -   `type`: 감지 방식(`server_vad`, `semantic_vad`)
--   `threshold`: 음성 활동 임곗값(0.0-1.0)
+-   `threshold`: 음성 활동 임계값(0.0-1.0)
 -   `silence_duration_ms`: 턴 종료를 감지하기 위한 무음 지속 시간
--   `prefix_padding_ms`: 발화 이전 오디오 패딩
+-   `prefix_padding_ms`: 발화 전 오디오 패딩
 
 ## 다음 단계
 
--   [실시간 에이전트 더 알아보기](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작 예제를 확인하세요
+-   [실시간 에이전트에 대해 더 알아보기](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작하는 예제를 확인하세요
 -   에이전트에 도구 추가하기
 -   에이전트 간 핸드오프 구현하기
 -   안전을 위한 가드레일 설정하기
 
 ## 인증
 
-환경 변수에 OpenAI API 키가 설정되어 있는지 확인하세요:
+환경에 OpenAI API 키가 설정되어 있는지 확인하세요:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-또는 세션을 생성할 때 직접 전달할 수도 있습니다:
+또는 세션을 만들 때 직접 전달할 수도 있습니다:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
@@ -233,7 +233,7 @@ session = await runner.run(model_config={"api_key": "your-api-key"})
 
 ## Azure OpenAI 엔드포인트 형식
 
-OpenAI 기본 엔드포인트 대신 Azure OpenAI에 연결하는 경우,
+OpenAI의 기본 엔드포인트 대신 Azure OpenAI에 연결하는 경우,
 `model_config["url"]`에 GA Realtime URL을 전달하고 인증 헤더를 명시적으로 설정하세요.
 
 ```python
@@ -245,7 +245,7 @@ session = await runner.run(
 )
 ```
 
-Bearer 토큰도 사용할 수 있습니다:
+베어러 토큰을 사용할 수도 있습니다:
 
 ```python
 session = await runner.run(
@@ -256,4 +256,4 @@ session = await runner.run(
 )
 ```
 
-실시간 에이전트와 함께 레거시 베타 경로(`/openai/realtime?api-version=...`)를 사용하는 것은 피하세요. SDK는 GA Realtime 인터페이스를 기대합니다.
+실시간 에이전트에서는 레거시 베타 경로(`/openai/realtime?api-version=...`) 사용을 피하세요. SDK는 GA Realtime 인터페이스를 기대합니다.

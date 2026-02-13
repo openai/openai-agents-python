@@ -4,14 +4,14 @@ search:
 ---
 # クイックスタート
 
-Realtime エージェントを使用すると、OpenAI の Realtime API を使って AI エージェントと音声会話ができます。このガイドでは、最初の realtime 音声エージェントを作成する手順を説明します。
+Realtime エージェントを使うと、OpenAI の Realtime API を使用して AI エージェントと音声会話できます。このガイドでは、最初の realtime 音声エージェントを作成する手順を説明します。
 
 !!! warning "ベータ機能"
-Realtime エージェントはベータ版です。実装を改善する過程で、破壊的変更が入る可能性があります。
+Realtime エージェントはベータ版です。実装の改善に伴い、破壊的変更が発生する可能性があります。
 
 ## 前提条件
 
--   Python 3.9 以上
+-   Python 3.10 以上
 -   OpenAI API キー
 -   OpenAI Agents SDK の基本的な理解
 
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. Runner の設定
+### 3. ランナーの設定
 
 ```python
 runner = RealtimeRunner(
@@ -204,14 +204,14 @@ if __name__ == "__main__":
 
 ### ターン検出
 
--   `type`: 検出方式（`server_vad`、`semantic_vad`）
--   `threshold`: 音声活動のしきい値（0.0-1.0）
+-   `type`: 検出方法（`server_vad`、`semantic_vad`）
+-   `threshold`: 音声アクティビティのしきい値（0.0-1.0）
 -   `silence_duration_ms`: ターン終了を検出する無音時間
 -   `prefix_padding_ms`: 発話前の音声パディング
 
 ## 次のステップ
 
--   [realtime エージェントの詳細](guide.md)
+-   [Realtime エージェントについて詳しく見る](guide.md)
 -   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) フォルダーの動作する例を確認する
 -   エージェントにツールを追加する
 -   エージェント間のハンドオフを実装する
@@ -225,7 +225,7 @@ if __name__ == "__main__":
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-または、セッション作成時に直接渡します。
+または、セッション作成時に直接渡してください。
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
@@ -233,7 +233,7 @@ session = await runner.run(model_config={"api_key": "your-api-key"})
 
 ## Azure OpenAI エンドポイント形式
 
-OpenAI のデフォルトエンドポイントではなく Azure OpenAI に接続する場合は、`model_config["url"]` に GA Realtime URL を渡し、認証ヘッダーを明示的に設定してください。
+OpenAI のデフォルトのエンドポイントではなく Azure OpenAI に接続する場合は、`model_config["url"]` に GA Realtime URL を渡し、認証ヘッダーを明示的に設定してください。
 
 ```python
 session = await runner.run(
@@ -244,7 +244,7 @@ session = await runner.run(
 )
 ```
 
-ベアラートークンも使用できます。
+Bearer トークンも使用できます。
 
 ```python
 session = await runner.run(
@@ -255,4 +255,4 @@ session = await runner.run(
 )
 ```
 
-realtime エージェントでは、レガシーなベータパス（`/openai/realtime?api-version=...`）の使用は避けてください。SDK は GA Realtime インターフェースを想定しています。
+Realtime エージェントでは、レガシーのベータ版パス（`/openai/realtime?api-version=...`）の使用は避けてください。SDK は GA Realtime インターフェースを想定しています。
