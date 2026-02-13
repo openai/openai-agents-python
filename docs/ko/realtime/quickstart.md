@@ -4,10 +4,10 @@ search:
 ---
 # 빠른 시작
 
-실시간 에이전트를 사용하면 OpenAI의 Realtime API로 AI 에이전트와 음성 대화를 할 수 있습니다. 이 가이드는 첫 실시간 음성 에이전트를 만드는 과정을 안내합니다.
+실시간 에이전트를 사용하면 OpenAI의 Realtime API로 AI 에이전트와 음성 대화를 할 수 있습니다. 이 가이드는 첫 번째 실시간 음성 에이전트를 만드는 과정을 안내합니다.
 
 !!! warning "베타 기능"
-실시간 에이전트는 베타입니다. 구현을 개선하는 과정에서 일부 파괴적 변경이 있을 수 있습니다.
+실시간 에이전트는 베타입니다. 구현을 개선하는 과정에서 일부 변경이 호환성을 깨뜨릴 수 있습니다.
 
 ## 사전 준비 사항
 
@@ -23,7 +23,7 @@ search:
 pip install openai-agents
 ```
 
-## 첫 실시간 에이전트 만들기
+## 첫 번째 실시간 에이전트 만들기
 
 ### 1. 필요한 구성 요소 가져오기
 
@@ -41,7 +41,7 @@ agent = RealtimeAgent(
 )
 ```
 
-### 3. 러너 설정하기
+### 3. 러너 설정
 
 ```python
 runner = RealtimeRunner(
@@ -60,7 +60,7 @@ runner = RealtimeRunner(
 )
 ```
 
-### 4. 세션 시작하기
+### 4. 세션 시작
 
 ```python
 # Start the session
@@ -195,12 +195,14 @@ if __name__ == "__main__":
 -   `model_name`: 사용 가능한 실시간 모델에서 선택합니다(예: `gpt-realtime`)
 -   `voice`: 음성을 선택합니다(`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 -   `modalities`: 텍스트 또는 오디오를 활성화합니다(`["text"]` 또는 `["audio"]`)
+-   `output_modalities`: 선택적으로 출력이 텍스트 및/또는 오디오로만 나오도록 제한합니다(`["text"]`, `["audio"]`, 또는 둘 다)
 
 ### 오디오 설정
 
 -   `input_audio_format`: 입력 오디오 형식(`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: 출력 오디오 형식
 -   `input_audio_transcription`: 전사 구성
+-   `input_audio_noise_reduction`: 입력 노이즈 감소 구성(`near_field` 또는 `far_field`)
 
 ### 턴 감지
 
@@ -209,13 +211,21 @@ if __name__ == "__main__":
 -   `silence_duration_ms`: 턴 종료를 감지하기 위한 무음 지속 시간
 -   `prefix_padding_ms`: 발화 전 오디오 패딩
 
+### 실행 설정
+
+-   `async_tool_calls`: 함수 도구를 비동기로 실행할지 여부(기본값 `True`)
+-   `guardrails_settings.debounce_text_length`: 출력 가드레일을 실행하기 전 누적 전사 최소 크기(기본값 `100`)
+-   `tool_error_formatter`: 모델에 표시되는 도구 오류 메시지를 커스터마이즈하는 콜백
+
+전체 스키마는 [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] 및 [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings]의 API 레퍼런스를 참고하세요.
+
 ## 다음 단계
 
--   [실시간 에이전트에 대해 더 알아보기](guide.md)
--   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더의 동작하는 예제를 확인하세요
--   에이전트에 도구 추가하기
--   에이전트 간 핸드오프 구현하기
--   안전을 위한 가드레일 설정하기
+-   [실시간 에이전트 자세히 알아보기](guide.md)
+-   [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 폴더에서 동작하는 예제를 확인하세요
+-   에이전트에 도구 추가
+-   에이전트 간 핸드오프 구현
+-   안전을 위한 가드레일 설정
 
 ## 인증
 
@@ -225,7 +235,7 @@ if __name__ == "__main__":
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
-또는 세션을 만들 때 직접 전달할 수도 있습니다:
+또는 세션을 만들 때 직접 전달할 수 있습니다:
 
 ```python
 session = await runner.run(model_config={"api_key": "your-api-key"})
@@ -245,7 +255,7 @@ session = await runner.run(
 )
 ```
 
-베어러 토큰을 사용할 수도 있습니다:
+bearer 토큰을 사용할 수도 있습니다:
 
 ```python
 session = await runner.run(

@@ -4,26 +4,26 @@ search:
 ---
 # 快速入门
 
-Realtime 智能体使你能够使用 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建第一个实时语音智能体。
+Realtime 智能体支持通过 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建你的第一个 realtime 语音智能体。
 
-!!! warning "Beta 功能"
-Realtime 智能体处于 beta 阶段。随着我们改进实现，预计会有一些破坏性变更。
+!!! warning "Beta feature"
+Realtime 智能体目前处于 beta 阶段。随着我们改进实现，预计会有一些破坏性变更。
 
-## 前置条件
+## 前提条件
 
 -   Python 3.10 或更高版本
 -   OpenAI API key
--   对 OpenAI Agents SDK 的基本了解
+-   对 OpenAI Agents SDK 的基本熟悉
 
 ## 安装
 
-如果你还没有安装 OpenAI Agents SDK，请先安装：
+如果你还没有安装，请安装 OpenAI Agents SDK：
 
 ```bash
 pip install openai-agents
 ```
 
-## 创建你的第一个实时智能体
+## 创建你的第一个 realtime 智能体
 
 ### 1. 导入所需组件
 
@@ -32,7 +32,7 @@ import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 ```
 
-### 2. 创建一个实时智能体
+### 2. 创建一个 realtime 智能体
 
 ```python
 agent = RealtimeAgent(
@@ -192,34 +192,44 @@ if __name__ == "__main__":
 
 ### 模型设置
 
--   `model_name`: 从可用的 realtime 模型中选择（例如：`gpt-realtime`）
--   `voice`: 选择声音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
+-   `model_name`: 从可用的 realtime 模型中选择（例如 `gpt-realtime`）
+-   `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 -   `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
+-   `output_modalities`: 可选，将输出限制为文本和/或音频（`["text"]`、`["audio"]`，或两者）
 
 ### 音频设置
 
 -   `input_audio_format`: 输入音频格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
 -   `output_audio_format`: 输出音频格式
 -   `input_audio_transcription`: 转写配置
+-   `input_audio_noise_reduction`: 输入降噪配置（`near_field` 或 `far_field`）
 
 ### 轮次检测
 
 -   `type`: 检测方法（`server_vad`、`semantic_vad`）
 -   `threshold`: 语音活动阈值（0.0-1.0）
--   `silence_duration_ms`: 用于检测轮次结束的静默时长
+-   `silence_duration_ms`: 用于检测轮次结束的静音时长
 -   `prefix_padding_ms`: 语音前的音频填充
+
+### 运行设置
+
+-   `async_tool_calls`: 工具调用是否异步运行（默认 `True`）
+-   `guardrails_settings.debounce_text_length`: 在运行输出安全防护措施之前，累计转写内容的最小长度（默认 `100`）
+-   `tool_error_formatter`: 用于自定义模型可见的工具错误消息的回调
+
+完整 schema 请参阅 [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] 和 [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] 的 API 参考。
 
 ## 后续步骤
 
 -   [了解更多 realtime 智能体](guide.md)
 -   查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的可运行示例
--   为你的智能体添加 tools
--   在智能体之间实现 handoffs
--   设置 guardrails 以确保安全
+-   为你的智能体添加工具
+-   实现智能体之间的任务转移
+-   设置安全防护措施以确保安全
 
 ## 身份验证
 
-确保你的环境中已设置 OpenAI API key：
+请确保你的环境中已设置 OpenAI API key：
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
@@ -233,7 +243,7 @@ session = await runner.run(model_config={"api_key": "your-api-key"})
 
 ## Azure OpenAI 端点格式
 
-如果你连接的是 Azure OpenAI，而不是 OpenAI 的默认端点，请在
+如果你连接的是 Azure OpenAI 而不是 OpenAI 的默认端点，请在
 `model_config["url"]` 中传入 GA Realtime URL，并显式设置 auth headers。
 
 ```python
@@ -256,5 +266,5 @@ session = await runner.run(
 )
 ```
 
-避免在 realtime 智能体中使用旧版 beta 路径（`/openai/realtime?api-version=...`）。该
+避免在 realtime 智能体中使用旧版 beta 路径（`/openai/realtime?api-version=...`）。
 SDK 期望使用 GA Realtime 接口。
