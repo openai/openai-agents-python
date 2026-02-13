@@ -244,7 +244,7 @@ async def test_extract_descriptions_from_docstring():
     timeout_behavior="raise_exception",
     timeout_error_function=sync_error_handler,
 )
-def timeout_configured_tool() -> str:
+async def timeout_configured_tool() -> str:
     return "ok"
 
 
