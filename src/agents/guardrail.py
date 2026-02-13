@@ -70,7 +70,7 @@ class OutputGuardrailResult:
 
 @dataclass
 class InputGuardrail(Generic[TContext]):
-    """Input guardrails are checks that run in parallel to the agent's execution.
+    """Input guardrails are checks that run either in parallel with the agent or before it starts.
     They can be used to do things like:
     - Check if input messages are off-topic
     - Take over control of the agent's execution if an unexpected input is detected
@@ -78,8 +78,9 @@ class InputGuardrail(Generic[TContext]):
     You can use the `@input_guardrail()` decorator to turn a function into an `InputGuardrail`, or
     create an `InputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, the agent
-    execution will immediately stop and a `InputGuardrailTripwireTriggered` exception will be raised
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`,
+    the agent's execution will immediately stop, and
+    an `InputGuardrailTripwireTriggered` exception will be raised
     """
 
     guardrail_function: Callable[
@@ -94,6 +95,11 @@ class InputGuardrail(Generic[TContext]):
     name: str | None = None
     """The name of the guardrail, used for tracing. If not provided, we'll use the guardrail
     function's name.
+    """
+
+    run_in_parallel: bool = True
+    """Whether the guardrail runs concurrently with the agent (True, default) or before
+    the agent starts (False).
     """
 
     def get_name(self) -> str:
@@ -132,7 +138,7 @@ class OutputGuardrail(Generic[TContext]):
     You can use the `@output_guardrail()` decorator to turn a function into an `OutputGuardrail`,
     or create an `OutputGuardrail` manually.
 
-    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, a
+    Guardrails return a `GuardrailResult`. If `result.tripwire_triggered` is `True`, an
     `OutputGuardrailTripwireTriggered` exception will be raised.
     """
 
@@ -208,6 +214,7 @@ def input_guardrail(
 def input_guardrail(
     *,
     name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> Callable[
     [_InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co]],
     InputGuardrail[TContext_co],
@@ -220,6 +227,7 @@ def input_guardrail(
     | None = None,
     *,
     name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> (
     InputGuardrail[TContext_co]
     | Callable[
@@ -234,14 +242,25 @@ def input_guardrail(
         @input_guardrail
         def my_sync_guardrail(...): ...
 
-        @input_guardrail(name="guardrail_name")
+        @input_guardrail(name="guardrail_name", run_in_parallel=False)
         async def my_async_guardrail(...): ...
+
+    Args:
+        func: The guardrail function to wrap.
+        name: Optional name for the guardrail. If not provided, uses the function's name.
+        run_in_parallel: Whether to run the guardrail concurrently with the agent (True, default)
+            or before the agent starts (False).
     """
 
     def decorator(
         f: _InputGuardrailFuncSync[TContext_co] | _InputGuardrailFuncAsync[TContext_co],
     ) -> InputGuardrail[TContext_co]:
-        return InputGuardrail(guardrail_function=f, name=name)
+        return InputGuardrail(
+            guardrail_function=f,
+            # If not set, guardrail name uses the function’s name by default.
+            name=name if name else f.__name__,
+            run_in_parallel=run_in_parallel,
+        )
 
     if func is not None:
         # Decorator was used without parentheses
@@ -310,7 +329,11 @@ def output_guardrail(
     def decorator(
         f: _OutputGuardrailFuncSync[TContext_co] | _OutputGuardrailFuncAsync[TContext_co],
     ) -> OutputGuardrail[TContext_co]:
-        return OutputGuardrail(guardrail_function=f, name=name)
+        return OutputGuardrail(
+            guardrail_function=f,
+            # Guardrail name defaults to function's name when not specified (None).
+            name=name if name else f.__name__,
+        )
 
     if func is not None:
         # Decorator was used without parentheses

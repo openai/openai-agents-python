@@ -1,6 +1,6 @@
 # Guardrails
 
-Guardrails run _in parallel_ to your agents, enabling you to do checks and validations of user input. For example, imagine you have an agent that uses a very smart (and hence slow/expensive) model to help with customer requests. You wouldn't want malicious users to ask the model to help them with their math homework. So, you can run a guardrail with a fast/cheap model. If the guardrail detects malicious usage, it can immediately raise an error, which stops the expensive model from running and saves you time/money.
+Guardrails enable you to do checks and validations of user input and agent output. For example, imagine you have an agent that uses a very smart (and hence slow/expensive) model to help with customer requests. You wouldn't want malicious users to ask the model to help them with their math homework. So, you can run a guardrail with a fast/cheap model. If the guardrail detects malicious usage, it can immediately raise an error and prevent the expensive model from running, saving you time and money (**when using blocking guardrails; for parallel guardrails, the expensive model may have already started running before the guardrail completes. See "Execution modes" below for details**).
 
 There are two kinds of guardrails:
 
@@ -19,17 +19,37 @@ Input guardrails run in 3 steps:
 
     Input guardrails are intended to run on user input, so an agent's guardrails only run if the agent is the *first* agent. You might wonder, why is the `guardrails` property on the agent instead of passed to `Runner.run`? It's because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
 
+### Execution modes
+
+Input guardrails support two execution modes:
+
+- **Parallel execution** (default, `run_in_parallel=True`): The guardrail runs concurrently with the agent's execution. This provides the best latency since both start at the same time. However, if the guardrail fails, the agent may have already consumed tokens and executed tools before being cancelled.
+
+- **Blocking execution** (`run_in_parallel=False`): The guardrail runs and completes *before* the agent starts. If the guardrail tripwire is triggered, the agent never executes, preventing token consumption and tool execution. This is ideal for cost optimization and when you want to avoid potential side effects from tool calls.
+
 ## Output guardrails
 
 Output guardrails run in 3 steps:
 
-1. First, the guardrail receives the same input passed to the agent.
+1. First, the guardrail receives the output produced by the agent.
 2. Next, the guardrail function runs to produce a [`GuardrailFunctionOutput`][agents.guardrail.GuardrailFunctionOutput], which is then wrapped in an [`OutputGuardrailResult`][agents.guardrail.OutputGuardrailResult]
 3. Finally, we check if [`.tripwire_triggered`][agents.guardrail.GuardrailFunctionOutput.tripwire_triggered] is true. If true, an [`OutputGuardrailTripwireTriggered`][agents.exceptions.OutputGuardrailTripwireTriggered] exception is raised, so you can appropriately respond to the user or handle the exception.
 
 !!! Note
 
-    Output guardrails are intended to run on the final agent input, so an agent's guardrails only run if the agent is the *last* agent. Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
+    Output guardrails are intended to run on the final agent output, so an agent's guardrails only run if the agent is the *last* agent. Similar to the input guardrails, we do this because guardrails tend to be related to the actual Agent - you'd run different guardrails for different agents, so colocating the code is useful for readability.
+
+    Output guardrails always run after the agent completes, so they don't support the `run_in_parallel` parameter.
+
+## Tool guardrails
+
+Tool guardrails wrap **function tools** and let you validate or block tool calls before and after execution. They are configured on the tool itself and run every time that tool is invoked.
+
+- Input tool guardrails run before the tool executes and can skip the call, replace the output with a message, or raise a tripwire.
+- Output tool guardrails run after the tool executes and can replace the output or raise a tripwire.
+- Tool guardrails apply only to function tools created with [`function_tool`][agents.function_tool]; hosted tools (`WebSearchTool`, `FileSearchTool`, `HostedMCPTool`, `CodeInterpreterTool`, `ImageGenerationTool`) and local runtime tools (`ComputerTool`, `ShellTool`, `ApplyPatchTool`, `LocalShellTool`) do not use this guardrail pipeline.
+
+See the code snippet below for details.
 
 ## Tripwires
 
@@ -111,8 +131,8 @@ class MessageOutput(BaseModel): # (1)!
     response: str
 
 class MathOutput(BaseModel): # (2)!
-    is_math: bool
     reasoning: str
+    is_math: bool
 
 guardrail_agent = Agent(
     name="Guardrail check",
@@ -152,3 +172,48 @@ async def main():
 2. This is the guardrail's output type.
 3. This is the guardrail function that receives the agent's output, and returns the result.
 4. This is the actual agent that defines the workflow.
+
+Lastly, here are examples of tool guardrails.
+
+```python
+import json
+from agents import (
+    Agent,
+    Runner,
+    ToolGuardrailFunctionOutput,
+    function_tool,
+    tool_input_guardrail,
+    tool_output_guardrail,
+)
+
+@tool_input_guardrail
+def block_secrets(data):
+    args = json.loads(data.context.tool_arguments or "{}")
+    if "sk-" in json.dumps(args):
+        return ToolGuardrailFunctionOutput.reject_content(
+            "Remove secrets before calling this tool."
+        )
+    return ToolGuardrailFunctionOutput.allow()
+
+
+@tool_output_guardrail
+def redact_output(data):
+    text = str(data.output or "")
+    if "sk-" in text:
+        return ToolGuardrailFunctionOutput.reject_content("Output contained sensitive data.")
+    return ToolGuardrailFunctionOutput.allow()
+
+
+@function_tool(
+    tool_input_guardrails=[block_secrets],
+    tool_output_guardrails=[redact_output],
+)
+def classify_text(text: str) -> str:
+    """Classify text for internal routing."""
+    return f"length:{len(text)}"
+
+
+agent = Agent(name="Classifier", tools=[classify_text])
+result = Runner.run_sync(agent, "hello world")
+print(result.final_output)
+```

@@ -13,12 +13,10 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
-    ModelBehaviorError,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
 )
-from agents.tracing import AgentSpanData, FunctionSpanData, GenerationSpanData
 
 from .fake_model import FakeModel
 from .test_responses import (
@@ -28,7 +26,7 @@ from .test_responses import (
     get_handoff_tool_call,
     get_text_message,
 )
-from .testing_processor import fetch_normalized_spans, fetch_ordered_spans, fetch_traces
+from .testing_processor import fetch_normalized_spans
 
 
 @pytest.mark.asyncio
@@ -42,9 +40,6 @@ async def test_single_turn_model_error():
     )
     with pytest.raises(ValueError):
         await Runner.run(agent, input="first_test")
-
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -74,13 +69,6 @@ async def test_single_turn_model_error():
         ]
     )
 
-    spans = fetch_ordered_spans()
-    assert len(spans) == 2, f"should have agent and generation spans, got {len(spans)}"
-
-    generation_span = spans[1]
-    assert isinstance(generation_span.span_data, GenerationSpanData)
-    assert generation_span.error, "should have error"
-
 
 @pytest.mark.asyncio
 async def test_multi_turn_no_handoffs():
@@ -105,9 +93,6 @@ async def test_multi_turn_no_handoffs():
 
     with pytest.raises(ValueError):
         await Runner.run(agent, input="first_test")
-
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -146,15 +131,6 @@ async def test_multi_turn_no_handoffs():
         ]
     )
 
-    spans = fetch_ordered_spans()
-    assert len(spans) == 4, (
-        f"should have agent, generation, tool, generation, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
-    )
-
-    last_generation_span = [x for x in spans if isinstance(x.span_data, GenerationSpanData)][-1]
-    assert last_generation_span.error, "should have error"
-
 
 @pytest.mark.asyncio
 async def test_tool_call_error():
@@ -163,18 +139,22 @@ async def test_tool_call_error():
     agent = Agent(
         name="test_agent",
         model=model,
-        tools=[get_function_tool("foo", "tool_result", hide_errors=True)],
+        tools=[get_function_tool("foo", "tool_result")],
     )
 
-    model.set_next_output(
-        [get_text_message("a_message"), get_function_tool_call("foo", "bad_json")],
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("a_message"), get_function_tool_call("foo", "bad_json")],
+            [get_text_message("done")],
+        ]
     )
 
-    with pytest.raises(ModelBehaviorError):
-        await Runner.run(agent, input="first_test")
+    result = await Runner.run(agent, input="first_test")
 
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
+    tool_outputs = [item for item in result.new_items if item.type == "tool_call_output_item"]
+    assert tool_outputs, "Expected a tool output item for invalid JSON"
+    assert "An error occurred while parsing tool arguments" in str(tool_outputs[0].output)
+    assert "valid JSON" in str(tool_outputs[0].output)
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -197,26 +177,26 @@ async def test_tool_call_error():
                                     "message": "Error running tool",
                                     "data": {
                                         "tool_name": "foo",
-                                        "error": "Invalid JSON input for tool foo: bad_json",
+                                        "error": "Expecting value: line 1 column 1 (char 0)",
                                     },
                                 },
-                                "data": {"name": "foo", "input": "bad_json"},
+                                "data": {
+                                    "name": "foo",
+                                    "input": "bad_json",
+                                    "output": (
+                                        "An error occurred while parsing tool arguments. "
+                                        "Please try again with valid JSON. Error: Expecting "
+                                        "value: line 1 column 1 (char 0)"
+                                    ),
+                                },
                             },
+                            {"type": "generation"},
                         ],
                     }
                 ],
             }
         ]
     )
-
-    spans = fetch_ordered_spans()
-    assert len(spans) == 3, (
-        f"should have agent, generation, tool spans, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
-    )
-
-    function_span = [x for x in spans if isinstance(x.span_data, FunctionSpanData)][0]
-    assert function_span.error, "should have error"
 
 
 @pytest.mark.asyncio
@@ -255,9 +235,6 @@ async def test_multiple_handoff_doesnt_error():
     result = await Runner.run(agent_3, input="user_message")
     assert result.last_agent == agent_1, "should have picked first handoff"
 
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
-
     assert fetch_normalized_spans() == snapshot(
         [
             {
@@ -282,7 +259,19 @@ async def test_multiple_handoff_doesnt_error():
                                 },
                             },
                             {"type": "generation"},
-                            {"type": "handoff", "data": {"from_agent": "test", "to_agent": "test"}},
+                            {
+                                "type": "handoff",
+                                "data": {"from_agent": "test", "to_agent": "test"},
+                                "error": {
+                                    "data": {
+                                        "requested_agents": [
+                                            "test",
+                                            "test",
+                                        ],
+                                    },
+                                    "message": "Multiple handoffs requested",
+                                },
+                            },
                         ],
                     },
                     {
@@ -293,12 +282,6 @@ async def test_multiple_handoff_doesnt_error():
                 ],
             }
         ]
-    )
-
-    spans = fetch_ordered_spans()
-    assert len(spans) == 7, (
-        f"should have 2 agent, 1 function, 3 generation, 1 handoff, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
     )
 
 
@@ -326,9 +309,6 @@ async def test_multiple_final_output_doesnt_error():
     result = await Runner.run(agent_1, input="user_message")
     assert result.final_output == Foo(bar="abc")
 
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
-
     assert fetch_normalized_spans() == snapshot(
         [
             {
@@ -342,12 +322,6 @@ async def test_multiple_final_output_doesnt_error():
                 ],
             }
         ]
-    )
-
-    spans = fetch_ordered_spans()
-    assert len(spans) == 2, (
-        f"should have 1 agent, 1 generation, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
     )
 
 
@@ -399,9 +373,6 @@ async def test_handoffs_lead_to_correct_agent_spans():
         f"should have ended on the third agent, got {result.last_agent.name}"
     )
 
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
-
     assert fetch_normalized_spans() == snapshot(
         [
             {
@@ -429,6 +400,15 @@ async def test_handoffs_lead_to_correct_agent_spans():
                             {
                                 "type": "handoff",
                                 "data": {"from_agent": "test_agent_3", "to_agent": "test_agent_1"},
+                                "error": {
+                                    "data": {
+                                        "requested_agents": [
+                                            "test_agent_1",
+                                            "test_agent_2",
+                                        ],
+                                    },
+                                    "message": "Multiple handoffs requested",
+                                },
                             },
                         ],
                     },
@@ -472,12 +452,6 @@ async def test_handoffs_lead_to_correct_agent_spans():
         ]
     )
 
-    spans = fetch_ordered_spans()
-    assert len(spans) == 12, (
-        f"should have 3 agents, 2 function, 5 generation, 2 handoff, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
-    )
-
 
 @pytest.mark.asyncio
 async def test_max_turns_exceeded():
@@ -502,9 +476,6 @@ async def test_max_turns_exceeded():
 
     with pytest.raises(MaxTurnsExceeded):
         await Runner.run(agent, input="user_message", max_turns=2)
-
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -538,15 +509,6 @@ async def test_max_turns_exceeded():
         ]
     )
 
-    spans = fetch_ordered_spans()
-    assert len(spans) == 5, (
-        f"should have 1 agent span, 2 generations, 2 function calls, got "
-        f"{len(spans)} with data: {[x.span_data for x in spans]}"
-    )
-
-    agent_span = [x for x in spans if isinstance(x.span_data, AgentSpanData)][-1]
-    assert agent_span.error, "last agent should have error"
-
 
 def guardrail_function(
     context: RunContextWrapper[Any], agent: Agent[Any], input: str | list[TResponseInputItem]
@@ -567,9 +529,6 @@ async def test_guardrail_error():
 
     with pytest.raises(InputGuardrailTripwireTriggered):
         await Runner.run(agent, input="user_message")
-
-    traces = fetch_traces()
-    assert len(traces) == 1, f"Expected 1 trace, got {len(traces)}"
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -594,12 +553,3 @@ async def test_guardrail_error():
             }
         ]
     )
-
-    spans = fetch_ordered_spans()
-    assert len(spans) == 2, (
-        f"should have 1 agent, 1 guardrail, got {len(spans)} with data: "
-        f"{[x.span_data for x in spans]}"
-    )
-
-    agent_span = [x for x in spans if isinstance(x.span_data, AgentSpanData)][-1]
-    assert agent_span.error, "last agent should have error"

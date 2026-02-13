@@ -4,6 +4,7 @@ import uuid
 from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
 
 from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """
 This example shows the handoffs/routing pattern. The triage agent receives the first message, and
@@ -37,9 +38,13 @@ async def main():
     # We'll create an ID for this conversation, so we can link each trace
     conversation_id = str(uuid.uuid4().hex[:16])
 
-    msg = input("Hi! We speak French, Spanish and English. How can I help? ")
+    msg = input_with_fallback(
+        "Hi! We speak French, Spanish and English. How can I help? ",
+        "Hello, how do I say good evening in French?",
+    )
     agent = triage_agent
     inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+    auto_mode = is_auto_mode()
 
     while True:
         # Each conversation turn is a single trace. Normally, each input from the user would be an
@@ -61,7 +66,9 @@ async def main():
         inputs = result.to_input_list()
         print("\n")
 
-        user_msg = input("Enter a message: ")
+        if auto_mode:
+            break
+        user_msg = input_with_fallback("Enter a message: ", "Thanks!")
         inputs.append({"content": user_msg, "role": "user"})
         agent = result.current_agent
 

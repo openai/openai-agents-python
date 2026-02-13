@@ -1,121 +1,326 @@
 site_name: OpenAI Agents SDK
 theme:
-    name: material
-    features:
-        # Allows copying code blocks
-        - content.code.copy
-        # Allows selecting code blocks
-        - content.code.select
-        # Shows the current path in the sidebar
-        - navigation.path
-        # Shows sections in the sidebar
-        - navigation.sections
-        # Shows sections expanded by default
-        - navigation.expand
-        # Enables annotations in code blocks
-        - content.code.annotate
-    palette:
-        primary: black
-    logo: assets/logo.svg
-    favicon: images/favicon-platform.svg
-nav:
-    - Intro: index.md
-    - Quickstart: quickstart.md
-    - Documentation:
-          - agents.md
-          - running_agents.md
-          - results.md
-          - streaming.md
-          - tools.md
-          - handoffs.md
-          - tracing.md
-          - context.md
-          - guardrails.md
-          - multi_agent.md
-          - models.md
-          - config.md
-    - API Reference:
-          - Agents:
-                - ref/index.md
-                - ref/agent.md
-                - ref/run.md
-                - ref/tool.md
-                - ref/result.md
-                - ref/stream_events.md
-                - ref/handoffs.md
-                - ref/lifecycle.md
-                - ref/items.md
-                - ref/run_context.md
-                - ref/usage.md
-                - ref/exceptions.md
-                - ref/guardrail.md
-                - ref/model_settings.md
-                - ref/agent_output.md
-                - ref/function_schema.md
-                - ref/models/interface.md
-                - ref/models/openai_chatcompletions.md
-                - ref/models/openai_responses.md
-          - Tracing:
-                - ref/tracing/index.md
-                - ref/tracing/create.md
-                - ref/tracing/traces.md
-                - ref/tracing/spans.md
-                - ref/tracing/processor_interface.md
-                - ref/tracing/processors.md
-                - ref/tracing/scope.md
-                - ref/tracing/setup.md
-                - ref/tracing/span_data.md
-                - ref/tracing/util.md
-          - Extensions:
-                - ref/extensions/handoff_filters.md
-                - ref/extensions/handoff_prompt.md
+  name: material
+  features:
+    # Allows copying code blocks
+    - content.code.copy
+    # Allows selecting code blocks
+    - content.code.select
+    # Shows the current path in the sidebar
+    - navigation.path
+    # Shows sections in the sidebar
+    - navigation.sections
+    # Shows sections expanded by default
+    - navigation.expand
+    # Enables annotations in code blocks
+    - content.code.annotate
+  palette:
+    primary: black
+  logo: assets/logo.svg
+  favicon: images/favicon-platform.svg
+
+repo_name: openai-agents-python
+repo_url: https://github.com/openai/openai-agents-python
 
 plugins:
-    - search
-    - mkdocstrings:
-          handlers:
-              python:
-                  paths: ["src/agents"]
-                  selection:
-                      docstring_style: google
-                  options:
-                      # Shows links to other members in signatures
-                      signature_crossrefs: true
-                      # Orders members by source order, rather than alphabetical
-                      members_order: source
-                      # Puts the signature on a separate line from the member name
-                      separate_signature: true
-                      # Shows type annotations in signatures
-                      show_signature_annotations: true
-                      # Makes the font sizes nicer
-                      heading_level: 3
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src/agents"]
+          selection:
+            docstring_style: google
+          options:
+            # Shows links to other members in signatures
+            signature_crossrefs: true
+            # Orders members by source order, rather than alphabetical
+            members_order: source
+            # Puts the signature on a separate line from the member name
+            separate_signature: true
+            # Shows type annotations in signatures
+            show_signature_annotations: true
+            # Makes the font sizes nicer
+            heading_level: 3
+            # Show inherited members
+            inherited_members: true
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+          nav:
+            - Intro: index.md
+            - Quickstart: quickstart.md
+            - Examples: examples.md
+            - Documentation:
+                - agents.md
+                - running_agents.md
+                - Sessions:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - results.md
+                - streaming.md
+                - human_in_the_loop.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - Models:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - Voice agents:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - Realtime agents:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+            - API Reference:
+                - Agents:
+                    - ref/index.md
+                    - ref/agent.md
+                    - ref/run.md
+                    - ref/memory.md
+                    - ref/repl.md
+                    - ref/tool.md
+                    - ref/tool_context.md
+                    - ref/result.md
+                    - ref/stream_events.md
+                    - ref/handoffs.md
+                    - ref/lifecycle.md
+                    - ref/items.md
+                    - ref/run_context.md
+                    - ref/usage.md
+                    - ref/exceptions.md
+                    - ref/guardrail.md
+                    - ref/prompts.md
+                    - ref/model_settings.md
+                    - ref/strict_schema.md
+                    - ref/tool_guardrails.md
+                    - ref/computer.md
+                    - ref/agent_output.md
+                    - ref/function_schema.md
+                    - ref/models/interface.md
+                    - ref/models/openai_chatcompletions.md
+                    - ref/models/openai_responses.md
+                    - ref/mcp/server.md
+                    - ref/mcp/util.md
+                - Tracing:
+                    - ref/tracing/index.md
+                    - ref/tracing/create.md
+                    - ref/tracing/traces.md
+                    - ref/tracing/spans.md
+                    - ref/tracing/processor_interface.md
+                    - ref/tracing/processors.md
+                    - ref/tracing/scope.md
+                    - ref/tracing/setup.md
+                    - ref/tracing/span_data.md
+                    - ref/tracing/util.md
+                - Realtime:
+                    - ref/realtime/agent.md
+                    - ref/realtime/runner.md
+                    - ref/realtime/session.md
+                    - ref/realtime/events.md
+                    - ref/realtime/config.md
+                    - ref/realtime/model.md
+                - Voice:
+                    - ref/voice/pipeline.md
+                    - ref/voice/workflow.md
+                    - ref/voice/input.md
+                    - ref/voice/result.md
+                    - ref/voice/pipeline_config.md
+                    - ref/voice/events.md
+                    - ref/voice/exceptions.md
+                    - ref/voice/model.md
+                    - ref/voice/utils.md
+                    - ref/voice/models/openai_provider.md
+                    - ref/voice/models/openai_stt.md
+                    - ref/voice/models/openai_tts.md
+                - Extensions:
+                    - ref/extensions/handoff_filters.md
+                    - ref/extensions/handoff_prompt.md
+                    - ref/extensions/litellm.md
+                    - ref/extensions/memory/sqlalchemy_session.md
+                    - ref/extensions/memory/encrypt_session.md
+                    - ref/extensions/memory/advanced_sqlite_session.md
+        - locale: ja
+          name: 日本語
+          build: true
+          nav:
+            - はじめに: index.md
+            - クイックスタート: quickstart.md
+            - コード例: examples.md
+            - ドキュメント:
+                - agents.md
+                - running_agents.md
+                - セッション:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - results.md
+                - streaming.md
+                - human_in_the_loop.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - モデル:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - 音声エージェント:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - リアルタイムエージェント:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+
+        - locale: ko
+          name: 한국어
+          build: true
+          nav:
+            - 소개: index.md
+            - 빠른 시작: quickstart.md
+            - 코드 예제: examples.md
+            - 문서:
+                - agents.md
+                - running_agents.md
+                - 세션:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - results.md
+                - streaming.md
+                - human_in_the_loop.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - 모델:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - 음성 에이전트:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - 실시간 에이전트:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
+        - locale: zh
+          name: 简体中文
+          build: true
+          nav:
+            - 介绍: index.md
+            - 快速开始: quickstart.md
+            - 示例: examples.md
+            - 文档:
+                - agents.md
+                - running_agents.md
+                - 会话:
+                    - sessions/index.md
+                    - sessions/sqlalchemy_session.md
+                    - sessions/advanced_sqlite_session.md
+                    - sessions/encrypted_session.md
+                - results.md
+                - streaming.md
+                - human_in_the_loop.md
+                - repl.md
+                - tools.md
+                - mcp.md
+                - handoffs.md
+                - tracing.md
+                - context.md
+                - guardrails.md
+                - multi_agent.md
+                - usage.md
+                - 模型:
+                    - models/index.md
+                    - models/litellm.md
+                - config.md
+                - visualization.md
+                - release.md
+                - 语音智能体:
+                    - voice/quickstart.md
+                    - voice/pipeline.md
+                    - voice/tracing.md
+                - 实时智能体:
+                    - realtime/quickstart.md
+                    - realtime/guide.md
 
 extra:
-    # Remove material generation message in footer
-    generator: false
+  # Remove material generation message in footer
+  generator: false
+  language: en
+  alternate:
+    - name: English
+      link: /openai-agents-python/
+      lang: en
+    - name: 日本語
+      link: /openai-agents-python/ja/
+      lang: ja
+    - name: 한국어
+      link: /openai-agents-python/ko/
+      lang: ko
+    - name: 简体中文
+      link: /openai-agents-python/zh/
+      lang: zh
 
 markdown_extensions:
-    - admonition
-    - pymdownx.details
-    - pymdownx.superfences
-    - attr_list
-    - md_in_html
-    - pymdownx.highlight:
-          anchor_linenums: true
-          line_spans: __span
-          pygments_lang_class: true
-    - pymdownx.inlinehilite
-    - pymdownx.snippets
-    - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
 
 validation:
-    omitted_files: warn
-    absolute_links: warn
-    unrecognized_links: warn
-    anchors: warn
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
 
 extra_css:
-    - stylesheets/extra.css
+  - stylesheets/extra.css
 
 watch:
-    - "src/agents"
+  - "src/agents"

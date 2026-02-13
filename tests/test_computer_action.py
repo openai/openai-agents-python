@@ -1,10 +1,10 @@
-"""Unit tests for the ComputerAction methods in `agents._run_impl`.
+"""Unit tests for the ComputerAction methods in `agents.run_internal.run_loop`.
 
 These confirm that the correct computer action method is invoked for each action type and
 that screenshots are taken and wrapped appropriately, and that the execute function invokes
 hooks and returns the expected ToolCallOutputItem."""
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses.response_computer_tool_call import (
@@ -18,6 +18,7 @@ from openai.types.responses.response_computer_tool_call import (
     ActionScroll,
     ActionType,
     ActionWait,
+    PendingSafetyCheck,
     ResponseComputerToolCall,
 )
 
@@ -31,8 +32,10 @@ from agents import (
     RunContextWrapper,
     RunHooks,
 )
-from agents._run_impl import ComputerAction, ToolRunComputerAction
 from agents.items import ToolCallOutputItem
+from agents.run_internal import run_loop
+from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
+from agents.tool import ComputerToolSafetyCheckData
 
 
 class LoggingComputer(Computer):
@@ -158,7 +161,7 @@ async def test_get_screenshot_sync_executes_action_and_takes_screenshot(
         pending_safety_checks=[],
         status="completed",
     )
-    screenshot_output = await ComputerAction._get_screenshot_sync(computer, tool_call)
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     # The last call is always to screenshot()
     if isinstance(action, ActionScreenshot):
         # Screenshot is taken twice: initial explicit call plus final capture.
@@ -205,7 +208,7 @@ async def test_get_screenshot_async_executes_action_and_takes_screenshot(
         pending_safety_checks=[],
         status="completed",
     )
-    screenshot_output = await ComputerAction._get_screenshot_async(computer, tool_call)
+    screenshot_output = await ComputerAction._execute_action_and_capture(computer, tool_call)
     if isinstance(action, ActionScreenshot):
         assert computer.calls == [("screenshot", ()), ("screenshot", ())]
     else:
@@ -302,10 +305,50 @@ async def test_execute_invokes_hooks_and_returns_tool_call_output() -> None:
     assert output_item.agent is agent
     assert isinstance(output_item, ToolCallOutputItem)
     assert output_item.output == "data:image/png;base64,xyz"
-    raw = output_item.raw_item
+    raw = cast(dict[str, Any], output_item.raw_item)
     # Raw item is a dict-like mapping with expected output fields.
-    assert isinstance(raw, dict)
     assert raw["type"] == "computer_call_output"
     assert raw["output"]["type"] == "computer_screenshot"
     assert "image_url" in raw["output"]
     assert raw["output"]["image_url"].endswith("xyz")
+
+
+@pytest.mark.asyncio
+async def test_pending_safety_check_acknowledged() -> None:
+    """Safety checks should be acknowledged via the callback."""
+
+    computer = LoggingComputer(screenshot_return="img")
+    called: list[ComputerToolSafetyCheckData] = []
+
+    def on_sc(data: ComputerToolSafetyCheckData) -> bool:
+        called.append(data)
+        return True
+
+    tool = ComputerTool(computer=computer, on_safety_check=on_sc)
+    safety = PendingSafetyCheck(id="sc", code="c", message="m")
+    tool_call = ResponseComputerToolCall(
+        id="t1",
+        type="computer_call",
+        action=ActionClick(type="click", x=1, y=1, button="left"),
+        call_id="t1",
+        pending_safety_checks=[safety],
+        status="completed",
+    )
+    run_action = ToolRunComputerAction(tool_call=tool_call, computer_tool=tool)
+    agent = Agent(name="a", tools=[tool])
+    ctx = RunContextWrapper(context=None)
+
+    results = await run_loop.execute_computer_actions(
+        agent=agent,
+        actions=[run_action],
+        hooks=RunHooks[Any](),
+        context_wrapper=ctx,
+        config=RunConfig(),
+    )
+
+    assert len(results) == 1
+    raw = results[0].raw_item
+    assert isinstance(raw, dict)
+    assert raw.get("acknowledged_safety_checks") == [{"id": "sc", "code": "c", "message": "m"}]
+    assert len(called) == 1
+    assert called[0].safety_check.id == "sc"

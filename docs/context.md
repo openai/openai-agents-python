@@ -10,7 +10,7 @@ Context is an overloaded term. There are two main classes of context you might c
 This is represented via the [`RunContextWrapper`][agents.run_context.RunContextWrapper] class and the [`context`][agents.run_context.RunContextWrapper.context] property within it. The way this works is:
 
 1. You create any Python object you want. A common pattern is to use a dataclass or a Pydantic object.
-2. You pass that object to the various run methods (e.g. `Runner.run(..., **context=whatever**))`.
+2. You pass that object to the various run methods (e.g. `Runner.run(..., context=whatever)`).
 3. All your tool calls, lifecycle hooks etc will be passed a wrapper object, `RunContextWrapper[T]`, where `T` represents your context object type which you can access via `wrapper.context`.
 
 The **most important** thing to be aware of: every agent, tool function, lifecycle etc for a given agent run must use the same _type_ of context.
@@ -38,17 +38,18 @@ class UserInfo:  # (1)!
 
 @function_tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
-    return f"User {wrapper.context.name} is 47 years old"
+    """Fetch the age of the user. Call this function to get user's age information."""
+    return f"The user {wrapper.context.name} is 47 years old"
 
 async def main():
-    user_info = UserInfo(name="John", uid=123)  # (3)!
+    user_info = UserInfo(name="John", uid=123)
 
-    agent = Agent[UserInfo](  # (4)!
+    agent = Agent[UserInfo](  # (3)!
         name="Assistant",
         tools=[fetch_user_age],
     )
 
-    result = await Runner.run(
+    result = await Runner.run(  # (4)!
         starting_agent=agent,
         input="What is the age of the user?",
         context=user_info,
@@ -66,6 +67,51 @@ if __name__ == "__main__":
 3. We mark the agent with the generic `UserInfo`, so that the typechecker can catch errors (for example, if we tried to pass a tool that took a different context type).
 4. The context is passed to the `run` function.
 5. The agent correctly calls the tool and gets the age.
+
+---
+
+### Advanced: `ToolContext`
+
+In some cases, you might want to access extra metadata about the tool being executed — such as its name, call ID, or raw argument string.  
+For this, you can use the [`ToolContext`][agents.tool_context.ToolContext] class, which extends `RunContextWrapper`.
+
+```python
+from typing import Annotated
+from pydantic import BaseModel, Field
+from agents import Agent, Runner, function_tool
+from agents.tool_context import ToolContext
+
+class WeatherContext(BaseModel):
+    user_id: str
+
+class Weather(BaseModel):
+    city: str = Field(description="The city name")
+    temperature_range: str = Field(description="The temperature range in Celsius")
+    conditions: str = Field(description="The weather conditions")
+
+@function_tool
+def get_weather(ctx: ToolContext[WeatherContext], city: Annotated[str, "The city to get the weather for"]) -> Weather:
+    print(f"[debug] Tool context: (name: {ctx.tool_name}, call_id: {ctx.tool_call_id}, args: {ctx.tool_arguments})")
+    return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
+
+agent = Agent(
+    name="Weather Agent",
+    instructions="You are a helpful agent that can tell the weather of a given city.",
+    tools=[get_weather],
+)
+```
+
+`ToolContext` provides the same `.context` property as `RunContextWrapper`,  
+plus additional fields specific to the current tool call:
+
+- `tool_name` – the name of the tool being invoked  
+- `tool_call_id` – a unique identifier for this tool call  
+- `tool_arguments` – the raw argument string passed to the tool  
+
+Use `ToolContext` when you need tool-level metadata during execution.  
+For general context sharing between agents and tools, `RunContextWrapper` remains sufficient.
+
+---
 
 ## Agent/LLM context
 

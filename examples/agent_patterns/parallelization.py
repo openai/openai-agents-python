@@ -1,6 +1,7 @@
 import asyncio
 
 from agents import Agent, ItemHelpers, Runner, trace
+from examples.auto_mode import input_with_fallback
 
 """
 This example shows the parallelization pattern. We run the agent three times in parallel, and pick
@@ -19,7 +20,10 @@ translation_picker = Agent(
 
 
 async def main():
-    msg = input("Hi! Enter a message, and we'll translate it to Spanish.\n\n")
+    msg = input_with_fallback(
+        "Hi! Enter a message, and we'll translate it to Spanish.\n\n",
+        "Good morning!",
+    )
 
     # Ensure the entire workflow is a single trace
     with trace("Parallel translation"):

@@ -1,7 +1,10 @@
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, Handoff, RunContextWrapper, Runner, handoff
+from agents import Agent, AgentOutputSchema, Handoff, RunContextWrapper, handoff
+from agents.lifecycle import AgentHooksBase
+from agents.model_settings import ModelSettings
+from agents.run_internal.run_loop import get_handoffs, get_output_schema
 
 
 @pytest.mark.asyncio
@@ -42,7 +45,7 @@ async def test_handoff_with_agents():
         handoffs=[agent_1, agent_2],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -77,7 +80,7 @@ async def test_handoff_with_handoff_obj():
         ],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -111,7 +114,7 @@ async def test_handoff_with_handoff_obj_and_agent():
         handoffs=[handoff(agent_1), agent_2],
     )
 
-    handoffs = Runner._get_handoffs(agent_3)
+    handoffs = await get_handoffs(agent_3, RunContextWrapper(None))
     assert len(handoffs) == 2
 
     assert handoffs[0].agent_name == "agent_1"
@@ -159,9 +162,65 @@ async def test_agent_final_output():
         output_type=Foo,
     )
 
-    schema = Runner._get_output_schema(agent)
+    schema = get_output_schema(agent)
+    assert isinstance(schema, AgentOutputSchema)
     assert schema is not None
     assert schema.output_type == Foo
-    assert schema.strict_json_schema is True
+    assert schema.is_strict_json_schema() is True
     assert schema.json_schema() is not None
     assert not schema.is_plain_text()
+
+
+class TestAgentValidation:
+    """Essential validation tests for Agent __post_init__"""
+
+    def test_name_validation_critical_cases(self):
+        """Test name validation - the original issue that started this PR"""
+        # This was the original failing case that caused JSON serialization errors
+        with pytest.raises(TypeError, match="Agent name must be a string, got int"):
+            Agent(name=1)  # type: ignore
+
+        with pytest.raises(TypeError, match="Agent name must be a string, got NoneType"):
+            Agent(name=None)  # type: ignore
+
+    def test_tool_use_behavior_dict_validation(self):
+        """Test tool_use_behavior accepts StopAtTools dict - fixes existing test failures"""
+        # This test ensures the existing failing tests now pass
+        Agent(name="test", tool_use_behavior={"stop_at_tool_names": ["tool1"]})
+
+        # Invalid cases that should fail
+        with pytest.raises(TypeError, match="Agent tool_use_behavior must be"):
+            Agent(name="test", tool_use_behavior=123)  # type: ignore
+
+    def test_hooks_validation_type_compatibility(self):
+        """Test hooks validation works with generic type validation."""
+
+        class MockHooks(AgentHooksBase):
+            pass
+
+        # Valid case
+        Agent(name="test", hooks=MockHooks())  # type: ignore
+
+        # Invalid case
+        with pytest.raises(TypeError, match="Agent hooks must be an AgentHooks instance"):
+            Agent(name="test", hooks="invalid")  # type: ignore
+
+    def test_list_field_validation(self):
+        """Test critical list fields that commonly get wrong types"""
+        # These are the most common mistakes users make
+        with pytest.raises(TypeError, match="Agent tools must be a list"):
+            Agent(name="test", tools="not_a_list")  # type: ignore
+
+        with pytest.raises(TypeError, match="Agent handoffs must be a list"):
+            Agent(name="test", handoffs="not_a_list")  # type: ignore
+
+    def test_model_settings_validation(self):
+        """Test model_settings validation - prevents runtime errors"""
+        # Valid case
+        Agent(name="test", model_settings=ModelSettings())
+
+        # Invalid case that could cause runtime issues
+        with pytest.raises(
+            TypeError, match="Agent model_settings must be a ModelSettings instance"
+        ):
+            Agent(name="test", model_settings={})  # type: ignore

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import abc
 import contextvars
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..logger import logger
@@ -10,9 +12,36 @@ from .processor_interface import TracingProcessor
 from .scope import Scope
 
 
-class Trace:
-    """
-    A trace is the root level object that tracing creates. It represents a logical "workflow".
+class Trace(abc.ABC):
+    """A complete end-to-end workflow containing related spans and metadata.
+
+    A trace represents a logical workflow or operation (e.g., "Customer Service Query"
+    or "Code Generation") and contains all the spans (individual operations) that occur
+    during that workflow.
+
+    Example:
+        ```python
+        # Basic trace usage
+        with trace("Order Processing") as t:
+            validation_result = await Runner.run(validator, order_data)
+            if validation_result.approved:
+                await Runner.run(processor, order_data)
+
+        # Trace with metadata and grouping
+        with trace(
+            "Customer Service",
+            group_id="chat_123",
+            metadata={"customer": "user_456"}
+        ) as t:
+            result = await Runner.run(support_agent, query)
+        ```
+
+    Notes:
+        - Use descriptive workflow names
+        - Group related traces with consistent group_ids
+        - Add relevant metadata for filtering/analysis
+        - Use context managers for reliable cleanup
+        - Consider privacy when adding trace data
     """
 
     @abc.abstractmethod
@@ -25,51 +54,184 @@ class Trace:
 
     @abc.abstractmethod
     def start(self, mark_as_current: bool = False):
-        """
-        Start the trace.
+        """Start the trace and optionally mark it as the current trace.
 
         Args:
-            mark_as_current: If true, the trace will be marked as the current trace.
+            mark_as_current: If true, marks this trace as the current trace
+                in the execution context.
+
+        Notes:
+            - Must be called before any spans can be added
+            - Only one trace can be current at a time
+            - Thread-safe when using mark_as_current
         """
         pass
 
     @abc.abstractmethod
     def finish(self, reset_current: bool = False):
-        """
-        Finish the trace.
+        """Finish the trace and optionally reset the current trace.
 
         Args:
-            reset_current: If true, the trace will be reset as the current trace.
+            reset_current: If true, resets the current trace to the previous
+                trace in the execution context.
+
+        Notes:
+            - Must be called to complete the trace
+            - Finalizes all open spans
+            - Thread-safe when using reset_current
         """
         pass
 
     @property
     @abc.abstractmethod
     def trace_id(self) -> str:
-        """
-        The trace ID.
+        """Get the unique identifier for this trace.
+
+        Returns:
+            str: The trace's unique ID in the format 'trace_<32_alphanumeric>'
+
+        Notes:
+            - IDs are globally unique
+            - Used to link spans to their parent trace
+            - Can be used to look up traces in the dashboard
         """
         pass
 
     @property
     @abc.abstractmethod
     def name(self) -> str:
-        """
-        The name of the workflow being traced.
+        """Get the human-readable name of this workflow trace.
+
+        Returns:
+            str: The workflow name (e.g., "Customer Service", "Data Processing")
+
+        Notes:
+            - Should be descriptive and meaningful
+            - Used for grouping and filtering in the dashboard
+            - Helps identify the purpose of the trace
         """
         pass
 
     @abc.abstractmethod
     def export(self) -> dict[str, Any] | None:
-        """
-        Export the trace as a dictionary.
+        """Export the trace data as a serializable dictionary.
+
+        Returns:
+            dict | None: Dictionary containing trace data, or None if tracing is disabled.
+
+        Notes:
+            - Includes all spans and their data
+            - Used for sending traces to backends
+            - May include metadata and group ID
         """
         pass
 
+    @property
+    @abc.abstractmethod
+    def tracing_api_key(self) -> str | None:
+        """The API key to use when exporting this trace and its spans."""
+        pass
+
+    def to_json(self, *, include_tracing_api_key: bool = False) -> dict[str, Any] | None:
+        """Serialize trace metadata for persistence or transport.
+
+        Args:
+            include_tracing_api_key: When True, include the tracing API key. Defaults to False
+                to avoid persisting secrets unintentionally.
+        """
+        exported = self.export()
+        if exported is None:
+            return None
+        payload = dict(exported)
+        if include_tracing_api_key and self.tracing_api_key:
+            payload["tracing_api_key"] = self.tracing_api_key
+        return payload
+
+
+@dataclass
+class TraceState:
+    """Serializable trace metadata for run state persistence."""
+
+    trace_id: str | None = None
+    workflow_name: str | None = None
+    group_id: str | None = None
+    metadata: dict[str, Any] | None = None
+    tracing_api_key: str | None = None
+    object_type: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_trace(cls, trace: Trace | None) -> TraceState | None:
+        if trace is None:
+            return None
+        payload = trace.to_json(include_tracing_api_key=True)
+        return cls.from_json(payload)
+
+    @classmethod
+    def from_json(cls, payload: Mapping[str, Any] | None) -> TraceState | None:
+        if not payload:
+            return None
+        data = dict(payload)
+        object_type = data.pop("object", None)
+        trace_id = data.pop("id", None) or data.pop("trace_id", None)
+        workflow_name = data.pop("workflow_name", None)
+        group_id = data.pop("group_id", None)
+        metadata_value = data.pop("metadata", None)
+        metadata = metadata_value if isinstance(metadata_value, dict) else None
+        tracing_api_key = data.pop("tracing_api_key", None)
+        return cls(
+            trace_id=trace_id if isinstance(trace_id, str) else None,
+            workflow_name=workflow_name if isinstance(workflow_name, str) else None,
+            group_id=group_id if isinstance(group_id, str) else None,
+            metadata=metadata,
+            tracing_api_key=tracing_api_key if isinstance(tracing_api_key, str) else None,
+            object_type=object_type if isinstance(object_type, str) else None,
+            extra=data,
+        )
+
+    def to_json(self, *, include_tracing_api_key: bool = False) -> dict[str, Any] | None:
+        if (
+            self.trace_id is None
+            and self.workflow_name is None
+            and self.group_id is None
+            and self.metadata is None
+            and self.tracing_api_key is None
+            and self.object_type is None
+            and not self.extra
+        ):
+            return None
+        payload: dict[str, Any] = {}
+        if self.object_type:
+            payload["object"] = self.object_type
+        if self.trace_id:
+            payload["id"] = self.trace_id
+        if self.workflow_name is not None:
+            payload["workflow_name"] = self.workflow_name
+        if self.group_id is not None:
+            payload["group_id"] = self.group_id
+        if self.metadata is not None:
+            payload["metadata"] = dict(self.metadata)
+        if include_tracing_api_key and self.tracing_api_key:
+            payload["tracing_api_key"] = self.tracing_api_key
+        for key, value in self.extra.items():
+            if key not in payload:
+                payload[key] = value
+        return payload
+
 
 class NoOpTrace(Trace):
-    """
-    A no-op trace that will not be recorded.
+    """A no-op implementation of Trace that doesn't record any data.
+
+    Used when tracing is disabled but trace operations still need to work.
+    Maintains proper context management but doesn't store or export any data.
+
+    Example:
+        ```python
+        # When tracing is disabled, traces become NoOpTrace
+        with trace("Disabled Workflow") as t:
+            # Operations still work but nothing is recorded
+            await Runner.run(agent, "query")
+        ```
     """
 
     def __init__(self):
@@ -101,13 +263,32 @@ class NoOpTrace(Trace):
 
     @property
     def trace_id(self) -> str:
+        """The trace's unique identifier.
+
+        Returns:
+            str: A unique ID for this trace.
+        """
         return "no-op"
 
     @property
     def name(self) -> str:
+        """The workflow name for this trace.
+
+        Returns:
+            str: Human-readable name describing this workflow.
+        """
         return "no-op"
 
     def export(self) -> dict[str, Any] | None:
+        """Export the trace data as a dictionary.
+
+        Returns:
+            dict | None: Trace data in exportable format, or None if no data.
+        """
+        return None
+
+    @property
+    def tracing_api_key(self) -> str | None:
         return None
 
 
@@ -122,6 +303,7 @@ class TraceImpl(Trace):
     __slots__ = (
         "_name",
         "_trace_id",
+        "_tracing_api_key",
         "group_id",
         "metadata",
         "_prev_context_token",
@@ -136,9 +318,11 @@ class TraceImpl(Trace):
         group_id: str | None,
         metadata: dict[str, Any] | None,
         processor: TracingProcessor,
+        tracing_api_key: str | None = None,
     ):
         self._name = name
         self._trace_id = trace_id or util.gen_trace_id()
+        self._tracing_api_key = tracing_api_key
         self.group_id = group_id
         self.metadata = metadata
         self._prev_context_token: contextvars.Token[Trace | None] | None = None
@@ -152,6 +336,10 @@ class TraceImpl(Trace):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self._tracing_api_key
 
     def start(self, mark_as_current: bool = False):
         if self._started:

@@ -13,6 +13,7 @@ from agents import (
     TResponseInputItem,
     input_guardrail,
 )
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """
 This example shows how to use guardrails.
@@ -20,7 +21,7 @@ This example shows how to use guardrails.
 Guardrails are checks that run in parallel to the agent's execution.
 They can be used to do things like:
 - Check if input messages are off-topic
-- Check that output messages don't violate any policies
+- Check that input messages don't violate any policies
 - Take over control of the agent's execution if an unexpected input is detected
 
 In this example, we'll setup an input guardrail that trips if the user is asking to do math homework.
@@ -68,9 +69,13 @@ async def main():
     )
 
     input_data: list[TResponseInputItem] = []
+    auto_mode = is_auto_mode()
 
     while True:
-        user_input = input("Enter a message: ")
+        user_input = input_with_fallback(
+            "Enter a message: ",
+            "What's the capital of California?",
+        )
         input_data.append(
             {
                 "role": "user",
@@ -93,6 +98,8 @@ async def main():
                     "content": message,
                 }
             )
+        if auto_mode:
+            break
 
     # Sample run:
     # Enter a message: What's the capital of California?

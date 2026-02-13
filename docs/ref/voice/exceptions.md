@@ -1,0 +1,3 @@
+# `Exceptions`
+
+::: agents.voice.exceptions

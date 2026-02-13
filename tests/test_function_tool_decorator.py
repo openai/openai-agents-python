@@ -3,9 +3,11 @@ import json
 from typing import Any, Optional
 
 import pytest
+from inline_snapshot import snapshot
 
 from agents import function_tool
 from agents.run_context import RunContextWrapper
+from agents.tool_context import ToolContext
 
 
 class DummyContext:
@@ -13,8 +15,10 @@ class DummyContext:
         self.data = "something"
 
 
-def ctx_wrapper() -> RunContextWrapper[DummyContext]:
-    return RunContextWrapper(DummyContext())
+def ctx_wrapper() -> ToolContext[DummyContext]:
+    return ToolContext(
+        context=DummyContext(), tool_name="dummy", tool_call_id="1", tool_arguments=""
+    )
 
 
 @function_tool
@@ -43,7 +47,7 @@ async def test_sync_no_context_with_args_invocation():
 
 
 @function_tool
-def sync_with_context(ctx: RunContextWrapper[DummyContext], name: str) -> str:
+def sync_with_context(ctx: ToolContext[DummyContext], name: str) -> str:
     return f"{name}_{ctx.context.data}"
 
 
@@ -70,7 +74,7 @@ async def test_async_no_context_invocation():
 
 
 @function_tool
-async def async_with_context(ctx: RunContextWrapper[DummyContext], prefix: str, num: int) -> str:
+async def async_with_context(ctx: ToolContext[DummyContext], prefix: str, num: int) -> str:
     await asyncio.sleep(0)
     return f"{prefix}-{num}-{ctx.context.data}"
 
@@ -152,8 +156,12 @@ def optional_param_function(a: int, b: Optional[int] = None) -> str:
 
 
 @pytest.mark.asyncio
-async def test_optional_param_function():
+async def test_non_strict_mode_function():
     tool = optional_param_function
+
+    assert tool.strict_json_schema is False, "strict_json_schema should be False"
+
+    assert tool.params_json_schema.get("required") == ["a"], "required should only be a"
 
     input_data = {"a": 5}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
@@ -165,7 +173,7 @@ async def test_optional_param_function():
 
 
 @function_tool(strict_mode=False)
-def multiple_optional_params_function(
+def all_optional_params_function(
     x: int = 42,
     y: str = "hello",
     z: Optional[int] = None,
@@ -176,8 +184,12 @@ def multiple_optional_params_function(
 
 
 @pytest.mark.asyncio
-async def test_multiple_optional_params_function():
-    tool = multiple_optional_params_function
+async def test_all_optional_params_function():
+    tool = all_optional_params_function
+
+    assert tool.strict_json_schema is False, "strict_json_schema should be False"
+
+    assert tool.params_json_schema.get("required") is None, "required should be empty"
 
     input_data: dict[str, Any] = {}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
@@ -190,3 +202,37 @@ async def test_multiple_optional_params_function():
     input_data = {"x": 10, "y": "world", "z": 99}
     output = await tool.on_invoke_tool(ctx_wrapper(), json.dumps(input_data))
     assert output == "10_world_99"
+
+
+@function_tool
+def get_weather(city: str) -> str:
+    """Get the weather for a given city.
+
+    Args:
+        city: The city to get the weather for.
+    """
+    return f"The weather in {city} is sunny."
+
+
+@pytest.mark.asyncio
+async def test_extract_descriptions_from_docstring():
+    """Ensure that we extract function and param descriptions from docstrings."""
+
+    tool = get_weather
+    assert tool.description == "Get the weather for a given city."
+    params_json_schema = tool.params_json_schema
+    assert params_json_schema == snapshot(
+        {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "description": "The city to get the weather for.",
+                    "title": "City",
+                    "type": "string",
+                }
+            },
+            "title": "get_weather_args",
+            "required": ["city"],
+            "additionalProperties": False,
+        }
+    )

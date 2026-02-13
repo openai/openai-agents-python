@@ -38,6 +38,25 @@ from agents import set_tracing_export_api_key
 set_tracing_export_api_key("sk-...")
 ```
 
+If you need to attribute traces to a specific organization or project when using the default exporter, set these environment variables before your app starts:
+
+```bash
+export OPENAI_ORG_ID="org_..."
+export OPENAI_PROJECT_ID="proj_..."
+```
+
+You can also set a tracing API key per run without changing the global exporter.
+
+```python
+from agents import Runner, RunConfig
+
+await Runner.run(
+    agent,
+    input="Hello",
+    run_config=RunConfig(tracing={"api_key": "sk-tracing-123"}),
+)
+```
+
 You can also disable tracing entirely by using the [`set_tracing_disabled()`][agents.set_tracing_disabled] function.
 
 ```python
@@ -63,7 +82,7 @@ Alternatively, you can customize the logs by adding handlers, filters, formatter
 ```python
 import logging
 
-logger =  logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
+logger = logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
 
 # To make all logs show up
 logger.setLevel(logging.DEBUG)

@@ -21,6 +21,7 @@ from agents import (
     trace,
 )
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 ### CONTEXT
 
@@ -39,21 +40,28 @@ class AirlineAgentContext(BaseModel):
     name_override="faq_lookup_tool", description_override="Lookup frequently asked questions."
 )
 async def faq_lookup_tool(question: str) -> str:
-    if "bag" in question or "baggage" in question:
+    question_lower = question.lower()
+    if any(
+        keyword in question_lower
+        for keyword in ["bag", "baggage", "luggage", "carry-on", "hand luggage", "hand carry"]
+    ):
         return (
             "You are allowed to bring one bag on the plane. "
             "It must be under 50 pounds and 22 inches x 14 inches x 9 inches."
         )
-    elif "seats" in question or "plane" in question:
+    elif any(keyword in question_lower for keyword in ["seat", "seats", "seating", "plane"]):
         return (
             "There are 120 seats on the plane. "
             "There are 22 business class seats and 98 economy seats. "
             "Exit rows are rows 4 and 16. "
             "Rows 5-8 are Economy Plus, with extra legroom. "
         )
-    elif "wifi" in question:
+    elif any(
+        keyword in question_lower
+        for keyword in ["wifi", "internet", "wireless", "connectivity", "network", "online"]
+    ):
         return "We have free wifi on the plane, join Airline-Wifi"
-    return "I'm sorry, I don't know the answer to that question."
+    return "I'm sorry, I don't know the answer to that question."
 
 
 @function_tool
@@ -136,13 +144,17 @@ async def main():
     current_agent: Agent[AirlineAgentContext] = triage_agent
     input_items: list[TResponseInputItem] = []
     context = AirlineAgentContext()
+    auto_mode = is_auto_mode()
 
     # Normally, each input from the user would be an API request to your app, and you can wrap the request in a trace()
     # Here, we'll just use a random UUID for the conversation ID
     conversation_id = uuid.uuid4().hex[:16]
 
     while True:
-        user_input = input("Enter your message: ")
+        user_input = input_with_fallback(
+            "Enter your message: ",
+            "What are your store hours?",
+        )
         with trace("Customer service", group_id=conversation_id):
             input_items.append({"content": user_input, "role": "user"})
             result = await Runner.run(current_agent, input_items, context=context)
@@ -163,6 +175,8 @@ async def main():
                     print(f"{agent_name}: Skipping item: {new_item.__class__.__name__}")
             input_items = result.to_input_list()
             current_agent = result.last_agent
+        if auto_mode:
+            break
 
 
 if __name__ == "__main__":

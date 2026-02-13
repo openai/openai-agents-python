@@ -223,7 +223,7 @@ class Foo(TypedDict):
 
 
 @pytest.mark.asyncio
-async def test_structed_output_non_streamed_agent_hooks():
+async def test_structured_output_non_streamed_agent_hooks():
     hooks = RunHooksForTests()
     model = FakeModel()
     agent_1 = Agent(name="test_1", model=model)
@@ -296,7 +296,7 @@ async def test_structed_output_non_streamed_agent_hooks():
 
 
 @pytest.mark.asyncio
-async def test_structed_output_streamed_agent_hooks():
+async def test_structured_output_streamed_agent_hooks():
     hooks = RunHooksForTests()
     model = FakeModel()
     agent_1 = Agent(name="test_1", model=model)

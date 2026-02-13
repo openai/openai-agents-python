@@ -5,6 +5,7 @@ import random
 
 from agents import Agent, HandoffInputData, Runner, function_tool, handoff, trace
 from agents.extensions import handoff_filters
+from agents.models import is_gpt_5_default
 
 
 @function_tool
@@ -14,6 +15,15 @@ def random_number_tool(max: int) -> int:
 
 
 def spanish_handoff_message_filter(handoff_message_data: HandoffInputData) -> HandoffInputData:
+    if is_gpt_5_default():
+        print("gpt-5 is enabled, so we're not filtering the input history")
+        # when using gpt-5, removing some of the items could break things, so we do this filtering only for other models
+        return HandoffInputData(
+            input_history=handoff_message_data.input_history,
+            pre_handoff_items=tuple(handoff_message_data.pre_handoff_items),
+            new_items=tuple(handoff_message_data.new_items),
+        )
+
     # First, we'll remove any tool-related messages from the message history
     handoff_message_data = handoff_filters.remove_all_tools(handoff_message_data)
 
@@ -24,6 +34,7 @@ def spanish_handoff_message_filter(handoff_message_data: HandoffInputData) -> Ha
         else handoff_message_data.input_history
     )
 
+    # or, you can use the HandoffInputData.clone(kwargs) method
     return HandoffInputData(
         input_history=history,
         pre_handoff_items=tuple(handoff_message_data.pre_handoff_items),

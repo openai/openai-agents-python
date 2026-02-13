@@ -4,10 +4,12 @@ import httpx
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from . import _openai_shared
+from .default_models import get_default_model
 from .interface import Model, ModelProvider
 from .openai_chatcompletions import OpenAIChatCompletionsModel
 from .openai_responses import OpenAIResponsesModel
 
+# This is kept for backward compatiblity but using get_default_model() method is recommended.
 DEFAULT_MODEL: str = "gpt-4o"
 
 
@@ -34,6 +36,19 @@ class OpenAIProvider(ModelProvider):
         project: str | None = None,
         use_responses: bool | None = None,
     ) -> None:
+        """Create a new OpenAI provider.
+
+        Args:
+            api_key: The API key to use for the OpenAI client. If not provided, we will use the
+                default API key.
+            base_url: The base URL to use for the OpenAI client. If not provided, we will use the
+                default base URL.
+            openai_client: An optional OpenAI client to use. If not provided, we will create a new
+                OpenAI client using the api_key and base_url.
+            organization: The organization to use for the OpenAI client.
+            project: The project to use for the OpenAI client.
+            use_responses: Whether to use the OpenAI responses API.
+        """
         if openai_client is not None:
             assert api_key is None and base_url is None, (
                 "Don't provide api_key or base_url if you provide openai_client"
@@ -66,13 +81,17 @@ class OpenAIProvider(ModelProvider):
         return self._client
 
     def get_model(self, model_name: str | None) -> Model:
-        if model_name is None:
-            model_name = DEFAULT_MODEL
+        model_is_explicit = model_name is not None
+        resolved_model_name = model_name if model_name is not None else get_default_model()
 
         client = self._get_client()
 
         return (
-            OpenAIResponsesModel(model=model_name, openai_client=client)
+            OpenAIResponsesModel(
+                model=resolved_model_name,
+                openai_client=client,
+                model_is_explicit=model_is_explicit,
+            )
             if self._use_responses
-            else OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+            else OpenAIChatCompletionsModel(model=resolved_model_name, openai_client=client)
         )

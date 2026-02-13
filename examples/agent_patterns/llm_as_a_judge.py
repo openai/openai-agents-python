@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from agents import Agent, ItemHelpers, Runner, TResponseInputItem, trace
+from examples.auto_mode import input_with_fallback, is_auto_mode
 
 """
 This example shows the LLM as a judge pattern. The first agent generates an outline for a story.
@@ -15,7 +16,7 @@ with the outline.
 story_outline_generator = Agent(
     name="story_outline_generator",
     instructions=(
-        "You generate a very short story outline based on the user's input."
+        "You generate a very short story outline based on the user's input. "
         "If there is any feedback provided, use it to improve the outline."
     ),
 )
@@ -30,19 +31,25 @@ class EvaluationFeedback:
 evaluator = Agent[None](
     name="evaluator",
     instructions=(
-        "You evaluate a story outline and decide if it's good enough."
-        "If it's not good enough, you provide feedback on what needs to be improved."
-        "Never give it a pass on the first try."
+        "You evaluate a story outline and decide if it's good enough. "
+        "If it's not good enough, you provide feedback on what needs to be improved. "
+        "Never give it a pass on the first try. After 5 attempts, you can give it a pass if the story outline is good enough - do not go for perfection"
     ),
     output_type=EvaluationFeedback,
 )
 
 
 async def main() -> None:
-    msg = input("What kind of story would you like to hear? ")
+    msg = input_with_fallback(
+        "What kind of story would you like to hear? ",
+        "A detective story in space.",
+    )
     input_items: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
 
     latest_outline: str | None = None
+    auto_mode = is_auto_mode()
+    max_rounds = 3 if auto_mode else None
+    rounds = 0
 
     # We'll run the entire workflow in a single trace
     with trace("LLM as a judge"):
@@ -64,6 +71,12 @@ async def main() -> None:
             if result.score == "pass":
                 print("Story outline is good enough, exiting.")
                 break
+
+            if auto_mode:
+                rounds += 1
+                if max_rounds is not None and rounds >= max_rounds:
+                    print("Auto mode: stopping after limited rounds.")
+                    break
 
             print("Re-running with feedback")
 

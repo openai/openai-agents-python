@@ -5,14 +5,16 @@ import inspect
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Literal, get_args, get_origin, get_type_hints
 
 from griffe import Docstring, DocstringSectionKind
 from pydantic import BaseModel, Field, create_model
+from pydantic.fields import FieldInfo
 
 from .exceptions import UserError
 from .run_context import RunContextWrapper
 from .strict_schema import ensure_strict_json_schema
+from .tool_context import ToolContext
 
 
 @dataclass
@@ -74,7 +76,7 @@ class FuncSchema:
 
 @dataclass
 class FuncDocumentation:
-    """Contains metadata about a python function, extracted from its docstring."""
+    """Contains metadata about a Python function, extracted from its docstring."""
 
     name: str
     """The name of the function, via `__name__`."""
@@ -131,7 +133,7 @@ def _detect_docstring_style(doc: str) -> DocstringStyle:
 
 @contextlib.contextmanager
 def _suppress_griffe_logging():
-    # Supresses warnings about missing annotations for params
+    # Suppresses warnings about missing annotations for params
     logger = logging.getLogger("griffe")
     previous_level = logger.getEffectiveLevel()
     logger.setLevel(logging.ERROR)
@@ -183,6 +185,40 @@ def generate_func_documentation(
     )
 
 
+def _strip_annotated(annotation: Any) -> tuple[Any, tuple[Any, ...]]:
+    """Returns the underlying annotation and any metadata from typing.Annotated."""
+
+    metadata: tuple[Any, ...] = ()
+    ann = annotation
+
+    while get_origin(ann) is Annotated:
+        args = get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+        metadata = (*metadata, *args[1:])
+
+    return ann, metadata
+
+
+def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
+    """Extracts a human readable description from Annotated metadata if present."""
+
+    for item in metadata:
+        if isinstance(item, str):
+            return item
+    return None
+
+
+def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | None:
+    """Returns the first FieldInfo in Annotated metadata, or None."""
+
+    for item in metadata:
+        if isinstance(item, FieldInfo):
+            return item
+    return None
+
+
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -192,7 +228,7 @@ def function_schema(
     strict_json_schema: bool = True,
 ) -> FuncSchema:
     """
-    Given a python function, extracts a `FuncSchema` from it, capturing the name, description,
+    Given a Python function, extracts a `FuncSchema` from it, capturing the name, description,
     parameter descriptions, and other metadata.
 
     Args:
@@ -206,7 +242,7 @@ def function_schema(
             descriptions.
         strict_json_schema: Whether the JSON schema is in strict mode. If True, we'll ensure that
             the schema adheres to the "strict" standard the OpenAI API expects. We **strongly**
-            recommend setting this to True, as it increases the likelihood of the LLM providing
+            recommend setting this to True, as it increases the likelihood of the LLM producing
             correct JSON input.
 
     Returns:
@@ -217,16 +253,36 @@ def function_schema(
     # 1. Grab docstring info
     if use_docstring_info:
         doc_info = generate_func_documentation(func, docstring_style)
-        param_descs = doc_info.param_descriptions or {}
+        param_descs = dict(doc_info.param_descriptions or {})
     else:
         doc_info = None
         param_descs = {}
 
-    func_name = name_override or doc_info.name if doc_info else func.__name__
+    type_hints_with_extras = get_type_hints(func, include_extras=True)
+    type_hints: dict[str, Any] = {}
+    annotated_param_descs: dict[str, str] = {}
+    param_metadata: dict[str, tuple[Any, ...]] = {}
+
+    for name, annotation in type_hints_with_extras.items():
+        if name == "return":
+            continue
+
+        stripped_ann, metadata = _strip_annotated(annotation)
+        type_hints[name] = stripped_ann
+        param_metadata[name] = metadata
+
+        description = _extract_description_from_metadata(metadata)
+        if description is not None:
+            annotated_param_descs[name] = description
+
+    for name, description in annotated_param_descs.items():
+        param_descs.setdefault(name, description)
+
+    # Ensure name_override takes precedence even if docstring info is disabled.
+    func_name = name_override or (doc_info.name if doc_info else func.__name__)
 
     # 2. Inspect function signature and get type hints
     sig = inspect.signature(func)
-    type_hints = get_type_hints(func)
     params = list(sig.parameters.items())
     takes_context = False
     filtered_params = []
@@ -237,21 +293,21 @@ def function_schema(
         ann = type_hints.get(first_name, first_param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
+            if origin is RunContextWrapper or origin is ToolContext:
                 takes_context = True  # Mark that the function takes context
             else:
                 filtered_params.append((first_name, first_param))
         else:
             filtered_params.append((first_name, first_param))
 
-    # For parameters other than the first, raise error if any use RunContextWrapper.
+    # For parameters other than the first, raise error if any use RunContextWrapper or ToolContext.
     for name, param in params[1:]:
         ann = type_hints.get(name, param.annotation)
         if ann != inspect._empty:
             origin = get_origin(ann) or ann
-            if origin is RunContextWrapper:
+            if origin is RunContextWrapper or origin is ToolContext:
                 raise UserError(
-                    f"RunContextWrapper param found at non-first position in function"
+                    f"RunContextWrapper/ToolContext param found at non-first position in function"
                     f" {func.__name__}"
                 )
         filtered_params.append((name, param))
@@ -288,7 +344,7 @@ def function_schema(
             # Default factory to empty list
             fields[name] = (
                 ann,
-                Field(default_factory=list, description=field_description),  # type: ignore
+                Field(default_factory=list, description=field_description),
             )
 
         elif param.kind == param.VAR_KEYWORD:
@@ -306,16 +362,37 @@ def function_schema(
 
             fields[name] = (
                 ann,
-                Field(default_factory=dict, description=field_description),  # type: ignore
+                Field(default_factory=dict, description=field_description),
             )
 
         else:
             # Normal parameter
-            if default == inspect._empty:
+            metadata = param_metadata.get(name, ())
+            field_info_from_annotated = _extract_field_info_from_metadata(metadata)
+
+            if field_info_from_annotated is not None:
+                merged = FieldInfo.merge_field_infos(
+                    field_info_from_annotated,
+                    description=field_description or field_info_from_annotated.description,
+                )
+                if default != inspect._empty and not isinstance(default, FieldInfo):
+                    merged = FieldInfo.merge_field_infos(merged, default=default)
+                elif isinstance(default, FieldInfo):
+                    merged = FieldInfo.merge_field_infos(merged, default)
+                fields[name] = (ann, merged)
+            elif default == inspect._empty:
                 # Required field
                 fields[name] = (
                     ann,
                     Field(..., description=field_description),
+                )
+            elif isinstance(default, FieldInfo):
+                # Parameter with a default value that is a Field(...)
+                fields[name] = (
+                    ann,
+                    FieldInfo.merge_field_infos(
+                        default, description=field_description or default.description
+                    ),
                 )
             else:
                 # Parameter with a default value
@@ -335,7 +412,8 @@ def function_schema(
     # 5. Return as a FuncSchema dataclass
     return FuncSchema(
         name=func_name,
-        description=description_override or doc_info.description if doc_info else None,
+        # Ensure description_override takes precedence even if docstring info is disabled.
+        description=description_override or (doc_info.description if doc_info else None),
         params_pydantic_model=dynamic_model,
         params_json_schema=json_schema,
         signature=sig,

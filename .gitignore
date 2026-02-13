@@ -45,6 +45,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.tmp/
 nosetests.xml
 coverage.xml
 *.cover
@@ -100,8 +101,10 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+.python-version
+.env*
 .venv
+.venv*
 env/
 venv/
 ENV/
@@ -135,10 +138,16 @@ dmypy.json
 cython_debug/
 
 # PyCharm
-#.idea/
+.idea/
 
 # Ruff stuff:
 .ruff_cache/
 
 # PyPI configuration file
 .pypirc
+.aider*
+
+# Redis database files
+dump.rdb
+
+tmp/
