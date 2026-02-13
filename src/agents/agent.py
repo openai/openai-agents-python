@@ -485,7 +485,7 @@ class Agent(AgentBase, Generic[TContext]):
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
-    ) -> Tool:
+    ) -> FunctionTool:
         """Transform this agent into a tool, callable by other agents.
 
         This is different from handoffs in two ways:
