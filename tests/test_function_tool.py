@@ -610,6 +610,38 @@ def test_function_tool_timeout_seconds_must_be_positive_number() -> None:
             timeout_seconds=cast(Any, "1"),
         )
 
+    with pytest.raises(ValueError, match="finite number"):
+        FunctionTool(
+            name="bad_timeout_inf",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=float("inf"),
+        )
+
+    with pytest.raises(ValueError, match="finite number"):
+        FunctionTool(
+            name="bad_timeout_nan",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=float("nan"),
+        )
+
+
+def test_function_tool_timeout_not_supported_for_sync_handlers() -> None:
+    def sync_tool() -> str:
+        return "ok"
+
+    with pytest.raises(ValueError, match="only supported for async @function_tool handlers"):
+        function_tool(sync_tool, timeout=1.0)
+
+    with pytest.raises(ValueError, match="only supported for async @function_tool handlers"):
+
+        @function_tool(timeout=1.0)
+        def sync_tool_decorator_style() -> str:
+            return "ok"
+
 
 def test_function_tool_timeout_behavior_must_be_supported() -> None:
     with pytest.raises(ValueError, match="timeout_behavior must be one of"):

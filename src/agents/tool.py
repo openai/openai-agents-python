@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import weakref
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
@@ -66,6 +67,7 @@ ToolFunction = Union[
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
 ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
 ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
+_SYNC_FUNCTION_TOOL_MARKER = "__agents_sync_function_tool__"
 
 
 class ToolOutputText(BaseModel):
@@ -1085,6 +1087,7 @@ def function_tool(
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
+        is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
         schema = function_schema(
             func=the_func,
             name_override=name_override,
@@ -1125,7 +1128,7 @@ def function_tool(
             if not _debug.DONT_LOG_TOOL_DATA:
                 logger.debug(f"Tool call args: {args}, kwargs: {kwargs_dict}")
 
-            if inspect.iscoroutinefunction(the_func):
+            if not is_sync_function_tool:
                 if schema.takes_context:
                     result = await the_func(ctx, *args, **kwargs_dict)
                 else:
@@ -1188,6 +1191,9 @@ def function_tool(
                     )
                 return result
 
+        if is_sync_function_tool:
+            setattr(_on_invoke_tool, _SYNC_FUNCTION_TOOL_MARKER, True)
+
         return FunctionTool(
             name=schema.name,
             description=schema.description or "",
@@ -1233,8 +1239,14 @@ def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:
                 "FunctionTool timeout_seconds must be a positive number in seconds or None."
             )
         timeout_seconds = float(timeout_seconds)
+        if not math.isfinite(timeout_seconds):
+            raise ValueError("FunctionTool timeout_seconds must be a finite number.")
         if timeout_seconds <= 0:
             raise ValueError("FunctionTool timeout_seconds must be greater than 0.")
+        if getattr(tool.on_invoke_tool, _SYNC_FUNCTION_TOOL_MARKER, False):
+            raise ValueError(
+                "FunctionTool timeout_seconds is only supported for async @function_tool handlers."
+            )
         tool.timeout_seconds = timeout_seconds
 
     if tool.timeout_behavior not in _FUNCTION_TOOL_TIMEOUT_BEHAVIORS:
