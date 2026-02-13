@@ -320,7 +320,7 @@ class RealtimeSession(RealtimeModelListener):
                     for idx, entry in enumerate(incoming_item.content):
                         # Only attempt to preserve for audio-like content
                         if entry.type in ("audio", "input_audio"):
-                            # Use tuple form for Python 3.9 compatibility
+                            # Use tuple form when checking against multiple classes.
                             assert isinstance(entry, (InputAudio, AssistantAudio))
                             # Determine if transcript is missing/empty on the incoming entry
                             entry_transcript = entry.transcript

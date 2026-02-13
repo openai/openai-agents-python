@@ -7,7 +7,7 @@ Realtime agents are in beta. Expect some breaking changes as we improve the impl
 
 ## Prerequisites
 
--   Python 3.9 or higher
+-   Python 3.10 or higher
 -   OpenAI API key
 -   Basic familiarity with the OpenAI Agents SDK
 

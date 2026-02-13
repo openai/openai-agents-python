@@ -247,11 +247,6 @@ async def _build_model_settings_from_agent(
     return updated_settings
 
 
-# Note: Avoid a module-level union alias for Python 3.9 compatibility.
-# Using a union at runtime (e.g., A | B) in a type alias triggers evaluation
-# during import on 3.9. We instead inline the union in annotations below.
-
-
 class TransportConfig(TypedDict):
     """Low-level network transport configuration."""
 

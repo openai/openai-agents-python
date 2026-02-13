@@ -19,7 +19,7 @@ Explore the [examples](examples) directory to see the SDK in action, and read ou
 
 ## Get started
 
-To get started, set up your Python environment (Python 3.9 or newer required), and then install OpenAI Agents SDK package.
+To get started, set up your Python environment (Python 3.10 or newer required), and then install OpenAI Agents SDK package.
 
 ### venv
 

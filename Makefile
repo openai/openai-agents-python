@@ -38,11 +38,6 @@ snapshots-fix:
 snapshots-create: 
 	uv run pytest --inline-snapshot=create 
 
-.PHONY: old_version_tests
-old_version_tests:
-	UV_PROJECT_ENVIRONMENT=.venv_39 uv sync --python 3.9 --all-extras --all-packages --group dev
-	UV_PROJECT_ENVIRONMENT=.venv_39 uv run --python 3.9 -m pytest
-
 .PHONY: build-docs
 build-docs:
 	uv run docs/scripts/generate_ref_files.py
