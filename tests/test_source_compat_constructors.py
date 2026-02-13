@@ -65,6 +65,9 @@ def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
     assert tool.tool_output_guardrails is not None
     assert tool.tool_input_guardrails[0] is allow_input
     assert tool.tool_output_guardrails[0] is allow_output
+    assert tool.timeout_seconds is None
+    assert tool.timeout_behavior == "error_as_result"
+    assert tool.timeout_error_function is None
 
 
 def test_agent_hook_context_third_positional_argument_is_turn_input() -> None:

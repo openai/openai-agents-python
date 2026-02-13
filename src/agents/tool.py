@@ -35,7 +35,7 @@ from typing_extensions import Concatenate, NotRequired, ParamSpec, TypedDict
 from . import _debug
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
-from .exceptions import ModelBehaviorError, UserError
+from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema
 from .logger import logger
 from .run_context import RunContextWrapper
@@ -64,6 +64,8 @@ ToolFunction = Union[
 ]
 
 DEFAULT_APPROVAL_REJECTION_MESSAGE = "Tool execution was not approved."
+ToolTimeoutBehavior = Literal["error_as_result", "raise_exception"]
+ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
 
 
 class ToolOutputText(BaseModel):
@@ -259,6 +261,20 @@ class FunctionTool:
     function that takes (run_context, tool_parameters, call_id) and returns whether this
     specific call needs approval."""
 
+    # Keep timeout fields after needs_approval to preserve positional constructor compatibility.
+    timeout_seconds: float | None = None
+    """Optional timeout (seconds) for each tool invocation."""
+
+    timeout_behavior: ToolTimeoutBehavior = "error_as_result"
+    """How to handle timeout events.
+
+    - "error_as_result": return a model-visible timeout error string.
+    - "raise_exception": raise a ToolTimeoutError and fail the run.
+    """
+
+    timeout_error_function: ToolErrorFunction | None = None
+    """Optional formatter for timeout errors when timeout_behavior is "error_as_result"."""
+
     _is_agent_tool: bool = field(default=False, init=False, repr=False)
     """Internal flag indicating if this tool is an agent-as-tool."""
 
@@ -271,6 +287,7 @@ class FunctionTool:
     def __post_init__(self):
         if self.strict_json_schema:
             self.params_json_schema = ensure_strict_json_schema(self.params_json_schema)
+        _validate_function_tool_timeout_config(self)
 
 
 @dataclass
@@ -905,8 +922,53 @@ def default_tool_error_function(ctx: RunContextWrapper[Any], error: Exception) -
     return f"An error occurred while running the tool. Please try again. Error: {str(error)}"
 
 
-ToolErrorFunction = Callable[[RunContextWrapper[Any], Exception], MaybeAwaitable[str]]
 _UNSET_FAILURE_ERROR_FUNCTION = object()
+_FUNCTION_TOOL_TIMEOUT_BEHAVIORS: tuple[ToolTimeoutBehavior, ...] = (
+    "error_as_result",
+    "raise_exception",
+)
+
+
+def default_tool_timeout_error_message(*, tool_name: str, timeout_seconds: float) -> str:
+    """Build the default message returned to the model when a tool times out."""
+    return f"Tool '{tool_name}' timed out after {timeout_seconds:g} seconds."
+
+
+async def invoke_function_tool(
+    *,
+    function_tool: FunctionTool,
+    context: ToolContext[Any],
+    arguments: str,
+) -> Any:
+    """Invoke a function tool, enforcing timeout configuration when provided."""
+    timeout_seconds = function_tool.timeout_seconds
+    if timeout_seconds is None:
+        return await function_tool.on_invoke_tool(context, arguments)
+
+    try:
+        return await asyncio.wait_for(
+            function_tool.on_invoke_tool(context, arguments),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        timeout_error = ToolTimeoutError(
+            tool_name=function_tool.name,
+            timeout_seconds=timeout_seconds,
+        )
+        if function_tool.timeout_behavior == "raise_exception":
+            raise timeout_error from exc
+
+        timeout_error_function = function_tool.timeout_error_function
+        if timeout_error_function is None:
+            return default_tool_timeout_error_message(
+                tool_name=function_tool.name,
+                timeout_seconds=timeout_seconds,
+            )
+
+        timeout_result = timeout_error_function(context, timeout_error)
+        if inspect.isawaitable(timeout_result):
+            return await timeout_result
+        return timeout_result
 
 
 @overload
@@ -924,6 +986,9 @@ def function_tool(
     | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+    timeout: float | None = None,
+    timeout_behavior: ToolTimeoutBehavior = "error_as_result",
+    timeout_error_function: ToolErrorFunction | None = None,
 ) -> FunctionTool:
     """Overload for usage as @function_tool (no parentheses)."""
     ...
@@ -943,6 +1008,9 @@ def function_tool(
     | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+    timeout: float | None = None,
+    timeout_behavior: ToolTimeoutBehavior = "error_as_result",
+    timeout_error_function: ToolErrorFunction | None = None,
 ) -> Callable[[ToolFunction[...]], FunctionTool]:
     """Overload for usage as @function_tool(...)."""
     ...
@@ -962,6 +1030,9 @@ def function_tool(
     | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
     tool_input_guardrails: list[ToolInputGuardrail[Any]] | None = None,
     tool_output_guardrails: list[ToolOutputGuardrail[Any]] | None = None,
+    timeout: float | None = None,
+    timeout_behavior: ToolTimeoutBehavior = "error_as_result",
+    timeout_error_function: ToolErrorFunction | None = None,
 ) -> FunctionTool | Callable[[ToolFunction[...]], FunctionTool]:
     """
     Decorator to create a FunctionTool from a function. By default, we will:
@@ -1000,6 +1071,11 @@ def function_tool(
             whether this specific call needs approval.
         tool_input_guardrails: Optional list of guardrails to run before invoking the tool.
         tool_output_guardrails: Optional list of guardrails to run after the tool returns.
+        timeout: Optional timeout in seconds for each tool call.
+        timeout_behavior: Timeout handling mode. "error_as_result" returns a model-visible message,
+            while "raise_exception" raises ToolTimeoutError and fails the run.
+        timeout_error_function: Optional formatter used for timeout messages when
+            timeout_behavior="error_as_result".
     """
 
     def _create_function_tool(the_func: ToolFunction[...]) -> FunctionTool:
@@ -1116,6 +1192,9 @@ def function_tool(
             needs_approval=needs_approval,
             tool_input_guardrails=tool_input_guardrails,
             tool_output_guardrails=tool_output_guardrails,
+            timeout_seconds=timeout,
+            timeout_behavior=timeout_behavior,
+            timeout_error_function=timeout_error_function,
         )
 
     # If func is actually a callable, we were used as @function_tool with no parentheses
@@ -1138,6 +1217,28 @@ def _is_computer_provider(candidate: object) -> bool:
     return isinstance(candidate, ComputerProvider) or (
         hasattr(candidate, "create") and callable(candidate.create)
     )
+
+
+def _validate_function_tool_timeout_config(tool: FunctionTool) -> None:
+    timeout_seconds = tool.timeout_seconds
+    if timeout_seconds is not None:
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise TypeError(
+                "FunctionTool timeout_seconds must be a positive number in seconds or None."
+            )
+        timeout_seconds = float(timeout_seconds)
+        if timeout_seconds <= 0:
+            raise ValueError("FunctionTool timeout_seconds must be greater than 0.")
+        tool.timeout_seconds = timeout_seconds
+
+    if tool.timeout_behavior not in _FUNCTION_TOOL_TIMEOUT_BEHAVIORS:
+        raise ValueError(
+            "FunctionTool timeout_behavior must be one of: "
+            + ", ".join(_FUNCTION_TOOL_TIMEOUT_BEHAVIORS)
+        )
+
+    if tool.timeout_error_function is not None and not callable(tool.timeout_error_function):
+        raise TypeError("FunctionTool timeout_error_function must be callable or None.")
 
 
 def _store_computer_initializer(tool: ComputerTool[Any]) -> None:

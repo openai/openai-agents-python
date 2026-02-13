@@ -26,6 +26,7 @@ from .exceptions import (
     RunErrorDetails,
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
+    ToolTimeoutError,
     UserError,
 )
 from .guardrail import (
@@ -285,6 +286,7 @@ __all__ = [
     "Prompt",
     "MaxTurnsExceeded",
     "ModelBehaviorError",
+    "ToolTimeoutError",
     "UserError",
     "InputGuardrail",
     "InputGuardrailResult",

@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import json
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import pytest
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
+    ToolTimeoutError,
     function_tool,
     tool_input_guardrail,
     tool_output_guardrail,
@@ -489,3 +490,105 @@ def test_function_tool_decorator_accepts_guardrail_arguments():
 
     assert guarded.tool_input_guardrails == [reject_args_guardrail]
     assert guarded.tool_output_guardrails == [allow_output_guardrail]
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_returns_default_message() -> None:
+    @function_tool(timeout=0.01)
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    result = await tool_module.invoke_function_tool(
+        function_tool=slow_tool,
+        context=ctx,
+        arguments="{}",
+    )
+
+    assert isinstance(result, str)
+    assert "timed out" in result.lower()
+    assert "0.01" in result
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_uses_custom_error_function() -> None:
+    def custom_timeout_error(_ctx: RunContextWrapper[Any], error: Exception) -> str:
+        assert isinstance(error, ToolTimeoutError)
+        return f"custom_timeout:{error.tool_name}:{error.timeout_seconds:g}"
+
+    @function_tool(timeout=0.01, timeout_error_function=custom_timeout_error)
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    result = await tool_module.invoke_function_tool(
+        function_tool=slow_tool,
+        context=ctx,
+        arguments="{}",
+    )
+
+    assert result == "custom_timeout:slow_tool:0.01"
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_timeout_can_raise_exception() -> None:
+    @function_tool(timeout=0.01, timeout_behavior="raise_exception")
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "slow"
+
+    ctx = ToolContext(None, tool_name=slow_tool.name, tool_call_id="slow", tool_arguments="{}")
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        await tool_module.invoke_function_tool(
+            function_tool=slow_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
+async def _noop_on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
+    return "ok"
+
+
+def test_function_tool_timeout_seconds_must_be_positive_number() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        FunctionTool(
+            name="bad_timeout",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=0.0,
+        )
+
+    with pytest.raises(TypeError, match="positive number"):
+        FunctionTool(
+            name="bad_timeout_type",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_seconds=cast(Any, "1"),
+        )
+
+
+def test_function_tool_timeout_behavior_must_be_supported() -> None:
+    with pytest.raises(ValueError, match="timeout_behavior must be one of"):
+        FunctionTool(
+            name="bad_timeout_behavior",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_behavior=cast(Any, "unsupported"),
+        )
+
+
+def test_function_tool_timeout_error_function_must_be_callable() -> None:
+    with pytest.raises(TypeError, match="timeout_error_function must be callable"):
+        FunctionTool(
+            name="bad_timeout_error_function",
+            description="bad",
+            params_json_schema={},
+            on_invoke_tool=_noop_on_invoke_tool,
+            timeout_error_function=cast(Any, "not-callable"),
+        )

@@ -52,6 +52,7 @@ from ..tool import (
     ShellCallOutcome,
     ShellCommandOutput,
     Tool,
+    invoke_function_tool,
     resolve_computer,
 )
 from ..tool_context import ToolContext
@@ -897,7 +898,11 @@ async def execute_function_tool_calls(
                             else _coro.noop_coroutine()
                         ),
                     )
-                    real_result = await func_tool.on_invoke_tool(tool_context, tool_call.arguments)
+                    real_result = await invoke_function_tool(
+                        function_tool=func_tool,
+                        context=tool_context,
+                        arguments=tool_call.arguments,
+                    )
 
                     final_result = await _execute_tool_output_guardrails(
                         func_tool=func_tool,

@@ -31,6 +31,7 @@ from agents import (
     RunContextWrapper,
     Runner,
     SQLiteSession,
+    ToolTimeoutError,
     UserError,
     handoff,
 )
@@ -3071,3 +3072,53 @@ async def test_execute_approved_tools_instance_method():
     assert len(generated_items) == 1
     assert isinstance(generated_items[0], ToolCallOutputItem)
     assert generated_items[0].output == "tool_result"
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_timeout_returns_error_as_result() -> None:
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "tool_result"
+
+    tool = function_tool(slow_tool, name_override="test_tool", timeout=0.01)
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+    generated_items = await run_execute_approved_tools(
+        agent=agent,
+        approval_item=approval_item,
+        approve=True,
+    )
+
+    assert len(generated_items) == 1
+    assert isinstance(generated_items[0], ToolCallOutputItem)
+    assert "timed out" in generated_items[0].output.lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_approved_tools_timeout_can_raise_exception() -> None:
+    async def slow_tool() -> str:
+        await asyncio.sleep(0.2)
+        return "tool_result"
+
+    tool = function_tool(
+        slow_tool,
+        name_override="test_tool",
+        timeout=0.01,
+        timeout_behavior="raise_exception",
+    )
+    _, agent = make_model_and_agent(tools=[tool])
+
+    tool_call = get_function_tool_call("test_tool", json.dumps({}))
+    assert isinstance(tool_call, ResponseFunctionToolCall)
+
+    approval_item = ToolApprovalItem(agent=agent, raw_item=tool_call)
+    with pytest.raises(ToolTimeoutError, match="timed out"):
+        await run_execute_approved_tools(
+            agent=agent,
+            approval_item=approval_item,
+            approve=True,
+        )

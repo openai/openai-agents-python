@@ -307,9 +307,16 @@ def mock_model():
     return MockRealtimeModel()
 
 
+def _set_default_timeout_fields(tool: Mock) -> Mock:
+    tool.timeout_seconds = None
+    tool.timeout_behavior = "error_as_result"
+    tool.timeout_error_function = None
+    return tool
+
+
 @pytest.fixture
 def mock_function_tool():
-    tool = Mock(spec=FunctionTool)
+    tool = _set_default_timeout_fields(Mock(spec=FunctionTool))
     tool.name = "test_function"
     tool.on_invoke_tool = AsyncMock(return_value="function_result")
     tool.needs_approval = False
@@ -1018,15 +1025,45 @@ class TestToolCallExecution:
         assert tool_end_event.arguments == '{"param": "value"}'
 
     @pytest.mark.asyncio
+    async def test_function_tool_timeout_returns_result_message(self, mock_model, mock_agent):
+        async def invoke_slow_tool(_ctx: ToolContext[Any], _arguments: str) -> str:
+            await asyncio.sleep(0.2)
+            return "done"
+
+        timeout_tool = FunctionTool(
+            name="slow_tool",
+            description="slow",
+            params_json_schema={"type": "object", "properties": {}},
+            on_invoke_tool=invoke_slow_tool,
+            timeout_seconds=0.01,
+        )
+        mock_agent.get_all_tools.return_value = [timeout_tool]
+
+        session = RealtimeSession(mock_model, mock_agent, None)
+        tool_call_event = RealtimeModelToolCallEvent(
+            name="slow_tool",
+            call_id="call_timeout",
+            arguments="{}",
+        )
+
+        await session._handle_tool_call(tool_call_event)
+
+        assert len(mock_model.sent_tool_outputs) == 1
+        sent_call, sent_output, start_response = mock_model.sent_tool_outputs[0]
+        assert sent_call == tool_call_event
+        assert start_response is True
+        assert "timed out" in sent_output.lower()
+
+    @pytest.mark.asyncio
     async def test_function_tool_with_multiple_tools_available(self, mock_model, mock_agent):
         """Test function tool execution when multiple tools are available"""
         # Create multiple mock tools
-        tool1 = Mock(spec=FunctionTool)
+        tool1 = _set_default_timeout_fields(Mock(spec=FunctionTool))
         tool1.name = "tool_one"
         tool1.on_invoke_tool = AsyncMock(return_value="result_one")
         tool1.needs_approval = False
 
-        tool2 = Mock(spec=FunctionTool)
+        tool2 = _set_default_timeout_fields(Mock(spec=FunctionTool))
         tool2.name = "tool_two"
         tool2.on_invoke_tool = AsyncMock(return_value="result_two")
         tool2.needs_approval = False
@@ -1329,7 +1366,7 @@ class TestToolCallExecution:
     async def test_tool_result_conversion_to_string(self, mock_model, mock_agent):
         """Test that tool results are converted to strings for model output"""
         # Create tool that returns non-string result
-        tool = Mock(spec=FunctionTool)
+        tool = _set_default_timeout_fields(Mock(spec=FunctionTool))
         tool.name = "test_function"
         tool.on_invoke_tool = AsyncMock(return_value={"result": "data", "count": 42})
         tool.needs_approval = False
@@ -1353,7 +1390,7 @@ class TestToolCallExecution:
     async def test_mixed_tool_types_filtering(self, mock_model, mock_agent):
         """Test that function tools and handoffs are properly separated"""
         # Create mixed tools
-        func_tool1 = Mock(spec=FunctionTool)
+        func_tool1 = _set_default_timeout_fields(Mock(spec=FunctionTool))
         func_tool1.name = "func1"
         func_tool1.on_invoke_tool = AsyncMock(return_value="result1")
         func_tool1.needs_approval = False
@@ -1361,7 +1398,7 @@ class TestToolCallExecution:
         handoff1 = Mock(spec=Handoff)
         handoff1.name = "handoff1"
 
-        func_tool2 = Mock(spec=FunctionTool)
+        func_tool2 = _set_default_timeout_fields(Mock(spec=FunctionTool))
         func_tool2.name = "func2"
         func_tool2.on_invoke_tool = AsyncMock(return_value="result2")
         func_tool2.needs_approval = False

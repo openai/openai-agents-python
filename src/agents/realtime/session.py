@@ -15,7 +15,7 @@ from ..items import ToolApprovalItem
 from ..logger import logger
 from ..run_config import ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper, TContext
-from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool
+from ..tool import DEFAULT_APPROVAL_REJECTION_MESSAGE, FunctionTool, invoke_function_tool
 from ..tool_context import ToolContext
 from ..util._approvals import evaluate_needs_approval_setting
 from .agent import RealtimeAgent
@@ -602,7 +602,11 @@ class RealtimeSession(RealtimeModelListener):
                 tool_arguments=event.arguments,
                 agent=agent,
             )
-            result = await func_tool.on_invoke_tool(tool_context, event.arguments)
+            result = await invoke_function_tool(
+                function_tool=func_tool,
+                context=tool_context,
+                arguments=event.arguments,
+            )
 
             await self._model.send_event(
                 RealtimeModelSendToolOutput(
