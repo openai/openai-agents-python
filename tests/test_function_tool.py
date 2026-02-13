@@ -548,6 +548,45 @@ async def test_invoke_function_tool_timeout_can_raise_exception() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_invoke_function_tool_does_not_rewrite_tool_raised_timeout_error() -> None:
+    @function_tool(timeout=1.0, failure_error_function=None)
+    async def timeout_tool() -> str:
+        raise TimeoutError("tool_internal_timeout")
+
+    ctx = ToolContext(
+        None, tool_name=timeout_tool.name, tool_call_id="timeout", tool_arguments="{}"
+    )
+    with pytest.raises(TimeoutError, match="tool_internal_timeout"):
+        await tool_module.invoke_function_tool(
+            function_tool=timeout_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_invoke_function_tool_does_not_rewrite_manual_tool_raised_timeout_error() -> None:
+    async def on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
+        raise TimeoutError("manual_tool_internal_timeout")
+
+    manual_tool = FunctionTool(
+        name="manual_timeout_tool",
+        description="manual timeout",
+        params_json_schema={},
+        on_invoke_tool=on_invoke_tool,
+        timeout_seconds=1.0,
+    )
+
+    ctx = ToolContext(None, tool_name=manual_tool.name, tool_call_id="timeout", tool_arguments="{}")
+    with pytest.raises(TimeoutError, match="manual_tool_internal_timeout"):
+        await tool_module.invoke_function_tool(
+            function_tool=manual_tool,
+            context=ctx,
+            arguments="{}",
+        )
+
+
 async def _noop_on_invoke_tool(_ctx: ToolContext[Any], _args: str) -> str:
     return "ok"
 

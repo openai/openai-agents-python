@@ -945,12 +945,18 @@ async def invoke_function_tool(
     if timeout_seconds is None:
         return await function_tool.on_invoke_tool(context, arguments)
 
+    tool_task: asyncio.Future[Any] = asyncio.ensure_future(
+        function_tool.on_invoke_tool(context, arguments)
+    )
     try:
-        return await asyncio.wait_for(
-            function_tool.on_invoke_tool(context, arguments),
-            timeout=timeout_seconds,
-        )
+        return await asyncio.wait_for(tool_task, timeout=timeout_seconds)
     except asyncio.TimeoutError as exc:
+        if tool_task.done() and not tool_task.cancelled():
+            tool_exception = tool_task.exception()
+            if tool_exception is None:
+                return tool_task.result()
+            raise tool_exception from None
+
         timeout_error = ToolTimeoutError(
             tool_name=function_tool.name,
             timeout_seconds=timeout_seconds,
