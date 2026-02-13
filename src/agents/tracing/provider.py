@@ -309,6 +309,7 @@ class DefaultTraceProvider(TraceProvider):
         """
         self._refresh_disabled_flag()
         tracing_api_key: str | None = None
+        trace_metadata: dict[str, Any] | None = None
         if self._disabled or disabled:
             logger.debug(f"Tracing is disabled. Not creating span {span_data}")
             return NoOpSpan(span_data)
@@ -331,6 +332,8 @@ class DefaultTraceProvider(TraceProvider):
             parent_id = current_span.span_id if current_span else None
             trace_id = current_trace.trace_id
             tracing_api_key = current_trace.tracing_api_key
+            # Trace is an interface; custom implementations may omit metadata.
+            trace_metadata = getattr(current_trace, "metadata", None)
 
         elif isinstance(parent, Trace):
             if isinstance(parent, NoOpTrace):
@@ -339,6 +342,8 @@ class DefaultTraceProvider(TraceProvider):
             trace_id = parent.trace_id
             parent_id = None
             tracing_api_key = parent.tracing_api_key
+            # Trace is an interface; custom implementations may omit metadata.
+            trace_metadata = getattr(parent, "metadata", None)
         elif isinstance(parent, Span):
             if isinstance(parent, NoOpSpan):
                 logger.debug(f"Parent {parent} is no-op, returning NoOpSpan")
@@ -346,6 +351,7 @@ class DefaultTraceProvider(TraceProvider):
             parent_id = parent.span_id
             trace_id = parent.trace_id
             tracing_api_key = parent.tracing_api_key
+            trace_metadata = parent.trace_metadata
 
         logger.debug(f"Creating span {span_data} with id {span_id}")
 
@@ -356,6 +362,7 @@ class DefaultTraceProvider(TraceProvider):
             processor=self._multi_processor,
             span_data=span_data,
             tracing_api_key=tracing_api_key,
+            trace_metadata=trace_metadata,
         )
 
     def shutdown(self) -> None:
