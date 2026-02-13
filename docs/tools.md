@@ -572,6 +572,59 @@ What to know:
 -   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
 -   See `examples/tools/codex.py` and `examples/tools/codex_same_thread.py` for complete runnable samples.
 
+## Function tool timeouts
+
+You can set per-call timeouts for async function tools with `@function_tool(timeout=...)`.
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool
+
+
+@function_tool(timeout=2.0)
+async def slow_lookup(query: str) -> str:
+    await asyncio.sleep(10)
+    return f"Result for {query}"
+
+
+agent = Agent(
+    name="Timeout demo",
+    instructions="Use tools when helpful.",
+    tools=[slow_lookup],
+)
+```
+
+When a timeout is reached, the default behavior is `timeout_behavior="error_as_result"`, which sends a model-visible timeout message (for example, `Tool 'slow_lookup' timed out after 2 seconds.`).
+
+You can control timeout handling:
+
+-   `timeout_behavior="error_as_result"` (default): return a timeout message to the model so it can recover.
+-   `timeout_behavior="raise_exception"`: raise [`ToolTimeoutError`][agents.exceptions.ToolTimeoutError] and fail the run.
+-   `timeout_error_function=...`: customize the timeout message when using `error_as_result`.
+
+```python
+import asyncio
+from agents import Agent, Runner, ToolTimeoutError, function_tool
+
+
+@function_tool(timeout=1.5, timeout_behavior="raise_exception")
+async def slow_tool() -> str:
+    await asyncio.sleep(5)
+    return "done"
+
+
+agent = Agent(name="Timeout hard-fail", tools=[slow_tool])
+
+try:
+    await Runner.run(agent, "Run the tool")
+except ToolTimeoutError as e:
+    print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
+```
+
+!!! note
+
+    Timeout configuration is supported only for async `@function_tool` handlers.
+
 ## Handling errors in function tools
 
 When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.

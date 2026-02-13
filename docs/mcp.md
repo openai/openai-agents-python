@@ -93,7 +93,7 @@ The hosted server exposes its tools automatically; you do not add it to `mcp_ser
 
 ### Streaming hosted MCP results
 
-Hosted tools support streaming results in exactly the same way as function tools. Pass `stream=True` to `Runner.run_streamed` to
+Hosted tools support streaming results in exactly the same way as function tools. Use `Runner.run_streamed` to
 consume incremental MCP output while the model is still working:
 
 ```python

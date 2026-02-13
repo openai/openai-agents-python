@@ -19,6 +19,10 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.9.0
+
+In this version, Python 3.9 is no longer supported as the major version is already EOLed three months ago. Please ugprade to a newer runtime version.
+
 ### 0.8.0
 
 In this version, two runtime behavior changes may require migration work:

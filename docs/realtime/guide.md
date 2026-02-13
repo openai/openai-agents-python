@@ -54,6 +54,16 @@ The session configuration allows you to control the underlying realtime model be
 
 Audio settings control how the session handles voice input and output. You can configure input audio transcription using models like Whisper, set language preferences, and provide transcription prompts to improve accuracy for domain-specific terms. Turn detection settings control when the agent should start and stop responding, with options for voice activity detection thresholds, silence duration, and padding around detected speech.
 
+Additional configuration options you can set on `RealtimeRunner(config=...)` include:
+
+-   `model_settings.output_modalities` to constrain output to text and/or audio.
+-   `model_settings.input_audio_noise_reduction` to tune noise reduction for near-field or far-field audio.
+-   `guardrails_settings.debounce_text_length` to control how frequently output guardrails run.
+-   `async_tool_calls` to run function tools concurrently.
+-   `tool_error_formatter` to customize model-visible tool error messages.
+
+See [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] for the complete typed configuration.
+
 ## Tools and Functions
 
 ### Adding Tools

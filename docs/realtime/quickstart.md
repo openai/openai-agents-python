@@ -191,12 +191,14 @@ if __name__ == "__main__":
 -   `model_name`: Choose from available realtime models (e.g., `gpt-realtime`)
 -   `voice`: Select voice (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`)
 -   `modalities`: Enable text or audio (`["text"]` or `["audio"]`)
+-   `output_modalities`: Optionally constrain output to text and/or audio (`["text"]`, `["audio"]`, or both)
 
 ### Audio settings
 
 -   `input_audio_format`: Format for input audio (`pcm16`, `g711_ulaw`, `g711_alaw`)
 -   `output_audio_format`: Format for output audio
 -   `input_audio_transcription`: Transcription configuration
+-   `input_audio_noise_reduction`: Input noise-reduction config (`near_field` or `far_field`)
 
 ### Turn detection
 
@@ -204,6 +206,14 @@ if __name__ == "__main__":
 -   `threshold`: Voice activity threshold (0.0-1.0)
 -   `silence_duration_ms`: Silence duration to detect turn end
 -   `prefix_padding_ms`: Audio padding before speech
+
+### Run settings
+
+-   `async_tool_calls`: Whether function tools run asynchronously (defaults to `True`)
+-   `guardrails_settings.debounce_text_length`: Minimum accumulated transcript size before output guardrails run (defaults to `100`)
+-   `tool_error_formatter`: Callback to customize model-visible tool error messages
+
+For the full schema, see the API reference for [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
 
 ## Next steps
 

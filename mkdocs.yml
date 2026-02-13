@@ -92,6 +92,9 @@ plugins:
                     - ref/index.md
                     - ref/agent.md
                     - ref/run.md
+                    - ref/run_config.md
+                    - ref/run_state.md
+                    - ref/run_error_handlers.md
                     - ref/memory.md
                     - ref/repl.md
                     - ref/tool.md
