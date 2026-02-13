@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import inspect
 import json
 import weakref
@@ -49,6 +50,7 @@ from .util._types import MaybeAwaitable
 if TYPE_CHECKING:
     from .agent import Agent, AgentBase
     from .items import RunItem, ToolApprovalItem
+    from .mcp.server import MCPServer
 
 
 ToolParams = ParamSpec("ToolParams")
@@ -183,6 +185,96 @@ ComputerConfig = Union[
 ]
 
 
+class ToolOriginType(str, enum.Enum):
+    """The type of tool origin."""
+
+    FUNCTION = "function"
+    """Regular Python function tool created via @function_tool decorator."""
+
+    MCP = "mcp"
+    """MCP server tool converted via MCPUtil.to_function_tool()."""
+
+    AGENT_AS_TOOL = "agent_as_tool"
+    """Agent converted to tool via agent.as_tool()."""
+
+
+@dataclass
+class ToolOrigin:
+    """Information about the origin/source of a function tool."""
+
+    type: ToolOriginType
+    """The type of tool origin."""
+
+    mcp_server: MCPServer | None = None
+    """The MCP server object. Only set when type is MCP."""
+
+    agent_as_tool: Agent[Any] | None = None
+    """The agent object. Only set when type is AGENT_AS_TOOL."""
+
+    _agent_as_tool_ref: weakref.ReferenceType[Agent[Any]] | None = field(
+        default=None, init=False, repr=False
+    )
+    """Weak reference to agent_as_tool for memory management."""
+
+    def __post_init__(self) -> None:
+        """Initialize weak reference for agent_as_tool."""
+        if self.agent_as_tool is not None:
+            self._agent_as_tool_ref = weakref.ref(self.agent_as_tool)
+
+    def __getattribute__(self, name: str) -> Any:
+        """Lazily resolve agent_as_tool via weakref when strong ref is cleared."""
+        if name == "agent_as_tool":
+            # Check if strong reference still exists
+            value = object.__getattribute__(self, "__dict__").get("agent_as_tool")
+            if value is not None:
+                return value
+            # Try to resolve via weakref
+            ref = object.__getattribute__(self, "_agent_as_tool_ref")
+            if ref is not None:
+                agent = ref()
+                if agent is not None:
+                    return agent
+            return None
+        return super().__getattribute__(name)
+
+    def release_agent(self) -> None:
+        """Release the strong reference to agent_as_tool while keeping a weak reference."""
+        if "agent_as_tool" not in self.__dict__:
+            return
+        agent = self.__dict__.get("agent_as_tool")
+        if agent is not None:
+            self._agent_as_tool_ref = weakref.ref(agent)
+        # Set to None instead of deleting so dataclass repr/asdict keep working.
+        self.__dict__["agent_as_tool"] = None
+
+    def __repr__(self) -> str:
+        """Custom repr that only includes relevant fields."""
+        parts = [f"type={self.type.value!r}"]
+        if self.mcp_server is not None:
+            parts.append(f"mcp_server_name={self.mcp_server.name!r}")
+        agent = self.agent_as_tool
+        if agent is not None:
+            parts.append(f"agent_as_tool_name={agent.name!r}")
+        return f"ToolOrigin({', '.join(parts)})"
+
+
+def _get_tool_origin_info(function_tool: FunctionTool) -> ToolOrigin | None:
+    """Extract origin information from a FunctionTool.
+
+    Args:
+        function_tool: The function tool to extract origin info from.
+
+    Returns:
+        ToolOrigin object if origin is set, otherwise None (defaults to FUNCTION type).
+    """
+    origin = function_tool._tool_origin
+    if origin is None:
+        # Default to FUNCTION if not explicitly set
+        return ToolOrigin(type=ToolOriginType.FUNCTION)
+
+    return origin
+
+
 @dataclass
 class FunctionToolResult:
     tool: FunctionTool
@@ -267,6 +359,9 @@ class FunctionTool:
 
     _agent_instance: Any = field(default=None, init=False, repr=False)
     """Internal reference to the agent instance if this is an agent-as-tool."""
+
+    _tool_origin: ToolOrigin | None = field(default=None, init=False, repr=False)
+    """Internal field tracking the origin of this tool (FUNCTION, MCP, or AGENT_AS_TOOL)."""
 
     def __post_init__(self):
         if self.strict_json_schema:

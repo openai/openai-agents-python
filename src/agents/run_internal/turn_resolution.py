@@ -63,6 +63,7 @@ from ..tool import (
     LocalShellTool,
     ShellTool,
     Tool,
+    _get_tool_origin_info,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import SpanError, handoff_span
@@ -696,8 +697,11 @@ async def resolve_interrupted_turn(
                 tool_name=function_tool.name,
                 call_id=call_id,
             )
+        tool_origin = _get_tool_origin_info(function_tool)
         rejected_function_outputs.append(
-            function_rejection_item(agent, tool_call, rejection_message=rejection_message)
+            function_rejection_item(
+                agent, tool_call, rejection_message=rejection_message, tool_origin=tool_origin
+            )
         )
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
@@ -1527,11 +1531,19 @@ def process_model_response(
         else:
             if output.name not in function_map:
                 if output_schema is not None and output.name == "json_tool_call":
-                    items.append(ToolCallItem(raw_item=output, agent=agent))
+                    json_tool = build_litellm_json_tool_call(output)
+                    tool_origin = _get_tool_origin_info(json_tool)
+                    items.append(
+                        ToolCallItem(
+                            raw_item=output,
+                            agent=agent,
+                            tool_origin=tool_origin,
+                        )
+                    )
                     functions.append(
                         ToolRunFunction(
                             tool_call=output,
-                            function_tool=build_litellm_json_tool_call(output),
+                            function_tool=json_tool,
                         )
                     )
                     continue
@@ -1545,8 +1557,14 @@ def process_model_response(
                 raise ModelBehaviorError(error)
 
             func_tool = function_map[output.name]
+            tool_origin = _get_tool_origin_info(func_tool)
             items.append(
-                ToolCallItem(raw_item=output, agent=agent, description=func_tool.description)
+                ToolCallItem(
+                    raw_item=output,
+                    agent=agent,
+                    description=func_tool.description,
+                    tool_origin=tool_origin,
+                )
             )
             functions.append(
                 ToolRunFunction(

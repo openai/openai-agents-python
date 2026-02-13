@@ -50,6 +50,7 @@ from typing_extensions import TypeAlias, assert_never
 from .exceptions import AgentsException, ModelBehaviorError
 from .logger import logger
 from .tool import (
+    ToolOrigin,
     ToolOutputFileContent,
     ToolOutputImage,
     ToolOutputText,
@@ -249,6 +250,15 @@ class ToolCallItem(RunItemBase[Any]):
     description: str | None = None
     """Optional tool description if known at item creation time."""
 
+    tool_origin: ToolOrigin | None = field(default=None, repr=False)
+    """Information about the origin/source of the tool call. Only set for FunctionTool calls."""
+
+    def release_agent(self) -> None:
+        """Release agent references including tool_origin.agent_as_tool."""
+        super().release_agent()
+        if self.tool_origin is not None:
+            self.tool_origin.release_agent()
+
 
 ToolCallOutputTypes: TypeAlias = Union[
     FunctionCallOutput,
@@ -272,6 +282,15 @@ class ToolCallOutputItem(RunItemBase[Any]):
     """
 
     type: Literal["tool_call_output_item"] = "tool_call_output_item"
+
+    tool_origin: ToolOrigin | None = field(default=None, repr=False)
+    """Information about the origin/source of the tool call. Only set for FunctionTool calls."""
+
+    def release_agent(self) -> None:
+        """Release agent references including tool_origin.agent_as_tool."""
+        super().release_agent()
+        if self.tool_origin is not None:
+            self.tool_origin.release_agent()
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts the tool output into an input item for the next model turn.

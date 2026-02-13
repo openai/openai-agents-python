@@ -52,6 +52,7 @@ from ..tool import (
     ShellCallOutcome,
     ShellCommandOutput,
     Tool,
+    _get_tool_origin_info,
     resolve_computer,
 )
 from ..tool_context import ToolContext
@@ -869,6 +870,7 @@ async def execute_function_tool_calls(
                         )
                         result = rejection_message
                         span_fn.span_data.output = result
+                        tool_origin = _get_tool_origin_info(func_tool)
                         return FunctionToolResult(
                             tool=func_tool,
                             output=result,
@@ -876,6 +878,7 @@ async def execute_function_tool_calls(
                                 agent,
                                 tool_call,
                                 rejection_message=rejection_message,
+                                tool_origin=tool_origin,
                             ),
                         )
 
@@ -975,10 +978,12 @@ async def execute_function_tool_calls(
 
             run_item: RunItem | None = None
             if not nested_interruptions:
+                tool_origin = _get_tool_origin_info(tool_run.function_tool)
                 run_item = ToolCallOutputItem(
                     output=result,
                     raw_item=ItemHelpers.tool_call_output_item(tool_run.tool_call, result),
                     agent=agent,
+                    tool_origin=tool_origin,
                 )
             else:
                 # Skip tool output until nested interruptions are resolved.
