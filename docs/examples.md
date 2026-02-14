@@ -69,6 +69,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Web applications
     -   Command-line interfaces
     -   Twilio integration
+    -   Twilio SIP integration
 
 -   **[reasoning_content](https://github.com/openai/openai-agents-python/tree/main/examples/reasoning_content):**
     Examples demonstrating how to work with reasoning content and structured outputs.

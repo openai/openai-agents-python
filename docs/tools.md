@@ -18,6 +18,11 @@ OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agent
 -   The [`HostedMCPTool`][agents.tool.HostedMCPTool] exposes a remote MCP server's tools to the model.
 -   The [`ImageGenerationTool`][agents.tool.ImageGenerationTool] generates images from a prompt.
 
+Advanced hosted search options:
+
+-   `FileSearchTool` supports `filters`, `ranking_options`, and `include_search_results` in addition to `vector_store_ids` and `max_num_results`.
+-   `WebSearchTool` supports `filters`, `user_location`, and `search_context_size`.
+
 ```python
 from agents import Agent, FileSearchTool, Runner, WebSearchTool
 
@@ -78,9 +83,11 @@ What to know:
 
 -   Hosted shell is available through the Responses API shell tool.
 -   `container_auto` provisions a container for the request; `container_reference` reuses an existing one.
+-   `container_auto` can also include `file_ids` and `memory_limit`.
 -   `environment.skills` accepts skill references and inline skill bundles.
 -   With hosted environments, do not set `executor`, `needs_approval`, or `on_approval` on `ShellTool`.
 -   `network_policy` supports `disabled` and `allowlist` modes.
+-   In allowlist mode, `network_policy.domain_secrets` can inject domain-scoped secrets by name.
 -   See `examples/tools/container_shell_skill_reference.py` and `examples/tools/container_shell_inline_skill.py` for complete examples.
 -   OpenAI platform guides: [Shell](https://platform.openai.com/docs/guides/tools-shell) and [Skills](https://platform.openai.com/docs/guides/tools-skills).
 
@@ -92,6 +99,7 @@ Local runtime tools execute in your environment and require you to supply implem
 -   [`ShellTool`][agents.tool.ShellTool]: the latest shell tool for both local execution and hosted container execution.
 -   [`LocalShellTool`][agents.tool.LocalShellTool]: legacy local-shell integration.
 -   [`ApplyPatchTool`][agents.tool.ApplyPatchTool]: implement [`ApplyPatchEditor`][agents.editor.ApplyPatchEditor] to apply diffs locally.
+-   Local shell skills are available with `ShellTool(environment={"type": "local", "skills": [...]})`.
 
 ```python
 from agents import Agent, ApplyPatchTool, ShellTool
@@ -284,7 +292,7 @@ Sometimes, you don't want to use a Python function as a tool. You can directly c
 -   `name`
 -   `description`
 -   `params_json_schema`, which is the JSON schema for the arguments
--   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and must return the tool output as a string.
+-   `on_invoke_tool`, which is an async function that receives a [`ToolContext`][agents.tool_context.ToolContext] and the arguments as a JSON string, and returns tool output (for example, text, structured tool output objects, or a list of outputs).
 
 ```python
 from typing import Any
