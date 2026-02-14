@@ -249,7 +249,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         Returns:
             List of input items representing the conversation history
         """
-        return await self.underlying_session.get_items(limit, wrapper)
+        # Only pass wrapper if provided, for backward compatibility with sessions
+        # that haven't updated their signatures yet
+        if wrapper is not None:
+            return await self.underlying_session.get_items(limit, wrapper)
+        return await self.underlying_session.get_items(limit)
 
     async def _defer_compaction(self, response_id: str, store: bool | None = None) -> None:
         if self._deferred_response_id is not None:
@@ -286,7 +290,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             items: List of input items to add to the history
             wrapper: Optional RunContextWrapper for accessing context data during addition
         """
-        await self.underlying_session.add_items(items, wrapper)
+        # Only pass wrapper if provided, for backward compatibility
+        if wrapper is not None:
+            await self.underlying_session.add_items(items, wrapper)
+        else:
+            await self.underlying_session.add_items(items)
         if self._compaction_candidate_items is not None:
             new_candidates = select_compaction_candidate_items(items)
             if new_candidates:
@@ -305,7 +313,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         Returns:
             The most recent item if it exists, None if the session is empty
         """
-        popped = await self.underlying_session.pop_item(wrapper)
+        # Only pass wrapper if provided, for backward compatibility
+        if wrapper is not None:
+            popped = await self.underlying_session.pop_item(wrapper)
+        else:
+            popped = await self.underlying_session.pop_item()
         if popped:
             self._compaction_candidate_items = None
             self._session_items = None
@@ -319,7 +331,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         Args:
             wrapper: Optional RunContextWrapper for accessing context data during clear
         """
-        await self.underlying_session.clear_session(wrapper)
+        # Only pass wrapper if provided, for backward compatibility
+        if wrapper is not None:
+            await self.underlying_session.clear_session(wrapper)
+        else:
+            await self.underlying_session.clear_session()
         self._compaction_candidate_items = []
         self._session_items = []
         self._deferred_response_id = None
