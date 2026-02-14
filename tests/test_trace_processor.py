@@ -461,6 +461,43 @@ def test_backend_span_exporter_truncates_large_non_string_input_for_openai_traci
 
 
 @patch("httpx.Client")
+def test_backend_span_exporter_truncates_large_non_string_input_without_stringifying(mock_client):
+    class NoStringifyDict(dict[str, Any]):
+        def __str__(self) -> str:
+            raise AssertionError("__str__ should not be called for oversized non-string previews")
+
+    class DummyItem:
+        tracing_api_key = None
+
+        def __init__(self):
+            payload_input = NoStringifyDict(
+                blob="x" * (BackendSpanExporter._OPENAI_TRACING_MAX_FIELD_BYTES + 5000)
+            )
+            self.exported_payload: dict[str, Any] = {
+                "object": "trace.span",
+                "span_data": {
+                    "type": "generation",
+                    "input": payload_input,
+                },
+            }
+
+        def export(self):
+            return self.exported_payload
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.return_value.post.return_value = mock_response
+
+    exporter = BackendSpanExporter(api_key="test_key")
+    exporter.export([cast(Any, DummyItem())])
+
+    sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
+    sent_input = sent_payload["span_data"]["input"]
+    assert sent_input["preview"] == "<NoStringifyDict len=1 truncated>"
+    exporter.close()
+
+
+@patch("httpx.Client")
 def test_backend_span_exporter_keeps_large_input_for_custom_endpoint(mock_client):
     class DummyItem:
         tracing_api_key = None

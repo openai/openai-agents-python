@@ -261,12 +261,17 @@ class BackendSpanExporter(TracingExporter):
         if isinstance(value, str):
             return self._truncate_string_for_json_limit(value, max_bytes)
 
-        preview = str(value)
-        if len(preview) > 512:
-            preview = preview[:512] + self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        type_name = type(value).__name__
+        preview = f"<{type_name} truncated>"
+        if isinstance(value, dict):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            preview = f"<{type_name} bytes={len(value)} truncated>"
         return {
             "truncated": True,
-            "original_type": type(value).__name__,
+            "original_type": type_name,
             "preview": preview,
         }
 
