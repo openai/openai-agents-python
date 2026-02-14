@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 from openai import AsyncOpenAI
 
 from agents.models._openai_shared import get_default_openai_client
 
 from ..items import TResponseInputItem
+from ..run_context import RunContextWrapper
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
 
@@ -68,7 +71,18 @@ class OpenAIConversationsSession(SessionABC):
     async def _clear_session_id(self) -> None:
         self._session_id = None
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, wrapper: RunContextWrapper[Any] | None = None
+    ) -> list[TResponseInputItem]:
+        """Retrieve the conversation history for this session.
+
+        Args:
+            limit: Maximum number of items to retrieve. If None, retrieves all items.
+            wrapper: Optional RunContextWrapper for accessing context data during retrieval.
+
+        Returns:
+            List of input items representing the conversation history
+        """
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -95,7 +109,15 @@ class OpenAIConversationsSession(SessionABC):
 
         return all_items  # type: ignore
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self, items: list[TResponseInputItem], wrapper: RunContextWrapper[Any] | None = None
+    ) -> None:
+        """Add new items to the conversation history.
+
+        Args:
+            items: List of input items to add to the history
+            wrapper: Optional RunContextWrapper for accessing context data during addition
+        """
         session_id = await self._get_session_id()
         if not items:
             return
@@ -105,7 +127,17 @@ class OpenAIConversationsSession(SessionABC):
             items=items,
         )
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self, wrapper: RunContextWrapper[Any] | None = None
+    ) -> TResponseInputItem | None:
+        """Remove and return the most recent item from the session.
+
+        Args:
+            wrapper: Optional RunContextWrapper for accessing context data during pop
+
+        Returns:
+            The most recent item if it exists, None if the session is empty
+        """
         session_id = await self._get_session_id()
         items = await self.get_items(limit=1)
         if not items:
@@ -116,7 +148,14 @@ class OpenAIConversationsSession(SessionABC):
         )
         return items[0]
 
-    async def clear_session(self) -> None:
+    async def clear_session(
+        self, wrapper: RunContextWrapper[Any] | None = None
+    ) -> None:
+        """Clear all items for this session.
+
+        Args:
+            wrapper: Optional RunContextWrapper for accessing context data during clear
+        """
         session_id = await self._get_session_id()
         await self._openai_client.conversations.delete(
             conversation_id=session_id,

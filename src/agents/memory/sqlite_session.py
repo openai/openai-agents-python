@@ -5,8 +5,10 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Any
 
 from ..items import TResponseInputItem
+from ..run_context import RunContextWrapper
 from .session import SessionABC
 from .session_settings import SessionSettings, resolve_session_limit
 
@@ -112,12 +114,15 @@ class SQLiteSession(SessionABC):
 
         conn.commit()
 
-    async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+    async def get_items(
+        self, limit: int | None = None, wrapper: RunContextWrapper[Any] | None = None
+    ) -> list[TResponseInputItem]:
         """Retrieve the conversation history for this session.
 
         Args:
             limit: Maximum number of items to retrieve. If None, uses session_settings.limit.
                    When specified, returns the latest N items in chronological order.
+            wrapper: Optional RunContextWrapper for accessing context data during retrieval.
 
         Returns:
             List of input items representing the conversation history
@@ -168,11 +173,14 @@ class SQLiteSession(SessionABC):
 
         return await asyncio.to_thread(_get_items_sync)
 
-    async def add_items(self, items: list[TResponseInputItem]) -> None:
+    async def add_items(
+        self, items: list[TResponseInputItem], wrapper: RunContextWrapper[Any] | None = None
+    ) -> None:
         """Add new items to the conversation history.
 
         Args:
             items: List of input items to add to the history
+            wrapper: Optional RunContextWrapper for accessing context data during addition
         """
         if not items:
             return
@@ -212,8 +220,13 @@ class SQLiteSession(SessionABC):
 
         await asyncio.to_thread(_add_items_sync)
 
-    async def pop_item(self) -> TResponseInputItem | None:
+    async def pop_item(
+        self, wrapper: RunContextWrapper[Any] | None = None
+    ) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
+
+        Args:
+            wrapper: Optional RunContextWrapper for accessing context data during pop
 
         Returns:
             The most recent item if it exists, None if the session is empty
@@ -253,8 +266,14 @@ class SQLiteSession(SessionABC):
 
         return await asyncio.to_thread(_pop_item_sync)
 
-    async def clear_session(self) -> None:
-        """Clear all items for this session."""
+    async def clear_session(
+        self, wrapper: RunContextWrapper[Any] | None = None
+    ) -> None:
+        """Clear all items for this session.
+
+        Args:
+            wrapper: Optional RunContextWrapper for accessing context data during clear
+        """
 
         def _clear_session_sync():
             conn = self._get_connection()
