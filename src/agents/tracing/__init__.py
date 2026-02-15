@@ -21,7 +21,7 @@ from .create import (
 from .processor_interface import TracingProcessor
 from .processors import default_exporter, default_processor
 from .provider import DefaultTraceProvider, TraceProvider
-from .setup import get_trace_provider, set_trace_provider
+from .setup import get_trace_provider as _get_trace_provider, set_trace_provider
 from .span_data import (
     AgentSpanData,
     CustomSpanData,
@@ -83,6 +83,27 @@ __all__ = [
     "mcp_tools_span",
 ]
 
+_default_tracing_initialized = False
+
+
+def _ensure_default_tracing_initialized() -> None:
+    global _default_tracing_initialized
+    if not _default_tracing_initialized:
+        provider = DefaultTraceProvider()
+        set_trace_provider(provider)
+        provider.register_processor(default_processor())
+        atexit.register(provider.shutdown)
+        _default_tracing_initialized = True
+
+
+def get_trace_provider() -> TraceProvider:
+    """Get the global trace provider used by tracing utilities."""
+    try:
+        return _get_trace_provider()
+    except RuntimeError:
+        _ensure_default_tracing_initialized()
+        return _get_trace_provider()
+
 
 def add_trace_processor(span_processor: TracingProcessor) -> None:
     """
@@ -110,13 +131,3 @@ def set_tracing_export_api_key(api_key: str) -> None:
     Set the OpenAI API key for the backend exporter.
     """
     default_exporter().set_api_key(api_key)
-
-
-set_trace_provider(DefaultTraceProvider())
-# Add the default processor, which exports traces and spans to the backend in batches. You can
-# change the default behavior by either:
-# 1. calling add_trace_processor(), which adds additional processors, or
-# 2. calling set_trace_processors(), which replaces the default processor.
-add_trace_processor(default_processor())
-
-atexit.register(get_trace_provider().shutdown)
