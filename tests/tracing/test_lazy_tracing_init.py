@@ -91,3 +91,41 @@ print(json.dumps({
     assert result["same_provider"] is True
     assert result["exporter_created"] is True
     assert result["processor_created"] is True
+
+
+def test_set_trace_provider_sets_global_provider() -> None:
+    from agents.tracing import setup
+    from agents.tracing.provider import DefaultTraceProvider
+
+    previous_provider = setup.GLOBAL_TRACE_PROVIDER
+    provider = DefaultTraceProvider()
+    try:
+        setup.set_trace_provider(provider)
+        assert setup.GLOBAL_TRACE_PROVIDER is provider
+    finally:
+        setup.GLOBAL_TRACE_PROVIDER = previous_provider
+
+
+def test_trace_helper_initializes_defaults_lazily() -> None:
+    result = _run_python_snippet(
+        """
+import json
+import agents.tracing as tracing
+import agents.tracing.processors as processors
+from agents.tracing import setup
+
+trace_obj = tracing.trace("lazy-init-from-trace")
+
+print(json.dumps({
+    "trace_created": trace_obj is not None,
+    "provider_is_set": setup.GLOBAL_TRACE_PROVIDER is not None,
+    "exporter_created": processors._global_exporter is not None,
+    "processor_created": processors._global_processor is not None,
+}))
+"""
+    )
+
+    assert result["trace_created"] is True
+    assert result["provider_is_set"] is True
+    assert result["exporter_created"] is True
+    assert result["processor_created"] is True
