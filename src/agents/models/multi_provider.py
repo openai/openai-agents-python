@@ -108,6 +108,15 @@ class MultiProvider(ModelProvider):
         else:
             return None, model_name
 
+    def _is_known_prefix(self, prefix: str | None) -> bool:
+        if prefix is None:
+            return False
+        if prefix in {"openai", "litellm"}:
+            return True
+        if self.provider_map and self.provider_map.has_prefix(prefix):
+            return True
+        return False
+
     def _create_fallback_provider(self, prefix: str) -> ModelProvider:
         if prefix == "litellm":
             from ..extensions.models.litellm_provider import LitellmProvider
@@ -136,7 +145,11 @@ class MultiProvider(ModelProvider):
         Returns:
             A Model.
         """
-        prefix, model_name = self._get_prefix_and_model_name(model_name)
+        prefix, parsed_model_name = self._get_prefix_and_model_name(model_name)
+        if self._is_known_prefix(prefix):
+            model_name = parsed_model_name
+        else:
+            prefix = None
 
         if prefix and self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider.get_model(model_name)
