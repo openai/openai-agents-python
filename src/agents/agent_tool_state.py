@@ -67,6 +67,8 @@ def record_agent_tool_run_result(
 ) -> None:
     """Store the nested agent run result by tool call identity."""
     tool_call_obj_id = id(tool_call)
+    # Clear any stale signature index if this object ID gets reused.
+    _drop_agent_tool_run_result(tool_call_obj_id)
     _agent_tool_run_results_by_obj[tool_call_obj_id] = run_result
     _index_agent_tool_run_result(tool_call, tool_call_obj_id)
 
