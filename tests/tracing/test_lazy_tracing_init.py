@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from typing import cast
 
 
 def _run_python_snippet(snippet: str) -> dict[str, bool]:
@@ -10,7 +11,7 @@ def _run_python_snippet(snippet: str) -> dict[str, bool]:
         capture_output=True,
         text=True,
     )
-    return json.loads(completed.stdout)
+    return cast(dict[str, bool], json.loads(completed.stdout))
 
 
 def test_import_does_not_initialize_default_tracing_objects():
