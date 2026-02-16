@@ -18,6 +18,7 @@ Note: This example requires the shodh-memory server to be running externally.
 
 import asyncio
 import os
+import uuid
 
 from agents import Agent, Runner
 
@@ -33,6 +34,9 @@ except ImportError:
 SHODH_API_KEY = os.environ.get("SHODH_API_KEY", "test-key")
 SHODH_SERVER = os.environ.get("SHODH_SERVER_URL", "http://localhost:3030")
 
+# Unique run ID to isolate state per execution — avoids stale results on reruns.
+RUN_ID = uuid.uuid4().hex[:8]
+
 
 async def session_example():
     """Demonstrate persistent conversation memory across agent runs."""
@@ -46,9 +50,9 @@ async def session_example():
     # shodh-memory applies biological memory dynamics: memories strengthen
     # with repeated access (Hebbian learning) and decay naturally over time.
     session = ShodhSession(
-        session_id="shodh_demo_123",
+        session_id=f"shodh_demo_{RUN_ID}",
         server_url=SHODH_SERVER,
-        user_id="demo-agent",
+        user_id=f"demo-agent-{RUN_ID}",
         api_key=SHODH_API_KEY,
     )
 
@@ -110,9 +114,9 @@ async def session_example():
     # Session isolation — different session_id, separate history.
     print("\n=== Session Isolation Demo ===")
     other_session = ShodhSession(
-        session_id="shodh_demo_456",
+        session_id=f"shodh_other_{RUN_ID}",
         server_url=SHODH_SERVER,
-        user_id="demo-agent",
+        user_id=f"demo-agent-{RUN_ID}",
         api_key=SHODH_API_KEY,
     )
     await other_session.clear_session()
@@ -142,7 +146,7 @@ async def tools_example():
 
     tools = ShodhTools(
         server_url=SHODH_SERVER,
-        user_id="demo-agent",
+        user_id=f"demo-tools-{RUN_ID}",
         api_key=SHODH_API_KEY,
     )
 
