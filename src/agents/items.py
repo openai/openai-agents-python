@@ -57,6 +57,7 @@ from .tool import (
     ValidToolOutputPydanticModelsTypeAdapter,
 )
 from .usage import Usage
+from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
     from .agent import Agent
@@ -531,7 +532,7 @@ class ItemHelpers:
                     "role": "user",
                 }
             ]
-        return input.copy()
+        return cast(list[TResponseInputItem], _to_dump_compatible(input))
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:
