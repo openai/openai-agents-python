@@ -1870,7 +1870,7 @@ wheels = [
 
 [[package]]
 name = "openai-agents"
-version = "0.9.1"
+version = "0.9.2"
 source = { editable = "." }
 dependencies = [
     { name = "griffe" },
