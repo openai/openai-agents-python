@@ -17,10 +17,12 @@ from agents import (
     set_conversation_history_wrappers,
 )
 from agents.extensions.handoff_filters import nest_handoff_history, remove_all_tools
+from agents.handoffs import history as handoff_history
 from agents.items import (
     HandoffOutputItem,
     MessageOutputItem,
     ReasoningItem,
+    ToolApprovalItem,
     ToolCallOutputItem,
     TResponseInputItem,
 )
@@ -104,6 +106,21 @@ def _get_handoff_output_run_item(content: str) -> HandoffOutputItem:
         source_agent=fake_agent(),
         target_agent=fake_agent(),
     )
+
+
+def _get_tool_approval_run_item() -> ToolApprovalItem:
+    return ToolApprovalItem(
+        agent=fake_agent(),
+        raw_item={"type": "function_call", "call_id": "approval-call", "name": "approved_tool"},
+    )
+
+
+class _CustomRunItem:
+    def __init__(self, input_item: TResponseInputItem) -> None:
+        self._input_item = input_item
+
+    def to_input_item(self) -> TResponseInputItem:
+        return deepcopy(self._input_item)
 
 
 def _get_reasoning_output_run_item() -> ReasoningItem:
@@ -305,6 +322,53 @@ def test_nest_handoff_history_handles_missing_user() -> None:
     summary_content = summary["content"]
     assert isinstance(summary_content, str)
     assert "reasoning" in summary_content.lower()
+
+
+def test_nest_handoff_history_does_not_forward_raw_reasoning_items() -> None:
+    data = handoff_data(
+        input_history=(_get_user_input_item("Hello"),),
+        new_items=(
+            _get_reasoning_output_run_item(),
+            _get_message_output_run_item("Handoff request"),
+            _get_handoff_output_run_item("transfer"),
+        ),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert nested.input_items is not None
+    forwarded_inputs = [item.to_input_item() for item in nested.input_items]
+    assert all(
+        not (isinstance(item, dict) and item.get("type") == "reasoning")
+        for item in forwarded_inputs
+    )
+    # Keep the original run items for session history even when we filter model input.
+    assert nested.new_items == data.new_items
+
+
+def test_nest_handoff_history_skips_tool_approval_items() -> None:
+    pre_forward_item = _CustomRunItem(_get_user_input_item("forward me"))
+    data = handoff_data(
+        pre_handoff_items=(pre_forward_item, _get_tool_approval_run_item()),
+        new_items=(
+            _get_tool_approval_run_item(),
+            _get_message_output_run_item("safe message"),
+        ),
+    )
+
+    nested = nest_handoff_history(data)
+
+    assert pre_forward_item in nested.pre_handoff_items
+    assert nested.input_items is not None
+    forwarded_inputs = [item.to_input_item() for item in nested.input_items]
+    assert all(
+        not (isinstance(item, dict) and item.get("call_id") == "approval-call")
+        for item in forwarded_inputs
+    )
+
+
+def test_parse_summary_line_rejects_blank_lines() -> None:
+    assert handoff_history._parse_summary_line("   ") is None
 
 
 def test_nest_handoff_history_appends_existing_history() -> None:

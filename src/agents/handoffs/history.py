@@ -32,6 +32,9 @@ _conversation_history_end = _DEFAULT_CONVERSATION_HISTORY_END
 _SUMMARY_ONLY_INPUT_TYPES = {
     "function_call",
     "function_call_output",
+    # Raw reasoning items require a following item in Responses API input and can become
+    # invalid when forwarded across handoffs as standalone items.
+    "reasoning",
 }
 
 
