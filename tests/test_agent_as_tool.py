@@ -25,7 +25,11 @@ from agents import (
     TResponseInputItem,
 )
 from agents.agent_tool_input import StructuredToolInputBuilderOptions
-from agents.agent_tool_state import record_agent_tool_run_result
+from agents.agent_tool_state import (
+    get_agent_tool_state_scope,
+    record_agent_tool_run_result,
+    set_agent_tool_state_scope,
+)
 from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent
 from agents.tool_context import ToolContext
 from tests.utils.hitl import make_function_tool_call
@@ -998,6 +1002,80 @@ async def test_agent_as_tool_rejected_nested_approval_resumes_run(
 
     assert output == "from_resume"
     assert run_inputs == [resume_state]
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_preserves_scope_for_nested_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested ToolContext instances should inherit the parent tool-state scope."""
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.interruptions: list[ToolApprovalItem] = []
+
+    scope_id = "resume-scope"
+    agent = Agent(name="scope-agent")
+    tool = agent.as_tool(tool_name="scope_tool", tool_description="Scope tool")
+
+    async def fake_run(cls, /, starting_agent, input, **kwargs) -> DummyResult:
+        del cls, starting_agent, input
+        nested_context = kwargs.get("context")
+        assert isinstance(nested_context, ToolContext)
+        assert get_agent_tool_state_scope(nested_context) == scope_id
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    tool_context = ToolContext(
+        context=None,
+        tool_name="scope_tool",
+        tool_call_id="scope-call",
+        tool_arguments='{"input":"hello"}',
+    )
+    set_agent_tool_state_scope(tool_context, scope_id)
+
+    output = await tool.on_invoke_tool(tool_context, '{"input":"hello"}')
+    assert output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_agent_as_tool_preserves_scope_for_nested_run_context_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested RunContextWrapper instances should inherit the parent tool-state scope."""
+
+    class Params(BaseModel):
+        text: str
+
+    class DummyResult:
+        def __init__(self) -> None:
+            self.final_output = "ok"
+            self.interruptions: list[ToolApprovalItem] = []
+
+    scope_id = "resume-scope-wrapper"
+    agent = Agent(name="scope-agent-wrapper")
+    tool = agent.as_tool(
+        tool_name="scope_tool_wrapper",
+        tool_description="Scope tool wrapper",
+        parameters=Params,
+    )
+
+    async def fake_run(cls, /, starting_agent, input, **kwargs) -> DummyResult:
+        del cls, starting_agent, input
+        nested_context = kwargs.get("context")
+        assert isinstance(nested_context, RunContextWrapper)
+        assert get_agent_tool_state_scope(nested_context) == scope_id
+        return DummyResult()
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    parent_context = RunContextWrapper(context={"key": "value"})
+    set_agent_tool_state_scope(parent_context, scope_id)
+
+    output = await tool.on_invoke_tool(cast(Any, parent_context), '{"text":"hello"}')
+    assert output == "ok"
 
 
 @pytest.mark.asyncio

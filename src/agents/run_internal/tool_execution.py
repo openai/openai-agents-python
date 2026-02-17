@@ -20,7 +20,11 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 from openai.types.responses.response_output_item import McpApprovalRequest
 
 from ..agent import Agent
-from ..agent_tool_state import consume_agent_tool_run_result, peek_agent_tool_run_result
+from ..agent_tool_state import (
+    consume_agent_tool_run_result,
+    get_agent_tool_state_scope,
+    peek_agent_tool_run_result,
+)
 from ..editor import ApplyPatchOperation, ApplyPatchResult
 from ..exceptions import (
     AgentsException,
@@ -840,6 +844,7 @@ async def execute_function_tool_calls(
     """Execute function tool calls with approvals, guardrails, and hooks."""
     tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+    tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
 
     async def run_single_tool(func_tool: FunctionTool, tool_call: ResponseFunctionToolCall) -> Any:
         with function_span(func_tool.name) as span_fn:
@@ -903,6 +908,7 @@ async def execute_function_tool_calls(
                                 agent,
                                 tool_call,
                                 rejection_message=rejection_message,
+                                scope_id=tool_state_scope_id,
                             ),
                         )
 
@@ -972,7 +978,10 @@ async def execute_function_tool_calls(
     function_tool_results = []
     for tool_run, result in zip(tool_runs, results):
         if isinstance(result, FunctionToolResult):
-            nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+            nested_run_result = consume_agent_tool_run_result(
+                tool_run.tool_call,
+                scope_id=tool_state_scope_id,
+            )
             if nested_run_result:
                 result.agent_run_result = nested_run_result
                 nested_interruptions_from_result: list[ToolApprovalItem] = (
@@ -985,7 +994,10 @@ async def execute_function_tool_calls(
 
             function_tool_results.append(result)
         else:
-            nested_run_result = peek_agent_tool_run_result(tool_run.tool_call)
+            nested_run_result = peek_agent_tool_run_result(
+                tool_run.tool_call,
+                scope_id=tool_state_scope_id,
+            )
             nested_interruptions: list[ToolApprovalItem] = []
             if nested_run_result:
                 nested_interruptions = (
@@ -994,9 +1006,15 @@ async def execute_function_tool_calls(
                     else []
                 )
             if nested_run_result and not nested_interruptions:
-                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                nested_run_result = consume_agent_tool_run_result(
+                    tool_run.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
             elif nested_run_result is None:
-                nested_run_result = consume_agent_tool_run_result(tool_run.tool_call)
+                nested_run_result = consume_agent_tool_run_result(
+                    tool_run.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
                 if nested_run_result:
                     nested_interruptions = (
                         nested_run_result.interruptions

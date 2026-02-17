@@ -8,6 +8,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
+from uuid import uuid4
 
 from openai.types.responses import (
     ResponseComputerToolCall,
@@ -172,6 +173,9 @@ class RunState(Generic[TContext, TAgent]):
     _trace_state: TraceState | None = field(default=None, repr=False)
     """Serialized trace metadata for resuming tracing context."""
 
+    _agent_tool_state_scope_id: str | None = field(default=None, repr=False)
+    """Private scope id used to isolate agent-tool pending state per RunState instance."""
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -204,6 +208,9 @@ class RunState(Generic[TContext, TAgent]):
         self._current_turn_persisted_item_count = 0
         self._tool_use_tracker_snapshot = {}
         self._trace_state = None
+        from .agent_tool_state import get_agent_tool_state_scope
+
+        self._agent_tool_state_scope_id = get_agent_tool_state_scope(context)
 
     def get_interruptions(self) -> list[ToolApprovalItem]:
         """Return pending interruptions if the current step is an interruption."""
@@ -582,6 +589,7 @@ class RunState(Generic[TContext, TAgent]):
             parent_state=self,
             function_entries=action_groups.get("functions", []),
             function_runs=processed_response.functions,
+            scope_id=self._agent_tool_state_scope_id,
             context_serializer=context_serializer,
             strict_context=strict_context,
             include_tracing_api_key=include_tracing_api_key,
@@ -1161,6 +1169,7 @@ def _serialize_pending_nested_agent_tool_runs(
     parent_state: RunState[Any, Any],
     function_entries: Sequence[dict[str, Any]],
     function_runs: Sequence[Any],
+    scope_id: str | None = None,
     context_serializer: ContextSerializer | None = None,
     strict_context: bool = False,
     include_tracing_api_key: bool = False,
@@ -1176,7 +1185,7 @@ def _serialize_pending_nested_agent_tool_runs(
         if not isinstance(tool_call, ResponseFunctionToolCall):
             continue
 
-        pending_run_result = peek_agent_tool_run_result(tool_call)
+        pending_run_result = peek_agent_tool_run_result(tool_call, scope_id=scope_id)
         if pending_run_result is None:
             continue
 
@@ -1314,6 +1323,7 @@ async def _restore_pending_nested_agent_tool_runs(
     current_agent: Agent[Any],
     function_entries: Sequence[Any],
     function_runs: Sequence[Any],
+    scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
 ) -> None:
@@ -1356,8 +1366,8 @@ async def _restore_pending_nested_agent_tool_runs(
 
         # Replace any stale cache entry with the same signature so resumed runs do not read
         # older pending interruptions after consuming this restored entry.
-        drop_agent_tool_run_result(tool_call)
-        record_agent_tool_run_result(tool_call, cast(Any, pending_result))
+        drop_agent_tool_run_result(tool_call, scope_id=scope_id)
+        record_agent_tool_run_result(tool_call, cast(Any, pending_result), scope_id=scope_id)
 
 
 async def _deserialize_processed_response(
@@ -1366,6 +1376,7 @@ async def _deserialize_processed_response(
     context: RunContextWrapper[Any],
     agent_map: dict[str, Agent[Any]],
     *,
+    scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
 ) -> ProcessedResponse:
@@ -1555,6 +1566,7 @@ async def _deserialize_processed_response(
         current_agent=current_agent,
         function_entries=processed_response_data.get("functions", []),
         function_runs=functions,
+        scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
     )
@@ -1972,6 +1984,10 @@ async def _build_run_state_from_json(
         previous_response_id=state_json.get("previous_response_id"),
         auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
     )
+    from .agent_tool_state import set_agent_tool_state_scope
+
+    state._agent_tool_state_scope_id = uuid4().hex
+    set_agent_tool_state_scope(context, state._agent_tool_state_scope_id)
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
@@ -1984,6 +2000,7 @@ async def _build_run_state_from_json(
             current_agent,
             state._context,
             agent_map,
+            scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
         )

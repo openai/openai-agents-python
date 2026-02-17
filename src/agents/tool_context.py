@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 
+from .agent_tool_state import get_agent_tool_state_scope, set_agent_tool_state_scope
 from .run_context import RunContextWrapper, TContext
 from .usage import Usage
 
@@ -130,4 +131,5 @@ class ToolContext(RunContextWrapper[TContext]):
             run_config=tool_run_config,
             **base_values,
         )
+        set_agent_tool_state_scope(tool_context, get_agent_tool_state_scope(context))
         return tool_context

@@ -9,6 +9,7 @@ from typing_extensions import Unpack
 
 from . import _debug
 from .agent import Agent
+from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -555,6 +556,7 @@ class AgentRunner:
                 session_items = []
                 model_responses = []
                 context_wrapper = ensure_context_wrapper(context)
+                set_agent_tool_state_scope(context_wrapper, None)
                 run_state = RunState(
                     context=context_wrapper,
                     original_input=original_input,
@@ -1458,6 +1460,7 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            set_agent_tool_state_scope(context_wrapper, None)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
             run_state = RunState(

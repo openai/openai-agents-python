@@ -1840,16 +1840,24 @@ class TestDeserializeHelpers:
         del first_result
         gc.collect()
 
-        restored_state = await RunState.from_json(outer_agent, state_json)
-        restored_interruptions = restored_state.get_interruptions()
-        assert len(restored_interruptions) == 1
-        restored_state.approve(restored_interruptions[0])
+        restored_state_one = await RunState.from_json(outer_agent, state_json)
+        restored_state_two = await RunState.from_json(outer_agent, state_json)
 
-        resumed_result = await Runner.run(outer_agent, restored_state)
+        restored_interruptions_one = restored_state_one.get_interruptions()
+        restored_interruptions_two = restored_state_two.get_interruptions()
+        assert len(restored_interruptions_one) == 1
+        assert len(restored_interruptions_two) == 1
+        restored_state_one.approve(restored_interruptions_one[0])
+        restored_state_two.approve(restored_interruptions_two[0])
 
-        assert resumed_result.final_output == "outer-complete"
-        assert resumed_result.interruptions == []
-        assert tool_calls == ["hello"]
+        resumed_result_one = await Runner.run(outer_agent, restored_state_one)
+        resumed_result_two = await Runner.run(outer_agent, restored_state_two)
+
+        assert resumed_result_one.final_output == "outer-complete"
+        assert resumed_result_one.interruptions == []
+        assert resumed_result_two.final_output == "outer-complete"
+        assert resumed_result_two.interruptions == []
+        assert tool_calls == ["hello", "hello"]
 
     async def test_json_decode_error_handling(self):
         """Test that invalid JSON raises appropriate error."""

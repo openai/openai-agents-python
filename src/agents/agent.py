@@ -22,8 +22,10 @@ from .agent_tool_input import (
 )
 from .agent_tool_state import (
     consume_agent_tool_run_result,
+    get_agent_tool_state_scope,
     peek_agent_tool_run_result,
     record_agent_tool_run_result,
+    set_agent_tool_state_scope,
 )
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
@@ -593,6 +595,7 @@ class Agent(AgentBase, Generic[TContext]):
             resolved_run_config = run_config
             if resolved_run_config is None and isinstance(context, ToolContext):
                 resolved_run_config = context.run_config
+            tool_state_scope_id = get_agent_tool_state_scope(context)
             if isinstance(context, ToolContext):
                 # Use a fresh ToolContext to avoid sharing approval state with parent runs.
                 nested_context = ToolContext(
@@ -605,17 +608,20 @@ class Agent(AgentBase, Generic[TContext]):
                     agent=context.agent,
                     run_config=resolved_run_config,
                 )
+                set_agent_tool_state_scope(nested_context, tool_state_scope_id)
                 if should_capture_tool_input:
                     nested_context.tool_input = params_data
             elif isinstance(context, RunContextWrapper):
                 if should_capture_tool_input:
                     nested_context = RunContextWrapper(context=context.context)
+                    set_agent_tool_state_scope(nested_context, tool_state_scope_id)
                     nested_context.tool_input = params_data
                 else:
                     nested_context = context.context
             else:
                 if should_capture_tool_input:
                     nested_context = RunContextWrapper(context=context)
+                    set_agent_tool_state_scope(nested_context, tool_state_scope_id)
                     nested_context.tool_input = params_data
                 else:
                     nested_context = context
@@ -678,7 +684,10 @@ class Agent(AgentBase, Generic[TContext]):
                         )
 
             if isinstance(context, ToolContext) and context.tool_call is not None:
-                pending_run_result = peek_agent_tool_run_result(context.tool_call)
+                pending_run_result = peek_agent_tool_run_result(
+                    context.tool_call,
+                    scope_id=tool_state_scope_id,
+                )
                 if pending_run_result and getattr(pending_run_result, "interruptions", None):
                     status = _nested_approvals_status(pending_run_result.interruptions)
                     if status == "pending":
@@ -693,7 +702,10 @@ class Agent(AgentBase, Generic[TContext]):
                                 context,
                                 pending_run_result.interruptions,
                             )
-                        consume_agent_tool_run_result(context.tool_call)
+                        consume_agent_tool_run_result(
+                            context.tool_call,
+                            scope_id=tool_state_scope_id,
+                        )
 
             if run_result is None:
                 if on_stream is not None:
@@ -780,7 +792,11 @@ class Agent(AgentBase, Generic[TContext]):
             interruptions = getattr(run_result, "interruptions", None)
             if isinstance(context, ToolContext) and context.tool_call is not None and interruptions:
                 if should_record_run_result:
-                    record_agent_tool_run_result(context.tool_call, run_result)
+                    record_agent_tool_run_result(
+                        context.tool_call,
+                        run_result,
+                        scope_id=tool_state_scope_id,
+                    )
 
             if custom_output_extractor:
                 return await custom_output_extractor(run_result)

@@ -29,7 +29,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
-from ..agent_tool_state import peek_agent_tool_run_result
+from ..agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
 from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff, HandoffInputData, nest_handoff_history
 from ..items import (
@@ -697,7 +697,12 @@ async def resolve_interrupted_turn(
                 call_id=call_id,
             )
         rejected_function_outputs.append(
-            function_rejection_item(agent, tool_call, rejection_message=rejection_message)
+            function_rejection_item(
+                agent,
+                tool_call,
+                rejection_message=rejection_message,
+                scope_id=tool_state_scope_id,
+            )
         )
         if isinstance(call_id, str):
             rejected_function_call_ids.add(call_id)
@@ -725,6 +730,7 @@ async def resolve_interrupted_turn(
 
     pending_approval_items = _pending_approvals_from_state()
     approval_items_by_call_id = index_approval_items_by_call_id(pending_approval_items)
+    tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
 
     rejected_function_outputs: list[RunItem] = []
     rejected_function_call_ids: set[str] = set()
@@ -840,7 +846,10 @@ async def resolve_interrupted_turn(
         if not call_id:
             return False
 
-        pending_run_result = peek_agent_tool_run_result(run.tool_call)
+        pending_run_result = peek_agent_tool_run_result(
+            run.tool_call,
+            scope_id=tool_state_scope_id,
+        )
         if pending_run_result and getattr(pending_run_result, "interruptions", None):
             status = _nested_interruptions_status(pending_run_result.interruptions)
             if status in ("approved", "rejected"):
