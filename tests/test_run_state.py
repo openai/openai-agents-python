@@ -61,6 +61,7 @@ from agents.run_internal.run_loop import (
 )
 from agents.run_state import (
     CURRENT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     RunState,
     _build_agent_map,
     _deserialize_items,
@@ -286,11 +287,13 @@ class TestRunState:
             await RunState.from_string(agent, str_data)
 
         json_data["$schemaVersion"] = "0.1"
+        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
         with pytest.raises(
             Exception,
             match=(
                 f"Run state schema version 0.1 is not supported. "
-                f"Please use version {CURRENT_SCHEMA_VERSION}"
+                f"Supported versions are: {supported_versions}. "
+                f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
             ),
         ):
             await RunState.from_string(agent, json.dumps(json_data))
@@ -3329,6 +3332,31 @@ class TestRunStateSerializationEdgeCases:
 
         with pytest.raises(UserError, match="Run state schema version 2.0 is not supported"):
             await RunState.from_json(agent, state_json)
+
+    @pytest.mark.asyncio
+    async def test_from_json_accepts_previous_schema_version(self):
+        """Test that from_json accepts a previous, explicitly supported schema version."""
+        agent = Agent(name="TestAgent")
+        state_json = {
+            "$schemaVersion": "1.0",
+            "original_input": "test",
+            "current_agent": {"name": "TestAgent"},
+            "context": {
+                "context": {"foo": "bar"},
+                "usage": {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "approvals": {},
+            },
+            "max_turns": 3,
+            "current_turn": 0,
+            "model_responses": [],
+            "generated_items": [],
+        }
+
+        restored = await RunState.from_json(agent, state_json)
+        assert restored._current_agent is not None
+        assert restored._current_agent.name == "TestAgent"
+        assert restored._context is not None
+        assert restored._context.context == {"foo": "bar"}
 
     @pytest.mark.asyncio
     async def test_from_json_agent_not_found(self):

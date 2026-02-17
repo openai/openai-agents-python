@@ -94,8 +94,13 @@ ContextOverride = Union[Mapping[str, Any], RunContextWrapper[Any]]
 ContextSerializer = Callable[[Any], Mapping[str, Any]]
 ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 
-# Schema version for serialization compatibility
-CURRENT_SCHEMA_VERSION = "1.0"
+# RunState schema policy.
+# 1. Bump CURRENT_SCHEMA_VERSION when serialized shape/semantics change.
+# 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
+# 3. to_json() always emits CURRENT_SCHEMA_VERSION.
+# 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
+CURRENT_SCHEMA_VERSION = "1.1"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -1894,10 +1899,12 @@ async def _build_run_state_from_json(
     schema_version = state_json.get("$schemaVersion")
     if not schema_version:
         raise UserError("Run state is missing schema version")
-    if schema_version != CURRENT_SCHEMA_VERSION:
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
         raise UserError(
             f"Run state schema version {schema_version} is not supported. "
-            f"Please use version {CURRENT_SCHEMA_VERSION}"
+            f"Supported versions are: {supported_versions}. "
+            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
 
     agent_map = _build_agent_map(initial_agent)
