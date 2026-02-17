@@ -129,7 +129,6 @@ class ComputerAction:
                 ),
             )
 
-            output = ""
             try:
                 output = await cls._execute_action_and_capture(computer, action.tool_call)
             except Exception as exc:
@@ -149,6 +148,7 @@ class ComputerAction:
                         )
                     )
                 logger.error("Failed to execute computer action: %s", exc, exc_info=True)
+                raise
 
             await asyncio.gather(
                 hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),

@@ -386,16 +386,15 @@ async def test_execute_redacts_span_error_when_sensitive_data_disabled() -> None
 
     set_tracing_disabled(False)
     with trace("computer-span-redaction-test"):
-        result = await ComputerAction.execute(
-            agent=agent,
-            action=tool_run,
-            hooks=RunHooks[Any](),
-            context_wrapper=RunContextWrapper(context=None),
-            config=RunConfig(trace_include_sensitive_data=False),
-        )
+        with pytest.raises(RuntimeError, match=secret_error):
+            await ComputerAction.execute(
+                agent=agent,
+                action=tool_run,
+                hooks=RunHooks[Any](),
+                context_wrapper=RunContextWrapper(context=None),
+                config=RunConfig(trace_include_sensitive_data=False),
+            )
 
-    assert isinstance(result, ToolCallOutputItem)
-    assert result.output == ""
     function_span = _get_function_span(comptool.name)
     assert function_span.get("error") == {
         "message": "Error running tool",
