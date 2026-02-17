@@ -354,16 +354,47 @@ class BatchTraceProcessor(TracingProcessor):
             self._exporter.export(items_to_export)
 
 
-# Create a shared global instance:
-_global_exporter = BackendSpanExporter()
-_global_processor = BatchTraceProcessor(_global_exporter)
+# Lazily initialized defaults to avoid creating network clients or threading
+# primitives during module import (important for fork-based process models).
+_global_exporter: BackendSpanExporter | None = None
+_global_processor: BatchTraceProcessor | None = None
+_global_lock = threading.Lock()
 
 
 def default_exporter() -> BackendSpanExporter:
     """The default exporter, which exports traces and spans to the backend in batches."""
-    return _global_exporter
+    global _global_exporter
+
+    exporter = _global_exporter
+    if exporter is not None:
+        return exporter
+
+    with _global_lock:
+        exporter = _global_exporter
+        if exporter is None:
+            exporter = BackendSpanExporter()
+            _global_exporter = exporter
+
+    return exporter
 
 
 def default_processor() -> BatchTraceProcessor:
     """The default processor, which exports traces and spans to the backend in batches."""
-    return _global_processor
+    global _global_exporter
+    global _global_processor
+
+    processor = _global_processor
+    if processor is not None:
+        return processor
+
+    with _global_lock:
+        processor = _global_processor
+        if processor is None:
+            exporter = _global_exporter
+            if exporter is None:
+                exporter = BackendSpanExporter()
+                _global_exporter = exporter
+            processor = BatchTraceProcessor(exporter)
+            _global_processor = processor
+
+    return processor
