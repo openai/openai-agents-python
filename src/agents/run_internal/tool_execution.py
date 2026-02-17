@@ -10,7 +10,7 @@ import dataclasses
 import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_item_param import (
@@ -62,7 +62,7 @@ from ..tool_guardrails import (
     ToolOutputGuardrailData,
     ToolOutputGuardrailResult,
 )
-from ..tracing import SpanError, function_span
+from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from .approvals import append_approval_error_output
@@ -104,6 +104,8 @@ __all__ = [
     "normalize_max_output_length",
     "normalize_shell_output_entries",
     "format_shell_error",
+    "get_trace_tool_error",
+    "with_tool_function_span",
     "build_litellm_json_tool_call",
     "process_hosted_mcp_approvals",
     "collect_manual_mcp_approvals",
@@ -120,6 +122,9 @@ __all__ = [
     "execute_computer_actions",
     "execute_approved_tools",
 ]
+
+REDACTED_TOOL_ERROR_MESSAGE = "Tool execution failed. Error details are redacted."
+TToolSpanResult = TypeVar("TToolSpanResult")
 
 
 # --------------------------
@@ -529,6 +534,27 @@ def format_shell_error(error: Exception | BaseException | Any) -> str:
         return str(error)
     except Exception:  # pragma: no cover - fallback only
         return repr(error)
+
+
+def get_trace_tool_error(*, trace_include_sensitive_data: bool, error_message: str) -> str:
+    """Return a trace-safe tool error string based on the sensitive-data setting."""
+    return error_message if trace_include_sensitive_data else REDACTED_TOOL_ERROR_MESSAGE
+
+
+async def with_tool_function_span(
+    *,
+    config: RunConfig,
+    tool_name: str,
+    fn: Callable[[Span[Any] | None], Any],
+) -> TToolSpanResult:
+    """Execute a tool callback in a function span when tracing is active."""
+    if config.tracing_disabled or get_current_trace() is None:
+        result = fn(None)
+        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
+
+    with function_span(tool_name) as span:
+        result = fn(span)
+        return await result if inspect.isawaitable(result) else cast(TToolSpanResult, result)
 
 
 def build_litellm_json_tool_call(output: ResponseFunctionToolCall) -> FunctionTool:

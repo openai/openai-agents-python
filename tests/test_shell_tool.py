@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -14,10 +15,13 @@ from agents import (
     ShellResult,
     ShellTool,
     UserError,
+    set_tracing_disabled,
+    trace,
 )
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ShellAction, ToolRunShellCall, execute_shell_calls
 
+from .testing_processor import SPAN_PROCESSOR_TESTING
 from .utils.hitl import (
     HITL_REJECTION_MSG,
     make_context_wrapper,
@@ -27,6 +31,19 @@ from .utils.hitl import (
     reject_tool_call,
     require_approval,
 )
+
+
+def _get_function_span(tool_name: str) -> dict[str, Any]:
+    for span in SPAN_PROCESSOR_TESTING.get_ordered_spans(including_empty=True):
+        exported = span.export()
+        if not exported:
+            continue
+        span_data = exported.get("span_data")
+        if not isinstance(span_data, dict):
+            continue
+        if span_data.get("type") == "function" and span_data.get("name") == tool_name:
+            return exported
+    raise AssertionError(f"Function span for tool '{tool_name}' not found")
 
 
 def _shell_call(call_id: str = "call_shell") -> dict[str, Any]:
@@ -266,6 +283,71 @@ async def test_shell_tool_structured_output_is_rendered() -> None:
     assert "status" not in payload_dict
     assert "shell_output" not in payload_dict
     assert "provider_data" not in payload_dict
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_emits_function_span() -> None:
+    shell_tool = ShellTool(executor=lambda request: "shell span output")
+    tool_run = ToolRunShellCall(tool_call=_shell_call("call_shell_trace"), shell_tool=shell_tool)
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    set_tracing_disabled(False)
+    with trace("shell-span-test"):
+        result = await ShellAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(shell_tool.name)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert "echo hi" in cast(str, span_data.get("input", ""))
+    assert span_data.get("output") == "shell span output"
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_redacts_span_error_when_sensitive_data_disabled() -> None:
+    secret_error = "shell secret output"
+
+    class ExplodingExecutor:
+        def __call__(self, request):
+            raise RuntimeError(secret_error)
+
+    shell_tool = ShellTool(executor=ExplodingExecutor())
+    tool_run = ToolRunShellCall(
+        tool_call=_shell_call("call_shell_trace_redacted"),
+        shell_tool=shell_tool,
+    )
+    agent = Agent(name="shell-agent", tools=[shell_tool])
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(context=None)
+
+    set_tracing_disabled(False)
+    with trace("shell-span-redaction-test"):
+        result = await ShellAction.execute(
+            agent=agent,
+            call=tool_run,
+            hooks=RunHooks[Any](),
+            context_wrapper=context_wrapper,
+            config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    assert isinstance(result, ToolCallOutputItem)
+    function_span = _get_function_span(shell_tool.name)
+    assert function_span.get("error") == {
+        "message": "Error running tool",
+        "data": {
+            "tool_name": shell_tool.name,
+            "error": "Tool execution failed. Error details are redacted.",
+        },
+    }
+    assert secret_error not in json.dumps(function_span)
+    span_data = cast(dict[str, Any], function_span["span_data"])
+    assert span_data.get("input") is None
+    assert span_data.get("output") is None
 
 
 @pytest.mark.asyncio
