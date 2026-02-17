@@ -12,6 +12,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
 )
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 
 from agents import Agent
 from agents.handoffs import HandoffInputData, nest_handoff_history
@@ -19,6 +20,7 @@ from agents.items import (
     HandoffCallItem,
     HandoffOutputItem,
     MessageOutputItem,
+    ReasoningItem,
     ToolApprovalItem,
     ToolCallItem,
     ToolCallOutputItem,
@@ -97,6 +99,16 @@ def _create_message_item(agent: Agent) -> MessageOutputItem:
     return MessageOutputItem(agent=agent, raw_item=raw_item, type="message_output_item")
 
 
+def _create_reasoning_item(agent: Agent) -> ReasoningItem:
+    """Create a mock ReasoningItem."""
+    raw_item = ResponseReasoningItem(
+        id="reasoning_123",
+        type="reasoning",
+        summary=[Summary(text="Thinking about handoff", type="summary_text")],
+    )
+    return ReasoningItem(agent=agent, raw_item=raw_item, type="reasoning_item")
+
+
 def _create_tool_approval_item(agent: Agent) -> ToolApprovalItem:
     """Create a mock ToolApprovalItem."""
     raw_item = {
@@ -157,6 +169,28 @@ class TestHandoffHistoryDuplicationFix:
         assert len(nested.pre_handoff_items) == 0
         assert nested.input_items == ()
 
+    def test_pre_handoff_reasoning_items_are_filtered(self):
+        """Verify ReasoningItem in pre_handoff_items is filtered.
+
+        Reasoning is represented in the summary transcript and should not be
+        forwarded as a raw item.
+        """
+        agent = _create_mock_agent()
+
+        handoff_data = HandoffInputData(
+            input_history=({"role": "user", "content": "Hello"},),
+            pre_handoff_items=(_create_reasoning_item(agent),),
+            new_items=(),
+        )
+
+        nested = nest_handoff_history(handoff_data)
+
+        assert len(nested.pre_handoff_items) == 0
+        first_item = nested.input_history[0]
+        assert isinstance(first_item, dict)
+        summary = str(first_item.get("content", ""))
+        assert "reasoning" in summary
+
     def test_new_items_handoff_output_is_filtered_for_input(self):
         """Verify HandoffOutputItem in new_items is filtered from input_items.
 
@@ -208,6 +242,35 @@ class TestHandoffHistoryDuplicationFix:
         assert nested.input_items is not None
         assert len(nested.input_items) == 1, "MessageOutputItem should be preserved in input_items"
         assert isinstance(nested.input_items[0], MessageOutputItem)
+
+    def test_reasoning_items_are_filtered_from_input_items(self):
+        """Verify ReasoningItem in new_items is filtered from input_items.
+
+        Reasoning is summarized in the conversation transcript and should not be
+        forwarded verbatim in nested handoff model input.
+        """
+        agent = _create_mock_agent()
+
+        handoff_data = HandoffInputData(
+            input_history=({"role": "user", "content": "Hello"},),
+            pre_handoff_items=(),
+            new_items=(
+                _create_reasoning_item(agent),
+                _create_handoff_call_item(agent),
+                _create_handoff_output_item(agent),
+            ),
+        )
+
+        nested = nest_handoff_history(handoff_data)
+
+        assert nested.input_items is not None
+        has_reasoning = any(isinstance(item, ReasoningItem) for item in nested.input_items)
+        assert not has_reasoning, "ReasoningItem should be filtered from input_items"
+
+        first_item = nested.input_history[0]
+        assert isinstance(first_item, dict)
+        summary = str(first_item.get("content", ""))
+        assert "reasoning" in summary
 
     def test_summary_contains_filtered_items_as_text(self):
         """Verify the summary message contains the filtered tool items as text.

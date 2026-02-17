@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
 from agents import (
@@ -331,6 +332,61 @@ async def test_handoff_filters():
     assert len(result.to_input_list()) == 2, (
         "should only have 2 inputs: orig input and last message"
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_nested_handoff_filters_reasoning_items_from_model_input():
+    model = FakeModel()
+    delegate = Agent(
+        name="delegate",
+        model=model,
+    )
+    triage = Agent(
+        name="triage",
+        model=model,
+        handoffs=[delegate],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="reasoning_1",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking about a handoff.", type="summary_text")],
+                ),
+                get_handoff_tool_call(delegate),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    captured_inputs: list[list[dict[str, Any]]] = []
+
+    def capture_model_input(data):
+        if isinstance(data.model_data.input, list):
+            captured_inputs.append(
+                [item for item in data.model_data.input if isinstance(item, dict)]
+            )
+        return data.model_data
+
+    result = Runner.run_streamed(
+        triage,
+        input="user_message",
+        run_config=RunConfig(
+            nest_handoff_history=True,
+            call_model_input_filter=capture_model_input,
+        ),
+    )
+    await consume_stream(result)
+
+    assert result.final_output == "done"
+    assert len(captured_inputs) >= 2
+    handoff_input = captured_inputs[1]
+    handoff_input_types = [
+        item["type"] for item in handoff_input if isinstance(item.get("type"), str)
+    ]
+    assert "reasoning" not in handoff_input_types
 
 
 @pytest.mark.asyncio
