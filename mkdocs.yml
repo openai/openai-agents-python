@@ -155,7 +155,11 @@ plugins:
                     - ref/extensions/handoff_filters.md
                     - ref/extensions/handoff_prompt.md
                     - ref/extensions/litellm.md
+                    - ref/extensions/tool_output_trimmer.md
                     - ref/extensions/memory/sqlalchemy_session.md
+                    - ref/extensions/memory/async_sqlite_session.md
+                    - ref/extensions/memory/redis_session.md
+                    - ref/extensions/memory/dapr_session.md
                     - ref/extensions/memory/encrypt_session.md
                     - ref/extensions/memory/advanced_sqlite_session.md
         - locale: ja

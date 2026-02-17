@@ -222,6 +222,43 @@ result = await Runner.run(
 )
 ```
 
+### Async SQLite sessions
+
+Use `AsyncSQLiteSession` when you want SQLite persistence backed by `aiosqlite`.
+
+```bash
+pip install aiosqlite
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import AsyncSQLiteSession
+
+agent = Agent(name="Assistant")
+session = AsyncSQLiteSession("user_123", db_path="conversations.db")
+result = await Runner.run(agent, "Hello", session=session)
+```
+
+### Redis sessions
+
+Use `RedisSession` for shared session memory across multiple workers or services.
+
+```bash
+pip install openai-agents[redis]
+```
+
+```python
+from agents import Agent, Runner
+from agents.extensions.memory import RedisSession
+
+agent = Agent(name="Assistant")
+session = RedisSession.from_url(
+    "user_123",
+    url="redis://localhost:6379/0",
+)
+result = await Runner.run(agent, "Hello", session=session)
+```
+
 ### SQLAlchemy sessions
 
 Production-ready sessions using any SQLAlchemy-supported database:
@@ -315,12 +352,13 @@ Use meaningful session IDs that help you organize conversations:
 
 -   Use in-memory SQLite (`SQLiteSession("session_id")`) for temporary conversations
 -   Use file-based SQLite (`SQLiteSession("session_id", "path/to/db.sqlite")`) for persistent conversations
+-   Use async SQLite (`AsyncSQLiteSession("session_id", db_path="...")`) when you need an `aiosqlite`-based implementation
+-   Use Redis-backed sessions (`RedisSession.from_url("session_id", url="redis://...")`) for shared, low-latency session memory
 -   Use SQLAlchemy-powered sessions (`SQLAlchemySession("session_id", engine=engine, create_tables=True)`) for production systems with existing databases supported by SQLAlchemy
--   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 
-30+ database backends with built-in telemetry, tracing, and data isolation
+-   Use Dapr state store sessions (`DaprSession.from_address("session_id", state_store_name="statestore", dapr_address="localhost:50001")`) for production cloud-native deployments with support for 30+ database backends with built-in telemetry, tracing, and data isolation
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
--   Consider implementing custom session backends for other production systems (Redis, Django, etc.) for more advanced use cases
+-   Consider implementing custom session backends for other production systems (for example, Django) for more advanced use cases
 
 ### Multiple sessions
 
@@ -493,6 +531,8 @@ For detailed API documentation, see:
 -   [`OpenAIConversationsSession`][agents.memory.OpenAIConversationsSession] - OpenAI Conversations API implementation
 -   [`OpenAIResponsesCompactionSession`][agents.memory.openai_responses_compaction_session.OpenAIResponsesCompactionSession] - Responses API compaction wrapper
 -   [`SQLiteSession`][agents.memory.sqlite_session.SQLiteSession] - Basic SQLite implementation
+-   [`AsyncSQLiteSession`][agents.extensions.memory.async_sqlite_session.AsyncSQLiteSession] - Async SQLite implementation based on `aiosqlite`
+-   [`RedisSession`][agents.extensions.memory.redis_session.RedisSession] - Redis-backed session implementation
 -   [`SQLAlchemySession`][agents.extensions.memory.sqlalchemy_session.SQLAlchemySession] - SQLAlchemy-powered implementation
 -   [`DaprSession`][agents.extensions.memory.dapr_session.DaprSession] - Dapr state store implementation
 -   [`AdvancedSQLiteSession`][agents.extensions.memory.advanced_sqlite_session.AdvancedSQLiteSession] - Enhanced SQLite with branching and analytics

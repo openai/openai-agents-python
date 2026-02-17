@@ -128,6 +128,12 @@ Sessions automatically:
 -   Stores new messages after each run
 -   Maintains separate conversations for different session IDs
 
+!!! note
+
+    Session persistence cannot be combined with server-managed conversation settings
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) in the
+    same run. Choose one approach per call.
+
 See the [Sessions documentation](sessions/index.md) for more details.
 
 
