@@ -277,6 +277,9 @@ class FunctionTool:
     timeout_error_function: ToolErrorFunction | None = None
     """Optional formatter for timeout errors when timeout_behavior is "error_as_result"."""
 
+    meta: dict[str, Any] | None = None
+    """Optional metadata for the tool."""
+
     _is_agent_tool: bool = field(default=False, init=False, repr=False)
     """Internal flag indicating if this tool is an agent-as-tool."""
 

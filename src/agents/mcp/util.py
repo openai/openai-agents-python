@@ -308,6 +308,7 @@ class MCPUtil:
             on_invoke_tool=invoke_func,
             strict_json_schema=is_strict,
             needs_approval=needs_approval,
+            meta=tool.meta,
         )
 
     @staticmethod
