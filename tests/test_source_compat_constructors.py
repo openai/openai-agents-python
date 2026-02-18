@@ -14,6 +14,7 @@ from agents import (
     RunContextWrapper,
     RunResult,
     RunResultStreaming,
+    SessionSettings,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -32,6 +33,34 @@ def test_run_config_positional_arguments_remain_backward_compatible() -> None:
 
     assert config.handoff_input_filter is keep_handoff_input
     assert config.session_settings is None
+
+
+def test_run_config_session_settings_positional_binding_is_preserved() -> None:
+    session_settings = SessionSettings(limit=123)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy is None
 
 
 def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
