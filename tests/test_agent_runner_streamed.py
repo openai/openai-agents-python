@@ -50,6 +50,17 @@ from .utils.hitl import (
 from .utils.simple_session import SimpleListSession
 
 
+def _find_reasoning_input_item(
+    items: str | list[TResponseInputItem] | Any,
+) -> dict[str, Any] | None:
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            return cast(dict[str, Any], item)
+    return None
+
+
 @pytest.mark.asyncio
 async def test_simple_first_run():
     model = FakeModel()
@@ -150,6 +161,47 @@ async def test_tool_call_runs():
         "should have five inputs: the original input, the message, the tool call, the tool result "
         "and the done message"
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_reasoning_item_id_policy_omits_follow_up_reasoning_ids() -> None:
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        tools=[get_function_tool("foo", "tool_result")],
+    )
+
+    model.add_multiple_turn_outputs(
+        [
+            [
+                ResponseReasoningItem(
+                    id="rs_stream",
+                    type="reasoning",
+                    summary=[Summary(text="Thinking...", type="summary_text")],
+                ),
+                get_function_tool_call("foo", json.dumps({"a": "b"}), call_id="call_stream"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    result = Runner.run_streamed(
+        agent,
+        input="hello",
+        run_config=RunConfig(reasoning_item_id_policy="omit"),
+    )
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "done"
+    second_request_reasoning = _find_reasoning_input_item(model.last_turn_args.get("input"))
+    assert second_request_reasoning is not None
+    assert "id" not in second_request_reasoning
+
+    history_reasoning = _find_reasoning_input_item(result.to_input_list())
+    assert history_reasoning is not None
+    assert "id" not in history_reasoning
 
 
 @pytest.mark.asyncio
@@ -1331,6 +1383,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         items: list[RunItem],
         persisted_count: int,
         response_id: str | None,
+        reasoning_item_id_policy: str | None = None,
         store: bool | None = None,
     ) -> int:
         observed_counts.append(persisted_count)
@@ -1339,6 +1392,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             items=items,
             persisted_count=persisted_count,
             response_id=response_id,
+            reasoning_item_id_policy=reasoning_item_id_policy,
             store=store,
         )
         return int(result)

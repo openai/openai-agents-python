@@ -86,7 +86,13 @@ from .models.openai_responses import OpenAIResponsesModel
 from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
 from .repl import run_demo_loop
 from .result import RunResult, RunResultStreaming
-from .run import RunConfig, Runner, ToolErrorFormatter, ToolErrorFormatterArgs
+from .run import (
+    ReasoningItemIdPolicy,
+    RunConfig,
+    Runner,
+    ToolErrorFormatter,
+    ToolErrorFormatterArgs,
+)
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
     RunErrorData,
@@ -345,6 +351,7 @@ __all__ = [
     "RunResult",
     "RunResultStreaming",
     "RunConfig",
+    "ReasoningItemIdPolicy",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "RunState",

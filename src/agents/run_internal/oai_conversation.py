@@ -12,7 +12,13 @@ from typing import Any, cast
 from ..items import ItemHelpers, ModelResponse, RunItem, TResponseInputItem
 from ..logger import logger
 from ..models.fake_id import FAKE_RESPONSES_ID
-from .items import drop_orphan_function_calls, fingerprint_input_item, normalize_input_items_for_api
+from .items import (
+    ReasoningItemIdPolicy,
+    drop_orphan_function_calls,
+    fingerprint_input_item,
+    normalize_input_items_for_api,
+    run_item_to_input_item,
+)
 
 # --------------------------
 # Private helpers (no public exports in this module)
@@ -47,6 +53,8 @@ class OpenAIServerConversationTracker:
     sent_initial_input: bool = False
     remaining_initial_input: list[TResponseInputItem] | None = None
     primed_from_state: bool = False
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+    prepared_item_sources: dict[int, TResponseInputItem] = field(default_factory=dict)
 
     def __post_init__(self):
         """Log initial tracker state to make conversation resume behavior debuggable."""
@@ -236,25 +244,29 @@ class OpenAIServerConversationTracker:
         if not items:
             return
 
-        delivered_ids: set[int] = set()
+        delivered_source_ids: set[int] = set()
+        delivered_by_content: set[str] = set()
         for item in items:
             if item is None:
                 continue
-            delivered_ids.add(id(item))
-            self.sent_items.add(id(item))
+            source_item = self._resolve_prepared_item_source(item)
+            self.prepared_item_sources.pop(id(item), None)
+            source_item_id = id(source_item)
+            if source_item_id in delivered_source_ids:
+                continue
+            delivered_source_ids.add(source_item_id)
+            self.sent_items.add(source_item_id)
+            fp = _fingerprint_for_tracker(source_item)
+            if fp:
+                delivered_by_content.add(fp)
+                self.sent_item_fingerprints.add(fp)
 
         if not self.remaining_initial_input:
             return
 
-        delivered_by_content: set[str] = set()
-        for item in items:
-            fp = _fingerprint_for_tracker(item)
-            if fp:
-                delivered_by_content.add(fp)
-
         remaining: list[TResponseInputItem] = []
         for pending in self.remaining_initial_input:
-            if id(pending) in delivered_ids:
+            if id(pending) in delivered_source_ids:
                 continue
             pending_fp = _fingerprint_for_tracker(pending)
             if pending_fp and pending_fp in delivered_by_content:
@@ -272,9 +284,11 @@ class OpenAIServerConversationTracker:
         for item in items:
             if item is None:
                 continue
-            rewind_items.append(item)
-            self.sent_items.discard(id(item))
-            fp = _fingerprint_for_tracker(item)
+            source_item = self._resolve_prepared_item_source(item)
+            self.prepared_item_sources.pop(id(item), None)
+            rewind_items.append(source_item)
+            self.sent_items.discard(id(source_item))
+            fp = _fingerprint_for_tracker(source_item)
             if fp:
                 self.sent_item_fingerprints.discard(fp)
 
@@ -296,6 +310,8 @@ class OpenAIServerConversationTracker:
         if not self.sent_initial_input:
             initial_items = ItemHelpers.input_to_new_input_list(original_input)
             input_items.extend(initial_items)
+            for item in initial_items:
+                self._register_prepared_item_source(item)
             filtered_initials = []
             for item in initial_items:
                 if item is None or isinstance(item, (str, bytes)):
@@ -305,6 +321,8 @@ class OpenAIServerConversationTracker:
             self.sent_initial_input = True
         elif self.remaining_initial_input:
             input_items.extend(self.remaining_initial_input)
+            for item in self.remaining_initial_input:
+                self._register_prepared_item_source(item)
 
         for item in generated_items:  # type: ignore[assignment]
             run_item: RunItem = cast(RunItem, item)
@@ -339,15 +357,27 @@ class OpenAIServerConversationTracker:
             if raw_item_id in self.sent_items or raw_item_id in self.server_items:
                 continue
 
-            to_input = getattr(run_item, "to_input_item", None)
-            input_item = to_input() if callable(to_input) else cast(TResponseInputItem, raw_item)
-
-            fp = _fingerprint_for_tracker(input_item)
+            converted_input_item = run_item_to_input_item(run_item, self.reasoning_item_id_policy)
+            if converted_input_item is None:
+                continue
+            fp = _fingerprint_for_tracker(converted_input_item)
             if fp and self.primed_from_state and fp in self.sent_item_fingerprints:
                 continue
 
-            input_items.append(input_item)
-
-            self.sent_items.add(raw_item_id)
+            input_items.append(converted_input_item)
+            self._register_prepared_item_source(
+                converted_input_item,
+                cast(TResponseInputItem, raw_item),
+            )
 
         return input_items
+
+    def _register_prepared_item_source(
+        self, prepared_item: TResponseInputItem, source_item: TResponseInputItem | None = None
+    ) -> None:
+        if source_item is None:
+            source_item = prepared_item
+        self.prepared_item_sources[id(prepared_item)] = source_item
+
+    def _resolve_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
+        return self.prepared_item_sources.get(id(item), item)

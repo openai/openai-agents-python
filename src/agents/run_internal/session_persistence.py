@@ -25,12 +25,14 @@ from ..memory import (
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..run_state import RunState
 from .items import (
+    ReasoningItemIdPolicy,
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     drop_orphan_function_calls,
     ensure_input_item_format,
     fingerprint_input_item,
     normalize_input_items_for_api,
+    run_item_to_input_item,
 )
 from .oai_conversation import OpenAIServerConversationTracker
 from .run_steps import SingleStepResult
@@ -205,6 +207,7 @@ async def save_result_to_session(
     run_state: RunState | None = None,
     *,
     response_id: str | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
 ) -> int:
     """
@@ -240,11 +243,17 @@ async def save_result_to_session(
             for item in ItemHelpers.input_to_new_input_list(original_input)
         ]
 
-    items_to_convert = [item for item in new_run_items if item.type != "tool_approval_item"]
-
-    new_items_as_input: list[TResponseInputItem] = [
-        ensure_input_item_format(item.to_input_item()) for item in items_to_convert
-    ]
+    resolved_reasoning_item_id_policy = (
+        reasoning_item_id_policy
+        if reasoning_item_id_policy is not None
+        else (run_state._reasoning_item_id_policy if run_state is not None else None)
+    )
+    new_items_as_input: list[TResponseInputItem] = []
+    for run_item in new_run_items:
+        converted = run_item_to_input_item(run_item, resolved_reasoning_item_id_policy)
+        if converted is None:
+            continue
+        new_items_as_input.append(ensure_input_item_format(converted))
 
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     ignore_ids_for_matching = _ignore_ids_for_matching(session)
@@ -332,6 +341,7 @@ async def save_resumed_turn_items(
     items: list[RunItem],
     persisted_count: int,
     response_id: str | None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
 ) -> int:
     """Persist resumed turn items and return the updated persisted count."""
@@ -343,6 +353,7 @@ async def save_resumed_turn_items(
         list(items),
         None,
         response_id=response_id,
+        reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
     )
     return persisted_count + saved_count

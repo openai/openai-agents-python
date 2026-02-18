@@ -99,8 +99,8 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
-CURRENT_SCHEMA_VERSION = "1.1"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = "1.2"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -151,6 +151,9 @@ class RunState(Generic[TContext, TAgent]):
     _auto_previous_response_id: bool = False
     """Whether the previous response id should be automatically tracked."""
 
+    _reasoning_item_id_policy: Literal["preserve", "omit"] | None = None
+    """How reasoning item IDs are represented in next-turn model input."""
+
     _input_guardrail_results: list[InputGuardrailResult] = field(default_factory=list)
     """Results from input guardrails applied to the run."""
 
@@ -200,6 +203,7 @@ class RunState(Generic[TContext, TAgent]):
         self._conversation_id = conversation_id
         self._previous_response_id = previous_response_id
         self._auto_previous_response_id = auto_previous_response_id
+        self._reasoning_item_id_policy = None
         self._model_responses = []
         self._generated_items = []
         self._session_items = []
@@ -548,6 +552,7 @@ class RunState(Generic[TContext, TAgent]):
             "conversation_id": self._conversation_id,
             "previous_response_id": self._previous_response_id,
             "auto_previous_response_id": self._auto_previous_response_id,
+            "reasoning_item_id_policy": self._reasoning_item_id_policy,
         }
 
         generated_items = self._merge_generated_items_with_processed()
@@ -763,6 +768,10 @@ class RunState(Generic[TContext, TAgent]):
                 continue
             normalized[agent_name] = [tool for tool in tools if isinstance(tool, str)]
         self._tool_use_tracker_snapshot = normalized
+
+    def set_reasoning_item_id_policy(self, policy: Literal["preserve", "omit"] | None) -> None:
+        """Store how reasoning item IDs should appear in next-turn model input."""
+        self._reasoning_item_id_policy = policy
 
     def get_tool_use_tracker_snapshot(self) -> dict[str, list[str]]:
         """Return a defensive copy of the tool-use tracker snapshot."""
@@ -2054,6 +2063,11 @@ async def _build_run_state_from_json(
     state._current_turn_persisted_item_count = state_json.get(
         "current_turn_persisted_item_count", 0
     )
+    serialized_policy = state_json.get("reasoning_item_id_policy")
+    if serialized_policy in {"preserve", "omit"}:
+        state._reasoning_item_id_policy = cast(Literal["preserve", "omit"], serialized_policy)
+    else:
+        state._reasoning_item_id_policy = None
     state.set_tool_use_tracker_snapshot(state_json.get("tool_use_tracker", {}))
     trace_data = state_json.get("trace")
     if isinstance(trace_data, Mapping):

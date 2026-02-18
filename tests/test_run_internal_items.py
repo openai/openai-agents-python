@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
-from agents.items import TResponseInputItem
+from agents import Agent
+from agents.items import ReasoningItem, TResponseInputItem
 from agents.models.fake_id import FAKE_RESPONSES_ID
 from agents.run_internal import items as run_items
 
@@ -200,3 +202,39 @@ def test_extract_mcp_request_id_from_run_variants() -> None:
         run_items.extract_mcp_request_id_from_run(_Run(requestItem={"call_id": "camel-call"}))
         == "camel-call"
     )
+
+
+def test_run_item_to_input_item_preserves_reasoning_item_ids_by_default() -> None:
+    agent = Agent(name="A")
+    reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_123",
+            summary=[],
+        ),
+    )
+
+    result = run_items.run_item_to_input_item(reasoning)
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "reasoning"
+    assert result.get("id") == "rs_123"
+
+
+def test_run_item_to_input_item_omits_reasoning_item_ids_when_configured() -> None:
+    agent = Agent(name="A")
+    reasoning = ReasoningItem(
+        agent=agent,
+        raw_item=ResponseReasoningItem(
+            type="reasoning",
+            id="rs_456",
+            summary=[],
+        ),
+    )
+
+    result = run_items.run_item_to_input_item(reasoning, "omit")
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "reasoning"
+    assert "id" not in result

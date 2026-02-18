@@ -125,6 +125,73 @@ def test_prepare_input_does_not_skip_fake_response_ids() -> None:
     assert prepared == [raw_item]
 
 
+def test_prepare_input_applies_reasoning_item_id_policy_for_generated_items() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv7",
+        previous_response_id=None,
+        reasoning_item_id_policy="omit",
+    )
+    generated_items = [
+        DummyRunItem(
+            {
+                "type": "reasoning",
+                "id": "rs_turn_input",
+                "content": [{"type": "input_text", "text": "reasoning trace"}],
+            },
+            type="reasoning_item",
+        )
+    ]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+
+    assert prepared == [
+        cast(
+            TResponseInputItem,
+            {"type": "reasoning", "content": [{"type": "input_text", "text": "reasoning trace"}]},
+        )
+    ]
+
+
+def test_prepare_input_does_not_resend_reasoning_item_after_marking_omitted_id_as_sent() -> None:
+    tracker = OpenAIServerConversationTracker(
+        conversation_id="conv8",
+        previous_response_id=None,
+        reasoning_item_id_policy="omit",
+    )
+    generated_items = [
+        DummyRunItem(
+            {
+                "type": "reasoning",
+                "id": "rs_turn_input",
+                "content": [{"type": "input_text", "text": "reasoning trace"}],
+            },
+            type="reasoning_item",
+        )
+    ]
+
+    first_prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    assert first_prepared == [
+        cast(
+            TResponseInputItem,
+            {"type": "reasoning", "content": [{"type": "input_text", "text": "reasoning trace"}]},
+        )
+    ]
+
+    tracker.mark_input_as_sent(first_prepared)
+
+    second_prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    assert second_prepared == []
+
+
 @pytest.mark.asyncio
 async def test_get_new_response_marks_filtered_input_as_sent() -> None:
     model = FakeModel()

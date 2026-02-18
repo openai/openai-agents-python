@@ -51,6 +51,7 @@ class CallModelData(Generic[TContext]):
 
 
 CallModelInputFilter = Callable[[CallModelData[Any]], MaybeAwaitable[ModelInputData]]
+ReasoningItemIdPolicy = Literal["preserve", "omit"]
 
 
 @dataclass
@@ -178,6 +179,13 @@ class RunConfig:
     Returning ``None`` falls back to the SDK default message.
     """
 
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
+    """Controls how reasoning items are converted to next-turn model input.
+
+    - ``None`` / ``"preserve"`` keeps reasoning item IDs as-is.
+    - ``"omit"`` strips reasoning item IDs from model input built by the runner.
+    """
+
     session_settings: SessionSettings | None = None
     """Configure session settings. Any non-null values will override the session's default
     settings. Used to control session behavior like the number of items to retrieve.
@@ -220,6 +228,7 @@ __all__ = [
     "CallModelData",
     "CallModelInputFilter",
     "ModelInputData",
+    "ReasoningItemIdPolicy",
     "RunConfig",
     "RunOptions",
     "ToolErrorFormatter",

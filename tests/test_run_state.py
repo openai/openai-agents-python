@@ -15,6 +15,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputText,
+    ResponseReasoningItem,
 )
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
@@ -40,6 +41,7 @@ from agents.items import (
     ItemHelpers,
     MessageOutputItem,
     ModelResponse,
+    ReasoningItem,
     RunItem,
     ToolApprovalItem,
     ToolCallItem,
@@ -48,6 +50,7 @@ from agents.items import (
     TResponseStreamEvent,
 )
 from agents.run_context import RunContextWrapper
+from agents.run_internal.items import run_items_to_input_items
 from agents.run_internal.run_loop import (
     NextStepInterruption,
     ProcessedResponse,
@@ -233,6 +236,34 @@ class TestRunState:
         str_data = state.to_string()
         assert isinstance(str_data, str)
         assert json.loads(str_data) == json_data
+
+    async def test_reasoning_item_id_policy_survives_serialization(self):
+        """RunState should preserve reasoning item input policy across serialization."""
+        context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})
+        agent = Agent(name="AgentReasoningPolicy")
+        state = make_state(agent, context=context, original_input="input1", max_turns=2)
+        state.set_reasoning_item_id_policy("omit")
+        state._generated_items = [
+            ReasoningItem(
+                agent=agent,
+                raw_item=ResponseReasoningItem(type="reasoning", id="rs_state", summary=[]),
+            )
+        ]
+
+        json_data = state.to_json()
+        assert json_data["reasoning_item_id_policy"] == "omit"
+
+        restored = await RunState.from_string(agent, state.to_string())
+        assert restored._reasoning_item_id_policy == "omit"
+
+        restored_history = run_items_to_input_items(
+            restored._generated_items,
+            restored._reasoning_item_id_policy,
+        )
+        assert len(restored_history) == 1
+        assert isinstance(restored_history[0], dict)
+        assert restored_history[0].get("type") == "reasoning"
+        assert "id" not in restored_history[0]
 
     @pytest.mark.asyncio
     async def test_tool_input_survives_serialization_round_trip(self):
