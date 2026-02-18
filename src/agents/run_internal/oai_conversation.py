@@ -55,6 +55,9 @@ class OpenAIServerConversationTracker:
     primed_from_state: bool = False
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None
     prepared_item_sources: dict[int, TResponseInputItem] = field(default_factory=dict)
+    prepared_item_sources_by_fingerprint: dict[str, list[TResponseInputItem]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self):
         """Log initial tracker state to make conversation resume behavior debuggable."""
@@ -249,8 +252,7 @@ class OpenAIServerConversationTracker:
         for item in items:
             if item is None:
                 continue
-            source_item = self._resolve_prepared_item_source(item)
-            self.prepared_item_sources.pop(id(item), None)
+            source_item = self._consume_prepared_item_source(item)
             source_item_id = id(source_item)
             if source_item_id in delivered_source_ids:
                 continue
@@ -284,8 +286,7 @@ class OpenAIServerConversationTracker:
         for item in items:
             if item is None:
                 continue
-            source_item = self._resolve_prepared_item_source(item)
-            self.prepared_item_sources.pop(id(item), None)
+            source_item = self._consume_prepared_item_source(item)
             rewind_items.append(source_item)
             self.sent_items.discard(id(source_item))
             fp = _fingerprint_for_tracker(source_item)
@@ -378,6 +379,45 @@ class OpenAIServerConversationTracker:
         if source_item is None:
             source_item = prepared_item
         self.prepared_item_sources[id(prepared_item)] = source_item
+        fingerprint = _fingerprint_for_tracker(prepared_item)
+        if fingerprint:
+            self.prepared_item_sources_by_fingerprint.setdefault(fingerprint, []).append(source_item)
 
     def _resolve_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
-        return self.prepared_item_sources.get(id(item), item)
+        source_item = self.prepared_item_sources.get(id(item))
+        if source_item is not None:
+            return source_item
+
+        fingerprint = _fingerprint_for_tracker(item)
+        if not fingerprint:
+            return item
+
+        source_items = self.prepared_item_sources_by_fingerprint.get(fingerprint)
+        if not source_items:
+            return item
+        return source_items[0]
+
+    def _consume_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
+        source_item = self._resolve_prepared_item_source(item)
+        direct_source = self.prepared_item_sources.pop(id(item), None)
+
+        fingerprint = _fingerprint_for_tracker(item)
+        if not fingerprint:
+            return source_item
+
+        source_items = self.prepared_item_sources_by_fingerprint.get(fingerprint)
+        if not source_items:
+            return source_item
+
+        target_source = direct_source if direct_source is not None else source_item
+        for index, candidate in enumerate(source_items):
+            if candidate is target_source:
+                source_items.pop(index)
+                break
+        else:
+            source_items.pop(0)
+
+        if not source_items:
+            self.prepared_item_sources_by_fingerprint.pop(fingerprint, None)
+
+        return source_item

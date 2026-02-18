@@ -63,6 +63,35 @@ def test_run_config_session_settings_positional_binding_is_preserved() -> None:
     assert config.reasoning_item_id_policy is None
 
 
+def test_run_config_reasoning_item_id_policy_positional_binding() -> None:
+    session_settings = SessionSettings(limit=123)
+    config = RunConfig(
+        None,
+        MultiProvider(),
+        None,
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        None,
+        True,
+        "Agent workflow",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        session_settings,
+        "omit",
+    )
+
+    assert config.session_settings == session_settings
+    assert config.reasoning_item_id_policy == "omit"
+
+
 def test_function_tool_positional_arguments_keep_guardrail_positions() -> None:
     async def invoke(_ctx: ToolContext[Any], _args: str) -> str:
         return "ok"
