@@ -381,7 +381,9 @@ class OpenAIServerConversationTracker:
         self.prepared_item_sources[id(prepared_item)] = source_item
         fingerprint = _fingerprint_for_tracker(prepared_item)
         if fingerprint:
-            self.prepared_item_sources_by_fingerprint.setdefault(fingerprint, []).append(source_item)
+            self.prepared_item_sources_by_fingerprint.setdefault(fingerprint, []).append(
+                source_item
+            )
 
     def _resolve_prepared_item_source(self, item: TResponseInputItem) -> TResponseInputItem:
         source_item = self.prepared_item_sources.get(id(item))

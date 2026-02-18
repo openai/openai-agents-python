@@ -81,6 +81,35 @@ def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() 
     assert tracker.remaining_initial_input == [pending_1]
 
 
+def test_mark_input_as_sent_uses_raw_generated_source_for_rebuilt_filtered_item() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv2b", previous_response_id=None)
+    raw_generated_item = {
+        "type": "function_call_output",
+        "call_id": "call-2b",
+        "output": "done",
+    }
+    generated_items = [
+        DummyRunItem(raw_generated_item, type="function_call_output_item"),
+    ]
+
+    prepared = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    rebuilt_filtered_item = cast(TResponseInputItem, dict(cast(dict[str, Any], prepared[0])))
+
+    tracker.mark_input_as_sent([rebuilt_filtered_item])
+
+    assert id(raw_generated_item) in tracker.sent_items
+    assert id(rebuilt_filtered_item) not in tracker.sent_items
+
+    prepared_again = tracker.prepare_input(
+        original_input=[],
+        generated_items=cast(list[Any], generated_items),
+    )
+    assert prepared_again == []
+
+
 def test_track_server_items_filters_remaining_initial_input_by_fingerprint() -> None:
     tracker = OpenAIServerConversationTracker(conversation_id="conv3", previous_response_id=None)
     pending_kept: TResponseInputItem = cast(
