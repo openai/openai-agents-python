@@ -316,14 +316,15 @@ def test_backend_span_exporter_sanitizes_generation_usage_for_openai_tracing(moc
     sent_payload = mock_client.return_value.post.call_args.kwargs["json"]["data"][0]
     sent_usage = sent_payload["span_data"]["usage"]
     assert "requests" not in sent_usage
+    assert "total_tokens" not in sent_usage
     assert sent_usage["input_tokens"] == 10
     assert sent_usage["output_tokens"] == 5
-    assert sent_usage["total_tokens"] == 15
     assert sent_usage["input_tokens_details"] == {"cached_tokens": 1}
     assert sent_usage["output_tokens_details"] == {"reasoning_tokens": 2}
 
     # Ensure the original exported object has not been mutated.
     assert "requests" in item.exported_payload["span_data"]["usage"]
+    assert item.exported_payload["span_data"]["usage"]["total_tokens"] == 15
     exporter.close()
 
 
@@ -400,7 +401,6 @@ def test_sanitize_for_openai_tracing_api_keeps_allowed_generation_usage():
             "usage": {
                 "input_tokens": 1,
                 "output_tokens": 2,
-                "total_tokens": 3,
                 "input_tokens_details": {"cached_tokens": 0},
                 "output_tokens_details": {"reasoning_tokens": 0},
             },
