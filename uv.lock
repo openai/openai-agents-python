@@ -254,6 +254,22 @@ wheels = [
 ]
 
 [[package]]
+name = "camb-sdk"
+version = "1.5.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+    { name = "websocket-client" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/f9/4d3f62909f62f98556e09958f40934abf226289f55a43e149dfc426dc1cf/camb_sdk-1.5.8.tar.gz", hash = "sha256:4ace563accb6aab35d2a4dce53789c98d8809a8c48806a69d0873fc8b0361300", size = 83508, upload-time = "2026-01-27T14:55:49.16Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/2d/e7aeef5d5f48205020d153f4a6ffb39d8971fca78b2cc64fdf0a36ceeb12/camb_sdk-1.5.8-py3-none-any.whl", hash = "sha256:7e1a4764376791ab7cccc27014cdfb691b8c73eecdcaeb01457f506ffd3425be", size = 152371, upload-time = "2026-01-27T14:55:45.637Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.8.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1883,6 +1899,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+camb = [
+    { name = "camb-sdk" },
+]
 dapr = [
     { name = "dapr" },
     { name = "grpcio" },
@@ -1946,6 +1965,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'sqlalchemy'", specifier = ">=0.29.0" },
+    { name = "camb-sdk", marker = "extra == 'camb'", specifier = ">=1.0.0" },
     { name = "cryptography", marker = "extra == 'encrypt'", specifier = ">=45.0,<46" },
     { name = "dapr", marker = "extra == 'dapr'", specifier = ">=1.16.0" },
     { name = "graphviz", marker = "extra == 'viz'", specifier = ">=0.17" },
@@ -1964,7 +1984,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<16" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=15.0,<16" },
 ]
-provides-extras = ["voice", "viz", "litellm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr"]
+provides-extras = ["voice", "viz", "litellm", "realtime", "sqlalchemy", "encrypt", "redis", "dapr", "camb"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3315,6 +3335,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/07/f6/d0e5b343768e8bcb4cda79f0f2f55051bf26177ecd5651f84c07567461cf/watchdog-6.0.0-py3-none-win32.whl", hash = "sha256:07df1fdd701c5d4c8e55ef6cf55b8f0120fe1aef7ef39a1c6fc6bc2e606d517a", size = 79065, upload-time = "2024-11-01T14:07:09.525Z" },
     { url = "https://files.pythonhosted.org/packages/db/d9/c495884c6e548fce18a8f40568ff120bc3a4b7b99813081c8ac0c936fa64/watchdog-6.0.0-py3-none-win_amd64.whl", hash = "sha256:cbafb470cf848d93b5d013e2ecb245d4aa1c8fd0504e863ccefa32445359d680", size = 79070, upload-time = "2024-11-01T14:07:10.686Z" },
     { url = "https://files.pythonhosted.org/packages/33/e8/e40370e6d74ddba47f002a32919d91310d6074130fe4e17dabcafc15cbf1/watchdog-6.0.0-py3-none-win_ia64.whl", hash = "sha256:a1914259fa9e1454315171103c6a30961236f508b9b623eae470268bbcc6a22f", size = 79067, upload-time = "2024-11-01T14:07:11.845Z" },
+]
+
+[[package]]
+name = "websocket-client"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/41/aa4bf9664e4cda14c3b39865b12251e8e7d239f4cd0e3cc1b6c2ccde25c1/websocket_client-1.9.0.tar.gz", hash = "sha256:9e813624b6eb619999a97dc7958469217c3176312b3a16a4bd1bc7e08a46ec98", size = 70576, upload-time = "2025-10-07T21:16:36.495Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/db/b10e48aa8fff7407e67470363eac595018441cf32d5e1001567a7aeba5d2/websocket_client-1.9.0-py3-none-any.whl", hash = "sha256:af248a825037ef591efbf6ed20cc5faa03d3b47b9e5a2230a529eeee1c1fc3ef", size = 82616, upload-time = "2025-10-07T21:16:34.951Z" },
 ]
 
 [[package]]

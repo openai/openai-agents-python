@@ -42,6 +42,7 @@ sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0, <46"]
 redis = ["redis>=7"]
 dapr = ["dapr>=1.16.0", "grpcio>=1.60.0"]
+camb = ["camb-sdk>=1.0.0"]
 
 [dependency-groups]
 dev = [
@@ -119,6 +120,10 @@ disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
 module = "sounddevice.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "camb.*"
 ignore_missing_imports = true
 
 [tool.coverage.run]

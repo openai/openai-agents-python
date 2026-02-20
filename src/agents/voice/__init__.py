@@ -10,6 +10,8 @@ from .model import (
     TTSVoice,
     VoiceModelProvider,
 )
+from .models.camb_model_provider import CambAIVoiceModelProvider
+from .models.camb_tts import CambAITTSModel
 from .models.openai_model_provider import OpenAIVoiceModelProvider
 from .models.openai_stt import OpenAISTTModel, OpenAISTTTranscriptionSession
 from .models.openai_tts import OpenAITTSModel
@@ -26,6 +28,8 @@ from .workflow import (
 
 __all__ = [
     "AudioInput",
+    "CambAITTSModel",
+    "CambAIVoiceModelProvider",
     "StreamedAudioInput",
     "STTModel",
     "STTModelSettings",
