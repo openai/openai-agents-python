@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import warnings
-from typing import Union, cast
+from typing import Any, Union, cast
 
 from typing_extensions import Unpack
 
@@ -56,6 +56,7 @@ from .run_internal.agent_runner_helpers import (
     save_turn_items_if_needed,
     should_cancel_parallel_model_task_on_input_guardrail_trip,
     update_run_state_for_interruption,
+    validate_server_conversation_handoff_settings,
     validate_session_conversation_settings,
 )
 from .run_internal.approvals import approvals_from_step
@@ -412,6 +413,21 @@ class AgentRunner:
         if run_config is None:
             run_config = RunConfig()
 
+        def validate_conversation_settings(active_agent_for_validation: Agent[Any]) -> None:
+            validate_session_conversation_settings(
+                session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            validate_server_conversation_handoff_settings(
+                active_agent_for_validation,
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = None
         starting_input = input if not is_resumed_state else None
@@ -435,11 +451,8 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
-            validate_session_conversation_settings(
-                session,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
+            validate_conversation_settings(
+                run_state._current_agent if run_state._current_agent else starting_agent
             )
             starting_input = run_state._original_input
             original_user_input = copy_input_items(run_state._original_input)
@@ -456,12 +469,7 @@ class AgentRunner:
             raw_input = cast(Union[str, list[TResponseInputItem]], input)
             original_user_input = raw_input
 
-            validate_session_conversation_settings(
-                session,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-            )
+            validate_conversation_settings(starting_agent)
 
             server_manages_conversation = (
                 conversation_id is not None
@@ -1451,6 +1459,13 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+            validate_server_conversation_handoff_settings(
+                run_state._current_agent if run_state._current_agent else starting_agent,
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
             # When resuming, use the original_input from state.
             # primeFromState will mark items as sent so prepareInput skips them
             starting_input = run_state._original_input
@@ -1482,6 +1497,13 @@ class AgentRunner:
             input_for_result = cast(Union[str, list[TResponseInputItem]], input)
             validate_session_conversation_settings(
                 session,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+            validate_server_conversation_handoff_settings(
+                starting_agent,
+                run_config,
                 conversation_id=conversation_id,
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,

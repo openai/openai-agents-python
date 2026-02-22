@@ -8,6 +8,7 @@ from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
+from ..handoffs import Handoff
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..result import RunResult
@@ -46,6 +47,7 @@ __all__ = [
     "save_turn_items_if_needed",
     "should_cancel_parallel_model_task_on_input_guardrail_trip",
     "update_run_state_for_interruption",
+    "validate_server_conversation_handoff_settings",
 ]
 
 _PARALLEL_INPUT_GUARDRAIL_CANCEL_PATCH_ID = (
@@ -101,6 +103,110 @@ def validate_session_conversation_settings(
     raise UserError(
         "Session persistence cannot be combined with conversation_id, "
         "previous_response_id, or auto_previous_response_id."
+    )
+
+
+def _is_remove_all_tools_filter(filter_fn: object | None) -> bool:
+    if filter_fn is None:
+        return False
+    module_name = getattr(filter_fn, "__module__", "")
+    function_name = getattr(filter_fn, "__name__", "")
+    return function_name == "remove_all_tools" and module_name.endswith(
+        "agents.extensions.handoff_filters"
+    )
+
+
+def _is_disabled_handoff(handoff_obj: Handoff[Any, Agent[Any]]) -> bool:
+    is_enabled = handoff_obj.is_enabled
+    return isinstance(is_enabled, bool) and not is_enabled
+
+
+def _collect_handoff_edges(
+    agent: Agent[Any],
+) -> list[tuple[Agent[Any], Handoff[Any, Agent[Any]] | None]]:
+    edges: list[tuple[Agent[Any], Handoff[Any, Agent[Any]] | None]] = []
+    visited_agents: set[int] = set()
+    queue: list[Agent[Any]] = [agent]
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in visited_agents:
+            continue
+        visited_agents.add(current_id)
+
+        for handoff_or_agent in current.handoffs:
+            handoff: Handoff[Any, Agent[Any]] | None = None
+            target: Agent[Any]
+            if isinstance(handoff_or_agent, Agent):
+                target = handoff_or_agent
+            elif isinstance(handoff_or_agent, Handoff):
+                handoff = handoff_or_agent
+                if _is_disabled_handoff(handoff):
+                    continue
+                target_ref = handoff._agent_ref() if handoff._agent_ref is not None else None
+                if not isinstance(target_ref, Agent):
+                    # Still validate handoff-level settings even when target resolution is deferred.
+                    edges.append((current, handoff))
+                    continue
+                target = target_ref
+            else:
+                continue
+
+            edges.append((target, handoff))
+            queue.append(target)
+
+    return edges
+
+
+def validate_server_conversation_handoff_settings(
+    agent: Agent[Any],
+    run_config: RunConfig,
+    *,
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> None:
+    server_manages_conversation = (
+        conversation_id is not None or previous_response_id is not None or auto_previous_response_id
+    )
+    if not server_manages_conversation:
+        return
+
+    has_remove_all_tools = False
+    has_nested_handoff_history = False
+    for _, handoff in _collect_handoff_edges(agent):
+        input_filter = (
+            handoff.input_filter
+            if handoff and handoff.input_filter is not None
+            else run_config.handoff_input_filter
+        )
+        if _is_remove_all_tools_filter(input_filter):
+            has_remove_all_tools = True
+
+        handoff_nest_handoff_history = handoff.nest_handoff_history if handoff else None
+        should_nest_history = (
+            handoff_nest_handoff_history
+            if handoff_nest_handoff_history is not None
+            else run_config.nest_handoff_history
+        )
+        if input_filter is None and should_nest_history:
+            has_nested_handoff_history = True
+
+    if not has_remove_all_tools and not has_nested_handoff_history:
+        return
+
+    conflict_parts: list[str] = []
+    if has_nested_handoff_history:
+        conflict_parts.append("nest_handoff_history")
+    if has_remove_all_tools:
+        conflict_parts.append("remove_all_tools")
+
+    raise UserError(
+        "Server-managed conversation (conversation_id / previous_response_id / "
+        "auto_previous_response_id) is incompatible with handoff settings: "
+        + ", ".join(conflict_parts)
+        + ". Use nest_handoff_history=False and avoid remove_all_tools."
     )
 
 
