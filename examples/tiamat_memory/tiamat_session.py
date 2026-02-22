@@ -129,18 +129,19 @@ class TiamatSession(SessionABC):
         async with self._lock:
             return await self._get_items_unlocked(session_limit)
 
-    async def _get_items_unlocked(
-        self, session_limit: int | None
-    ) -> list[TResponseInputItem]:
-        """Internal item retrieval — must be called while holding ``self._lock``."""
-        # Fetch enough records; when no limit is set, retrieve all available
-        fetch_limit = session_limit if session_limit and session_limit > 0 else 10000
+    async def _fetch_active_items_unlocked(self) -> list[tuple[int, dict[str, Any]]]:
+        """Parse memories, applying clear and pop tombstone filters.
 
+        Returns a list of ``(seq, item)`` pairs sorted by sequence number,
+        with internal markers (clear, pop) already filtered out.
+
+        Must be called while holding ``self._lock``.
+        """
         resp = await self._client.post(
             "/api/memory/recall",
             json={
                 "query": self._make_tag(),
-                "limit": fetch_limit,
+                "limit": 10000,
             },
         )
         if resp.status_code != 200:
@@ -149,10 +150,10 @@ class TiamatSession(SessionABC):
         data = resp.json()
         memories = data.get("memories", [])
 
-        items: list[TResponseInputItem] = []
         last_clear_seq: int = -1
+        popped_seqs: set[int] = set()
 
-        # First pass: parse all items and find the latest clear marker
+        # First pass: parse all items, collect clear and pop markers
         parsed: list[tuple[int, dict[str, Any]]] = []
         for memory in memories:
             content = memory.get("content", "")
@@ -167,19 +168,32 @@ class TiamatSession(SessionABC):
                 last_clear_seq = max(last_clear_seq, seq)
                 continue
 
+            if item.get("_tiamat_popped"):
+                popped_seqs.add(item.get("_tiamat_popped_seq", -1))
+                continue
+
             parsed.append((seq, item))
 
-        # Second pass: keep only items after the last clear marker
+        # Second pass: keep only items after the last clear and not popped
+        active: list[tuple[int, dict[str, Any]]] = []
         for seq, item in parsed:
-            if seq > last_clear_seq:
-                items.append(item)
+            if seq > last_clear_seq and seq not in popped_seqs:
+                active.append((seq, item))
 
-        # Sort by original insertion order
-        items.sort(key=lambda x: x.get("_tiamat_seq", 0))
+        # Sort by insertion order
+        active.sort(key=lambda pair: pair[0])
+        return active
 
-        # Remove internal metadata
-        for item in items:
+    async def _get_items_unlocked(
+        self, session_limit: int | None
+    ) -> list[TResponseInputItem]:
+        """Internal item retrieval — must be called while holding ``self._lock``."""
+        active = await self._fetch_active_items_unlocked()
+
+        items: list[TResponseInputItem] = []
+        for _seq, item in active:
             item.pop("_tiamat_seq", None)
+            items.append(item)
 
         if session_limit is not None and session_limit > 0:
             items = items[-session_limit:]
@@ -196,9 +210,8 @@ class TiamatSession(SessionABC):
             return
 
         async with self._lock:
-            # Get current sequence number
-            existing = await self._get_raw_memories()
-            seq = len(existing)
+            # Get current max sequence number
+            seq = await self._next_seq_unlocked()
 
             for item in items:
                 # Add sequence number for ordering
@@ -217,42 +230,82 @@ class TiamatSession(SessionABC):
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
 
-        Note: TIAMAT's API doesn't support direct deletion, so this retrieves
-        the last item and marks it as removed via a tag update.
+        Persists a tombstone marker so the item is excluded from future reads.
+        This ensures ``rewind_session_items`` terminates correctly.
 
         Returns:
             The most recent item if it exists, None if the session is empty.
         """
         async with self._lock:
-            items = await self._get_items_unlocked(session_limit=None)
-            if not items:
+            active = await self._fetch_active_items_unlocked()
+            if not active:
                 return None
-            return items[-1]
+
+            last_seq, last_item = active[-1]
+
+            # Store a tombstone so this item is permanently excluded
+            await self._client.post(
+                "/api/memory/store",
+                json={
+                    "content": json.dumps({
+                        "_tiamat_popped": True,
+                        "_tiamat_popped_seq": last_seq,
+                        "_tiamat_ts": time.time(),
+                    }),
+                    "tags": [self._make_tag(), "pop_marker"],
+                    "importance": 0.0,
+                },
+            )
+
+            # Remove internal metadata before returning
+            last_item.pop("_tiamat_seq", None)
+            return last_item
 
     async def clear_session(self) -> None:
         """Clear all items for this session.
 
-        Stores a clear marker so subsequent reads return empty.
+        Stores a clear marker with a sequence number higher than all existing
+        items, so subsequent reads filter out everything before it.
         """
         async with self._lock:
+            clear_seq = await self._next_seq_unlocked()
             await self._client.post(
                 "/api/memory/store",
                 json={
-                    "content": json.dumps({"_tiamat_clear": True, "_tiamat_ts": time.time()}),
+                    "content": json.dumps({
+                        "_tiamat_clear": True,
+                        "_tiamat_seq": clear_seq,
+                        "_tiamat_ts": time.time(),
+                    }),
                     "tags": [self._make_tag(), "clear_marker"],
                     "importance": 1.0,
                 },
             )
 
-    async def _get_raw_memories(self) -> list[dict[str, Any]]:
-        """Get raw memories for this session."""
+    async def _next_seq_unlocked(self) -> int:
+        """Compute the next available sequence number.
+
+        Scans all raw memories (including markers) to find the highest
+        ``_tiamat_seq`` and returns one past it. Must be called while
+        holding ``self._lock``.
+        """
         resp = await self._client.post(
             "/api/memory/recall",
-            json={"query": self._make_tag(), "limit": 100},
+            json={"query": self._make_tag(), "limit": 10000},
         )
         if resp.status_code != 200:
-            return []
-        return resp.json().get("memories", [])
+            return 0
+
+        max_seq = -1
+        for memory in resp.json().get("memories", []):
+            try:
+                item = json.loads(memory.get("content", ""))
+                seq = item.get("_tiamat_seq", 0)
+                if seq > max_seq:
+                    max_seq = seq
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return max_seq + 1
 
     async def close(self) -> None:
         """Close the HTTP client."""
