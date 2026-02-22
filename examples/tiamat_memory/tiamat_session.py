@@ -127,39 +127,64 @@ class TiamatSession(SessionABC):
         session_limit = resolve_session_limit(limit, self.session_settings)
 
         async with self._lock:
-            resp = await self._client.post(
-                "/api/memory/recall",
-                json={
-                    "query": self._make_tag(),
-                    "limit": session_limit or 100,
-                },
-            )
-            if resp.status_code != 200:
-                return []
+            return await self._get_items_unlocked(session_limit)
 
-            data = resp.json()
-            memories = data.get("memories", [])
+    async def _get_items_unlocked(
+        self, session_limit: int | None
+    ) -> list[TResponseInputItem]:
+        """Internal item retrieval — must be called while holding ``self._lock``."""
+        # Fetch enough records; when no limit is set, retrieve all available
+        fetch_limit = session_limit if session_limit and session_limit > 0 else 10000
 
-            items: list[TResponseInputItem] = []
-            for memory in memories:
-                content = memory.get("content", "")
-                try:
-                    item = json.loads(content)
-                    items.append(item)
-                except (json.JSONDecodeError, TypeError):
-                    continue
+        resp = await self._client.post(
+            "/api/memory/recall",
+            json={
+                "query": self._make_tag(),
+                "limit": fetch_limit,
+            },
+        )
+        if resp.status_code != 200:
+            return []
 
-            # Sort by original order (stored with sequence number in tags)
-            items.sort(key=lambda x: x.get("_tiamat_seq", 0))
+        data = resp.json()
+        memories = data.get("memories", [])
 
-            # Remove internal metadata
-            for item in items:
-                item.pop("_tiamat_seq", None)
+        items: list[TResponseInputItem] = []
+        last_clear_seq: int = -1
 
-            if session_limit is not None and session_limit > 0:
-                items = items[-session_limit:]
+        # First pass: parse all items and find the latest clear marker
+        parsed: list[tuple[int, dict[str, Any]]] = []
+        for memory in memories:
+            content = memory.get("content", "")
+            try:
+                item = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                continue
 
-            return items
+            seq = item.get("_tiamat_seq", 0)
+
+            if item.get("_tiamat_clear"):
+                last_clear_seq = max(last_clear_seq, seq)
+                continue
+
+            parsed.append((seq, item))
+
+        # Second pass: keep only items after the last clear marker
+        for seq, item in parsed:
+            if seq > last_clear_seq:
+                items.append(item)
+
+        # Sort by original insertion order
+        items.sort(key=lambda x: x.get("_tiamat_seq", 0))
+
+        # Remove internal metadata
+        for item in items:
+            item.pop("_tiamat_seq", None)
+
+        if session_limit is not None and session_limit > 0:
+            items = items[-session_limit:]
+
+        return items
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Store conversation items in TIAMAT memory.
@@ -199,7 +224,7 @@ class TiamatSession(SessionABC):
             The most recent item if it exists, None if the session is empty.
         """
         async with self._lock:
-            items = await self.get_items()
+            items = await self._get_items_unlocked(session_limit=None)
             if not items:
                 return None
             return items[-1]
