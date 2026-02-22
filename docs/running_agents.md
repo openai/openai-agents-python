@@ -62,8 +62,66 @@ The `run_config` parameter lets you configure some global settings for the agent
 -   [`session_input_callback`][agents.run.RunConfig.session_input_callback]: Customize how new user input is merged with session history before each turn when using Sessions.
 -   [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]: Hook to edit the fully prepared model input (instructions and input items) immediately before the model call, e.g., to trim history or inject a system prompt.
 -   [`tool_error_formatter`][agents.run.RunConfig.tool_error_formatter]: Customize the model-visible message when a tool call is rejected during approval flows.
+-   [`reasoning_item_id_policy`][agents.run.RunConfig.reasoning_item_id_policy]: Control whether reasoning item IDs are preserved or omitted when the runner converts prior outputs into next-turn model input.
 
 Nested handoffs are available as an opt-in beta. Enable the collapsed-transcript behavior by passing `RunConfig(nest_handoff_history=True)` or set `handoff(..., nest_handoff_history=True)` to turn it on for a specific handoff. If you prefer to keep the raw transcript (the default), leave the flag unset or provide a `handoff_input_filter` (or `handoff_history_mapper`) that forwards the conversation exactly as you need. To change the wrapper text used in the generated summary without writing a custom mapper, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] to restore the defaults).
+
+### Run config details
+
+#### `tool_error_formatter`
+
+Use `tool_error_formatter` to customize the message that is returned to the model when a tool call is rejected in an approval flow.
+
+The formatter receives [`ToolErrorFormatterArgs`][agents.run_config.ToolErrorFormatterArgs] with:
+
+-   `kind`: The error category. Today this is `"approval_rejected"`.
+-   `tool_type`: The tool runtime (`"function"`, `"computer"`, `"shell"`, or `"apply_patch"`).
+-   `tool_name`: The tool name.
+-   `call_id`: The tool call ID.
+-   `default_message`: The SDK's default model-visible message.
+-   `run_context`: The active run context wrapper.
+
+Return a string to replace the message, or `None` to use the SDK default.
+
+```python
+from agents import Agent, RunConfig, Runner, ToolErrorFormatterArgs
+
+
+def format_rejection(args: ToolErrorFormatterArgs[None]) -> str | None:
+    if args.kind == "approval_rejected":
+        return (
+            f"Tool call '{args.tool_name}' was rejected by a human reviewer. "
+            "Ask for confirmation or propose a safer alternative."
+        )
+    return None
+
+
+agent = Agent(name="Assistant")
+result = Runner.run_sync(
+    agent,
+    "Please delete the production database.",
+    run_config=RunConfig(tool_error_formatter=format_rejection),
+)
+```
+
+#### `reasoning_item_id_policy`
+
+`reasoning_item_id_policy` controls how reasoning items are converted into next-turn model input when the runner carries history forward (for example, when using `RunResult.to_input_list()` or session-backed runs).
+
+-   `None` or `"preserve"` (default): Keep reasoning item IDs.
+-   `"omit"`: Strip reasoning item IDs from the generated next-turn input.
+
+Use `"omit"` primarily as an opt-in mitigation for a class of Responses API 400 errors where a reasoning item is sent with an `id` but without the required following item (for example, `Item 'rs_...' of type 'reasoning' was provided without its required following item.`).
+
+This can happen in multi-turn agent runs when the SDK constructs follow-up input from prior outputs (including session persistence, server-managed conversation deltas, streamed/non-streamed follow-up turns, and resume paths) and a reasoning item ID is preserved but the provider requires that ID to remain paired with its corresponding following item.
+
+Setting `reasoning_item_id_policy="omit"` keeps the reasoning content but strips the reasoning item `id`, which avoids triggering that API invariant in SDK-generated follow-up inputs.
+
+Scope notes:
+
+-   This only changes reasoning items generated/forwarded by the SDK when it builds follow-up input.
+-   It does not rewrite user-supplied initial input items.
+-   `call_model_input_filter` can still intentionally reintroduce reasoning IDs after this policy is applied.
 
 ## Conversations/chat threads
 
@@ -192,6 +250,16 @@ async def main():
         previous_response_id = result.last_response_id
         print(f"Assistant: {result.final_output}")
 ```
+
+!!! note
+
+    The SDK automatically retries `conversation_locked` errors with backoff. In server-managed
+    conversation runs, it rewinds the internal conversation-tracker input before retrying so the
+    same prepared items can be resent cleanly.
+
+    In local session-based runs (which cannot be combined with `conversation_id`,
+    `previous_response_id`, or `auto_previous_response_id`), the SDK also performs a best-effort
+    rollback of recently persisted input items to reduce duplicate history entries after a retry.
 
 ## Call model input filter
 

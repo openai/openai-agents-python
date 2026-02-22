@@ -53,6 +53,67 @@ When session memory is enabled:
 
 This eliminates the need to manually call `.to_input_list()` and manage conversation state between runs.
 
+## Customizing prepared input
+
+When you pass a session, the runner normally prepares model input as:
+
+1. Session history (retrieved from `session.get_items(...)`)
+2. New turn input
+
+Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize that merge step before the model call. The callback receives two lists:
+
+-   `history`: The retrieved session history (already normalized into input-item format)
+-   `new_input`: The current turn's new input items
+
+Return the final list of input items that should be sent to the model.
+
+```python
+from agents import Agent, RunConfig, Runner, SQLiteSession
+
+
+def keep_recent_history(history, new_input):
+    # Keep only the last 10 history items, then append the new turn.
+    return history[-10:] + new_input
+
+
+agent = Agent(name="Assistant")
+session = SQLiteSession("conversation_123")
+
+result = await Runner.run(
+    agent,
+    "Continue from the latest updates only.",
+    session=session,
+    run_config=RunConfig(session_input_callback=keep_recent_history),
+)
+```
+
+Use this when you need custom pruning, reordering, or selective inclusion of history without changing how the session stores items.
+
+## Limiting retrieved history
+
+Use [`SessionSettings`][agents.memory.SessionSettings] to control how much history is fetched before each run.
+
+-   `SessionSettings(limit=None)` (default): retrieve all available session items
+-   `SessionSettings(limit=N)`: retrieve only the most recent `N` items
+
+You can apply this per run via [`RunConfig.session_settings`][agents.run.RunConfig.session_settings]:
+
+```python
+from agents import Agent, RunConfig, Runner, SessionSettings, SQLiteSession
+
+agent = Agent(name="Assistant")
+session = SQLiteSession("conversation_123")
+
+result = await Runner.run(
+    agent,
+    "Summarize our recent discussion.",
+    session=session,
+    run_config=RunConfig(session_settings=SessionSettings(limit=50)),
+)
+```
+
+If your session implementation exposes default session settings, `RunConfig.session_settings` overrides any non-`None` values for that run. This is useful for long conversations where you want to cap retrieval size without changing the session's default behavior.
+
 ## Memory operations
 
 ### Basic operations
