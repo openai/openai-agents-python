@@ -13,6 +13,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    RunConfig,
     RunContextWrapper,
     Runner,
     TResponseInputItem,
@@ -92,7 +93,11 @@ async def test_multi_turn_no_handoffs():
     )
 
     with pytest.raises(ValueError):
-        await Runner.run(agent, input="first_test")
+        await Runner.run(
+            agent,
+            input="first_test",
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
 
     assert fetch_normalized_spans() == snapshot(
         [
@@ -149,7 +154,11 @@ async def test_tool_call_error():
         ]
     )
 
-    result = await Runner.run(agent, input="first_test")
+    result = await Runner.run(
+        agent,
+        input="first_test",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
 
     tool_outputs = [item for item in result.new_items if item.type == "tool_call_output_item"]
     assert tool_outputs, "Expected a tool output item for invalid JSON"
@@ -232,7 +241,11 @@ async def test_multiple_handoff_doesnt_error():
             [get_text_message("done")],
         ]
     )
-    result = await Runner.run(agent_3, input="user_message")
+    result = await Runner.run(
+        agent_3,
+        input="user_message",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
     assert result.last_agent == agent_1, "should have picked first handoff"
 
     assert fetch_normalized_spans() == snapshot(
@@ -367,7 +380,11 @@ async def test_handoffs_lead_to_correct_agent_spans():
             [get_text_message("done")],
         ]
     )
-    result = await Runner.run(agent_3, input="user_message")
+    result = await Runner.run(
+        agent_3,
+        input="user_message",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
 
     assert result.last_agent == agent_3, (
         f"should have ended on the third agent, got {result.last_agent.name}"
@@ -475,7 +492,12 @@ async def test_max_turns_exceeded():
     )
 
     with pytest.raises(MaxTurnsExceeded):
-        await Runner.run(agent, input="user_message", max_turns=2)
+        await Runner.run(
+            agent,
+            input="user_message",
+            max_turns=2,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
 
     assert fetch_normalized_spans() == snapshot(
         [
