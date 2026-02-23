@@ -42,6 +42,71 @@ The runner then runs a loop:
 
 Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
 
+### Responses WebSocket transport (optional helper)
+
+If you enable the OpenAI Responses websocket transport, you can keep using the normal `Runner` APIs. The websocket session helper is recommended for connection reuse, but it is not required.
+
+This is the Responses API over websocket transport, not the [Realtime API](realtime/guide.md).
+
+#### Pattern 1: No session helper (works)
+
+Use this when you just want websocket transport and do not need the SDK to manage a shared provider/session for you.
+
+```python
+import asyncio
+
+from agents import Agent, Runner, set_default_openai_responses_transport
+
+
+async def main():
+    set_default_openai_responses_transport("websocket")
+
+    agent = Agent(name="Assistant", instructions="Be concise.")
+    result = Runner.run_streamed(agent, "Summarize recursion in one sentence.")
+
+    async for event in result.stream_events():
+        if event.type == "raw_response_event":
+            continue
+        print(event.type)
+
+
+asyncio.run(main())
+```
+
+This pattern is fine for single runs. If you call `Runner.run()` / `Runner.run_streamed()` repeatedly, each run may reconnect unless you manually reuse the same `RunConfig` / provider instance.
+
+#### Pattern 2: Use `responses_websocket_session()` (recommended for multi-turn reuse)
+
+Use [`responses_websocket_session()`][agents.responses_websocket_session] when you want a shared websocket-capable provider and `RunConfig` across multiple runs (including nested agent-as-tool calls that inherit the same `run_config`).
+
+```python
+import asyncio
+
+from agents import Agent, responses_websocket_session
+
+
+async def main():
+    agent = Agent(name="Assistant", instructions="Be concise.")
+
+    async with responses_websocket_session() as ws:
+        first = ws.run_streamed(agent, "Say hello in one short sentence.")
+        async for _event in first.stream_events():
+            pass
+
+        second = ws.run_streamed(
+            agent,
+            "Now say goodbye.",
+            previous_response_id=first.last_response_id,
+        )
+        async for _event in second.stream_events():
+            pass
+
+
+asyncio.run(main())
+```
+
+Finish consuming streamed results before the context exits. Exiting the context while a websocket request is still in flight may force-close the shared connection.
+
 ## Run config
 
 The `run_config` parameter lets you configure some global settings for the agent run:

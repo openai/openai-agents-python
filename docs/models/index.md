@@ -61,6 +61,45 @@ For lower latency, using `reasoning.effort="none"` with `gpt-5.2` is recommended
 
 If you pass a non–GPT-5 model name without custom `model_settings`, the SDK reverts to generic `ModelSettings` compatible with any model.
 
+### Responses WebSocket transport
+
+By default, OpenAI Responses API requests use HTTP transport. You can opt in to websocket transport when using OpenAI-backed models.
+
+```python
+from agents import set_default_openai_responses_transport
+
+set_default_openai_responses_transport("websocket")
+```
+
+This affects OpenAI Responses models resolved by the default OpenAI provider (including string model names such as `"gpt-5.2"`).
+
+You can also configure websocket transport per provider or per run:
+
+```python
+from agents import Agent, OpenAIProvider, RunConfig, Runner
+
+provider = OpenAIProvider(
+    use_responses_websocket=True,
+    # Optional; if omitted, OPENAI_WEBSOCKET_BASE_URL is used when set.
+    websocket_base_url="wss://your-proxy.example/v1",
+)
+
+agent = Agent(name="Assistant")
+result = await Runner.run(
+    agent,
+    "Hello",
+    run_config=RunConfig(model_provider=provider),
+)
+```
+
+If you need prefix-based model routing (for example mixing `openai/...` and `litellm/...` model names in one run), use [`MultiProvider`][agents.MultiProvider] and set `openai_use_responses_websocket=True` there instead.
+
+Notes:
+
+-   This is the Responses API over websocket transport, not the [Realtime API](../realtime/guide.md).
+-   Install the `websockets` package if it is not already available in your environment.
+-   You can use [`Runner.run_streamed()`][agents.run.Runner.run_streamed] directly after enabling websocket transport. For multi-turn workflows where you want to reuse the same websocket connection across turns (and nested agent-as-tool calls), the [`responses_websocket_session()`][agents.responses_websocket_session] helper is recommended. See the [Running agents](../running_agents.md) guide and [`examples/basic/stream_ws.py`](https://github.com/openai/openai-agents-python/tree/main/examples/basic/stream_ws.py).
+
 ## Non-OpenAI models
 
 You can use most other non-OpenAI models via the [LiteLLM integration](./litellm.md). First, install the litellm dependency group:

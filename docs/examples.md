@@ -23,6 +23,7 @@ Check out a variety of sample implementations of the SDK in the examples section
     -   Agent lifecycle management
     -   Dynamic system prompts
     -   Streaming outputs (text, items, function call args)
+    -   Responses websocket transport with a shared session helper across turns (`examples/basic/stream_ws.py`)
     -   Prompt templates
     -   File handling (local and remote, images and PDFs)
     -   Usage tracking

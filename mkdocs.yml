@@ -94,6 +94,7 @@ plugins:
                     - ref/run.md
                     - ref/run_config.md
                     - ref/run_state.md
+                    - ref/responses_websocket_session.md
                     - ref/run_error_handlers.md
                     - ref/memory.md
                     - ref/repl.md
@@ -118,6 +119,8 @@ plugins:
                     - ref/models/interface.md
                     - ref/models/openai_chatcompletions.md
                     - ref/models/openai_responses.md
+                    - ref/models/openai_provider.md
+                    - ref/models/multi_provider.md
                     - ref/mcp/server.md
                     - ref/mcp/util.md
                 - Tracing:

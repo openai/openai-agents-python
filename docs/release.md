@@ -19,6 +19,16 @@ We will increment `Z` for non-breaking changes:
 
 ## Breaking change changelog
 
+### 0.10.0
+
+This minor release does **not** introduce a breaking change, but it includes a significant new feature area for OpenAI Responses users: websocket transport support for the Responses API.
+
+Highlights:
+
+-   Added websocket transport support for OpenAI Responses models (opt-in; HTTP remains the default transport).
+-   Added a `responses_websocket_session()` helper / `ResponsesWebSocketSession` for reusing a shared websocket-capable provider and `RunConfig` across multi-turn runs.
+-   Added a new websocket streaming example (`examples/basic/stream_ws.py`) covering streaming, tools, approvals, and follow-up turns.
+
 ### 0.9.0
 
 In this version, Python 3.9 is no longer supported, as this major version reached EOL three months ago. Please upgrade to a newer runtime version.
