@@ -70,6 +70,8 @@ class MultiProvider(ModelProvider):
         openai_organization: str | None = None,
         openai_project: str | None = None,
         openai_use_responses: bool | None = None,
+        openai_use_responses_websocket: bool | None = None,
+        openai_websocket_base_url: str | None = None,
     ) -> None:
         """Create a new OpenAI provider.
 
@@ -86,15 +88,21 @@ class MultiProvider(ModelProvider):
             openai_organization: The organization to use for the OpenAI provider.
             openai_project: The project to use for the OpenAI provider.
             openai_use_responses: Whether to use the OpenAI responses API.
+            openai_use_responses_websocket: Whether to use websocket transport for the OpenAI
+                responses API.
+            openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
+                If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
         """
         self.provider_map = provider_map
         self.openai_provider = OpenAIProvider(
             api_key=openai_api_key,
             base_url=openai_base_url,
+            websocket_base_url=openai_websocket_base_url,
             openai_client=openai_client,
             organization=openai_organization,
             project=openai_project,
             use_responses=openai_use_responses,
+            use_responses_websocket=openai_use_responses_websocket,
         )
 
         self._fallback_providers: dict[str, ModelProvider] = {}
@@ -142,3 +150,20 @@ class MultiProvider(ModelProvider):
             return provider.get_model(model_name)
         else:
             return self._get_fallback_provider(prefix).get_model(model_name)
+
+    async def aclose(self) -> None:
+        """Close cached resources held by child providers."""
+        providers: list[ModelProvider] = [self.openai_provider]
+        if self.provider_map is not None:
+            providers.extend(self.provider_map.get_mapping().values())
+        providers.extend(self._fallback_providers.values())
+
+        seen: set[int] = set()
+        for provider in providers:
+            if provider is self:
+                continue
+            provider_id = id(provider)
+            if provider_id in seen:
+                continue
+            seen.add(provider_id)
+            await provider.aclose()

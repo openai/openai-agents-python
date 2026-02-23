@@ -10,7 +10,7 @@ import dataclasses as _dc
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
-from openai.types.responses import ResponseCompletedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses import Response, ResponseCompletedEvent, ResponseOutputItemDoneEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
@@ -1202,23 +1202,31 @@ async def run_single_turn_streamed(
     ):
         streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
+        terminal_response: Response | None = None
         if isinstance(event, ResponseCompletedEvent):
+            terminal_response = event.response
+        elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+            maybe_response = getattr(event, "response", None)
+            if isinstance(maybe_response, Response):
+                terminal_response = maybe_response
+
+        if terminal_response is not None:
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=event.response.usage.input_tokens,
-                    output_tokens=event.response.usage.output_tokens,
-                    total_tokens=event.response.usage.total_tokens,
-                    input_tokens_details=event.response.usage.input_tokens_details,
-                    output_tokens_details=event.response.usage.output_tokens_details,
+                    input_tokens=terminal_response.usage.input_tokens,
+                    output_tokens=terminal_response.usage.output_tokens,
+                    total_tokens=terminal_response.usage.total_tokens,
+                    input_tokens_details=terminal_response.usage.input_tokens_details,
+                    output_tokens_details=terminal_response.usage.output_tokens_details,
                 )
-                if event.response.usage
+                if terminal_response.usage
                 else Usage()
             )
             final_response = ModelResponse(
-                output=event.response.output,
+                output=terminal_response.output,
                 usage=usage,
-                response_id=event.response.id,
+                response_id=terminal_response.id,
             )
             context_wrapper.usage.add(usage)
 

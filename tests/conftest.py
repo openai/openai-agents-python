@@ -43,6 +43,7 @@ def clear_openai_settings():
     _openai_shared._default_openai_key = None
     _openai_shared._default_openai_client = None
     _openai_shared._use_responses_by_default = True
+    _openai_shared.set_default_openai_responses_transport("http")
 
 
 @pytest.fixture(autouse=True)

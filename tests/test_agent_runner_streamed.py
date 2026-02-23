@@ -4,8 +4,13 @@ import asyncio
 import json
 from typing import Any, cast
 
+import httpx
 import pytest
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseFailedEvent,
+    ResponseFunctionToolCall,
+    ResponseIncompleteEvent,
+)
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem, Summary
 from typing_extensions import TypedDict
 
@@ -17,6 +22,7 @@ from agents import (
     InputGuardrail,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    OpenAIResponsesWSModel,
     OutputGuardrail,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
@@ -32,7 +38,7 @@ from agents.run_internal import run_loop
 from agents.run_internal.run_loop import QueueCompleteSentinel
 from agents.stream_events import AgentUpdatedStreamEvent, StreamEvent
 
-from .fake_model import FakeModel
+from .fake_model import FakeModel, get_response_obj
 from .test_responses import (
     get_final_output_message,
     get_function_tool,
@@ -59,6 +65,17 @@ def _find_reasoning_input_item(
         if isinstance(item, dict) and item.get("type") == "reasoning":
             return cast(dict[str, Any], item)
     return None
+
+
+def _ws_terminal_response_frame(event_type: str, response_id: str, sequence_number: int) -> str:
+    response = get_response_obj([get_text_message("partial final")], response_id=response_id)
+    return json.dumps(
+        {
+            "type": event_type,
+            "response": response.model_dump(),
+            "sequence_number": sequence_number,
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -95,6 +112,125 @@ async def test_simple_first_run():
     assert result.final_output == "second"
     assert len(result.raw_responses) == 1, "exactly one model response should be generated"
     assert len(result.to_input_list()) == 3, "should have original input and generated item"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_event_type", "terminal_event_cls"),
+    [
+        ("response.incomplete", ResponseIncompleteEvent),
+        ("response.failed", ResponseFailedEvent),
+    ],
+)
+async def test_streamed_run_accepts_terminal_response_payload_events(
+    terminal_event_type: str, terminal_event_cls: type[Any]
+) -> None:
+    class TerminalPayloadFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            self.last_turn_args = {
+                "system_instructions": system_instructions,
+                "input": input,
+                "model_settings": model_settings,
+                "tools": tools,
+                "output_schema": output_schema,
+                "previous_response_id": previous_response_id,
+                "conversation_id": conversation_id,
+            }
+            if self.first_turn_args is None:
+                self.first_turn_args = self.last_turn_args.copy()
+
+            response = get_response_obj(
+                [get_text_message("partial final")], response_id="resp-partial"
+            )
+            yield terminal_event_cls(
+                type=terminal_event_type,
+                response=response,
+                sequence_number=0,
+            )
+
+    model = TerminalPayloadFakeModel()
+    agent = Agent(name="test", model=model)
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "partial final"
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].response_id == "resp-partial"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
+async def test_streamed_run_accepts_terminal_response_payload_events_from_ws_model(
+    monkeypatch, terminal_event_type: str
+) -> None:
+    class DummyWSConnection:
+        def __init__(self, frames: list[str]):
+            self._frames = frames
+            self.close_code: int | None = None
+
+        async def send(self, payload: str) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if not self._frames:
+                raise RuntimeError("No more websocket frames configured")
+            return self._frames.pop(0)
+
+        async def close(self) -> None:
+            if self.close_code is None:
+                self.close_code = 1000
+
+    class DummyWSClient:
+        def __init__(self) -> None:
+            self.base_url = httpx.URL("https://api.openai.com/v1/")
+            self.websocket_base_url = None
+            self.default_query: dict[str, Any] = {}
+            self.default_headers = {
+                "Authorization": "Bearer test-key",
+                "User-Agent": "AsyncOpenAI/Python test",
+            }
+            self.timeout: Any = None
+
+        async def _refresh_api_key(self) -> None:
+            return None
+
+    ws = DummyWSConnection([_ws_terminal_response_frame(terminal_event_type, "resp-ws", 1)])
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=DummyWSClient())  # type: ignore[arg-type]
+
+    async def fake_open(
+        _ws_url: str,
+        _headers: dict[str, str],
+        *,
+        connect_timeout: float | None = None,
+    ) -> DummyWSConnection:
+        return ws
+
+    monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
+
+    agent = Agent(name="test", model=model)
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == "partial final"
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].response_id == "resp-ws"
 
 
 @pytest.mark.asyncio
