@@ -4,16 +4,16 @@ search:
 ---
 # 快速入门
 
-Realtime 智能体支持通过 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建你的第一个 realtime 语音智能体。
+Realtime 智能体让你可以使用 OpenAI 的 Realtime API 与你的 AI 智能体进行语音对话。本指南将带你创建你的第一个 realtime 语音智能体。
 
-!!! warning "Beta feature"
-Realtime 智能体目前处于 beta 阶段。随着我们改进实现，预计会有一些破坏性变更。
+!!! warning "Beta 功能"
+Realtime 智能体目前处于 beta 阶段。随着我们改进实现，可能会出现一些破坏性变更。
 
 ## 前提条件
 
 -   Python 3.10 或更高版本
 -   OpenAI API key
--   对 OpenAI Agents SDK 的基本熟悉
+-   对 OpenAI Agents SDK 有基本了解
 
 ## 安装
 
@@ -60,7 +60,7 @@ runner = RealtimeRunner(
 )
 ```
 
-### 4. 启动会话
+### 4. 启动一个会话
 
 ```python
 # Start the session
@@ -109,9 +109,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## 完整示例
+## 完整示例（同一流程放在一个文件中）
 
-下面是一个完整可运行的示例：
+这是将同一快速入门流程改写为单个脚本后的版本。
 
 ```python
 import asyncio
@@ -188,19 +188,21 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 配置选项
+## 配置与部署说明
+
+在你已经跑通一个基础会话之后，再使用这些选项。
 
 ### 模型设置
 
 -   `model_name`: 从可用的 realtime 模型中选择（例如 `gpt-realtime`）
 -   `voice`: 选择语音（`alloy`、`echo`、`fable`、`onyx`、`nova`、`shimmer`）
 -   `modalities`: 启用文本或音频（`["text"]` 或 `["audio"]`）
--   `output_modalities`: 可选，将输出限制为文本和/或音频（`["text"]`、`["audio"]`，或两者）
+-   `output_modalities`: 可选地将输出限制为文本和/或音频（`["text"]`、`["audio"]` 或两者）
 
 ### 音频设置
 
--   `input_audio_format`: 输入音频格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
--   `output_audio_format`: 输出音频格式
+-   `input_audio_format`: 输入音频的格式（`pcm16`、`g711_ulaw`、`g711_alaw`）
+-   `output_audio_format`: 输出音频的格式
 -   `input_audio_transcription`: 转写配置
 -   `input_audio_noise_reduction`: 输入降噪配置（`near_field` 或 `far_field`）
 
@@ -208,26 +210,18 @@ if __name__ == "__main__":
 
 -   `type`: 检测方法（`server_vad`、`semantic_vad`）
 -   `threshold`: 语音活动阈值（0.0-1.0）
--   `silence_duration_ms`: 用于检测轮次结束的静音时长
+-   `silence_duration_ms`: 用于检测轮次结束的静默时长
 -   `prefix_padding_ms`: 语音前的音频填充
 
 ### 运行设置
 
--   `async_tool_calls`: 工具调用是否异步运行（默认 `True`）
--   `guardrails_settings.debounce_text_length`: 在运行输出安全防护措施之前，累计转写内容的最小长度（默认 `100`）
+-   `async_tool_calls`: 工具调用是否异步运行（默认为 `True`）
+-   `guardrails_settings.debounce_text_length`: 在输出安全防护措施运行前，累计转写内容的最小大小（默认为 `100`）
 -   `tool_error_formatter`: 用于自定义模型可见的工具错误消息的回调
 
-完整 schema 请参阅 [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] 和 [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] 的 API 参考。
+完整 schema 请参阅 [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] 与 [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings] 的 API 参考。
 
-## 后续步骤
-
--   [了解更多 realtime 智能体](guide.md)
--   查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的可运行示例
--   为你的智能体添加工具
--   实现智能体之间的任务转移
--   设置安全防护措施以确保安全
-
-## 身份验证
+### 身份验证
 
 请确保你的环境中已设置 OpenAI API key：
 
@@ -241,10 +235,10 @@ export OPENAI_API_KEY="your-api-key-here"
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
 
-## Azure OpenAI 端点格式
+### Azure OpenAI 端点格式
 
 如果你连接的是 Azure OpenAI 而不是 OpenAI 的默认端点，请在
-`model_config["url"]` 中传入 GA Realtime URL，并显式设置 auth headers。
+`model_config["url"]` 中传入一个 GA Realtime URL，并显式设置 auth headers。
 
 ```python
 session = await runner.run(
@@ -266,5 +260,13 @@ session = await runner.run(
 )
 ```
 
-避免在 realtime 智能体中使用旧版 beta 路径（`/openai/realtime?api-version=...`）。
+避免在 realtime 智能体中使用旧的 beta 路径（`/openai/realtime?api-version=...`）。该
 SDK 期望使用 GA Realtime 接口。
+
+## 后续步骤
+
+-   [进一步了解 realtime 智能体](guide.md)
+-   查看 [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) 文件夹中的可运行示例
+-   为你的智能体添加工具
+-   实现智能体之间的任务转移
+-   设置安全防护措施以确保安全
