@@ -8,6 +8,18 @@ Tools let agents take actions: things like fetching data, running code, calling 
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
 -   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
 
+## Choosing a tool type
+
+Use this page as a catalog, then jump to the section that matches the runtime you control.
+
+| If you want to... | Start here |
+| --- | --- |
+| Use OpenAI-managed tools (web search, file search, code interpreter, hosted MCP, image generation) | [Hosted tools](#hosted-tools) |
+| Run tools in your own process or environment | [Local runtime tools](#local-runtime-tools) |
+| Wrap Python functions as tools | [Function tools](#function-tools) |
+| Let one agent call another without a handoff | [Agents as tools](#agents-as-tools) |
+| Run workspace-scoped Codex tasks from an agent | [Experimental: Codex tool](#experimental-codex-tool) |
+
 ## Hosted tools
 
 OpenAI offers a few built-in tools when using the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel]:
@@ -354,6 +366,90 @@ def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score fr
     return f"Score recorded: {score}"
 ```
 
+### Function tool timeouts
+
+You can set per-call timeouts for async function tools with `@function_tool(timeout=...)`.
+
+```python
+import asyncio
+from agents import Agent, Runner, function_tool
+
+
+@function_tool(timeout=2.0)
+async def slow_lookup(query: str) -> str:
+    await asyncio.sleep(10)
+    return f"Result for {query}"
+
+
+agent = Agent(
+    name="Timeout demo",
+    instructions="Use tools when helpful.",
+    tools=[slow_lookup],
+)
+```
+
+When a timeout is reached, the default behavior is `timeout_behavior="error_as_result"`, which sends a model-visible timeout message (for example, `Tool 'slow_lookup' timed out after 2 seconds.`).
+
+You can control timeout handling:
+
+-   `timeout_behavior="error_as_result"` (default): return a timeout message to the model so it can recover.
+-   `timeout_behavior="raise_exception"`: raise [`ToolTimeoutError`][agents.exceptions.ToolTimeoutError] and fail the run.
+-   `timeout_error_function=...`: customize the timeout message when using `error_as_result`.
+
+```python
+import asyncio
+from agents import Agent, Runner, ToolTimeoutError, function_tool
+
+
+@function_tool(timeout=1.5, timeout_behavior="raise_exception")
+async def slow_tool() -> str:
+    await asyncio.sleep(5)
+    return "done"
+
+
+agent = Agent(name="Timeout hard-fail", tools=[slow_tool])
+
+try:
+    await Runner.run(agent, "Run the tool")
+except ToolTimeoutError as e:
+    print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
+```
+
+!!! note
+
+    Timeout configuration is supported only for async `@function_tool` handlers.
+
+### Handling errors in function tools
+
+When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
+
+-   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
+-   If you pass your own error function, it runs that instead, and sends the response to the LLM.
+-   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
+
+```python
+from agents import function_tool, RunContextWrapper
+from typing import Any
+
+def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
+    """A custom function to provide a user-friendly error message."""
+    print(f"A tool call failed with the following error: {error}")
+    return "An internal server error occurred. Please try again later."
+
+@function_tool(failure_error_function=my_custom_error_function)
+def get_user_profile(user_id: str) -> str:
+    """Fetches a user profile from a mock API.
+     This function demonstrates a 'flaky' or failing API call.
+    """
+    if user_id == "user_123":
+        return "User profile for user_123 successfully retrieved."
+    else:
+        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
+
+```
+
+If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
+
 ## Agents as tools
 
 In some workflows, you may want a central agent to orchestrate a network of specialized agents, instead of handing off control. You can do this by modeling agents as tools.
@@ -627,87 +723,3 @@ What to know:
 -   Outputs: results include `response`, `usage`, and `thread_id`; usage is added to `RunContextWrapper.usage`.
 -   Structure: `output_schema` enforces structured Codex responses when you need typed outputs.
 -   See `examples/tools/codex.py` and `examples/tools/codex_same_thread.py` for complete runnable samples.
-
-## Function tool timeouts
-
-You can set per-call timeouts for async function tools with `@function_tool(timeout=...)`.
-
-```python
-import asyncio
-from agents import Agent, Runner, function_tool
-
-
-@function_tool(timeout=2.0)
-async def slow_lookup(query: str) -> str:
-    await asyncio.sleep(10)
-    return f"Result for {query}"
-
-
-agent = Agent(
-    name="Timeout demo",
-    instructions="Use tools when helpful.",
-    tools=[slow_lookup],
-)
-```
-
-When a timeout is reached, the default behavior is `timeout_behavior="error_as_result"`, which sends a model-visible timeout message (for example, `Tool 'slow_lookup' timed out after 2 seconds.`).
-
-You can control timeout handling:
-
--   `timeout_behavior="error_as_result"` (default): return a timeout message to the model so it can recover.
--   `timeout_behavior="raise_exception"`: raise [`ToolTimeoutError`][agents.exceptions.ToolTimeoutError] and fail the run.
--   `timeout_error_function=...`: customize the timeout message when using `error_as_result`.
-
-```python
-import asyncio
-from agents import Agent, Runner, ToolTimeoutError, function_tool
-
-
-@function_tool(timeout=1.5, timeout_behavior="raise_exception")
-async def slow_tool() -> str:
-    await asyncio.sleep(5)
-    return "done"
-
-
-agent = Agent(name="Timeout hard-fail", tools=[slow_tool])
-
-try:
-    await Runner.run(agent, "Run the tool")
-except ToolTimeoutError as e:
-    print(f"{e.tool_name} timed out in {e.timeout_seconds} seconds")
-```
-
-!!! note
-
-    Timeout configuration is supported only for async `@function_tool` handlers.
-
-## Handling errors in function tools
-
-When you create a function tool via `@function_tool`, you can pass a `failure_error_function`. This is a function that provides an error response to the LLM in case the tool call crashes.
-
--   By default (i.e. if you don't pass anything), it runs a `default_tool_error_function` which tells the LLM an error occurred.
--   If you pass your own error function, it runs that instead, and sends the response to the LLM.
--   If you explicitly pass `None`, then any tool call errors will be re-raised for you to handle. This could be a `ModelBehaviorError` if the model produced invalid JSON, or a `UserError` if your code crashed, etc.
-
-```python
-from agents import function_tool, RunContextWrapper
-from typing import Any
-
-def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
-    """A custom function to provide a user-friendly error message."""
-    print(f"A tool call failed with the following error: {error}")
-    return "An internal server error occurred. Please try again later."
-
-@function_tool(failure_error_function=my_custom_error_function)
-def get_user_profile(user_id: str) -> str:
-    """Fetches a user profile from a mock API.
-     This function demonstrates a 'flaky' or failing API call.
-    """
-    if user_id == "user_123":
-        return "User profile for user_123 successfully retrieved."
-    else:
-        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
-
-```
-
-If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.

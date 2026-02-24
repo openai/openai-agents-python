@@ -51,6 +51,17 @@ Notes:
 - When `failure_error_function` is unset, the SDK uses the default tool error formatter.
 - Server-level `failure_error_function` overrides `Agent.mcp_config["failure_error_function"]` for that server.
 
+## Shared patterns across transports
+
+After you choose a transport, most integrations need the same follow-up decisions:
+
+- How to expose only a subset of tools ([Tool filtering](#tool-filtering)).
+- Whether the server also provides reusable prompts ([Prompts](#prompts)).
+- Whether `list_tools()` should be cached ([Caching](#caching)).
+- How MCP activity appears in traces ([Tracing](#tracing)).
+
+For local MCP servers (`MCPServerStdio`, `MCPServerSse`, `MCPServerStreamableHttp`), approval policies and per-call `_meta` payloads are also shared concepts. The Streamable HTTP section shows the most complete examples, and the same patterns apply to the other local transports.
+
 ## 1. Hosted MCP server tools
 
 Hosted tools push the entire tool round-trip into OpenAI's infrastructure. Instead of your code listing and calling tools, the
@@ -355,6 +366,10 @@ Key behaviors:
 - Set `strict=True` to raise on the first connection failure.
 - Call `reconnect(failed_only=True)` to retry failed servers, or `reconnect(failed_only=False)` to restart all servers.
 - Use `connect_timeout_seconds`, `cleanup_timeout_seconds`, and `connect_in_parallel` to tune lifecycle behavior.
+
+## Common server capabilities
+
+The sections below apply across MCP server transports (with the exact API surface depending on the server class).
 
 ## Tool filtering
 

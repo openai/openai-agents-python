@@ -21,7 +21,9 @@ async def main():
 
 Read more in the [results guide](results.md).
 
-## The agent loop
+## Runner lifecycle and configuration
+
+### The agent loop
 
 When you use the run method in `Runner`, you pass in a starting agent and input. The input can either be a string (which is considered a user message), or a list of input items, which are the items in the OpenAI Responses API.
 
@@ -38,17 +40,17 @@ The runner then runs a loop:
 
     The rule for whether the LLM output is considered as a "final output" is that it produces text output with the desired type, and there are no tool calls.
 
-## Streaming
+### Streaming
 
 Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).
 
-### Responses WebSocket transport (optional helper)
+#### Responses WebSocket transport (optional helper)
 
 If you enable the OpenAI Responses websocket transport, you can keep using the normal `Runner` APIs. The websocket session helper is recommended for connection reuse, but it is not required.
 
 This is the Responses API over websocket transport, not the [Realtime API](realtime/guide.md).
 
-#### Pattern 1: No session helper (works)
+##### Pattern 1: No session helper (works)
 
 Use this when you just want websocket transport and do not need the SDK to manage a shared provider/session for you.
 
@@ -75,7 +77,7 @@ asyncio.run(main())
 
 This pattern is fine for single runs. If you call `Runner.run()` / `Runner.run_streamed()` repeatedly, each run may reconnect unless you manually reuse the same `RunConfig` / provider instance.
 
-#### Pattern 2: Use `responses_websocket_session()` (recommended for multi-turn reuse)
+##### Pattern 2: Use `responses_websocket_session()` (recommended for multi-turn reuse)
 
 Use [`responses_websocket_session()`][agents.responses_websocket_session] when you want a shared websocket-capable provider and `RunConfig` across multiple runs (including nested agent-as-tool calls that inherit the same `run_config`).
 
@@ -107,33 +109,48 @@ asyncio.run(main())
 
 Finish consuming streamed results before the context exits. Exiting the context while a websocket request is still in flight may force-close the shared connection.
 
-## Run config
+### Run config
 
 The `run_config` parameter lets you configure some global settings for the agent run:
+
+#### Common run config categories
+
+Use `RunConfig` to override behavior for a single run without changing each agent definition.
+
+##### Model, provider, and session defaults
 
 -   [`model`][agents.run.RunConfig.model]: Allows setting a global LLM model to use, irrespective of what `model` each Agent has.
 -   [`model_provider`][agents.run.RunConfig.model_provider]: A model provider for looking up model names, which defaults to OpenAI.
 -   [`model_settings`][agents.run.RunConfig.model_settings]: Overrides agent-specific settings. For example, you can set a global `temperature` or `top_p`.
 -   [`session_settings`][agents.run.RunConfig.session_settings]: Overrides session-level defaults (for example, `SessionSettings(limit=...)`) when retrieving history during a run.
+-   [`session_input_callback`][agents.run.RunConfig.session_input_callback]: Customize how new user input is merged with session history before each turn when using Sessions.
+
+##### Guardrails, handoffs, and model input shaping
+
 -   [`input_guardrails`][agents.run.RunConfig.input_guardrails], [`output_guardrails`][agents.run.RunConfig.output_guardrails]: A list of input or output guardrails to include on all runs.
 -   [`handoff_input_filter`][agents.run.RunConfig.handoff_input_filter]: A global input filter to apply to all handoffs, if the handoff doesn't already have one. The input filter allows you to edit the inputs that are sent to the new agent. See the documentation in [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] for more details.
 -   [`nest_handoff_history`][agents.run.RunConfig.nest_handoff_history]: Opt-in beta that collapses the prior transcript into a single assistant message before invoking the next agent. This is disabled by default while we stabilize nested handoffs; set to `True` to enable or leave `False` to pass through the raw transcript. All [Runner methods][agents.run.Runner] automatically create a `RunConfig` when you do not pass one, so the quickstarts and examples keep the default off, and any explicit [`Handoff.input_filter`][agents.handoffs.Handoff.input_filter] callbacks continue to override it. Individual handoffs can override this setting via [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history].
 -   [`handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper]: Optional callable that receives the normalized transcript (history + handoff items) whenever you opt in to `nest_handoff_history`. It must return the exact list of input items to forward to the next agent, allowing you to replace the built-in summary without writing a full handoff filter.
+-   [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]: Hook to edit the fully prepared model input (instructions and input items) immediately before the model call, e.g., to trim history or inject a system prompt.
+-   [`reasoning_item_id_policy`][agents.run.RunConfig.reasoning_item_id_policy]: Control whether reasoning item IDs are preserved or omitted when the runner converts prior outputs into next-turn model input.
+
+##### Tracing and observability
+
 -   [`tracing_disabled`][agents.run.RunConfig.tracing_disabled]: Allows you to disable [tracing](tracing.md) for the entire run.
 -   [`tracing`][agents.run.RunConfig.tracing]: Pass a [`TracingConfig`][agents.tracing.TracingConfig] to override exporters, processors, or tracing metadata for this run.
 -   [`trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data]: Configures whether traces will include potentially sensitive data, such as LLM and tool call inputs/outputs.
 -   [`workflow_name`][agents.run.RunConfig.workflow_name], [`trace_id`][agents.run.RunConfig.trace_id], [`group_id`][agents.run.RunConfig.group_id]: Sets the tracing workflow name, trace ID and trace group ID for the run. We recommend at least setting `workflow_name`. The group ID is an optional field that lets you link traces across multiple runs.
 -   [`trace_metadata`][agents.run.RunConfig.trace_metadata]: Metadata to include on all traces.
--   [`session_input_callback`][agents.run.RunConfig.session_input_callback]: Customize how new user input is merged with session history before each turn when using Sessions.
--   [`call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]: Hook to edit the fully prepared model input (instructions and input items) immediately before the model call, e.g., to trim history or inject a system prompt.
+
+##### Tool approval and tool error behavior
+
 -   [`tool_error_formatter`][agents.run.RunConfig.tool_error_formatter]: Customize the model-visible message when a tool call is rejected during approval flows.
--   [`reasoning_item_id_policy`][agents.run.RunConfig.reasoning_item_id_policy]: Control whether reasoning item IDs are preserved or omitted when the runner converts prior outputs into next-turn model input.
 
 Nested handoffs are available as an opt-in beta. Enable the collapsed-transcript behavior by passing `RunConfig(nest_handoff_history=True)` or set `handoff(..., nest_handoff_history=True)` to turn it on for a specific handoff. If you prefer to keep the raw transcript (the default), leave the flag unset or provide a `handoff_input_filter` (or `handoff_history_mapper`) that forwards the conversation exactly as you need. To change the wrapper text used in the generated summary without writing a custom mapper, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] (and [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] to restore the defaults).
 
-### Run config details
+#### Run config details
 
-#### `tool_error_formatter`
+##### `tool_error_formatter`
 
 Use `tool_error_formatter` to customize the message that is returned to the model when a tool call is rejected in an approval flow.
 
@@ -169,7 +186,7 @@ result = Runner.run_sync(
 )
 ```
 
-#### `reasoning_item_id_policy`
+##### `reasoning_item_id_policy`
 
 `reasoning_item_id_policy` controls how reasoning items are converted into next-turn model input when the runner carries history forward (for example, when using `RunResult.to_input_list()` or session-backed runs).
 
@@ -188,7 +205,9 @@ Scope notes:
 -   It does not rewrite user-supplied initial input items.
 -   `call_model_input_filter` can still intentionally reintroduce reasoning IDs after this policy is applied.
 
-## Conversations/chat threads
+## State and conversation management
+
+### Conversations/chat threads
 
 Calling any of the run methods can result in one or more agents running (and hence one or more LLM calls), but it represents a single logical turn in a chat conversation. For example:
 
@@ -197,7 +216,23 @@ Calling any of the run methods can result in one or more agents running (and hen
 
 At the end of the agent run, you can choose what to show to the user. For example, you might show the user every new item generated by the agents, or just the final output. Either way, the user might then ask a followup question, in which case you can call the run method again.
 
-### Manual conversation management
+#### Choosing a conversation state strategy
+
+Use one of these approaches per run:
+
+| Approach | Best for | What you manage |
+| --- | --- | --- |
+| Manual (`result.to_input_list()`) | Full control over history shaping | You construct and resend prior input items |
+| Sessions (`session=...`) | App-managed multi-turn chat state | The SDK loads/saves history in your chosen backend |
+| Server-managed (`conversation_id` / `previous_response_id`) | Letting OpenAI manage turn state | You store IDs only; the server stores conversation state |
+
+!!! note
+
+    Session persistence cannot be combined with server-managed conversation settings
+    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) in the
+    same run. Choose one approach per call.
+
+#### Manual conversation management
 
 You can manually manage conversation history using the [`RunResultBase.to_input_list()`][agents.result.RunResultBase.to_input_list] method to get the inputs for the next turn:
 
@@ -219,7 +254,7 @@ async def main():
         # California
 ```
 
-### Automatic conversation management with Sessions
+#### Automatic conversation management with Sessions
 
 For a simpler approach, you can use [Sessions](sessions/index.md) to automatically handle conversation history without manually calling `.to_input_list()`:
 
@@ -251,22 +286,16 @@ Sessions automatically:
 -   Stores new messages after each run
 -   Maintains separate conversations for different session IDs
 
-!!! note
-
-    Session persistence cannot be combined with server-managed conversation settings
-    (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) in the
-    same run. Choose one approach per call.
-
 See the [Sessions documentation](sessions/index.md) for more details.
 
 
-### Server-managed conversations
+#### Server-managed conversations
 
 You can also let the OpenAI conversation state feature manage conversation state on the server side, instead of handling it locally with `to_input_list()` or `Sessions`. This allows you to preserve conversation history without manually resending all past messages. See the [OpenAI Conversation state guide](https://platform.openai.com/docs/guides/conversation-state?api-mode=responses) for more details.
 
 OpenAI provides two ways to track state across turns:
 
-#### 1. Using `conversation_id`
+##### 1. Using `conversation_id`
 
 You first create a conversation using the OpenAI Conversations API and then reuse its ID for every subsequent call:
 
@@ -289,7 +318,7 @@ async def main():
         print(f"Assistant: {result.final_output}")
 ```
 
-#### 2. Using `previous_response_id`
+##### 2. Using `previous_response_id`
 
 Another option is **response chaining**, where each turn links explicitly to the response ID from the previous turn.
 
@@ -326,7 +355,9 @@ async def main():
     `previous_response_id`, or `auto_previous_response_id`), the SDK also performs a best-effort
     rollback of recently persisted input items to reduce duplicate history entries after a retry.
 
-## Call model input filter
+## Hooks and customization
+
+### Call model input filter
 
 Use `call_model_input_filter` to edit the model input right before the model call. The hook receives the current agent, context, and the combined input items (including session history when present) and returns a new `ModelInputData`.
 
@@ -349,7 +380,9 @@ result = Runner.run_sync(
 
 Set the hook per run via `run_config` or as a default on your `Runner` to redact sensitive data, trim long histories, or inject additional system guidance.
 
-## Error handlers
+## Errors and recovery
+
+### Error handlers
 
 All `Runner` entry points accept `error_handlers`, a dict keyed by error kind. Today, the supported key is `"max_turns"`. Use it when you want to return a controlled final output instead of raising `MaxTurnsExceeded`.
 
@@ -382,9 +415,10 @@ print(result.final_output)
 
 Set `include_in_history=False` when you do not want the fallback output appended to conversation history.
 
-## Long running agents & human-in-the-loop
+## Durable execution integrations and human-in-the-loop
 
-For tool approval pause/resume patterns, see the dedicated [Human-in-the-loop guide](human_in_the_loop.md).
+For tool approval pause/resume patterns, start with the dedicated [Human-in-the-loop guide](human_in_the_loop.md).
+The integrations below are for durable orchestration when runs may span long waits, retries, or process restarts.
 
 ### Temporal
 

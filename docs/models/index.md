@@ -5,6 +5,18 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 -   **Recommended**: the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel], which calls OpenAI APIs using the new [Responses API](https://platform.openai.com/docs/api-reference/responses).
 -   The [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel], which calls OpenAI APIs using the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
+## Choosing a model setup
+
+Use this page in the following order depending on your setup:
+
+| Goal | Start here |
+| --- | --- |
+| Use OpenAI-hosted models with SDK defaults | [OpenAI models](#openai-models) |
+| Use OpenAI Responses API over websocket transport | [Responses WebSocket transport](#responses-websocket-transport) |
+| Use non-OpenAI providers | [Non-OpenAI models](#non-openai-models) |
+| Mix models/providers in one workflow | [Advanced model selection and mixing](#advanced-model-selection-and-mixing) and [Mixing models across providers](#mixing-models-across-providers) |
+| Debug provider compatibility issues | [Troubleshooting non-OpenAI providers](#troubleshooting-non-openai-providers) |
+
 ## OpenAI models
 
 When you don't specify a model when initializing an `Agent`, the default model will be used. The default is currently [`gpt-4.1`](https://platform.openai.com/docs/models/gpt-4.1) for compatibility and low latency. If you have access, we recommend setting your agents to [`gpt-5.2`](https://platform.openai.com/docs/models/gpt-5.2) for higher quality while keeping explicit `model_settings`.
@@ -129,7 +141,7 @@ In cases where you do not have an API key from `platform.openai.com`, we recomme
 
     In these examples, we use the Chat Completions API/model, because most LLM providers don't yet support the Responses API. If your LLM provider does support it, we recommend using Responses.
 
-## Mixing and matching models
+## Advanced model selection and mixing
 
 Within a single workflow, you may want to use different models for each agent. For example, you could use a smaller, faster model for triage, while using a larger, more capable model for complex tasks. When configuring an [`Agent`][agents.Agent], you can select a specific model by either:
 
@@ -204,7 +216,7 @@ english_agent = Agent(
 )
 ```
 
-## Common issues with using other LLM providers
+## Troubleshooting non-OpenAI providers
 
 ### Tracing client error 401
 

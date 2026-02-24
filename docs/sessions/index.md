@@ -43,7 +43,7 @@ result = Runner.run_sync(
 print(result.final_output)  # "Approximately 39 million"
 ```
 
-## How it works
+## Core session behavior
 
 When session memory is enabled:
 
@@ -53,7 +53,7 @@ When session memory is enabled:
 
 This eliminates the need to manually call `.to_input_list()` and manage conversation state between runs.
 
-## Customizing prepared input
+## Control how history and new input merge
 
 When you pass a session, the runner normally prepares model input as:
 
@@ -174,9 +174,26 @@ result = await Runner.run(
 print(f"Agent: {result.final_output}")
 ```
 
-## Session types
+## Built-in session implementations
 
 The SDK provides several session implementations for different use cases:
+
+### Choose a built-in session implementation
+
+Use this table to pick a starting point before reading the detailed examples below.
+
+| Session type | Best for | Notes |
+| --- | --- | --- |
+| `SQLiteSession` | Local development and simple apps | Built-in, lightweight, file-backed or in-memory |
+| `AsyncSQLiteSession` | Async SQLite with `aiosqlite` | Extension backend with async driver support |
+| `RedisSession` | Shared memory across workers/services | Good for low-latency distributed deployments |
+| `SQLAlchemySession` | Production apps with existing databases | Works with SQLAlchemy-supported databases |
+| `OpenAIConversationsSession` | Server-managed storage in OpenAI | OpenAI Conversations API-backed history |
+| `OpenAIResponsesCompactionSession` | Long conversations with automatic compaction | Wrapper around another session backend |
+| `AdvancedSQLiteSession` | SQLite plus branching/analytics | Heavier feature set; see dedicated page |
+| `EncryptedSession` | Encryption + TTL on top of another session | Wrapper; choose an underlying backend first |
+
+Some implementations have dedicated pages with additional details; those are linked inline in their subsections.
 
 ### OpenAI Conversations API sessions
 
@@ -399,7 +416,7 @@ See [Encrypted Sessions](encrypted_session.md) for detailed documentation.
 
 There are a few more built-in options. Please refer to `examples/memory/` and source code under `extensions/memory/`.
 
-## Session management
+## Operational patterns
 
 ### Session ID naming
 

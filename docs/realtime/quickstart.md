@@ -105,9 +105,9 @@ def _truncate_str(s: str, max_length: int) -> str:
     return s
 ```
 
-## Complete example
+## Full example (same flow in one file)
 
-Here's a complete working example:
+This is the same quickstart flow rewritten as a single script.
 
 ```python
 import asyncio
@@ -184,7 +184,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## Configuration options
+## Configuration and deployment notes
+
+Use these options after you have a basic session running.
 
 ### Model settings
 
@@ -215,15 +217,7 @@ if __name__ == "__main__":
 
 For the full schema, see the API reference for [`RealtimeRunConfig`][agents.realtime.config.RealtimeRunConfig] and [`RealtimeSessionModelSettings`][agents.realtime.config.RealtimeSessionModelSettings].
 
-## Next steps
-
--   [Learn more about realtime agents](guide.md)
--   Check out working examples in the [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) folder
--   Add tools to your agent
--   Implement handoffs between agents
--   Set up guardrails for safety
-
-## Authentication
+### Authentication
 
 Make sure your OpenAI API key is set in your environment:
 
@@ -237,7 +231,7 @@ Or pass it directly when creating the session:
 session = await runner.run(model_config={"api_key": "your-api-key"})
 ```
 
-## Azure OpenAI endpoint format
+### Azure OpenAI endpoint format
 
 If you connect to Azure OpenAI instead of OpenAI's default endpoint, pass a GA Realtime URL in
 `model_config["url"]` and set auth headers explicitly.
@@ -264,3 +258,11 @@ session = await runner.run(
 
 Avoid using the legacy beta path (`/openai/realtime?api-version=...`) with realtime agents. The
 SDK expects the GA Realtime interface.
+
+## Next steps
+
+-   [Learn more about realtime agents](guide.md)
+-   Check out working examples in the [examples/realtime](https://github.com/openai/openai-agents-python/tree/main/examples/realtime) folder
+-   Add tools to your agent
+-   Implement handoffs between agents
+-   Set up guardrails for safety
