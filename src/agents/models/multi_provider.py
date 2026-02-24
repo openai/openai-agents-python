@@ -147,7 +147,11 @@ class MultiProvider(ModelProvider):
             return provider.get_model(model_name)
         elif prefix:
             # For unknown prefixes, pass the full model name (including prefix) to LiteLLM
-            return self._get_fallback_provider(prefix).get_model(f"{prefix}/{model_name}")
+            # Except for litellm prefix, where we should just pass the model name (without prefix)
+            if prefix == "litellm":
+                return self._get_fallback_provider(prefix).get_model(model_name)
+            else:
+                return self._get_fallback_provider(prefix).get_model(f"{prefix}/{model_name}")
         else:
             return self._get_fallback_provider(prefix).get_model(model_name)
 
