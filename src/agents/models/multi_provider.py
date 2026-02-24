@@ -1,106 +1,47 @@
 from __future__ import annotations
 
-from openai import AsyncOpenAI
+import copy
+from typing import TYPE_CHECKING
 
-from ..exceptions import UserError
+from .default_models import get_default_model
 from .interface import Model, ModelProvider
 from .openai_provider import OpenAIProvider
 
-
-class MultiProviderMap:
-    """A map of model name prefixes to ModelProviders."""
-
-    def __init__(self):
-        self._mapping: dict[str, ModelProvider] = {}
-
-    def has_prefix(self, prefix: str) -> bool:
-        """Returns True if the given prefix is in the mapping."""
-        return prefix in self._mapping
-
-    def get_mapping(self) -> dict[str, ModelProvider]:
-        """Returns a copy of the current prefix -> ModelProvider mapping."""
-        return self._mapping.copy()
-
-    def set_mapping(self, mapping: dict[str, ModelProvider]):
-        """Overwrites the current mapping with a new one."""
-        self._mapping = mapping
-
-    def get_provider(self, prefix: str) -> ModelProvider | None:
-        """Returns the ModelProvider for the given prefix.
-
-        Args:
-            prefix: The prefix of the model name e.g. "openai" or "my_prefix".
-        """
-        return self._mapping.get(prefix)
-
-    def add_provider(self, prefix: str, provider: ModelProvider):
-        """Adds a new prefix -> ModelProvider mapping.
-
-        Args:
-            prefix: The prefix of the model name e.g. "openai" or "my_prefix".
-            provider: The ModelProvider to use for the given prefix.
-        """
-        self._mapping[prefix] = provider
-
-    def remove_provider(self, prefix: str):
-        """Removes the mapping for the given prefix.
-
-        Args:
-            prefix: The prefix of the model name e.g. "openai" or "my_prefix".
-        """
-        del self._mapping[prefix]
+if TYPE_CHECKING:
+    from ..provider_map import ProviderMap
+    from ..types import UserError
 
 
 class MultiProvider(ModelProvider):
-    """This ModelProvider maps to a Model based on the prefix of the model name. By default, the
-    mapping is:
-    - "openai/" prefix or no prefix -> OpenAIProvider. e.g. "openai/gpt-4.1", "gpt-4.1"
-    - "litellm/" prefix -> LitellmProvider. e.g. "litellm/openai/gpt-4.1"
+    """A ModelProvider that can route to multiple providers based on the model name prefix.
 
-    You can override or customize this mapping.
+    Example:
+    ```python
+    model = multi_provider.get_model("litellm/anthropic/claude-4-sonnet")
+    ```
     """
 
     def __init__(
         self,
-        *,
-        provider_map: MultiProviderMap | None = None,
         openai_api_key: str | None = None,
-        openai_base_url: str | None = None,
-        openai_client: AsyncOpenAI | None = None,
         openai_organization: str | None = None,
         openai_project: str | None = None,
-        openai_use_responses: bool | None = None,
-        openai_use_responses_websocket: bool | None = None,
+        openai_base_url: str | None = None,
         openai_websocket_base_url: str | None = None,
-    ) -> None:
-        """Create a new OpenAI provider.
-
-        Args:
-            provider_map: A MultiProviderMap that maps prefixes to ModelProviders. If not provided,
-                we will use a default mapping. See the documentation for this class to see the
-                default mapping.
-            openai_api_key: The API key to use for the OpenAI provider. If not provided, we will use
-                the default API key.
-            openai_base_url: The base URL to use for the OpenAI provider. If not provided, we will
-                use the default base URL.
-            openai_client: An optional OpenAI client to use. If not provided, we will create a new
-                OpenAI client using the api_key and base_url.
-            openai_organization: The organization to use for the OpenAI provider.
-            openai_project: The project to use for the OpenAI provider.
-            openai_use_responses: Whether to use the OpenAI responses API.
-            openai_use_responses_websocket: Whether to use websocket transport for the OpenAI
-                responses API.
-            openai_websocket_base_url: The websocket base URL to use for the OpenAI provider.
-                If not provided, the provider will use `OPENAI_WEBSOCKET_BASE_URL` when set.
-        """
+        openai_client: Any | None = None,
+        openai_use_responses: bool = False,
+        openai_use_responses_websocket: bool = False,
+        provider_map: "ProviderMap" | None = None,
+    ):
         self.provider_map = provider_map
+
         self.openai_provider = OpenAIProvider(
             api_key=openai_api_key,
+            organization=openai_organization,
+            project=openai_project,
             base_url=openai_base_url,
             websocket_base_url=openai_websocket_base_url,
             openai_client=openai_client,
-            organization=openai_organization,
-            project=openai_project,
             use_responses=openai_use_responses,
             use_responses_websocket=openai_use_responses_websocket,
         )
@@ -117,12 +58,9 @@ class MultiProvider(ModelProvider):
             return None, model_name
 
     def _create_fallback_provider(self, prefix: str) -> ModelProvider:
-        if prefix == "litellm":
-            from ..extensions.models.litellm_provider import LitellmProvider
+        from ..extensions.models.litellm_provider import LitellmProvider
 
-            return LitellmProvider()
-        else:
-            raise UserError(f"Unknown prefix: {prefix}")
+        return LitellmProvider()
 
     def _get_fallback_provider(self, prefix: str | None) -> ModelProvider:
         if prefix is None or prefix == "openai":
@@ -148,22 +86,26 @@ class MultiProvider(ModelProvider):
 
         if prefix and self.provider_map and (provider := self.provider_map.get_provider(prefix)):
             return provider.get_model(model_name)
+        elif prefix:
+            # For unknown prefixes, pass the full model name (including prefix) to LiteLLM
+            return self._get_fallback_provider(prefix).get_model(f"{prefix}/{model_name}")
         else:
             return self._get_fallback_provider(prefix).get_model(model_name)
 
     async def aclose(self) -> None:
         """Close cached resources held by child providers."""
         providers: list[ModelProvider] = [self.openai_provider]
-        if self.provider_map is not None:
-            providers.extend(self.provider_map.get_mapping().values())
-        providers.extend(self._fallback_providers.values())
+        for provider in self._fallback_providers.values():
+            providers.append(provider)
 
-        seen: set[int] = set()
         for provider in providers:
-            if provider is self:
-                continue
-            provider_id = id(provider)
-            if provider_id in seen:
-                continue
-            seen.add(provider_id)
-            await provider.aclose()
+            if hasattr(provider, "aclose"):
+                await provider.aclose()
+
+
+# For backwards compatibility
+MultiProviderMap = MultiProvider
+
+
+# Type imports
+from typing import Any
