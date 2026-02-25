@@ -18,6 +18,11 @@ if TYPE_CHECKING:
         DAPR_CONSISTENCY_STRONG,
         DaprSession,
     )
+    from .double_buffer_session import (
+        DoubleBufferSession,
+        RenewalPolicy,
+        Summarizer,
+    )
     from .encrypt_session import EncryptedSession
     from .redis_session import RedisSession
     from .sqlalchemy_session import SQLAlchemySession
@@ -28,13 +33,30 @@ __all__: list[str] = [
     "DAPR_CONSISTENCY_EVENTUAL",
     "DAPR_CONSISTENCY_STRONG",
     "DaprSession",
+    "DoubleBufferSession",
     "EncryptedSession",
     "RedisSession",
+    "RenewalPolicy",
     "SQLAlchemySession",
+    "Summarizer",
 ]
 
 
 def __getattr__(name: str) -> Any:
+    if name in ("DoubleBufferSession", "RenewalPolicy", "Summarizer"):
+        from .double_buffer_session import (  # noqa: F401
+            DoubleBufferSession,
+            RenewalPolicy,
+            Summarizer,
+        )
+
+        _map = {
+            "DoubleBufferSession": DoubleBufferSession,
+            "RenewalPolicy": RenewalPolicy,
+            "Summarizer": Summarizer,
+        }
+        return _map[name]
+
     if name == "EncryptedSession":
         try:
             from .encrypt_session import EncryptedSession  # noqa: F401
