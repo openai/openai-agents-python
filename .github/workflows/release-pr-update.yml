@@ -65,7 +65,7 @@ jobs:
           git rebase origin/main
       - name: Run Codex release review
         if: steps.find.outputs.found == 'true'
-        uses: openai/codex-action@v1
+        uses: openai/codex-action@5c16f9b5b3d5c4f0a7b8fa2e686c1ed4dbb7c7e2
         with:
           openai-api-key: ${{ secrets.PROD_OPENAI_API_KEY }}
           prompt-file: .github/codex/prompts/release-review.md
