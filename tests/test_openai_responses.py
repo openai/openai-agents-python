@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -141,6 +142,114 @@ async def test_user_agent_header_responses(override_ua: str | None):
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_get_response_exposes_request_id():
+    class DummyResponses:
+        async def create(self, **kwargs):
+            response = get_response_obj([], response_id="resp-request-id")
+            response._request_id = "req_nonstream_123"
+            return response
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    response = await model.get_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    )
+
+    assert response.response_id == "resp-request-id"
+    assert response.request_id == "req_nonstream_123"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_attaches_request_id_to_terminal_response():
+    class DummyHTTPStream:
+        def __init__(self):
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([], response_id="resp-stream-request-id"),
+                sequence_number=0,
+            )
+
+    inner_stream = DummyHTTPStream()
+
+    class DummyAPIResponse:
+        def __init__(self):
+            self.request_id = "req_stream_123"
+            self.close_calls = 0
+            self.parse_calls = 0
+
+        async def parse(self):
+            self.parse_calls += 1
+            return inner_stream
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    api_response = DummyAPIResponse()
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    stream_agen = cast(Any, stream)
+    event = await stream_agen.__anext__()
+
+    assert getattr(stream, "request_id", None) == "req_stream_123"
+    assert getattr(event.response, "_request_id", None) == "req_stream_123"
+
+    with pytest.raises(StopAsyncIteration):
+        await stream_agen.__anext__()
+
+    assert api_response.parse_calls == 1
+    assert api_response.close_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_close_closes_inner_http_stream_with_async_close(monkeypatch):
     client = DummyWSClient()
     model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
@@ -189,6 +298,57 @@ async def test_stream_response_close_closes_inner_http_stream_with_async_close(m
 
     await stream_agen.aclose()
 
+    assert inner_stream.close_calls == 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_normal_exhaustion_closes_inner_http_stream(monkeypatch):
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    class DummyHTTPStream:
+        def __init__(self):
+            self._yielded = False
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([]),
+                sequence_number=0,
+            )
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    inner_stream = DummyHTTPStream()
+
+    async def fake_fetch_response(*args: Any, **kwargs: Any) -> DummyHTTPStream:
+        return inner_stream
+
+    monkeypatch.setattr(model, "_fetch_response", fake_fetch_response)
+
+    events: list[ResponseCompletedEvent] = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    ):
+        assert isinstance(event, ResponseCompletedEvent)
+        events.append(event)
+
+    assert len(events) == 1
     assert inner_stream.close_calls == 1
 
 

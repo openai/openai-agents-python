@@ -1227,6 +1227,7 @@ async def run_single_turn_streamed(
                 output=terminal_response.output,
                 usage=usage,
                 response_id=terminal_response.id,
+                request_id=getattr(terminal_response, "_request_id", None),
             )
             context_wrapper.usage.add(usage)
 

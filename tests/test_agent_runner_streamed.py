@@ -7,6 +7,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from openai.types.responses import (
+    ResponseCompletedEvent,
     ResponseFailedEvent,
     ResponseFunctionToolCall,
     ResponseIncompleteEvent,
@@ -171,6 +172,44 @@ async def test_streamed_run_accepts_terminal_response_payload_events(
     assert result.final_output == "partial final"
     assert len(result.raw_responses) == 1
     assert result.raw_responses[0].response_id == "resp-partial"
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_exposes_request_id_on_raw_responses() -> None:
+    class RequestIdTerminalFakeModel(FakeModel):
+        async def stream_response(
+            self,
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            *,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        ):
+            response = get_response_obj(
+                [get_text_message("partial final")], response_id="resp-partial"
+            )
+            response._request_id = "req_streamed_result_123"
+            yield ResponseCompletedEvent(
+                type="response.completed",
+                response=response,
+                sequence_number=0,
+            )
+
+    model = RequestIdTerminalFakeModel()
+    agent = Agent(name="test", model=model)
+
+    result = Runner.run_streamed(agent, input="test")
+    async for _ in result.stream_events():
+        pass
+
+    assert len(result.raw_responses) == 1
+    assert result.raw_responses[0].request_id == "req_streamed_result_123"
 
 
 @pytest.mark.allow_call_model_methods

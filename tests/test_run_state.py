@@ -1683,6 +1683,7 @@ class TestDeserializeHelpers:
                 )
             ],
             response_id="resp123",
+            request_id="req123",
         )
         state._model_responses.append(response)
 
@@ -1692,6 +1693,7 @@ class TestDeserializeHelpers:
 
         assert len(restored._model_responses) == 1
         assert restored._model_responses[0].response_id == "resp123"
+        assert restored._model_responses[0].request_id == "req123"
         assert restored._model_responses[0].usage.requests == 1
         assert restored._model_responses[0].usage.input_tokens == 10
 

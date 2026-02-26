@@ -483,6 +483,9 @@ class ModelResponse:
     be passed to `Runner.run`.
     """
 
+    request_id: str | None = None
+    """The transport request ID for this model call, if provided by the model SDK."""
+
     def to_input_items(self) -> list[TResponseInputItem]:
         """Convert the output into a list of input items suitable for passing to the model."""
         # We happen to know that the shape of the Pydantic output items are the same as the

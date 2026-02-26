@@ -99,8 +99,8 @@ ContextDeserializer = Callable[[Mapping[str, Any]], Any]
 # 2. Keep older readable versions in SUPPORTED_SCHEMA_VERSIONS for backward reads.
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer versions).
-CURRENT_SCHEMA_VERSION = "1.3"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", CURRENT_SCHEMA_VERSION})
+CURRENT_SCHEMA_VERSION = "1.4"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2", "1.3", CURRENT_SCHEMA_VERSION})
 
 _FUNCTION_OUTPUT_ADAPTER: TypeAdapter[FunctionCallOutput] = TypeAdapter(FunctionCallOutput)
 _COMPUTER_OUTPUT_ADAPTER: TypeAdapter[ComputerCallOutput] = TypeAdapter(ComputerCallOutput)
@@ -265,6 +265,7 @@ class RunState(Generic[TContext, TAgent]):
                 "usage": serialize_usage(resp.usage),
                 "output": [_serialize_raw_item_value(item) for item in resp.output],
                 "response_id": resp.response_id,
+                "request_id": resp.request_id,
             }
             for resp in self._model_responses
         ]
@@ -2191,12 +2192,14 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
         output = output_adapter.validate_python(normalized_output)
 
         response_id = resp_data.get("response_id")
+        request_id = resp_data.get("request_id")
 
         result.append(
             ModelResponse(
                 usage=usage,
                 output=output,
                 response_id=response_id,
+                request_id=request_id,
             )
         )
 
