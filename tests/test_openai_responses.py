@@ -205,10 +205,16 @@ async def test_fetch_response_stream_attaches_request_id_to_terminal_response():
             self.close_calls += 1
 
     api_response = DummyAPIResponse()
+    aexit_calls: list[tuple[Any, Any, Any]] = []
 
     class DummyStreamingContextManager:
         async def __aenter__(self):
             return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            aexit_calls.append((exc_type, exc, tb))
+            await api_response.close()
+            return False
 
     class DummyResponses:
         def __init__(self):
@@ -246,6 +252,62 @@ async def test_fetch_response_stream_attaches_request_id_to_terminal_response():
 
     assert api_response.parse_calls == 1
     assert api_response.close_calls == 1
+    assert aexit_calls == [(None, None, None)]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_fetch_response_stream_parse_failure_exits_streaming_context():
+    parse_error = RuntimeError("parse failed")
+    aexit_calls: list[tuple[Any, Any, Any]] = []
+
+    class DummyAPIResponse:
+        request_id = "req_stream_123"
+
+        async def parse(self):
+            raise parse_error
+
+    api_response = DummyAPIResponse()
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            aexit_calls.append((exc_type, exc, tb))
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="parse failed"):
+        await model._fetch_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=True,
+        )
+
+    assert len(aexit_calls) == 1
+    exc_type, exc, tb = aexit_calls[0]
+    assert exc_type is RuntimeError
+    assert exc is parse_error
+    assert tb is not None
 
 
 @pytest.mark.allow_call_model_methods

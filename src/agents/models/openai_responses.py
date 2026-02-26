@@ -129,7 +129,7 @@ class _ResponseStreamWithRequestId:
         stream: AsyncIterator[ResponseStreamEvent],
         *,
         request_id: str | None,
-        cleanup: Callable[[], Awaitable[None]],
+        cleanup: Callable[[], Awaitable[object]],
     ) -> None:
         self._stream = stream
         self.request_id = request_id
@@ -512,14 +512,14 @@ class OpenAIResponsesModel(Model):
         api_response = await api_response_cm.__aenter__()
         try:
             stream_response = await api_response.parse()
-        except Exception:
-            await api_response.close()
+        except BaseException as exc:
+            await api_response_cm.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
         return _ResponseStreamWithRequestId(
             cast(AsyncIterator[ResponseStreamEvent], stream_response),
             request_id=api_response.request_id,
-            cleanup=api_response.close,
+            cleanup=lambda: api_response_cm.__aexit__(None, None, None),
         )
 
     def _build_response_create_kwargs(
