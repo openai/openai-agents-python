@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, ModelBehaviorError, Runner, UserError
+from agents import Agent, AgentsException, ModelBehaviorError, Runner, UserError
 
 from ..fake_model import FakeModel
 from ..test_responses import get_function_tool_call, get_text_message
@@ -195,3 +195,70 @@ async def test_runner_calls_mcp_tool_with_args(streaming: bool):
     assert server.tool_results == [f"result_test_tool_2_{json_args}"]
 
     await server.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_handles_mcp_upstream_errors_as_tool_output(streaming: bool):
+    """MCP upstream failures should be surfaced as tool output by default."""
+
+    class FailingMCPServer(FakeMCPServer):
+        async def call_tool(self, tool_name, arguments, meta=None):
+            self.tool_calls.append(tool_name)
+            raise Exception("GET upstream-service?q=invalid: 422 validation failed")
+
+    server = FailingMCPServer()
+    server.add_tool("failing_tool", {})
+
+    model = FakeModel()
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+    model.add_multiple_turn_outputs(
+        [
+            [get_text_message("before"), get_function_tool_call("failing_tool", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+
+    if streaming:
+        result = Runner.run_streamed(agent, input="trigger mcp failure")
+        async for _ in result.stream_events():
+            pass
+        final = result.final_output
+    else:
+        result = await Runner.run(agent, input="trigger mcp failure")
+        final = result.final_output
+
+    assert final == "done"
+    assert server.tool_calls == ["failing_tool"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_raises_when_mcp_failure_error_function_disabled(streaming: bool):
+    """Disabling MCP failure handling should preserve raising behavior."""
+
+    class FailingMCPServer(FakeMCPServer):
+        async def call_tool(self, tool_name, arguments, meta=None):
+            raise Exception("GET upstream-service?q=invalid: 422 validation failed")
+
+    server = FailingMCPServer()
+    server.add_tool("failing_tool", {})
+
+    model = FakeModel()
+    agent = Agent(
+        name="test",
+        model=model,
+        mcp_servers=[server],
+        mcp_config={"failure_error_function": None},
+    )
+    model.add_multiple_turn_outputs(
+        [[get_text_message("before"), get_function_tool_call("failing_tool", "{}")]]
+    )
+
+    with pytest.raises(AgentsException):
+        if streaming:
+            result = Runner.run_streamed(agent, input="trigger mcp failure")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, input="trigger mcp failure")
