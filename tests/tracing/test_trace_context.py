@@ -5,11 +5,23 @@ from uuid import uuid4
 from agents.tracing import TracingConfig, set_tracing_disabled, trace
 from agents.tracing.context import create_trace_for_run
 from agents.tracing.scope import Scope
-from agents.tracing.traces import NoOpTrace, ReattachedTrace, TraceImpl, TraceState
+from agents.tracing.traces import (
+    NoOpTrace,
+    ReattachedTrace,
+    TraceImpl,
+    TraceState,
+    _started_trace_ids,
+    _started_trace_ids_lock,
+)
 
 
 def _new_trace_id() -> str:
     return f"trace_{uuid4().hex}"
+
+
+def _clear_started_trace_ids() -> None:
+    with _started_trace_ids_lock:
+        _started_trace_ids.clear()
 
 
 def _mark_trace_as_started(
@@ -58,15 +70,9 @@ def test_create_trace_for_run_reattaches_matching_started_trace() -> None:
     assert created.trace_id == trace_state.trace_id
 
 
-def test_create_trace_for_run_does_not_reattach_unseen_trace_id() -> None:
-    Scope.set_current_trace(None)
-    set_tracing_disabled(False)
-    trace_state = TraceState(
-        trace_id=_new_trace_id(),
-        workflow_name="workflow",
-        group_id="group-1",
-        metadata={"key": "value"},
-    )
+def test_create_trace_for_run_reattaches_after_trace_state_reload() -> None:
+    trace_state = _mark_trace_as_started()
+    _clear_started_trace_ids()
 
     created = create_trace_for_run(
         workflow_name="workflow",
@@ -76,6 +82,47 @@ def test_create_trace_for_run_does_not_reattach_unseen_trace_id() -> None:
         tracing=None,
         disabled=False,
         trace_state=trace_state,
+        reattach_resumed_trace=True,
+    )
+
+    assert isinstance(created, ReattachedTrace)
+
+
+def test_create_trace_for_run_reattaches_stripped_trace_key_with_matching_resume_key() -> None:
+    trace_state = _mark_trace_as_started(tracing_api_key="trace-key")
+    stripped_trace_state = TraceState.from_json(trace_state.to_json())
+    assert stripped_trace_state is not None
+    assert stripped_trace_state.tracing_api_key is None
+    assert stripped_trace_state.tracing_api_key_hash == trace_state.tracing_api_key_hash
+
+    created = create_trace_for_run(
+        workflow_name="workflow",
+        trace_id=stripped_trace_state.trace_id,
+        group_id=stripped_trace_state.group_id,
+        metadata=dict(stripped_trace_state.metadata or {}),
+        tracing={"api_key": "trace-key"},
+        disabled=False,
+        trace_state=stripped_trace_state,
+        reattach_resumed_trace=True,
+    )
+
+    assert isinstance(created, ReattachedTrace)
+    assert created.tracing_api_key == "trace-key"
+
+
+def test_create_trace_for_run_does_not_reattach_stripped_trace_key_with_mismatch() -> None:
+    trace_state = _mark_trace_as_started(tracing_api_key="trace-key")
+    stripped_trace_state = TraceState.from_json(trace_state.to_json())
+    assert stripped_trace_state is not None
+
+    created = create_trace_for_run(
+        workflow_name="workflow",
+        trace_id=stripped_trace_state.trace_id,
+        group_id=stripped_trace_state.group_id,
+        metadata=dict(stripped_trace_state.metadata or {}),
+        tracing={"api_key": "other-trace-key"},
+        disabled=False,
+        trace_state=stripped_trace_state,
         reattach_resumed_trace=True,
     )
 

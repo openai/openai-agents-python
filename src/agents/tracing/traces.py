@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import contextvars
+import hashlib
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -149,6 +150,14 @@ class Trace(abc.ABC):
         return payload
 
 
+def _hash_tracing_api_key(tracing_api_key: str | None) -> str | None:
+    # Persist only a fingerprint so resumed runs can verify the same explicit
+    # tracing key without storing the secret.
+    if tracing_api_key is None:
+        return None
+    return hashlib.sha256(tracing_api_key.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class TraceState:
     """Serializable trace metadata for run state persistence."""
@@ -158,6 +167,7 @@ class TraceState:
     group_id: str | None = None
     metadata: dict[str, Any] | None = None
     tracing_api_key: str | None = None
+    tracing_api_key_hash: str | None = None
     object_type: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -180,12 +190,20 @@ class TraceState:
         metadata_value = data.pop("metadata", None)
         metadata = metadata_value if isinstance(metadata_value, dict) else None
         tracing_api_key = data.pop("tracing_api_key", None)
+        tracing_api_key_hash = data.pop("tracing_api_key_hash", None)
+        resolved_tracing_api_key = tracing_api_key if isinstance(tracing_api_key, str) else None
+        resolved_tracing_api_key_hash = _hash_tracing_api_key(resolved_tracing_api_key)
+        # Secure snapshots may strip the raw key, so keep the stored
+        # fingerprint for resume-time matching.
+        if resolved_tracing_api_key_hash is None and isinstance(tracing_api_key_hash, str):
+            resolved_tracing_api_key_hash = tracing_api_key_hash
         return cls(
             trace_id=trace_id if isinstance(trace_id, str) else None,
             workflow_name=workflow_name if isinstance(workflow_name, str) else None,
             group_id=group_id if isinstance(group_id, str) else None,
             metadata=metadata,
-            tracing_api_key=tracing_api_key if isinstance(tracing_api_key, str) else None,
+            tracing_api_key=resolved_tracing_api_key,
+            tracing_api_key_hash=resolved_tracing_api_key_hash,
             object_type=object_type if isinstance(object_type, str) else None,
             extra=data,
         )
@@ -197,6 +215,7 @@ class TraceState:
             and self.group_id is None
             and self.metadata is None
             and self.tracing_api_key is None
+            and self.tracing_api_key_hash is None
             and self.object_type is None
             and not self.extra
         ):
@@ -214,6 +233,10 @@ class TraceState:
             payload["metadata"] = dict(self.metadata)
         if include_tracing_api_key and self.tracing_api_key:
             payload["tracing_api_key"] = self.tracing_api_key
+        if self.tracing_api_key_hash:
+            # Always persist the fingerprint so default RunState snapshots
+            # can still validate explicit resume keys.
+            payload["tracing_api_key_hash"] = self.tracing_api_key_hash
         for key, value in self.extra.items():
             if key not in payload:
                 payload[key] = value
@@ -320,7 +343,7 @@ class ReattachedTrace(Trace):
         }
 
 
-def reattach_trace(trace_state: TraceState) -> Trace | None:
+def reattach_trace(trace_state: TraceState, *, tracing_api_key: str | None = None) -> Trace | None:
     """Build a live trace context from persisted state without notifying processors."""
     if trace_state.trace_id is None:
         return None
@@ -329,7 +352,11 @@ def reattach_trace(trace_state: TraceState) -> Trace | None:
         trace_id=trace_state.trace_id,
         group_id=trace_state.group_id,
         metadata=dict(trace_state.metadata) if trace_state.metadata is not None else None,
-        tracing_api_key=trace_state.tracing_api_key,
+        tracing_api_key=(
+            trace_state.tracing_api_key
+            if trace_state.tracing_api_key is not None
+            else tracing_api_key
+        ),
     )
 
 

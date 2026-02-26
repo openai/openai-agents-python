@@ -4,7 +4,11 @@ from typing import Any
 
 from .config import TracingConfig
 from .create import get_current_trace, trace
-from .traces import Trace, TraceState, _trace_id_was_started, reattach_trace
+from .traces import Trace, TraceState, _hash_tracing_api_key, reattach_trace
+
+
+def _get_tracing_api_key(tracing: TracingConfig | None) -> str | None:
+    return tracing.get("api_key") if tracing is not None else None
 
 
 def _trace_state_matches_effective_settings(
@@ -24,8 +28,14 @@ def _trace_state_matches_effective_settings(
         return False
     if trace_state.metadata != metadata:
         return False
-    tracing_api_key = tracing.get("api_key") if tracing is not None else None
-    return trace_state.tracing_api_key == tracing_api_key
+    tracing_api_key = _get_tracing_api_key(tracing)
+    if trace_state.tracing_api_key is not None:
+        return trace_state.tracing_api_key == tracing_api_key
+    if trace_state.tracing_api_key_hash is not None:
+        # A fingerprint lets stripped RunState snapshots prove the caller
+        # re-supplied the same explicit key.
+        return trace_state.tracing_api_key_hash == _hash_tracing_api_key(tracing_api_key)
+    return tracing_api_key is None
 
 
 def create_trace_for_run(
@@ -56,9 +66,10 @@ def create_trace_for_run(
             metadata=metadata,
             tracing=tracing,
         )
-        and _trace_id_was_started(trace_state.trace_id)
     ):
-        return reattach_trace(trace_state)
+        # Reuse the live key because secure snapshots may persist only the
+        # fingerprint, not the secret itself.
+        return reattach_trace(trace_state, tracing_api_key=_get_tracing_api_key(tracing))
 
     return trace(
         workflow_name=workflow_name,
