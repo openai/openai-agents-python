@@ -312,6 +312,75 @@ async def test_fetch_response_stream_parse_failure_exits_streaming_context():
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_stream_response_ignores_streaming_context_exit_failure_after_terminal_event():
+    class DummyHTTPStream:
+        def __init__(self):
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([], response_id="resp-stream-request-id"),
+                sequence_number=0,
+            )
+
+    inner_stream = DummyHTTPStream()
+    aexit_calls: list[tuple[Any, Any, Any]] = []
+
+    class DummyAPIResponse:
+        request_id = "req_stream_123"
+
+        async def parse(self):
+            return inner_stream
+
+    api_response = DummyAPIResponse()
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            aexit_calls.append((exc_type, exc, tb))
+            raise RuntimeError("stream context exit failed")
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    events: list[ResponseCompletedEvent] = []
+    async for event in model.stream_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        tracing=ModelTracing.DISABLED,
+    ):
+        assert isinstance(event, ResponseCompletedEvent)
+        events.append(event)
+
+    assert len(events) == 1
+    assert aexit_calls == [(None, None, None)]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_close_closes_inner_http_stream_with_async_close(monkeypatch):
     client = DummyWSClient()
     model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]

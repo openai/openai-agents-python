@@ -124,6 +124,13 @@ class _WebsocketRequestTimeouts:
 class _ResponseStreamWithRequestId:
     """Wrap an SDK event stream and retain the originating request ID."""
 
+    _TERMINAL_EVENT_TYPES = {
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "response.error",
+    }
+
     def __init__(
         self,
         stream: AsyncIterator[ResponseStreamEvent],
@@ -137,6 +144,7 @@ class _ResponseStreamWithRequestId:
         self._closed = False
         self._stream_close_complete = False
         self._cleanup_complete = False
+        self._yielded_terminal_event = False
 
     def __aiter__(self) -> _ResponseStreamWithRequestId:
         return self
@@ -149,10 +157,13 @@ class _ResponseStreamWithRequestId:
             event = await self._stream.__anext__()
         except StopAsyncIteration:
             self._closed = True
-            await self._cleanup_once()
+            await self._cleanup_after_exhaustion()
             raise
 
         self._attach_request_id(event)
+        event_type = getattr(event, "type", None)
+        if event_type in self._TERMINAL_EVENT_TYPES:
+            self._yielded_terminal_event = True
         return event
 
     async def aclose(self) -> None:
@@ -183,6 +194,15 @@ class _ResponseStreamWithRequestId:
             return
         self._cleanup_complete = True
         await self._cleanup()
+
+    async def _cleanup_after_exhaustion(self) -> None:
+        try:
+            await self._cleanup_once()
+        except Exception as exc:
+            if self._yielded_terminal_event:
+                logger.debug(f"Ignoring stream cleanup error after terminal event: {exc}")
+                return
+            raise
 
     async def _close_stream_once(self) -> None:
         if self._stream_close_complete:
