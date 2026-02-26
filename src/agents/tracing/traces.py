@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import contextvars
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -219,6 +220,119 @@ class TraceState:
         return payload
 
 
+_started_trace_ids: set[str] = set()
+_started_trace_ids_lock = threading.Lock()
+
+
+def _mark_trace_id_started(trace_id: str | None) -> None:
+    if not trace_id or trace_id == "no-op":
+        return
+    with _started_trace_ids_lock:
+        _started_trace_ids.add(trace_id)
+
+
+def _trace_id_was_started(trace_id: str | None) -> bool:
+    if not trace_id or trace_id == "no-op":
+        return False
+    with _started_trace_ids_lock:
+        return trace_id in _started_trace_ids
+
+
+class ReattachedTrace(Trace):
+    """A trace context rebuilt from persisted state without re-emitting trace start events."""
+
+    __slots__ = (
+        "_name",
+        "_trace_id",
+        "_tracing_api_key",
+        "group_id",
+        "metadata",
+        "_prev_context_token",
+        "_started",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        trace_id: str,
+        group_id: str | None,
+        metadata: dict[str, Any] | None,
+        tracing_api_key: str | None,
+    ) -> None:
+        self._name = name
+        self._trace_id = trace_id
+        self._tracing_api_key = tracing_api_key
+        self.group_id = group_id
+        self.metadata = metadata
+        self._prev_context_token: contextvars.Token[Trace | None] | None = None
+        self._started = False
+
+    @property
+    def trace_id(self) -> str:
+        return self._trace_id
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def tracing_api_key(self) -> str | None:
+        return self._tracing_api_key
+
+    def start(self, mark_as_current: bool = False):
+        if self._started:
+            return
+
+        self._started = True
+        _mark_trace_id_started(self.trace_id)
+
+        if mark_as_current:
+            self._prev_context_token = Scope.set_current_trace(self)
+
+    def finish(self, reset_current: bool = False):
+        if not self._started:
+            return
+
+        if reset_current and self._prev_context_token is not None:
+            Scope.reset_current_trace(self._prev_context_token)
+            self._prev_context_token = None
+
+    def __enter__(self) -> Trace:
+        if self._started:
+            if not self._prev_context_token:
+                logger.error("Trace already started but no context token set")
+            return self
+
+        self.start(mark_as_current=True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.finish(reset_current=exc_type is not GeneratorExit)
+
+    def export(self) -> dict[str, Any] | None:
+        return {
+            "object": "trace",
+            "id": self.trace_id,
+            "workflow_name": self.name,
+            "group_id": self.group_id,
+            "metadata": self.metadata,
+        }
+
+
+def reattach_trace(trace_state: TraceState) -> Trace | None:
+    """Build a live trace context from persisted state without notifying processors."""
+    if trace_state.trace_id is None:
+        return None
+    return ReattachedTrace(
+        name=trace_state.workflow_name or "Agent workflow",
+        trace_id=trace_state.trace_id,
+        group_id=trace_state.group_id,
+        metadata=dict(trace_state.metadata) if trace_state.metadata is not None else None,
+        tracing_api_key=trace_state.tracing_api_key,
+    )
+
+
 class NoOpTrace(Trace):
     """A no-op implementation of Trace that doesn't record any data.
 
@@ -347,6 +461,7 @@ class TraceImpl(Trace):
 
         self._started = True
         self._processor.on_trace_start(self)
+        _mark_trace_id_started(self.trace_id)
 
         if mark_as_current:
             self._prev_context_token = Scope.set_current_trace(self)

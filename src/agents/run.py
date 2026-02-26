@@ -107,8 +107,8 @@ from .run_internal.tool_use_tracker import (
 from .run_state import RunState
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, trace
-from .tracing.context import TraceCtxManager
+from .tracing import Span, SpanError, agent_span, get_current_trace
+from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData
 from .util import _error_tracing
 
@@ -549,6 +549,8 @@ class AgentRunner:
             metadata=trace_metadata,
             tracing=trace_config,
             disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         ):
             if is_resumed_state and run_state is not None:
                 run_state.set_trace(get_current_trace())
@@ -1519,17 +1521,15 @@ class AgentRunner:
         # If there's already a trace, we don't create a new one. In addition, we can't end the
         # trace here, because the actual work is done in `stream_events` and this method ends
         # before that.
-        new_trace = (
-            None
-            if get_current_trace()
-            else trace(
-                workflow_name=trace_workflow_name,
-                trace_id=trace_id,
-                group_id=trace_group_id,
-                metadata=trace_metadata,
-                tracing=trace_config,
-                disabled=run_config.tracing_disabled,
-            )
+        new_trace = create_trace_for_run(
+            workflow_name=trace_workflow_name,
+            trace_id=trace_id,
+            group_id=trace_group_id,
+            metadata=trace_metadata,
+            tracing=trace_config,
+            disabled=run_config.tracing_disabled,
+            trace_state=run_state._trace_state if run_state is not None else None,
+            reattach_resumed_trace=is_resumed_state,
         )
         if run_state is not None:
             run_state.set_trace(new_trace or get_current_trace())
