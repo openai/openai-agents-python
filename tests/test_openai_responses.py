@@ -312,6 +312,91 @@ async def test_fetch_response_stream_parse_failure_exits_streaming_context():
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+async def test_fetch_response_stream_without_request_id_still_returns_events():
+    class DummyHTTPStream:
+        def __init__(self):
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([], response_id="resp-stream-request-id"),
+                sequence_number=0,
+            )
+
+    inner_stream = DummyHTTPStream()
+    aexit_calls: list[tuple[Any, Any, Any]] = []
+
+    class DummyAPIResponse:
+        def __init__(self):
+            self.close_calls = 0
+            self.parse_calls = 0
+
+        async def parse(self):
+            self.parse_calls += 1
+            return inner_stream
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    api_response = DummyAPIResponse()
+
+    class DummyStreamingContextManager:
+        async def __aenter__(self):
+            return api_response
+
+        async def __aexit__(self, exc_type, exc, tb):
+            aexit_calls.append((exc_type, exc, tb))
+            await api_response.close()
+            return False
+
+    class DummyResponses:
+        def __init__(self):
+            self.with_streaming_response = SimpleNamespace(create=self.create_streaming)
+
+        def create_streaming(self, **kwargs):
+            return DummyStreamingContextManager()
+
+    class DummyResponsesClient:
+        def __init__(self):
+            self.responses = DummyResponses()
+
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=DummyResponsesClient())  # type: ignore[arg-type]
+
+    stream = await model._fetch_response(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=True,
+    )
+
+    stream_agen = cast(Any, stream)
+    event = await stream_agen.__anext__()
+
+    assert getattr(stream, "request_id", None) is None
+    assert getattr(event.response, "_request_id", None) is None
+
+    with pytest.raises(StopAsyncIteration):
+        await stream_agen.__anext__()
+
+    assert api_response.parse_calls == 1
+    assert api_response.close_calls == 1
+    assert aexit_calls == [(None, None, None)]
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_stream_response_ignores_streaming_context_exit_failure_after_terminal_event():
     class DummyHTTPStream:
         def __init__(self):

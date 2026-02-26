@@ -538,7 +538,7 @@ class OpenAIResponsesModel(Model):
 
         return _ResponseStreamWithRequestId(
             cast(AsyncIterator[ResponseStreamEvent], stream_response),
-            request_id=api_response.request_id,
+            request_id=getattr(api_response, "request_id", None),
             cleanup=lambda: api_response_cm.__aexit__(None, None, None),
         )
 
