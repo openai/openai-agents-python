@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import queue
@@ -30,6 +31,8 @@ class ConsoleSpanExporter(TracingExporter):
 
 class BackendSpanExporter(TracingExporter):
     _OPENAI_TRACING_INGEST_ENDPOINT = "https://api.openai.com/v1/traces/ingest"
+    _OPENAI_TRACING_MAX_FIELD_BYTES = 100_000
+    _OPENAI_TRACING_STRING_TRUNCATION_SUFFIX = "... [truncated]"
     _OPENAI_TRACING_ALLOWED_USAGE_KEYS = frozenset(
         {
             "input_tokens",
@@ -181,35 +184,182 @@ class BackendSpanExporter(TracingExporter):
         return self.endpoint.rstrip("/") == self._OPENAI_TRACING_INGEST_ENDPOINT.rstrip("/")
 
     def _sanitize_for_openai_tracing_api(self, payload_item: dict[str, Any]) -> dict[str, Any]:
-        """Move unsupported generation usage fields under usage.details for traces ingest."""
+        """Drop or truncate span fields known to be rejected by traces ingest."""
         span_data = payload_item.get("span_data")
         if not isinstance(span_data, dict):
             return payload_item
 
+        sanitized_span_data = span_data
+        did_mutate = False
+
+        for field_name in ("input", "output"):
+            if field_name not in span_data:
+                continue
+            sanitized_field = self._truncate_span_field_value(span_data[field_name])
+            if sanitized_field is span_data[field_name]:
+                continue
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data[field_name] = sanitized_field
+
         if span_data.get("type") != "generation":
-            return payload_item
-
-        usage = span_data.get("usage")
-        if not isinstance(usage, dict):
-            return payload_item
-
-        sanitized_usage = self._sanitize_generation_usage_for_openai_tracing_api(usage)
-
-        if sanitized_usage is None:
-            sanitized_span_data = dict(span_data)
-            sanitized_span_data.pop("usage", None)
+            if not did_mutate:
+                return payload_item
             sanitized_payload_item = dict(payload_item)
             sanitized_payload_item["span_data"] = sanitized_span_data
             return sanitized_payload_item
 
-        if sanitized_usage == usage:
+        usage = span_data.get("usage")
+        if not isinstance(usage, dict):
+            if not did_mutate:
+                return payload_item
+            sanitized_payload_item = dict(payload_item)
+            sanitized_payload_item["span_data"] = sanitized_span_data
+            return sanitized_payload_item
+
+        sanitized_usage = self._sanitize_generation_usage_for_openai_tracing_api(usage)
+
+        if sanitized_usage is None:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data.pop("usage", None)
+        elif sanitized_usage != usage:
+            if not did_mutate:
+                sanitized_span_data = dict(span_data)
+                did_mutate = True
+            sanitized_span_data["usage"] = sanitized_usage
+
+        if not did_mutate:
             return payload_item
 
-        sanitized_span_data = dict(span_data)
-        sanitized_span_data["usage"] = sanitized_usage
         sanitized_payload_item = dict(payload_item)
         sanitized_payload_item["span_data"] = sanitized_span_data
         return sanitized_payload_item
+
+    def _value_json_size_bytes(self, value: Any) -> int:
+        try:
+            serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return self._OPENAI_TRACING_MAX_FIELD_BYTES + 1
+        return len(serialized.encode("utf-8"))
+
+    def _truncate_string_for_json_limit(self, value: str, max_bytes: int) -> str:
+        value_size = self._value_json_size_bytes(value)
+        if value_size <= max_bytes:
+            return value
+
+        suffix = self._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX
+        suffix_size = self._value_json_size_bytes(suffix)
+        if suffix_size > max_bytes:
+            return ""
+        if suffix_size == max_bytes:
+            return suffix
+
+        budget_without_suffix = max_bytes - suffix_size
+        estimated_chars = int(len(value) * budget_without_suffix / max(value_size, 1))
+        estimated_chars = max(0, min(len(value), estimated_chars))
+
+        best = value[:estimated_chars] + suffix
+        best_size = self._value_json_size_bytes(best)
+        while best_size > max_bytes and estimated_chars > 0:
+            overflow_ratio = (best_size - max_bytes) / max(best_size, 1)
+            trim_chars = max(1, int(estimated_chars * overflow_ratio) + 1)
+            estimated_chars = max(0, estimated_chars - trim_chars)
+            best = value[:estimated_chars] + suffix
+            best_size = self._value_json_size_bytes(best)
+
+        return best
+
+    def _truncate_span_field_value(self, value: Any) -> Any:
+        max_bytes = self._OPENAI_TRACING_MAX_FIELD_BYTES
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+
+        sanitized_value = self._sanitize_json_compatible_value(value)
+        if sanitized_value is self._UNSERIALIZABLE:
+            return self._truncated_preview(value)
+
+        return self._truncate_json_value_for_limit(sanitized_value, max_bytes)
+
+    def _truncate_json_value_for_limit(self, value: Any, max_bytes: int) -> Any:
+        if self._value_json_size_bytes(value) <= max_bytes:
+            return value
+
+        if isinstance(value, str):
+            return self._truncate_string_for_json_limit(value, max_bytes)
+
+        if isinstance(value, dict):
+            return self._truncate_mapping_for_json_limit(value, max_bytes)
+
+        if isinstance(value, list):
+            return self._truncate_list_for_json_limit(value, max_bytes)
+
+        return self._truncated_preview(value)
+
+    def _truncate_mapping_for_json_limit(
+        self, value: dict[str, Any], max_bytes: int
+    ) -> dict[str, Any]:
+        truncated = dict(value)
+        current_size = self._value_json_size_bytes(truncated)
+
+        while truncated and current_size > max_bytes:
+            largest_key = max(
+                truncated, key=lambda key: self._value_json_size_bytes(truncated[key])
+            )
+            child = truncated[largest_key]
+            child_size = self._value_json_size_bytes(child)
+            child_budget = max(0, max_bytes - (current_size - child_size))
+            truncated_child = self._truncate_json_value_for_limit(child, child_budget)
+
+            if truncated_child == child:
+                truncated.pop(largest_key)
+            else:
+                truncated[largest_key] = truncated_child
+
+            current_size = self._value_json_size_bytes(truncated)
+
+        return truncated
+
+    def _truncate_list_for_json_limit(self, value: list[Any], max_bytes: int) -> list[Any]:
+        truncated = list(value)
+        current_size = self._value_json_size_bytes(truncated)
+
+        while truncated and current_size > max_bytes:
+            largest_index = max(
+                range(len(truncated)),
+                key=lambda index: self._value_json_size_bytes(truncated[index]),
+            )
+            child = truncated[largest_index]
+            child_size = self._value_json_size_bytes(child)
+            child_budget = max(0, max_bytes - (current_size - child_size))
+            truncated_child = self._truncate_json_value_for_limit(child, child_budget)
+
+            if truncated_child == child:
+                truncated.pop(largest_index)
+            else:
+                truncated[largest_index] = truncated_child
+
+            current_size = self._value_json_size_bytes(truncated)
+
+        return truncated
+
+    def _truncated_preview(self, value: Any) -> dict[str, Any]:
+        type_name = type(value).__name__
+        preview = f"<{type_name} truncated>"
+        if isinstance(value, dict):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            preview = f"<{type_name} len={len(value)} truncated>"
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            preview = f"<{type_name} bytes={len(value)} truncated>"
+
+        return {
+            "truncated": True,
+            "original_type": type_name,
+            "preview": preview,
+        }
 
     def _sanitize_generation_usage_for_openai_tracing_api(
         self, usage: dict[str, Any]
