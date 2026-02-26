@@ -220,13 +220,13 @@ async def test_runner_handles_mcp_upstream_errors_as_tool_output(streaming: bool
     )
 
     if streaming:
-        result = Runner.run_streamed(agent, input="trigger mcp failure")
-        async for _ in result.stream_events():
+        streamed_result = Runner.run_streamed(agent, input="trigger mcp failure")
+        async for _ in streamed_result.stream_events():
             pass
-        final = result.final_output
+        final = streamed_result.final_output
     else:
-        result = await Runner.run(agent, input="trigger mcp failure")
-        final = result.final_output
+        non_streamed_result = await Runner.run(agent, input="trigger mcp failure")
+        final = non_streamed_result.final_output
 
     assert final == "done"
     assert server.tool_calls == ["failing_tool"]
