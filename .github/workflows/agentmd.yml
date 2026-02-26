@@ -1,0 +1,25 @@
+# Validate AGENTS.md with AgentMD (https://agentmd.vercel.app/).
+# Ensures the contributor guide is parseable and agent-ready.
+# If the action fails to load, install the AgentMD GitHub App (free for 3 repos).
+name: AgentMD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Validate AGENTS.md
+        uses: agentmd/agentmd/.github/actions/agentmd@main
+        with:
+          command: validate
+          path: .

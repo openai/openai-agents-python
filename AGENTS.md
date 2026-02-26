@@ -201,6 +201,10 @@ make tests
 - Run `make format`, `make lint`, `make mypy`, and `make tests` before marking work ready.
 - Commit messages should be concise and written in the imperative mood. Small, focused commits are preferred.
 
+### AgentMD
+
+This repository uses [AgentMD](https://agentmd.vercel.app/) to validate `AGENTS.md` in CI. The workflow runs on push and pull requests. To get a readiness score or run locally, use `npx @agentmd/cli init` (optional) or connect the AgentMD GitHub App.
+
 ### Review Process & What Reviewers Look For
 
 - ✅ Checks pass (`make format`, `make lint`, `make mypy`, `make tests`).
