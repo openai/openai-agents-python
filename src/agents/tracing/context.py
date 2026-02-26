@@ -4,7 +4,13 @@ from typing import Any
 
 from .config import TracingConfig
 from .create import get_current_trace, trace
-from .traces import Trace, TraceState, _hash_tracing_api_key, reattach_trace
+from .traces import (
+    Trace,
+    TraceState,
+    _hash_tracing_api_key,
+    _trace_id_was_started,
+    reattach_trace,
+)
 
 
 def _get_tracing_api_key(tracing: TracingConfig | None) -> str | None:
@@ -58,6 +64,7 @@ def create_trace_for_run(
         reattach_resumed_trace
         and not disabled
         and trace_state is not None
+        and _trace_id_was_started(trace_state.trace_id)
         and _trace_state_matches_effective_settings(
             trace_state=trace_state,
             workflow_name=workflow_name,

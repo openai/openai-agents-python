@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import agents.tracing.traces as trace_module
 from agents.tracing import TracingConfig, set_tracing_disabled, trace
 from agents.tracing.context import create_trace_for_run
 from agents.tracing.scope import Scope
@@ -70,7 +71,7 @@ def test_create_trace_for_run_reattaches_matching_started_trace() -> None:
     assert created.trace_id == trace_state.trace_id
 
 
-def test_create_trace_for_run_reattaches_after_trace_state_reload() -> None:
+def test_create_trace_for_run_does_not_reattach_after_trace_state_reload() -> None:
     trace_state = _mark_trace_as_started()
     _clear_started_trace_ids()
 
@@ -85,7 +86,8 @@ def test_create_trace_for_run_reattaches_after_trace_state_reload() -> None:
         reattach_resumed_trace=True,
     )
 
-    assert isinstance(created, ReattachedTrace)
+    assert isinstance(created, TraceImpl)
+    assert not isinstance(created, ReattachedTrace)
 
 
 def test_create_trace_for_run_reattaches_stripped_trace_key_with_matching_resume_key() -> None:
@@ -212,3 +214,16 @@ def test_create_trace_for_run_uses_existing_current_trace() -> None:
         )
 
         assert created is None
+
+
+def test_started_trace_id_cache_is_bounded(monkeypatch) -> None:
+    _clear_started_trace_ids()
+    monkeypatch.setattr(trace_module, "_MAX_STARTED_TRACE_IDS", 2)
+
+    first = _mark_trace_as_started(metadata={"key": "first"})
+    second = _mark_trace_as_started(metadata={"key": "second"})
+    third = _mark_trace_as_started(metadata={"key": "third"})
+
+    assert len(_started_trace_ids) == 2
+    assert list(_started_trace_ids) == [second.trace_id, third.trace_id]
+    assert first.trace_id not in _started_trace_ids

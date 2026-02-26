@@ -4,6 +4,7 @@ import abc
 import contextvars
 import hashlib
 import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -243,7 +244,8 @@ class TraceState:
         return payload
 
 
-_started_trace_ids: set[str] = set()
+_MAX_STARTED_TRACE_IDS = 4096
+_started_trace_ids: OrderedDict[str, None] = OrderedDict()
 _started_trace_ids_lock = threading.Lock()
 
 
@@ -251,7 +253,13 @@ def _mark_trace_id_started(trace_id: str | None) -> None:
     if not trace_id or trace_id == "no-op":
         return
     with _started_trace_ids_lock:
-        _started_trace_ids.add(trace_id)
+        if trace_id in _started_trace_ids:
+            _started_trace_ids.move_to_end(trace_id)
+        else:
+            _started_trace_ids[trace_id] = None
+
+        while len(_started_trace_ids) > _MAX_STARTED_TRACE_IDS:
+            _started_trace_ids.popitem(last=False)
 
 
 def _trace_id_was_started(trace_id: str | None) -> bool:
