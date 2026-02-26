@@ -240,8 +240,9 @@ class MCPUtil:
 
         The ``agent`` parameter is optional for backward compatibility with older
         call sites that used ``MCPUtil.to_function_tool(tool, server, strict)``.
-        When omitted, this helper preserves the historical behavior and leaves
-        ``needs_approval`` disabled.
+        When omitted, this helper preserves the historical behavior for static
+        policies. If the server uses a callable approval policy, approvals default
+        to required to avoid bypassing dynamic checks.
         """
         invoke_func_impl = functools.partial(cls.invoke_mcp_tool, server, tool)
         effective_failure_error_function = server._get_failure_error_function(

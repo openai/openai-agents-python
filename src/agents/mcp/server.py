@@ -236,7 +236,7 @@ class MCPServer(abc.ABC):
 
         if callable(policy):
             if agent is None:
-                return False
+                return True
 
             async def _needs_approval(
                 run_context: RunContextWrapper[Any], _args: dict[str, Any], _call_id: str

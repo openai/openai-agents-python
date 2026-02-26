@@ -323,6 +323,31 @@ async def test_to_function_tool_legacy_call_without_agent_uses_server_policy():
 
 
 @pytest.mark.asyncio
+async def test_to_function_tool_legacy_call_callable_policy_requires_approval():
+    """Legacy to_function_tool calls should default to approval for callable policies."""
+
+    server = FakeMCPServer()
+    server.add_tool("legacy_callable_tool", {})
+
+    def require_approval(
+        _run_context: RunContextWrapper[Any],
+        _agent: Agent,
+        _tool: MCPTool,
+    ) -> bool:
+        return False
+
+    server._needs_approval_policy = require_approval  # type: ignore[assignment]
+
+    function_tool = MCPUtil.to_function_tool(
+        MCPTool(name="legacy_callable_tool", inputSchema={}),
+        server,
+        convert_schemas_to_strict=False,
+    )
+
+    assert function_tool.needs_approval is True
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_failure_error_function_agent_default():
     """Agent-level failure_error_function should handle MCP tool failures."""
 
