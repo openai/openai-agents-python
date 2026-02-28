@@ -205,6 +205,20 @@ class RunResultBase(abc.ABC):
         return original_items + new_items
 
     @property
+    def tool_call_id(self) -> str | None:
+        """The tool call ID associated with this run, when executed as an agent tool.
+
+        In the agent-as-tool pattern, this returns the ``call_id`` of the parent
+        agent's tool invocation that triggered this nested run.  Returns ``None``
+        when the run was not started via :meth:`Agent.as_tool`.
+        """
+        from .tool_context import ToolContext
+
+        if isinstance(self.context_wrapper, ToolContext):
+            return self.context_wrapper.tool_call_id
+        return None
+
+    @property
     def last_response_id(self) -> str | None:
         """Convenience method to get the response ID of the last model response."""
         if not self.raw_responses:

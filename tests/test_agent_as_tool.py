@@ -393,6 +393,77 @@ async def test_agent_as_tool_custom_output_extractor(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_agent_as_tool_extractor_can_access_tool_call_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """custom_output_extractor should be able to access tool_call_id from RunResult."""
+    from agents.result import RunResult, RunResultStreaming
+
+    agent = Agent(name="nested_agent")
+
+    # Build a real RunResult whose context_wrapper is a ToolContext
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="nested_tool",
+        tool_call_id="call_abc_123",
+        tool_arguments="{}",
+    )
+    real_run_result = RunResult(
+        input="hello",
+        new_items=[],
+        raw_responses=[],
+        final_output="done",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=tool_ctx,
+        _last_agent=agent,
+    )
+
+    async def fake_run(
+        cls,
+        starting_agent,
+        input,
+        *,
+        context,
+        max_turns,
+        hooks,
+        run_config,
+        previous_response_id,
+        conversation_id,
+        session,
+    ):
+        return real_run_result
+
+    monkeypatch.setattr(Runner, "run", classmethod(fake_run))
+
+    received_call_id: str | None = None
+
+    async def extractor(result: RunResult | RunResultStreaming) -> str:
+        nonlocal received_call_id
+        received_call_id = result.tool_call_id
+        return "extracted"
+
+    tool = agent.as_tool(
+        tool_name="nested_tool",
+        tool_description="A nested agent tool",
+        custom_output_extractor=extractor,
+    )
+
+    parent_tool_context = ToolContext(
+        context=None,
+        tool_name="nested_tool",
+        tool_call_id="call_abc_123",
+        tool_arguments='{"input": "hello"}',
+    )
+    output = await tool.on_invoke_tool(parent_tool_context, '{"input": "hello"}')
+
+    assert output == "extracted"
+    assert received_call_id == "call_abc_123"
+
+
+@pytest.mark.asyncio
 async def test_agent_as_tool_inherits_parent_run_config_when_not_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

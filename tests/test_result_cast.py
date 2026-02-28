@@ -257,3 +257,35 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
     assert agent_ref() is None
     with pytest.raises(AgentsException):
         _ = streaming_result.last_agent
+
+
+def test_tool_call_id_returns_id_when_context_is_tool_context() -> None:
+    """tool_call_id should return the ToolContext's tool_call_id."""
+    from agents.tool_context import ToolContext
+
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="my_tool",
+        tool_call_id="call_xyz",
+        tool_arguments="{}",
+    )
+    result = RunResult(
+        input="test",
+        new_items=[],
+        raw_responses=[],
+        final_output="ok",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=Agent(name="test"),
+        context_wrapper=tool_ctx,
+        interruptions=[],
+    )
+    assert result.tool_call_id == "call_xyz"
+
+
+def test_tool_call_id_returns_none_when_context_is_plain_wrapper() -> None:
+    """tool_call_id should return None for runs not started via agent-as-tool."""
+    result = create_run_result("ok")
+    assert result.tool_call_id is None
