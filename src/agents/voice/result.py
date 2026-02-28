@@ -53,9 +53,9 @@ class StreamedAudioResult:
         self._turn_text_buffer = ""
         self._queue: asyncio.Queue[VoiceStreamEvent] = asyncio.Queue()
         self._tasks: list[asyncio.Task[Any]] = []
-        self._ordered_tasks: deque[
-            asyncio.Queue[VoiceStreamEvent | None]
-        ] = deque()  # New: deque to hold local queues for each text segment
+        self._ordered_tasks: deque[asyncio.Queue[VoiceStreamEvent | None]] = (
+            deque()
+        )  # New: deque to hold local queues for each text segment
         self._dispatcher_task: asyncio.Task[Any] | None = (
             None  # Task to dispatch audio chunks in order
         )
