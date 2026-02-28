@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
@@ -2089,10 +2090,10 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
         Dictionary mapping agent names to agent instances.
     """
     agent_map: dict[str, Agent[Any]] = {}
-    queue = [initial_agent]
+    queue: deque[Agent[Any]] = deque([initial_agent])
 
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         if current.name in agent_map:
             continue
         agent_map[current.name] = current
