@@ -745,6 +745,8 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     logger.error(f"Error cleaning up server: {e}")
             finally:
                 self.session = None
+                self.exit_stack = AsyncExitStack()
+                self.server_initialize_result = None
 
 
 class MCPServerStdioParams(TypedDict):
