@@ -339,6 +339,7 @@ async with MCPServerStdio(
 ## 5. MCP server manager
 
 When you have multiple MCP servers, use `MCPServerManager` to connect them up front and expose the connected subset to your agents.
+See the [MCPServerManager API reference](ref/mcp/manager.md) for constructor options and reconnect behavior.
 
 ```python
 from agents import Agent, Runner

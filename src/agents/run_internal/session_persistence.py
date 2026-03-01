@@ -59,9 +59,19 @@ async def prepare_input_with_session(
     include_history_in_prepared_input: bool = True,
     preserve_dropped_new_items: bool = False,
 ) -> tuple[str | list[TResponseInputItem], list[TResponseInputItem]]:
-    """
-    Prepare input by combining it with session history and applying the optional input callback.
-    Returns the prepared input plus the appended items that should be persisted separately.
+    """Prepare model input from session history plus the new turn input.
+
+    Returns a tuple of:
+
+    1. The prepared input that should be sent to the model after normalization and dedupe.
+    2. The subset of items that should be appended to the session store for this turn.
+
+    The second value is intentionally not "everything returned by the callback". When a
+    ``session_input_callback`` reorders or filters history, we still need to persist only the
+    items that belong to the new turn. This function therefore compares the callback output
+    against deep-copied history and new-input lists, first by object identity and then by
+    content frequency, so retries and custom merge strategies do not accidentally re-persist
+    old history as fresh input.
     """
 
     if session is None:
@@ -102,6 +112,9 @@ async def prepare_input_with_session(
         if not isinstance(combined, list):
             raise UserError("Session input callback must return a list of input items.")
 
+        # The callback may reorder, drop, or duplicate items. Keep separate reference maps for
+        # the copied history and copied new-input lists so we can reconstruct which output items
+        # belong to the new turn and therefore still need to be persisted.
         history_refs = _build_reference_map(history_for_callback)
         new_refs = _build_reference_map(new_items_for_callback)
         history_counts = _build_frequency_map(history_for_callback)
@@ -135,6 +148,8 @@ async def prepare_input_with_session(
         else:
             prepared_items_raw = new_items_for_callback if preserve_dropped_new_items else []
 
+    # Normalize exactly as the runtime does elsewhere so the prepared model input and the
+    # persisted session items are derived from the same item shape and dedupe rules.
     prepared_as_inputs = [ensure_input_item_format(item) for item in prepared_items_raw]
     filtered = drop_orphan_function_calls(prepared_as_inputs)
     normalized = normalize_input_items_for_api(filtered)

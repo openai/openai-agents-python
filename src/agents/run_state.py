@@ -117,7 +117,19 @@ _MISSING_CONTEXT_SENTINEL = object()
 
 @dataclass
 class RunState(Generic[TContext, TAgent]):
-    """Serializable snapshot of an agent run, including context, usage, and interruptions."""
+    """Serializable snapshot of an agent run, including context, usage, and interruptions.
+
+    ``RunState`` is the durable pause/resume boundary for human-in-the-loop flows. It stores
+    enough information to continue an interrupted run, including model responses, generated
+    items, approval state, and optional server-managed conversation identifiers.
+
+    Context serialization is intentionally conservative:
+
+    - Mapping contexts round-trip directly.
+    - Custom contexts may require a serializer and deserializer.
+    - When no safe serializer is available, the snapshot is still written but emits warnings and
+      records metadata describing what is required to rebuild the original context type.
+    """
 
     _current_turn: int = 0
     """Current turn number in the conversation."""
@@ -297,7 +309,13 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-        """Validate and serialize the stored run context."""
+        """Validate and serialize the stored run context.
+
+        The returned metadata captures how the context was serialized so restore-time code can
+        decide whether a deserializer or override is required. This lets RunState remain durable
+        for simple mapping contexts without silently pretending that richer custom objects can be
+        reconstructed automatically.
+        """
         if self._context is None:
             return None, _build_context_meta(
                 None,
@@ -1906,7 +1924,18 @@ async def _build_run_state_from_json(
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
 ) -> RunState[Any, Agent[Any]]:
-    """Shared helper to rebuild RunState from JSON payload."""
+    """Shared helper to rebuild RunState from JSON payload.
+
+    Context restoration follows this precedence order:
+
+    1. ``context_override`` when supplied.
+    2. ``context_deserializer`` applied to serialized mapping data.
+    3. Direct mapping restore for contexts that were serialized as plain mappings.
+
+    When the snapshot metadata indicates that the original context type could not round-trip
+    safely, this function warns or raises (in ``strict_context`` mode) rather than silently
+    claiming that the rebuilt mapping is equivalent to the original object.
+    """
     schema_version = state_json.get("$schemaVersion")
     if not schema_version:
         raise UserError("Run state is missing schema version")
