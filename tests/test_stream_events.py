@@ -38,7 +38,7 @@ def get_reasoning_item() -> ResponseReasoningItem:
 
 @function_tool
 async def foo() -> str:
-    await asyncio.sleep(3)
+    await asyncio.sleep(0)
     return "success!"
 
 

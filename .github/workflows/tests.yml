@@ -92,8 +92,11 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: make sync
       - name: Run tests with coverage
-        if: steps.changes.outputs.run == 'true'
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.12'
         run: make coverage
+      - name: Run tests
+        if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.12'
+        run: make tests
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."

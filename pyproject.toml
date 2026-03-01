@@ -50,6 +50,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-mock>=3.14.0",
+    "pytest-xdist",
     "rich>=13.1.0, <14",
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.6.0",
@@ -145,6 +146,7 @@ filterwarnings = [
 ]
 markers = [
     "allow_call_model_methods: mark test as allowing calls to real model implementations",
+    "serial: mark test as requiring serial execution",
 ]
 
 [tool.inline-snapshot]

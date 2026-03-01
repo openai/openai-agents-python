@@ -6,8 +6,8 @@ from agents.models import _openai_shared
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.run import set_default_agent_runner
-from agents.tracing import set_trace_processors
-from agents.tracing.setup import get_trace_provider
+from agents.tracing.provider import DefaultTraceProvider
+from agents.tracing.setup import set_trace_provider
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
@@ -15,7 +15,11 @@ from .testing_processor import SPAN_PROCESSOR_TESTING
 # This fixture will run once before any tests are executed
 @pytest.fixture(scope="session", autouse=True)
 def setup_span_processor():
-    set_trace_processors([SPAN_PROCESSOR_TESTING])
+    provider = DefaultTraceProvider()
+    provider.set_processors([SPAN_PROCESSOR_TESTING])
+    set_trace_provider(provider)
+    yield
+    provider.shutdown()
 
 
 # Ensure a default OpenAI API key is present for tests that construct clients
@@ -49,13 +53,6 @@ def clear_openai_settings():
 @pytest.fixture(autouse=True)
 def clear_default_runner():
     set_default_agent_runner(None)
-
-
-# This fixture will run after all tests end
-@pytest.fixture(autouse=True, scope="session")
-def shutdown_trace_provider():
-    yield
-    get_trace_provider().shutdown()
 
 
 @pytest.fixture(autouse=True)

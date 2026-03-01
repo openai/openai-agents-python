@@ -1007,13 +1007,14 @@ class TestTransportIntegration:
     async def test_connect_to_local_server(self):
         """Test connecting to a real local server with transport config."""
         received_messages = []
-        import asyncio
+        session_update_received = asyncio.Event()
 
         async def handler(websocket):
             try:
                 # Use async iteration for compatibility with newer websockets
                 async for message in websocket:
                     received_messages.append(json.loads(message))
+                    session_update_received.set()
                     # Respond to session update
                     # We need to provide a minimally valid session object
                     response = {
@@ -1069,9 +1070,7 @@ class TestTransportIntegration:
 
             await model.connect(config)
 
-            # Wait briefly for the connection logic to send session.update
-            # In a real scenario we'd wait for an event, but here we just sleep briefly
-            await asyncio.sleep(0.2)
+            await asyncio.wait_for(session_update_received.wait(), timeout=1.0)
 
             # Verify we are connected
             assert model._websocket is not None
@@ -1118,7 +1117,7 @@ class TestTransportIntegration:
             await model.connect(config)
 
             # Wait for multiple ping/pong cycles
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
 
             # Connection should still be open
             assert model._websocket is not None
@@ -1323,7 +1322,7 @@ class TestTransportIntegration:
         import hashlib
 
         # Server handshake delay threshold (in seconds)
-        SERVER_HANDSHAKE_DELAY = 0.3
+        SERVER_HANDSHAKE_DELAY = 0.05
 
         shutdown_event = asyncio.Event()
         connections_attempted = []
@@ -1369,8 +1368,11 @@ class TestTransportIntegration:
                 writer.write(response.encode())
                 await writer.drain()
 
-                # Keep connection open until shutdown
+                # Keep connection open until shutdown, then send a close frame so
+                # the client can complete close() without waiting for a timeout.
                 await shutdown_event.wait()
+                writer.write(b"\x88\x00")
+                await writer.drain()
 
             except asyncio.TimeoutError:
                 pass
@@ -1387,7 +1389,7 @@ class TestTransportIntegration:
             # Test 1: FAILURE - Client timeout < server delay
             # Client gives up before server completes handshake
             transport_fail: TransportConfig = {
-                "handshake_timeout": 0.1,  # 100ms < 300ms server delay → will timeout
+                "handshake_timeout": 0.01,
             }
             model_fail = OpenAIRealtimeWebSocketModel(transport_config=transport_fail)
             config_fail: RealtimeModelConfig = {
@@ -1405,7 +1407,7 @@ class TestTransportIntegration:
             # Test 2: SUCCESS - Client timeout > server delay
             # Client waits long enough for server to complete handshake
             transport_success: TransportConfig = {
-                "handshake_timeout": 1.0,  # 1000ms > 300ms server delay → will succeed
+                "handshake_timeout": 0.2,
             }
             model_success = OpenAIRealtimeWebSocketModel(transport_config=transport_success)
             config_success: RealtimeModelConfig = {
@@ -1420,6 +1422,7 @@ class TestTransportIntegration:
             assert model_success._websocket is not None
             assert model_success._websocket.close_code is None
 
+            shutdown_event.set()
             await model_success.close()
 
         finally:
@@ -1459,7 +1462,7 @@ class TestTransportIntegration:
                 await model.connect(config)
 
                 # Let it run for a bit
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
 
                 end = asyncio.get_event_loop().time()
                 connection_durations[label] = end - start
