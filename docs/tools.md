@@ -3,7 +3,7 @@
 Tools let agents take actions: things like fetching data, running code, calling external APIs, and even using a computer. The SDK supports five categories:
 
 -   Hosted OpenAI tools: run alongside the model on OpenAI servers.
--   Local runtime tools: run in your environment (computer use, shell, apply patch).
+-   Local/runtime execution tools: `ComputerTool` and `ApplyPatchTool` always run in your environment, while `ShellTool` can run locally or in a hosted container.
 -   Function calling: wrap any Python function as a tool.
 -   Agents as tools: expose an agent as a callable tool without a full handoff.
 -   Experimental: Codex tool: run workspace-scoped Codex tasks from a tool call.
@@ -105,7 +105,11 @@ What to know:
 
 ## Local runtime tools
 
-Local runtime tools execute in your environment and require you to supply implementations:
+Local runtime tools execute outside the model response itself. The model still decides when to call them, but your application or configured execution environment performs the actual work.
+
+`ComputerTool` and `ApplyPatchTool` always require local implementations that you provide. `ShellTool` spans both modes: use the hosted-container configuration above when you want managed execution, or the local runtime configuration below when you want commands to run in your own process.
+
+Local runtime tools require you to supply implementations:
 
 -   [`ComputerTool`][agents.tool.ComputerTool]: implement the [`Computer`][agents.computer.Computer] or [`AsyncComputer`][agents.computer.AsyncComputer] interface to enable GUI/browser automation.
 -   [`ShellTool`][agents.tool.ShellTool]: the latest shell tool for both local execution and hosted container execution.

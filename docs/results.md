@@ -7,6 +7,20 @@ When you call the `Runner.run` methods, you either get a:
 
 Both of these inherit from [`RunResultBase`][agents.result.RunResultBase], which is where most useful information is present.
 
+## Which result property should I use?
+
+Most applications only need a few result properties or helpers:
+
+| Property or helper | Use it when you need... |
+| --- | --- |
+| `final_output` | The final answer to show the user. |
+| `to_input_list()` | A full next-turn input list when you are manually carrying conversation history yourself. |
+| `new_items` | Rich run items with agent, tool, and handoff metadata for logs, UIs, or audits. |
+| `last_agent` | The agent that should usually handle the next turn. |
+| `last_response_id` | Continuation with `previous_response_id` on the next OpenAI Responses turn. |
+| `interruptions` | Pending tool approvals you must resolve before resuming. |
+| `to_state()` | A serializable snapshot for pause/resume or durable job workflows. |
+
 ## Final output
 
 The [`final_output`][agents.result.RunResultBase.final_output] property contains the final output of the last agent that ran. This is either:
@@ -22,9 +36,17 @@ The [`final_output`][agents.result.RunResultBase.final_output] property contains
 
 You can use [`result.to_input_list()`][agents.result.RunResultBase.to_input_list] to turn the result into an input list that concatenates the original input you provided, to the items generated during the agent run. This makes it convenient to take the outputs of one agent run and pass them into another run, or to run it in a loop and append new user inputs each time.
 
+In practice:
+
+-   Use `result.to_input_list()` when your application manually carries the entire conversation transcript.
+-   Use [`session=...`](sessions/index.md) when you want the SDK to load and save history for you.
+-   If you are using OpenAI server-managed state with `conversation_id` or `previous_response_id`, usually pass only the new user input and reuse the stored ID instead of resending `result.to_input_list()`.
+
 ## Last agent
 
 The [`last_agent`][agents.result.RunResultBase.last_agent] property contains the last agent that ran. Depending on your application, this is often useful for the next time the user inputs something. For example, if you have a frontline triage agent that hands off to a language-specific agent, you can store the last agent, and re-use it the next time the user messages the agent.
+
+In streaming mode, [`RunResultStreaming.current_agent`][agents.result.RunResultStreaming.current_agent] updates as the run progresses, so you can observe handoffs as they happen.
 
 ## New items
 
@@ -36,6 +58,10 @@ The [`new_items`][agents.result.RunResultBase.new_items] property contains the n
 -   [`ToolCallItem`][agents.items.ToolCallItem] indicates that the LLM invoked a tool.
 -   [`ToolCallOutputItem`][agents.items.ToolCallOutputItem] indicates that a tool was called. The raw item is the tool response. You can also access the tool output from the item.
 -   [`ReasoningItem`][agents.items.ReasoningItem] indicates a reasoning item from the LLM. The raw item is the reasoning generated.
+
+## Run state
+
+Call [`result.to_state()`][agents.result.RunResult.to_state] when you need a serializable snapshot of the run. This is the bridge between a finished or paused run and a later resume, especially for approval flows or durable worker systems.
 
 ## Other information
 
@@ -83,5 +109,5 @@ approval workflows, see the [human-in-the-loop guide](human_in_the_loop.md).
 `RunResultBase` includes a few helper methods/properties that are useful in production flows:
 
 - [`final_output_as(...)`][agents.result.RunResultBase.final_output_as] casts final output to a specific type (optionally with runtime type checking).
-- [`last_response_id`][agents.result.RunResultBase.last_response_id] returns the latest model response ID, useful for response chaining.
+- [`last_response_id`][agents.result.RunResultBase.last_response_id] returns the latest model response ID. Pass this back as `previous_response_id` when you want to continue an OpenAI Responses API chain on the next turn.
 - [`release_agents(...)`][agents.result.RunResultBase.release_agents] drops strong references to agents when you want to reduce memory pressure after inspecting results.

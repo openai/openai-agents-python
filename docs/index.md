@@ -54,3 +54,9 @@ print(result.final_output)
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
+
+## Start here
+
+-   Build your first text-based agent with the [Quickstart](quickstart.md).
+-   Build a low-latency voice agent with the [Realtime agents quickstart](realtime/quickstart.md).
+-   If you want a speech-to-text / agent / text-to-speech pipeline instead, see the [Voice pipeline quickstart](voice/quickstart.md).

@@ -4,6 +4,8 @@ The Agents SDK provides built-in session memory to automatically maintain conver
 
 Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
+Use sessions when you want the SDK to manage client-side memory for you. If you are already using OpenAI server-managed state with `conversation_id` or `previous_response_id`, you usually do not also need a session for the same conversation.
+
 ## Quick start
 
 ```python
@@ -41,6 +43,20 @@ result = Runner.run_sync(
     session=session
 )
 print(result.final_output)  # "Approximately 39 million"
+```
+
+## Resuming interrupted runs with the same session
+
+If a run pauses for approval, resume it with the same session instance (or another session instance that points at the same backing store) so the resumed turn continues the same stored conversation history.
+
+```python
+result = await Runner.run(agent, "Delete temporary files that are no longer needed.", session=session)
+
+if result.interruptions:
+    state = result.to_state()
+    for interruption in result.interruptions:
+        state.approve(interruption)
+    result = await Runner.run(agent, state, session=session)
 ```
 
 ## Core session behavior
@@ -233,7 +249,7 @@ print(result.final_output)  # "California"
 
 ### OpenAI Responses compaction sessions
 
-Use `OpenAIResponsesCompactionSession` to compact session history with the Responses API (`responses.compact`). It wraps an underlying session and can automatically compact after each turn based on `should_trigger_compaction`.
+Use `OpenAIResponsesCompactionSession` to compact stored conversation history with the Responses API (`responses.compact`). It wraps an underlying session and can automatically compact after each turn based on `should_trigger_compaction`. Do not wrap `OpenAIConversationsSession` with it; those two features manage history in different ways.
 
 #### Typical usage (auto-compaction)
 
@@ -253,6 +269,8 @@ print(result.final_output)
 ```
 
 By default, compaction runs after each turn once the candidate threshold is reached.
+
+`compaction_mode="previous_response_id"` works best when you are already chaining turns with Responses API response IDs. `compaction_mode="input"` rebuilds the compaction request from the current session items instead, which is useful when the response chain is unavailable or you want the session contents to be the source of truth. The default `"auto"` chooses the safest available option.
 
 #### auto-compaction can block streaming
 

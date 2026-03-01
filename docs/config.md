@@ -1,5 +1,13 @@
 # Configuring the SDK
 
+This page covers SDK-wide defaults that you usually set once during application startup, such as the default OpenAI key or client, the default OpenAI API shape, tracing export defaults, and logging behavior.
+
+If you need to configure a specific agent or run instead, start with:
+
+-   [Running agents](running_agents.md) for `RunConfig`, sessions, and conversation-state options.
+-   [Models](models/index.md) for model selection and provider configuration.
+-   [Tracing](tracing.md) for per-run tracing metadata and custom trace processors.
+
 ## API keys and clients
 
 By default, the SDK uses the `OPENAI_API_KEY` environment variable for LLM requests and tracing. The key is resolved when the SDK first creates an OpenAI client (lazy initialization), so set the environment variable before your first model call. If you are unable to set that environment variable before your app starts, you can use the [set_default_openai_key()][agents.set_default_openai_key] function to set the key.
@@ -30,7 +38,7 @@ set_default_openai_api("chat_completions")
 
 ## Tracing
 
-Tracing is enabled by default. It uses the OpenAI API keys from the section above by default (i.e. the environment variable or the default key you set). You can specifically set the API key used for tracing by using the [`set_tracing_export_api_key`][agents.set_tracing_export_api_key] function.
+Tracing is enabled by default. By default it uses the same OpenAI API key as your model requests from the section above (that is, the environment variable or the default key you set). You can specifically set the API key used for tracing by using the [`set_tracing_export_api_key`][agents.set_tracing_export_api_key] function.
 
 ```python
 from agents import set_tracing_export_api_key

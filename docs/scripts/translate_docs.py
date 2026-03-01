@@ -64,6 +64,8 @@ do_not_translate = [
 eng_to_non_eng_mapping = {
     "ja": {
         "agents": "エージェント",
+        "agent orchestration": "エージェントオーケストレーション",
+        "orchestrating multiple agents": "エージェントオーケストレーション",
         "computer use": "コンピュータ操作",
         "OAI hosted tools": "OpenAI がホストするツール",
         "well formed data": "適切な形式のデータ",
@@ -88,11 +90,12 @@ eng_to_non_eng_mapping = {
     },
     "ko": {
         "agents": "에이전트",
+        "agent orchestration": "에이전트 오케스트레이션",
         "computer use": "컴퓨터 사용",
         "OAI hosted tools": "OpenAI 호스트하는 도구",
         "well formed data": "적절한 형식의 데이터",
         "guardrail": "가드레일",
-        "orchestrating multiple agents": "멀티 에이전트 오케스트레이션",
+        "orchestrating multiple agents": "에이전트 오케스트레이션",
         "handoffs": "핸드오프",
         "function tools": "함수 도구",
         "function calling": "함수 호출",
@@ -122,6 +125,8 @@ eng_to_non_eng_mapping = {
     },
     "zh": {
         "agents": "智能体",
+        "agent orchestration": "智能体编排",
+        "orchestrating multiple agents": "智能体编排",
         "computer use": "计算机操作",
         "OAI hosted tools": "由OpenAI托管的工具",
         "well formed data": "格式良好的数据",

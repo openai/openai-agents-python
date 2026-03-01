@@ -4,6 +4,8 @@ Streaming lets you subscribe to updates of the agent run as it proceeds. This ca
 
 To stream, you can call [`Runner.run_streamed()`][agents.run.Runner.run_streamed], which will give you a [`RunResultStreaming`][agents.result.RunResultStreaming]. Calling `result.stream_events()` gives you an async stream of [`StreamEvent`][agents.stream_events.StreamEvent] objects, which are described below.
 
+Keep consuming `result.stream_events()` until the async iterator finishes. A streaming run is not complete until the iterator ends, and post-processing such as session persistence, approval bookkeeping, or history compaction can finish after the last visible token arrives. When the loop exits, `result.is_complete` reflects the final run state.
+
 ## Raw response events
 
 [`RawResponsesStreamEvent`][agents.stream_events.RawResponsesStreamEvent] are raw events passed directly from the LLM. They are in OpenAI Responses API format, which means each event has a type (like `response.created`, `response.output_text.delta`, etc) and data. These events are useful if you want to stream response messages to the user as soon as they are generated.
@@ -30,6 +32,26 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+## Streaming and approvals
+
+Streaming is compatible with runs that pause for tool approval. If a tool requires approval, `result.stream_events()` finishes and pending approvals are exposed in [`RunResultStreaming.interruptions`][agents.result.RunResultStreaming.interruptions]. Convert the result to a [`RunState`][agents.run_state.RunState] with `result.to_state()`, approve or reject the interruption, and then resume with `Runner.run_streamed(...)`.
+
+```python
+result = Runner.run_streamed(agent, "Delete temporary files if they are no longer needed.")
+async for _event in result.stream_events():
+    pass
+
+if result.interruptions:
+    state = result.to_state()
+    for interruption in result.interruptions:
+        state.approve(interruption)
+    result = Runner.run_streamed(agent, state)
+    async for _event in result.stream_events():
+        pass
+```
+
+For a full pause/resume walkthrough, see the [human-in-the-loop guide](human_in_the_loop.md).
 
 ## Run item events and agent events
 
