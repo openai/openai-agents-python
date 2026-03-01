@@ -873,8 +873,12 @@ async def execute_function_tool_calls(
                     )
 
                     if approval_status is None:
+                        tool_origin = _get_tool_origin_info(func_tool)
                         approval_item = ToolApprovalItem(
-                            agent=agent, raw_item=tool_call, tool_name=func_tool.name
+                            agent=agent,
+                            raw_item=tool_call,
+                            tool_name=func_tool.name,
+                            tool_origin=tool_origin,
                         )
                         return FunctionToolResult(
                             tool=func_tool, output=None, run_item=approval_item

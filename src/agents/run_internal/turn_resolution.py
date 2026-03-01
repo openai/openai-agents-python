@@ -982,7 +982,12 @@ async def resolve_interrupted_turn(
         output_exists_checker=_function_output_exists,
         record_rejection=_record_function_rejection,
         pending_interruption_adder=_add_pending_interruption,
-        pending_item_builder=lambda run: ToolApprovalItem(agent=agent, raw_item=run.tool_call),
+        pending_item_builder=lambda run: ToolApprovalItem(
+            agent=agent,
+            raw_item=run.tool_call,
+            tool_name=run.function_tool.name,
+            tool_origin=_get_tool_origin_info(run.function_tool),
+        ),
     )
 
     rebuilt_function_tool_runs = await _rebuild_function_runs_from_approvals()

@@ -394,7 +394,16 @@ class ToolApprovalItem(RunItemBase[Any]):
     tool_name: str | None = None
     """Tool name for approval tracking; falls back to raw_item.name when absent."""
 
+    tool_origin: ToolOrigin | None = field(default=None, repr=False)
+    """Information about the origin/source of the tool. Only set for FunctionTool calls."""
+
     type: Literal["tool_approval_item"] = "tool_approval_item"
+
+    def release_agent(self) -> None:
+        """Release agent references including tool_origin.agent_as_tool."""
+        super().release_agent()
+        if self.tool_origin is not None:
+            self.tool_origin.release_agent()
 
     def __post_init__(self) -> None:
         """Populate tool_name from the raw item if not provided."""

@@ -901,7 +901,7 @@ class TestBuildAgentMap:
         agent_a.handoffs = [agent_b]
         agent_b.handoffs = [agent_a]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert agent_map.get("AgentA") is not None
         assert agent_map.get("AgentB") is not None
@@ -921,7 +921,7 @@ class TestBuildAgentMap:
         agent_b.handoffs = [agent_d]
         agent_c.handoffs = [agent_d]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert len(agent_map) == 4
         assert all(agent_map.get(name) is not None for name in ["A", "B", "C", "D"])
@@ -932,7 +932,7 @@ class TestBuildAgentMap:
         agent_b = Agent(name="AgentB")
         agent_a.handoffs = [handoff(agent_b)]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
 
@@ -950,7 +950,7 @@ class TestBuildAgentMap:
 
         agent_a.handoffs = [LegacyHandoff(agent_b)]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
 
@@ -965,7 +965,7 @@ class TestBuildAgentMap:
 
         agent_a.handoffs = [LegacyWrapper(agent_b)]  # type: ignore[list-item]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert sorted(agent_map.keys()) == ["AgentA", "AgentB"]
 
@@ -986,7 +986,7 @@ class TestBuildAgentMap:
         )
         agent_a.handoffs = [detached_handoff]
 
-        agent_map = _build_agent_map(agent_a)
+        agent_map, _ = _build_agent_map(agent_a)
 
         assert sorted(agent_map.keys()) == ["AgentA"]
 
@@ -2965,7 +2965,7 @@ class TestRunStateSerializationEdgeCases:
 
         # This should trigger line 759 (all_tools = [])
         result = await _deserialize_processed_response(
-            processed_response_data, agent_no_tools, context, {}
+            processed_response_data, agent_no_tools, context, {}, []
         )
         assert result is not None
 
@@ -3002,8 +3002,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger lines 778-782 and 787-796
+        agent_map = {"AgentA": agent_a, "AgentB": agent_b}
         result = await _deserialize_processed_response(
-            processed_response_data, agent_a, context, {"AgentA": agent_a, "AgentB": agent_b}
+            processed_response_data, agent_a, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         assert len(result.handoffs) == 1
@@ -3047,8 +3048,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger lines 801-808
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         assert len(result.functions) == 1
@@ -3124,8 +3126,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger lines 815-824
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         assert len(result.computer_actions) == 1
@@ -3165,8 +3168,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger the ValidationError path (lines 1299-1302)
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         # Should fall back to using tool_call_data directly when validation fails
@@ -3218,8 +3222,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger the Exception path (lines 1314-1317)
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         # Should fall back to using tool_call_data directly when deserialization fails
@@ -3260,8 +3265,9 @@ class TestRunStateSerializationEdgeCases:
             "interruptions": [],
         }
 
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
 
         assert len(result.local_shell_calls) == 1
@@ -3310,8 +3316,9 @@ class TestRunStateSerializationEdgeCases:
         }
 
         # This should trigger lines 831-852
+        agent_map = {"TestAgent": agent}
         result = await _deserialize_processed_response(
-            processed_response_data, agent, context, {"TestAgent": agent}
+            processed_response_data, agent, context, agent_map, list(agent_map.values())
         )
         assert result is not None
         # The MCP approval request might not be deserialized if MockMCPTool isn't a HostedMCPTool,
@@ -3635,6 +3642,7 @@ class TestRunStateSerializationEdgeCases:
             agent,  # type: ignore[arg-type]
             context,
             {},
+            [],
         )
         assert result is not None
 
@@ -3666,7 +3674,9 @@ class TestRunStateSerializationEdgeCases:
             ],
         }
 
-        result = await _deserialize_processed_response(processed_response_data, agent, context, {})
+        result = await _deserialize_processed_response(
+            processed_response_data, agent, context, {}, []
+        )
         # Should skip the empty mcp_tool_data and not add it to mcp_approval_requests
         assert len(result.mcp_approval_requests) == 0
 

@@ -429,7 +429,14 @@ class RealtimeSession(RealtimeModelListener):
             "call_id": tool_call.call_id,
             "arguments": tool_call.arguments,
         }
-        return ToolApprovalItem(agent=cast(Any, agent), raw_item=raw_item, tool_name=tool.name)
+        from ..tool import _get_tool_origin_info
+
+        return ToolApprovalItem(
+            agent=cast(Any, agent),
+            raw_item=raw_item,
+            tool_name=tool.name,
+            tool_origin=_get_tool_origin_info(tool),
+        )
 
     async def _maybe_request_tool_approval(
         self,

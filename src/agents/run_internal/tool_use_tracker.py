@@ -85,7 +85,7 @@ def hydrate_tool_use_tracker(
     if not snapshot:
         return
 
-    agent_map = _build_agent_map(starting_agent)
+    agent_map, _ = _build_agent_map(starting_agent)
     for agent_name, tool_names in snapshot.items():
         agent = agent_map.get(agent_name)
         if agent is None:

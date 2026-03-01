@@ -209,11 +209,13 @@ class RunState(Generic[TContext, TAgent]):
         conversation_id: str | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
+        root_agent: TAgent | None = None,
     ):
         """Initialize a new RunState."""
         self._context = context
         self._original_input = _clone_original_input(original_input)
         self._current_agent = starting_agent
+        self._starting_agent = root_agent if root_agent is not None else starting_agent
         self._max_turns = max_turns
         self._conversation_id = conversation_id
         self._previous_response_id = previous_response_id
@@ -532,6 +534,8 @@ class RunState(Generic[TContext, TAgent]):
         if self._context is None:
             raise UserError("Cannot serialize RunState: No context")
 
+        _, agent_list = _build_agent_map(self._starting_agent)
+
         approvals_dict = self._serialize_approvals()
         model_responses = self._serialize_model_responses()
         original_input_serialized = self._serialize_original_input()
@@ -578,13 +582,18 @@ class RunState(Generic[TContext, TAgent]):
         }
 
         generated_items = self._merge_generated_items_with_processed()
-        result["generated_items"] = [self._serialize_item(item) for item in generated_items]
-        result["session_items"] = [self._serialize_item(item) for item in list(self._session_items)]
-        result["current_step"] = self._serialize_current_step()
+        result["generated_items"] = [
+            self._serialize_item(item, agent_list) for item in generated_items
+        ]
+        result["session_items"] = [
+            self._serialize_item(item, agent_list) for item in list(self._session_items)
+        ]
+        result["current_step"] = self._serialize_current_step(agent_list)
         result["last_model_response"] = _serialize_last_model_response(model_responses)
         result["last_processed_response"] = (
             self._serialize_processed_response(
                 self._last_processed_response,
+                agent_list,
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
@@ -602,6 +611,7 @@ class RunState(Generic[TContext, TAgent]):
     def _serialize_processed_response(
         self,
         processed_response: ProcessedResponse,
+        agent_list: list[Any],
         *,
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
@@ -611,6 +621,7 @@ class RunState(Generic[TContext, TAgent]):
 
         Args:
             processed_response: The ProcessedResponse to serialize.
+            agent_list: List of agents in traversal order for tool_origin serialization.
 
         Returns:
             A dictionary representation of the ProcessedResponse.
@@ -628,19 +639,25 @@ class RunState(Generic[TContext, TAgent]):
         )
 
         interruptions_data = [
-            _serialize_tool_approval_interruption(interruption, include_tool_name=True)
+            _serialize_tool_approval_interruption(
+                interruption,
+                include_tool_name=True,
+                agent_list=agent_list,
+            )
             for interruption in processed_response.interruptions
             if isinstance(interruption, ToolApprovalItem)
         ]
 
         return {
-            "new_items": [self._serialize_item(item) for item in processed_response.new_items],
+            "new_items": [
+                self._serialize_item(item, agent_list) for item in processed_response.new_items
+            ],
             "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
         }
 
-    def _serialize_current_step(self) -> dict[str, Any] | None:
+    def _serialize_current_step(self, agent_list: list[Any] | None = None) -> dict[str, Any] | None:
         """Serialize the current step if it's an interruption."""
         # Import at runtime to avoid circular import
         from .run_internal.run_steps import NextStepInterruption
@@ -650,7 +667,9 @@ class RunState(Generic[TContext, TAgent]):
 
         interruptions_data = [
             _serialize_tool_approval_interruption(
-                item, include_tool_name=item.tool_name is not None
+                item,
+                include_tool_name=item.tool_name is not None,
+                agent_list=agent_list,
             )
             for item in self._current_step.interruptions
             if isinstance(item, ToolApprovalItem)
@@ -663,7 +682,7 @@ class RunState(Generic[TContext, TAgent]):
             },
         }
 
-    def _serialize_item(self, item: RunItem) -> dict[str, Any]:
+    def _serialize_item(self, item: RunItem, agent_list: list[Any] | None = None) -> dict[str, Any]:
         """Serialize a run item to JSON-compatible dict."""
         raw_item_dict: Any = _serialize_raw_item_value(item.raw_item)
 
@@ -694,12 +713,9 @@ class RunState(Generic[TContext, TAgent]):
         if hasattr(item, "description") and item.description is not None:
             result["description"] = item.description
         if hasattr(item, "tool_origin") and item.tool_origin is not None:
-            tool_origin_data: dict[str, Any] = {"type": item.tool_origin.type.value}
-            if item.tool_origin.agent_as_tool is not None:
-                tool_origin_data["agent_as_tool"] = {"name": item.tool_origin.agent_as_tool.name}
-            if item.tool_origin.mcp_server is not None:
-                tool_origin_data["mcp_server"] = {"name": item.tool_origin.mcp_server.name}
-            result["tool_origin"] = tool_origin_data
+            tool_origin_data = _serialize_tool_origin(item.tool_origin, agent_list)
+            if tool_origin_data:
+                result["tool_origin"] = tool_origin_data
 
         return result
 
@@ -1120,8 +1136,33 @@ def _serialize_mcp_tool(mcp_tool: Any) -> dict[str, Any]:
     return {"value": normalized}
 
 
+def _serialize_tool_origin(
+    tool_origin: ToolOrigin, agent_list: list[Any] | None = None
+) -> dict[str, Any] | None:
+    """Serialize ToolOrigin to JSON. Uses agent_index when agent_list provided."""
+    if tool_origin is None:
+        return None
+    result: dict[str, Any] = {"type": tool_origin.type.value}
+    if tool_origin.agent_as_tool is not None:
+        agent = tool_origin.agent_as_tool
+        if agent_list:
+            try:
+                idx = next(i for i, a in enumerate(agent_list) if a is agent)
+                result["agent_as_tool"] = {"agent_index": idx}
+            except StopIteration:
+                result["agent_as_tool"] = {"name": agent.name}
+        else:
+            result["agent_as_tool"] = {"name": agent.name}
+    if tool_origin.mcp_server is not None:
+        result["mcp_server"] = {"name": tool_origin.mcp_server.name}
+    return result
+
+
 def _serialize_tool_approval_interruption(
-    interruption: ToolApprovalItem, *, include_tool_name: bool
+    interruption: ToolApprovalItem,
+    *,
+    include_tool_name: bool,
+    agent_list: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Serialize a ToolApprovalItem interruption."""
     interruption_dict: dict[str, Any] = {
@@ -1131,6 +1172,10 @@ def _serialize_tool_approval_interruption(
     }
     if include_tool_name and interruption.tool_name is not None:
         interruption_dict["tool_name"] = interruption.tool_name
+    if hasattr(interruption, "tool_origin") and interruption.tool_origin is not None:
+        tool_origin_data = _serialize_tool_origin(interruption.tool_origin, agent_list)
+        if tool_origin_data:
+            interruption_dict["tool_origin"] = tool_origin_data
     return interruption_dict
 
 
@@ -1418,6 +1463,7 @@ async def _deserialize_processed_response(
     current_agent: Agent[Any],
     context: RunContextWrapper[Any],
     agent_map: dict[str, Agent[Any]],
+    agent_list: list[Agent[Any]],
     *,
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
@@ -1430,11 +1476,14 @@ async def _deserialize_processed_response(
         current_agent: The current agent (used to get tools and handoffs).
         context: The run context wrapper.
         agent_map: Map of agent names to agents.
+        agent_list: List of agents in traversal order for agent_index lookup.
 
     Returns:
         A reconstructed ProcessedResponse instance.
     """
-    new_items = _deserialize_items(processed_response_data.get("new_items", []), agent_map)
+    new_items = _deserialize_items(
+        processed_response_data.get("new_items", []), agent_map, agent_list
+    )
 
     if hasattr(current_agent, "get_all_tools"):
         all_tools = await current_agent.get_all_tools(context)
@@ -1713,6 +1762,7 @@ def _deserialize_tool_approval_item(
     item_data: Mapping[str, Any],
     *,
     agent_map: Mapping[str, Agent[Any]],
+    agent_list: list[Agent[Any]] | None = None,
     fallback_agent: Agent[Any] | None = None,
     pre_normalized_raw_item: Any | None = None,
 ) -> ToolApprovalItem | None:
@@ -1729,7 +1779,12 @@ def _deserialize_tool_approval_item(
 
     tool_name = item_data.get("tool_name")
     raw_item = _deserialize_tool_approval_raw_item(raw_item_data)
-    return ToolApprovalItem(agent=agent, raw_item=raw_item, tool_name=tool_name)
+    tool_origin = _deserialize_tool_origin(
+        item_data.get("tool_origin"), agent_map, agent, agent_list
+    )
+    return ToolApprovalItem(
+        agent=agent, raw_item=raw_item, tool_name=tool_name, tool_origin=tool_origin
+    )
 
 
 def _deserialize_tool_call_output_raw_item(
@@ -1956,7 +2011,7 @@ async def _build_run_state_from_json(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         )
 
-    agent_map = _build_agent_map(initial_agent)
+    agent_map, agent_list = _build_agent_map(initial_agent)
 
     current_agent_name = state_json["current_agent"]["name"]
     current_agent = agent_map.get(current_agent_name)
@@ -2039,6 +2094,7 @@ async def _build_run_state_from_json(
         conversation_id=state_json.get("conversation_id"),
         previous_response_id=state_json.get("previous_response_id"),
         auto_previous_response_id=bool(state_json.get("auto_previous_response_id", False)),
+        root_agent=initial_agent,
     )
     from .agent_tool_state import set_agent_tool_state_scope
 
@@ -2047,7 +2103,9 @@ async def _build_run_state_from_json(
 
     state._current_turn = state_json["current_turn"]
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._generated_items = _deserialize_items(state_json.get("generated_items", []), agent_map)
+    state._generated_items = _deserialize_items(
+        state_json.get("generated_items", []), agent_map, agent_list
+    )
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
@@ -2056,6 +2114,7 @@ async def _build_run_state_from_json(
             current_agent,
             state._context,
             agent_map,
+            agent_list,
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
@@ -2064,7 +2123,9 @@ async def _build_run_state_from_json(
         state._last_processed_response = None
 
     if "session_items" in state_json:
-        state._session_items = _deserialize_items(state_json.get("session_items", []), agent_map)
+        state._session_items = _deserialize_items(
+            state_json.get("session_items", []), agent_map, agent_list
+        )
     else:
         state._session_items = state._merge_generated_items_with_processed()
 
@@ -2090,7 +2151,9 @@ async def _build_run_state_from_json(
             "interruptions", current_step_data.get("interruptions", [])
         )
         for item_data in interruptions_data:
-            approval_item = _deserialize_tool_approval_item(item_data, agent_map=agent_map)
+            approval_item = _deserialize_tool_approval_item(
+                item_data, agent_map=agent_map, agent_list=agent_list
+            )
             if approval_item is not None:
                 interruptions.append(approval_item)
 
@@ -2118,23 +2181,35 @@ async def _build_run_state_from_json(
     return state
 
 
-def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
-    """Build a map of agent names to agents by traversing handoffs.
+def _build_agent_map(
+    initial_agent: Agent[Any],
+) -> tuple[dict[str, Agent[Any]], list[Agent[Any]]]:
+    """Build agent map and agent list by traversing handoffs and tools.
+
+    Uses id(agent) for visited tracking so duplicate-name agents are included in
+    agent_list. agent_map uses name as key (first wins) for backward compatibility.
+    agent_list preserves order for stable agent_index in tool_origin serialization.
 
     Args:
         initial_agent: The starting agent.
 
     Returns:
-        Dictionary mapping agent names to agent instances.
+        Tuple of (agent_map, agent_list). agent_map maps name -> agent (first wins).
+        agent_list is all agents in BFS order, including duplicates by name.
     """
     agent_map: dict[str, Agent[Any]] = {}
+    agent_list: list[Agent[Any]] = []
+    visited: set[int] = set()
     queue: deque[Agent[Any]] = deque([initial_agent])
 
     while queue:
         current = queue.popleft()
-        if current.name in agent_map:
+        if id(current) in visited:
             continue
-        agent_map[current.name] = current
+        visited.add(id(current))
+        agent_list.append(current)
+        if current.name not in agent_map:
+            agent_map[current.name] = current
 
         # Add handoff agents to the queue
         for handoff_item in current.handoffs:
@@ -2142,21 +2217,15 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
             handoff_agent_name: str | None = None
 
             if isinstance(handoff_item, Handoff):
-                # Some custom/mocked Handoff subclasses bypass dataclass initialization.
-                # Prefer agent_name, then legacy name fallback used in tests.
                 candidate_name = getattr(handoff_item, "agent_name", None) or getattr(
                     handoff_item, "name", None
                 )
                 if isinstance(candidate_name, str):
                     handoff_agent_name = candidate_name
-                    if handoff_agent_name in agent_map:
-                        continue
 
                 handoff_ref = getattr(handoff_item, "_agent_ref", None)
                 handoff_agent = handoff_ref() if callable(handoff_ref) else None
                 if handoff_agent is None:
-                    # Backward-compatibility fallback for custom legacy handoff objects that store
-                    # the target directly on `.agent`. New code should prefer `handoff()` objects.
                     legacy_agent = getattr(handoff_item, "agent", None)
                     if legacy_agent is not None:
                         handoff_agent = legacy_agent
@@ -2164,7 +2233,7 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                             "Using legacy handoff `.agent` fallback while building agent map. "
                             "This compatibility path is not recommended for new code."
                         )
-                if handoff_agent_name is None:
+                if handoff_agent_name is None and handoff_agent is not None:
                     candidate_name = getattr(handoff_agent, "name", None)
                     handoff_agent_name = candidate_name if isinstance(candidate_name, str) else None
                 if handoff_agent is None or not hasattr(handoff_agent, "handoffs"):
@@ -2175,8 +2244,6 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                         )
                     continue
             else:
-                # Backward-compatibility fallback for custom legacy handoff wrappers that expose
-                # the target directly on `.agent` without inheriting from `Handoff`.
                 legacy_agent = getattr(handoff_item, "agent", None)
                 if legacy_agent is not None:
                     handoff_agent = legacy_agent
@@ -2191,7 +2258,7 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
             if (
                 handoff_agent is not None
                 and handoff_agent_name
-                and handoff_agent_name not in agent_map
+                and id(handoff_agent) not in visited
             ):
                 queue.append(cast(Any, handoff_agent))
 
@@ -2203,14 +2270,17 @@ def _build_agent_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
                     continue
                 tool_agent = getattr(tool, "_agent_instance", None)
                 tool_agent_name = getattr(tool_agent, "name", None)
-                if tool_agent and tool_agent_name and tool_agent_name not in agent_map:
+                if tool_agent and tool_agent_name and id(tool_agent) not in visited:
                     queue.append(tool_agent)
 
-    return agent_map
+    return agent_map, agent_list
 
 
 def _deserialize_tool_origin(
-    tool_origin_data: dict[str, Any] | None, agent_map: dict[str, Agent[Any]], agent: Agent[Any]
+    tool_origin_data: dict[str, Any] | None,
+    agent_map: Mapping[str, Agent[Any]],
+    agent: Agent[Any],
+    agent_list: list[Agent[Any]] | None = None,
 ) -> ToolOrigin | None:
     """Deserialize ToolOrigin from JSON data.
 
@@ -2218,6 +2288,7 @@ def _deserialize_tool_origin(
         tool_origin_data: Serialized tool origin dictionary.
         agent_map: Map of agent names to agent instances.
         agent: The agent associated with this item (used for MCP server lookup).
+        agent_list: List of agents in traversal order for agent_index lookup.
 
     Returns:
         ToolOrigin instance or None if data is missing/invalid.
@@ -2241,11 +2312,22 @@ def _deserialize_tool_origin(
     if origin_type == ToolOriginType.AGENT_AS_TOOL:
         agent_data = tool_origin_data.get("agent_as_tool")
         if agent_data and isinstance(agent_data, Mapping):
-            agent_name = agent_data.get("name")
-            if agent_name:
-                agent_as_tool = agent_map.get(agent_name)
-                if not agent_as_tool:
-                    logger.warning(f"Agent {agent_name} not found in agent map for tool_origin")
+            agent_index = agent_data.get("agent_index")
+            if agent_index is not None and isinstance(agent_index, int) and agent_list:
+                if 0 <= agent_index < len(agent_list):
+                    agent_as_tool = agent_list[agent_index]
+                else:
+                    logger.warning(
+                        "Agent index %s out of range for tool_origin (list len=%s)",
+                        agent_index,
+                        len(agent_list),
+                    )
+            else:
+                agent_name = agent_data.get("name")
+                if agent_name:
+                    agent_as_tool = agent_map.get(agent_name)
+                    if not agent_as_tool:
+                        logger.warning(f"Agent {agent_name} not found in agent map for tool_origin")
 
     elif origin_type == ToolOriginType.MCP:
         mcp_data = tool_origin_data.get("mcp_server")
@@ -2307,17 +2389,23 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
 
 
 def _deserialize_items(
-    items_data: list[dict[str, Any]], agent_map: dict[str, Agent[Any]]
+    items_data: list[dict[str, Any]],
+    agent_map: dict[str, Agent[Any]],
+    agent_list: list[Agent[Any]] | None = None,
 ) -> list[RunItem]:
     """Deserialize run items from JSON data.
 
     Args:
         items_data: List of serialized run item dictionaries.
         agent_map: Map of agent names to agent instances.
+        agent_list: List of agents in traversal order for agent_index lookup. If None,
+            agent_as_tool falls back to name-based lookup (duplicate names not supported).
 
     Returns:
         List of RunItem instances.
     """
+    if agent_list is None:
+        agent_list = list(agent_map.values())
 
     result: list[RunItem] = []
 
@@ -2375,7 +2463,7 @@ def _deserialize_items(
                 description = item_data.get("description")
                 # Preserve tool_origin if it was stored with the item
                 tool_origin = _deserialize_tool_origin(
-                    item_data.get("tool_origin"), agent_map, agent
+                    item_data.get("tool_origin"), agent_map, agent, agent_list
                 )
                 result.append(
                     ToolCallItem(
@@ -2394,7 +2482,7 @@ def _deserialize_items(
                     continue
                 # Preserve tool_origin if it was stored with the item
                 tool_origin = _deserialize_tool_origin(
-                    item_data.get("tool_origin"), agent_map, agent
+                    item_data.get("tool_origin"), agent_map, agent, agent_list
                 )
                 result.append(
                     ToolCallOutputItem(
