@@ -257,3 +257,70 @@ def test_run_result_streaming_release_agents_releases_current_agent() -> None:
     assert agent_ref() is None
     with pytest.raises(AgentsException):
         _ = streaming_result.last_agent
+
+
+def test_run_result_tool_context_returns_tool_context() -> None:
+    from agents.tool_context import ToolContext
+
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="my_tool",
+        tool_call_id="call_xyz",
+        tool_arguments="{}",
+    )
+    result = RunResult(
+        input="test",
+        new_items=[],
+        raw_responses=[],
+        final_output="ok",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        _last_agent=Agent(name="test"),
+        context_wrapper=tool_ctx,
+        interruptions=[],
+    )
+
+    assert result.tool_context is tool_ctx
+    assert result.tool_context is not None
+    assert result.tool_context.tool_call_id == "call_xyz"
+
+
+def test_run_result_tool_context_returns_none_for_plain_context() -> None:
+    result = create_run_result("ok")
+
+    assert result.tool_context is None
+
+
+def test_run_result_streaming_tool_context_returns_tool_context() -> None:
+    from agents.tool_context import ToolContext
+
+    agent = Agent(name="streaming-tool-agent")
+    tool_ctx = ToolContext(
+        context=None,
+        tool_name="stream_tool",
+        tool_call_id="call_stream",
+        tool_arguments='{"input":"stream"}',
+    )
+    result = RunResultStreaming(
+        input="stream",
+        new_items=[],
+        raw_responses=[],
+        final_output="done",
+        input_guardrail_results=[],
+        output_guardrail_results=[],
+        tool_input_guardrail_results=[],
+        tool_output_guardrail_results=[],
+        context_wrapper=tool_ctx,
+        current_agent=agent,
+        current_turn=0,
+        max_turns=1,
+        _current_agent_output_schema=None,
+        trace=None,
+        interruptions=[],
+    )
+
+    assert result.tool_context is tool_ctx
+    assert result.tool_context is not None
+    assert result.tool_context.tool_call_id == "call_stream"

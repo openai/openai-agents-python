@@ -6,7 +6,7 @@ import copy
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import InitVar, dataclass, field
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
@@ -44,6 +44,9 @@ from .util._pretty_print import (
     pretty_print_result,
     pretty_print_run_result_streaming,
 )
+
+if TYPE_CHECKING:
+    from .tool_context import ToolContext
 
 T = TypeVar("T")
 
@@ -203,6 +206,15 @@ class RunResultBase(abc.ABC):
             new_items.append(converted)
 
         return original_items + new_items
+
+    @property
+    def tool_context(self) -> ToolContext[Any] | None:
+        """The tool context for runs started via ``Agent.as_tool()``, if available."""
+        from .tool_context import ToolContext
+
+        if isinstance(self.context_wrapper, ToolContext):
+            return self.context_wrapper
+        return None
 
     @property
     def last_response_id(self) -> str | None:
