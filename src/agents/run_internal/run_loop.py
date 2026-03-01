@@ -1260,8 +1260,23 @@ async def run_single_turn_streamed(
                     if isinstance(tool_name, str) and tool_name in tool_map:
                         tool = tool_map[tool_name]
                         tool_description = getattr(tool, "description", None)
-                        if isinstance(tool, FunctionTool):
-                            tool_origin = _get_tool_origin_info(tool)
+                        # Resolve FunctionTool for tool_origin; tool_map may have non-FunctionTool
+                        # due to name collision.
+                        func_tool = (
+                            tool
+                            if isinstance(tool, FunctionTool)
+                            else next(
+                                (
+                                    t
+                                    for t in all_tools
+                                    if isinstance(t, FunctionTool)
+                                    and getattr(t, "name", None) == tool_name
+                                ),
+                                None,
+                            )
+                        )
+                        if func_tool is not None:
+                            tool_origin = _get_tool_origin_info(func_tool)
                     elif (
                         isinstance(tool_name, str)
                         and tool_name == "json_tool_call"
